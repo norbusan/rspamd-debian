@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+case "$1" in
+    purge)
+      rm -rf /var/lib/rspamd
+      rm -rf /var/log/rspamd
+      rm -rf /run/rspamd
+      exit 0;;
+    remove|upgrade|disappear|failed-upgrade|abort-*)
+      exit 0;;
+    *)
+      echo "postrm called with unknown argument \`$1'" >&2
+      exit 1;;
+esac

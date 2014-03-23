@@ -1,0 +1,516 @@
+#ifndef RSPAMD_CONFIG_H_IN
+#define RSPAMD_CONFIG_H_IN
+
+#cmakedefine HAVE_SYS_TYPES_H    1
+
+#cmakedefine HAVE_SYS_TIME_H     1
+
+#cmakedefine HAVE_SYS_UIO_H      1
+
+#cmakedefine HAVE_FCNTL_H        1
+
+#cmakedefine HAVE_MATH_H         1
+
+#cmakedefine HAVE_STDIO_H        1
+
+#cmakedefine HAVE_STDLIB_H       1
+
+#cmakedefine HAVE_STRING_H       1
+
+#cmakedefine HAVE_STRINGS_H      1
+
+#cmakedefine HAVE_TIME_H         1
+
+#cmakedefine HAVE_UNISTD_H       1
+
+#cmakedefine HAVE_SYSEXITS_H     1
+
+#cmakedefine HAVE_STDINT_H       1
+
+#cmakedefine HAVE_INTTYPES_H     1
+
+#cmakedefine HAVE_STDBOOL_H      1
+
+#cmakedefine HAVE_ARPA_INET_H    1
+#cmakedefine HAVE_NETINET_IN_H   1
+
+#cmakedefine HAVE_NETDB_H        1
+
+#cmakedefine HAVE_POLL_H         1
+
+#cmakedefine HAVE_SYSLOG_H       1
+
+#cmakedefine HAVE_SIGINFO_H      1
+
+#cmakedefine HAVE_LIBUTIL_H      1
+
+#cmakedefine HAVE_LIBGEN_H       1
+
+#cmakedefine HAVE_SEARCH_H       1
+
+#cmakedefine HAVE_LOCALE_H       1
+
+#cmakedefine HAVE_GRP_H          1
+#cmakedefine HAVE_PWD_H          1
+
+#cmakedefine HAVE_GLOB_H         1
+
+#cmakedefine HAVE_ENDIAN_H       1
+#cmakedefine HAVE_SYS_ENDIAN_H   1
+#cmakedefine HAVE_MACHINE_ENDIAN_H  1
+#cmakedefine HAVE_SYS_CDEFS_H    1
+
+#cmakedefine LIBEVENT_EVHTTP     1
+
+ #ifdef HAVE_ENDIAN_H
+ #include <endian.h>
+ #else 
+ #ifdef HAVE_SYS_ENDIAN_H
+ #include <sys/endian.h>
+ #else
+ #ifdef HAVE_MACHINE_ENDIAN_H
+ #include <machine/endian.h>
+ #else
+ #define LITTLE_ENDIAN   1234    
+ #define BIG_ENDIAN      4321    
+ #if defined(i386) || defined(__i386) || defined(__amd64) || \
+ 	 defined(BIT_ZERO_ON_RIGHT) || defined(__x86__)
+ #define BYTE_ORDER      LITTLE_ENDIAN
+ #endif
+ 
+ #if defined(__sparc) || defined(__sparc__) || defined(__powerpc__)
+ #define BYTE_ORDER      BIG_ENDIAN
+ #endif
+ 
+ #endif /* HAVE_MACHINE_ENDIAN_H */
+ #endif /* HAVE_SYS_ENDIAN_H */
+ #endif /* HAVE_ENDIAN_H */
+ 
+ #if !defined(BYTE_ORDER) || (BYTE_ORDER != BIG_ENDIAN && BYTE_ORDER != LITTLE_ENDIAN)
+ # error "Undefined or unknown BYTE_ORDER"
+ #endif
+ 
+
+
+#cmakedefine HAVE_SYS_QUEUE_H    1
+#cmakedefine HAVE_SYS_MMAN_H     1
+#cmakedefine HAVE_SYS_SOCKET_H   1
+#cmakedefine HAVE_SYS_UN_H       1
+#cmakedefine HAVE_SYS_STAT_H     1
+#cmakedefine HAVE_SYS_WAIT_H     1
+#cmakedefine HAVE_SYS_PARAM_H    1
+#cmakedefine HAVE_SYS_FILE_H     1
+#cmakedefine HAVE_SYS_RESOURCE_H 1
+#cmakedefine HAVE_SYS_TIMEB_H    1
+#cmakedefine HAVE_SYS_UTSNAME_H  1
+
+#cmakedefine HAVE_PIDFILE        1
+
+#cmakedefine HAVE_PIDFILE_FILENO 1
+
+#cmakedefine HAVE_SETPROCTITLE   1
+
+#cmakedefine HAVE_GETPAGESIZE    1
+
+#cmakedefine HAVE_NANOSLEEP      1
+
+#cmakedefine HAVE_PATH_MAX       1
+
+#cmakedefine HAVE_MAXPATHLEN     1
+
+#cmakedefine HAVE_MMAP_SHARED    1
+
+#cmakedefine HAVE_MMAP_ANON      1
+
+#cmakedefine HAVE_MMAP_NOCORE    1
+
+#cmakedefine HAVE_O_DIRECT       1
+
+#cmakedefine HAVE_FADVISE        1
+
+#cmakedefine HAVE_FALLOCATE      1
+#cmakedefine HAVE_POSIX_FALLOCATE 1
+
+#cmakedefine HAVE_FDATASYNC      1
+#cmakedefine HAVE_COMPATIBLE_QUEUE_H    1
+
+#cmakedefine HAVE_SC_NPROCESSORS_ONLN 1
+
+#cmakedefine HAVE_VFORK          1
+
+#cmakedefine HAVE_WAIT4          1
+
+#cmakedefine HAVE_WAITPID        1
+
+#cmakedefine HAVE_FLOCK          1
+
+#cmakedefine HAVE_TANHL          1
+#cmakedefine HAVE_TANH           1
+
+#cmakedefine HAVE_EXPL           1
+#cmakedefine HAVE_EXP2L          1
+
+#cmakedefine HAVE_SA_SIGINFO     1
+
+#cmakedefine DEBUG_MODE          1
+
+#cmakedefine GMIME24             1
+
+#cmakedefine HAVE_CLOCK_VIRTUAL  1
+#cmakedefine HAVE_CLOCK_PROCESS_CPUTIME_ID  1
+
+#cmakedefine HAVE_SETITIMER      1
+
+#cmakedefine HAVE_INET_PTON      1
+
+#define      WITHOUT_PERL        1
+
+#cmakedefine WITH_LUA            1
+
+#cmakedefine WITH_PROFILER       1
+
+#cmakedefine WITH_JUDY           1
+
+#cmakedefine WITH_DB             1
+
+#cmakedefine WITH_SQLITE         1
+
+#cmakedefine WITH_GPERF_TOOLS    1
+
+#cmakedefine WITH_SYSTEM_HIREDIS 1
+
+#cmakedefine HAVE_ASM_PAUSE      1
+
+#cmakedefine BUILD_STATIC        1
+
+#cmakedefine HAVE_SENDFILE       1
+#cmakedefine HAVE_SYS_SENDFILE_H 1
+#cmakedefine HAVE_SYS_EVENTFD_H  1
+#cmakedefine HAVE_AIO_H          1
+#cmakedefine HAVE_LIBAIO_H       1
+
+#cmakedefine HAVE_MKSTEMP        1
+
+#cmakedefine HAVE_CLOCK_GETTIME  1
+
+#cmakedefine HAVE_OPENSSL		 1
+
+#cmakedefine GLIB_COMPAT         1
+#cmakedefine GLIB_RE_COMPAT		 1
+#cmakedefine GLIB_UNISCRIPT_COMPAT		 1
+#cmakedefine GLIB_HASH_COMPAT		 1
+#cmakedefine PARAM_H_HAS_BITSET  1
+
+#cmakedefine HAVE_FETCH_H        1
+#cmakedefine CURL_FOUND          1
+
+#cmakedefine HAVE_READPASSPHRASE_H  1
+#cmakedefine HAVE_TERMIOS_H      1
+
+#cmakedefine HAVE_IPV6_V6ONLY    1
+
+#if (defined(__i386__) || defined(__x86_64__)  || defined(_M_IX86))
+/* Use murmur hash for UTHash for these platforms */
+#define HASH_FUNCTION HASH_MUR
+#define HASH_USING_NO_STRICT_ALIASING
+#endif
+/* Configure allocator */
+#define uthash_malloc(sz) g_slice_alloc(sz)
+#define uthash_free(ptr,sz) g_slice_free1(sz, ptr)
+
+#define RSPAMD_CONFDIR "${CONFDIR}"
+#define RSPAMD_RUNDIR "${RUNDIR}"
+#define RSPAMD_LOGDIR "${LOGDIR}"
+#define RSPAMD_DBDIR "${DBDIR}"
+#define RSPAMD_EXAMPLESDIR "${EXAMPLESDIR}"
+#define RSPAMD_PLUGINSDIR "${PLUGINSDIR}"
+#define RSPAMD_PREFIX "${CMAKE_INSTALL_PREFIX}"
+
+#define RVERSION          "${RSPAMD_VERSION}"
+#define RID               "${RSPAMD_ID}"
+#define RSPAMD_MASTER_SITE_URL "${RSPAMD_MASTER_SITE_URL}"
+
+#define MODULES_NUM        ${RSPAMD_MODULES_NUM}
+
+/* sys/types */
+#ifdef HAVE_SYS_TYPES_H
+#include <sys/types.h>
+#endif
+
+/* cdefs */
+#ifdef HAVE_SYS_CDEFS_H
+#include <sys/cdefs.h>
+#endif
+
+/* sys/param */
+#ifdef HAVE_SYS_PARAM_H
+#include <sys/param.h>
+#endif
+
+/* stdint */
+#ifdef HAVE_STDINT_H
+#include <stdint.h>
+#elif defined(HAVE_INTTYPES_H)
+#include <inttypes.h>
+#endif
+
+/* stdbool */
+#ifdef HAVE_STDBOOL_H
+#include <stdbool.h>
+#endif
+
+/* queue */
+#ifdef HAVE_COMPATIBLE_QUEUE_H
+#ifdef HAVE_SYS_QUEUE_H
+#include <sys/queue.h>
+#endif
+#else
+#include "queue.h"
+#endif
+
+/* sys/socket */
+#ifdef HAVE_SYS_SOCKET_H
+#include <sys/socket.h>
+#endif
+
+/* sys/file.h */
+#ifdef HAVE_SYS_FILE_H
+#include <sys/file.h>
+#endif
+
+/* sys/uio.h */
+#ifdef HAVE_SYS_UIO_H
+#include <sys/uio.h>
+#endif
+
+/* sys/mman */
+#ifdef HAVE_SYS_MMAN_H
+#include <sys/mman.h>
+#endif
+
+/* netinet issues */
+#ifdef HAVE_NETINET_IN_H
+#include <netinet/in.h>
+#endif
+#ifdef HAVE_ARPA_INET_H
+#include <arpa/inet.h>
+#endif
+
+/* unix sockets */
+#ifdef HAVE_SYS_UN_H
+#include <sys/un.h>
+#endif
+
+/* netdb */
+#ifdef HAVE_NETDB_H
+#include <netdb.h>
+#endif
+
+/* stdlib */
+#ifdef HAVE_STDLIB_H
+#include <stdlib.h>
+#endif
+
+/* stdio */
+#ifdef HAVE_STDIO_H
+#include <stdio.h>
+#endif
+
+/* time */
+#ifdef HAVE_TIME_H
+#include <time.h>
+#endif
+
+/* timedb */
+#ifdef HAVE_SYS_TIMEB_H
+#include <sys/timeb.h>
+#endif
+
+/* sysexits */
+#ifdef HAVE_SYSEXITS_H
+#include <sysexits.h>
+#endif
+
+/* unistd */
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif
+
+
+/* string */
+#ifdef HAVE_STRING_H
+#include <string.h>
+#endif
+
+/* strings */
+#ifdef HAVE_STRINGS_H
+#include <strings.h>
+#endif
+
+/* fcntl */
+#ifdef HAVE_FCNTL_H
+#include <fcntl.h>
+#endif
+
+/* Linux specific falloc.h */
+#ifdef HAVE_LINUX_FALLOC_H
+#include <linux/falloc.h>
+#endif
+
+/* poll */
+#ifdef HAVE_POLL_H
+#include <poll.h>
+#endif
+
+/* sys/stat */
+#ifdef HAVE_SYS_STAT_H
+#include <sys/stat.h>
+#endif
+
+/* sys/wait */
+#ifdef HAVE_SYS_WAIT_H
+#include <sys/wait.h>
+#endif
+
+/* sys/resource.h */
+#ifdef HAVE_SYS_RESOURCE_H
+#include <sys/resource.h>
+#endif
+
+/* math */
+#ifdef HAVE_MATH_H
+#include <math.h>
+#endif
+
+/* libutil */
+#ifdef HAVE_LIBUTIL_H
+#include <libutil.h>
+#endif
+
+/* pwd and grp */
+#ifdef HAVE_PWD_H
+#include <pwd.h>
+#endif
+
+#ifdef HAVE_GRP_H
+#include <grp.h>
+#endif
+
+#ifdef HAVE_GLOB_H
+#include <glob.h>
+#endif
+
+/* syslog */
+#ifdef HAVE_SYSLOG_H
+#include <syslog.h>
+#endif
+
+#ifdef HAVE_LIBGEN_H
+#include <libgen.h>
+#define HAVE_DIRNAME 1
+#endif
+
+#ifdef HAVE_SEARCH_H
+#include <search.h>
+#endif
+
+#ifdef HAVE_LOCALE_H
+#include <locale.h>
+#define HAVE_SETLOCALE 1
+#endif
+
+#ifdef HAVE_SYS_EVENTFD_H
+#include <sys/eventfd.h>
+#endif
+
+#ifdef HAVE_AIO_H
+#include <aio.h>
+#endif
+
+#ifdef HAVE_SYS_SENDFILE_H
+#include <sys/sendfile.h>
+#endif
+
+#ifdef WITH_GPERF_TOOLS
+#include <google/profiler.h>
+#endif
+
+#ifdef HAVE_FETCH_H
+#include <fetch.h>
+#elif defined(CURL_FOUND)
+#include <curl/curl.h>
+#endif
+
+#ifdef HAVE_READPASSPHRASE_H
+#include <readpassphrase.h>
+#endif
+
+#ifdef HAVE_TERMIOS_H
+#include <termios.h>
+#endif
+
+#ifdef HAVE_PATHS_H
+#include <paths.h>
+#endif
+
+#include <errno.h>
+#include <signal.h>
+#ifdef HAVE_SIGINFO_H
+# include <siginfo.h>
+#endif
+#include <event.h>
+#if _EVENT_NUMERIC_VERSION > 0x02000000
+# include <event2/thread.h>
+#endif
+#include <glib.h>
+
+
+#ifdef GLIB_RE_COMPAT
+#include "gregex.h"
+#endif
+#ifdef GLIB_UNISCRIPT_COMPAT
+#include "guniscript.h"
+#endif
+#ifdef GLIB_COMPAT
+#include "gchecksum.h"
+#endif
+
+#if (GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION < 14)
+typedef off_t goffset;
+#endif
+
+#ifndef BUILD_STATIC
+#include <gmodule.h>
+#endif
+
+#ifndef NO_GMIME
+#include <gmime/gmime.h>
+#endif
+
+/* Forwarded declaration */
+struct module_ctx;
+struct config_file;
+struct rspamd_worker;
+
+typedef struct module_s {
+	const gchar *name;
+	int (*module_init_func)(struct config_file *cfg, struct module_ctx **ctx);
+	int (*module_config_func)(struct config_file *cfg);
+	int (*module_reconfig_func)(struct config_file *cfg);
+} module_t;
+
+typedef struct worker_s {
+	const gchar *name;
+	gpointer (*worker_init_func)(struct config_file *cfg);
+	void (*worker_start_func)(struct rspamd_worker *worker);
+	gboolean has_socket;
+	gboolean unique;
+	gboolean threaded;
+	gboolean killable;
+	gint listen_type;
+} worker_t;
+
+extern module_t *modules[];
+extern worker_t *workers[];
+
+#endif

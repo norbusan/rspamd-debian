@@ -1,0 +1,6 @@
+../src/mem_pool.c
+../src/hash.c
+../src/url.c
+../src/util.c
+../src/memcached.c
+../src/statfile.c

@@ -1,0 +1,138 @@
+.TH "RSPAMD" "8" "" "Rspamd User Manual" ""
+.SH NAME
+.PP
+rspamd \- main daemon for rapid spam filtering system
+.SH SYNOPSIS
+.PP
+rspamd [\f[I]options\f[]]...
+.PP
+rspamd \-\-help
+.SH DESCRIPTION
+.PP
+Rspamd filtering system is designed to be fast, modular and easily
+scalable system.
+Rspamd core is written in \f[C]C\f[] language using event driven
+processing model.
+Plugins for rspamd can be written in \f[C]Lua\f[] programming language.
+Rspamd is designed to process connections completely asynchronous and do
+not block anywhere in code.
+.SH OPTIONS
+.TP
+.B \-t, \-\-config\-test
+Perform config test and exit
+.RS
+.RE
+.TP
+.B \-f, \-\-no\-fork
+Do not daemonize main process
+.RS
+.RE
+.TP
+.B \-c \f[I]path\f[], \-\-config=\f[I]path\f[]
+Specify config file(s)
+.RS
+.RE
+.TP
+.B \-u \f[I]username\f[], \-\-user=\f[I]username\f[]
+User to run rspamd as
+.RS
+.RE
+.TP
+.B \-g \f[I]groupname\f[], \-\-group=\f[I]groupname\f[]
+Group to run rspamd as
+.RS
+.RE
+.TP
+.B \-p \f[I]path\f[], \-\-pid=\f[I]path\f[]
+Path to pidfile
+.RS
+.RE
+.TP
+.B \-C, \-\-dump\-cache
+Dump symbols cache stats and exit
+.RS
+.RE
+.TP
+.B \-d, \-\-debug
+Force debug output
+.RS
+.RE
+.TP
+.B \-i, \-\-insecure
+Ignore running workers as privileged users (insecure)
+.RS
+.RE
+.TP
+.B \-\-test\-lua=\f[I]path\f[]
+Specify lua file(s) to test
+.RS
+.RE
+.TP
+.B \-\-sign\-config=\f[I]path\f[]
+Specify config file(s) to sign
+.RS
+.RE
+.TP
+.B \-\-private\-key=\f[I]path\f[]
+Specify private key to sign
+.RS
+.RE
+.TP
+.B \-\-convert\-config=\f[I]path\f[]
+Convert configuration to UCL
+.RS
+.RE
+.SH EXAMPLES
+.PP
+Run rspamd daemon with default configuration:
+.IP
+.nf
+\f[C]
+rspamd
+\f[]
+.fi
+.PP
+Run rspamd in foreground with custom configuration:
+.IP
+.nf
+\f[C]
+rspamd\ \\\-f\ \\\-c\ ~/rspamd.conf
+\f[]
+.fi
+.PP
+Run rspamd specifying user and group:
+.IP
+.nf
+\f[C]
+rspamd\ \\\-u\ rspamd\ \\\-g\ rspamd\ \\\-c\ /etc/rspamd/rspamd.conf
+\f[]
+.fi
+.PP
+Test lua scripts using rspamd API:
+.IP
+.nf
+\f[C]
+rspamd\ \\\-\\\-test\-lua=~/test1.lua\ \\\-\\\-test\-lua=~/test2.lua
+\f[]
+.fi
+.PP
+Sign config files for \f[C]\&.includes\f[] macro:
+.IP
+.nf
+\f[C]
+rspamd\ \\\-\\\-private\-key=sign.key\ \\\-\\\-sign\-config=rspamd.conf
+\f[]
+.fi
+.PP
+Convert old \f[C]XML\f[] config to the \f[C]UCL\f[] format (since
+0.6.0):
+.IP
+.nf
+\f[C]
+rspamd\ \\\-c\ /etc/rspamd.xml\ \\\-\\\-convert\-config=/etc/rspamd/rspamd.conf
+\f[]
+.fi
+.SH SEE ALSO
+.PP
+Rspamd documentation and source codes may be downloaded from
+<https://rspamd.com/>.
