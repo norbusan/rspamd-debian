@@ -10,7 +10,7 @@ PROJECT(rspamd C)
 
 SET(RSPAMD_VERSION_MAJOR 0)
 SET(RSPAMD_VERSION_MINOR 6)
-SET(RSPAMD_VERSION_PATCH 9)
+SET(RSPAMD_VERSION_PATCH 10)
 
 SET(RSPAMD_VERSION         "${RSPAMD_VERSION_MAJOR}.${RSPAMD_VERSION_MINOR}.${RSPAMD_VERSION_PATCH}")
 SET(RSPAMD_MASTER_SITE_URL "https://rspamd.com")
@@ -445,7 +445,7 @@ ProcessPackage(GTHREAD gthread-2.0)
 
 IF(ENABLE_HIREDIS MATCHES "ON")
 	# Try to find hiredis library
-	ProcessPackage(HIREDIS hiredis)
+	ProcessPackage(HIREDIS hiredis libhiredis)
 ENDIF(ENABLE_HIREDIS MATCHES "ON")
 
 ProcessPackage(GMIME2 gmime-2.6 gmime-2.4 gmime-2.0)

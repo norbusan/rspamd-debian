@@ -24,19 +24,24 @@
 #include "lua_common.h"
 
 LUA_FUNCTION_DEF (ip, to_string);
+LUA_FUNCTION_DEF (ip, to_number);
+LUA_FUNCTION_DEF (ip, from_number);
 LUA_FUNCTION_DEF (ip, to_table);
 LUA_FUNCTION_DEF (ip, str_octets);
 LUA_FUNCTION_DEF (ip, inversed_str_octets);
 LUA_FUNCTION_DEF (ip, from_string);
 LUA_FUNCTION_DEF (ip, destroy);
 LUA_FUNCTION_DEF (ip, get_version);
+LUA_FUNCTION_DEF (ip, is_valid);
 
 static const struct luaL_reg    iplib_m[] = {
 	LUA_INTERFACE_DEF (ip, to_string),
 	LUA_INTERFACE_DEF (ip, to_table),
+	LUA_INTERFACE_DEF (ip, to_number),
 	LUA_INTERFACE_DEF (ip, str_octets),
 	LUA_INTERFACE_DEF (ip, inversed_str_octets),
 	LUA_INTERFACE_DEF (ip, get_version),
+	LUA_INTERFACE_DEF (ip, is_valid),
 	{"__tostring", lua_ip_to_string},
 	{"__gc", lua_ip_destroy},
 	{NULL, NULL}
@@ -44,6 +49,7 @@ static const struct luaL_reg    iplib_m[] = {
 
 static const struct luaL_reg    iplib_f[] = {
 	LUA_INTERFACE_DEF (ip, from_string),
+	LUA_INTERFACE_DEF (ip, from_number),
 	{NULL, NULL}
 };
 
@@ -63,7 +69,7 @@ lua_ip_to_table (lua_State *L)
 	int max, i;
 	guint8 *ptr;
 
-	if (ip != NULL) {
+	if (ip != NULL && ip->is_valid) {
 		lua_newtable (L);
 		if (ip->af == AF_INET) {
 			max = 32 / 8;
@@ -92,7 +98,7 @@ lua_ip_str_octets (lua_State *L)
 	guint8 *ptr;
 	char numbuf[8];
 
-	if (ip != NULL) {
+	if (ip != NULL && ip->is_valid) {
 		lua_newtable (L);
 		if (ip->af == AF_INET) {
 			max = 32 / 8;
@@ -132,7 +138,7 @@ lua_ip_inversed_str_octets (lua_State *L)
 	guint8 *ptr;
 	char numbuf[4];
 
-	if (ip != NULL) {
+	if (ip != NULL && ip->is_valid) {
 		lua_newtable (L);
 		if (ip->af == AF_INET) {
 			max = 32 / 8;
@@ -171,7 +177,7 @@ lua_ip_to_string (lua_State *L)
 	struct rspamd_lua_ip *ip = lua_check_ip (L, 1);
 	gchar dst[INET6_ADDRSTRLEN + 1];
 
-	if (ip != NULL) {
+	if (ip != NULL && ip->is_valid) {
 		lua_pushstring (L, inet_ntop (ip->af, &ip->data, dst, sizeof (dst)));
 	}
 	else {
@@ -192,15 +198,81 @@ lua_ip_from_string (lua_State *L)
 		ip = g_slice_alloc (sizeof (struct rspamd_lua_ip));
 		if (inet_pton (AF_INET, ip_str, &ip->data.ip4) == 1) {
 			ip->af = AF_INET;
+			ip->is_valid = TRUE;
 		}
 		else if (inet_pton (AF_INET6, ip_str, &ip->data.ip6) == 1) {
 			ip->af = AF_INET6;
+			ip->is_valid = TRUE;
 		}
 		else {
-			g_slice_free1 (sizeof (struct rspamd_lua_ip), ip);
-			lua_pushnil (L);
-			return 1;
+			ip->is_valid = FALSE;
 		}
+		pip = lua_newuserdata (L, sizeof (struct rspamd_lua_ip *));
+		lua_setclass (L, "rspamd{ip}", -1);
+		*pip = ip;
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+static gint
+lua_ip_to_number (lua_State *L)
+{
+	struct rspamd_lua_ip *ip = lua_check_ip (L, 1);
+	guint32 dst[4], i;
+
+	if (ip != NULL && ip->is_valid) {
+		if (ip->af == AF_INET) {
+			/* One integer in host byte order */
+			lua_pushinteger (L, ntohl (ip->data.ip4.s_addr));
+		}
+		else {
+			/* 4 integers in host byte order */
+			G_STATIC_ASSERT (sizeof (ip->data) >= sizeof (dst));
+			memcpy (dst, &ip->data, sizeof (dst));
+			for (i = 0; i < G_N_ELEMENTS (dst); i ++) {
+				lua_pushinteger (L, ntohl (dst[i]));
+			}
+			return 4;
+		}
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+static gint
+lua_ip_from_number (lua_State *L)
+{
+	guint32 src[4], i;
+	struct rspamd_lua_ip *ip, **pip;
+
+	if (lua_gettop (L) == 1 && lua_isnumber (L, 1)) {
+		/* Ipv4 version */
+		ip = g_slice_alloc (sizeof (struct rspamd_lua_ip));
+		src[0] = lua_tointeger (L, 1);
+		ip->af = AF_INET;
+		ip->is_valid = TRUE;
+		ip->data.ip4.s_addr = htonl (src[0]);
+		pip = lua_newuserdata (L, sizeof (struct rspamd_lua_ip *));
+		lua_setclass (L, "rspamd{ip}", -1);
+		*pip = ip;
+	}
+	else if (lua_gettop (L) == 4 && lua_isnumber (L, 1)) {
+		/* Ipv6 version */
+		for (i = 0; i < 4; i ++) {
+			src[i] = htonl (lua_tonumber (L, i + 1));
+		}
+		G_STATIC_ASSERT (sizeof (ip->data) >= sizeof (src));
+		ip = g_slice_alloc (sizeof (struct rspamd_lua_ip));
+		ip->af = AF_INET6;
+		ip->is_valid = TRUE;
+		memcpy (&ip->data, src, sizeof (src));
 		pip = lua_newuserdata (L, sizeof (struct rspamd_lua_ip *));
 		lua_setclass (L, "rspamd{ip}", -1);
 		*pip = ip;
@@ -229,8 +301,23 @@ lua_ip_get_version (lua_State *L)
 {
 	struct rspamd_lua_ip *ip = lua_check_ip (L, 1);
 
-	if (ip) {
+	if (ip && ip->is_valid) {
 		lua_pushnumber (L, ip->af == AF_INET6 ? 6 : 4);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+static gint
+lua_ip_is_valid (lua_State *L)
+{
+	struct rspamd_lua_ip *ip = lua_check_ip (L, 1);
+
+	if (ip) {
+		lua_pushboolean (L, ip->is_valid);
 	}
 	else {
 		lua_pushnil (L);
@@ -244,12 +331,13 @@ lua_ip_push (lua_State *L, int af, gpointer data)
 {
 	struct rspamd_lua_ip *ip, **pip;
 
+	ip = g_slice_alloc (sizeof (struct rspamd_lua_ip));
+
 	if (!rspamd_ip_is_valid (data, af)) {
-		lua_pushnil (L);
+		ip->is_valid = FALSE;
 	}
 	else {
-		ip = g_slice_alloc (sizeof (struct rspamd_lua_ip));
-
+		ip->is_valid = TRUE;
 		ip->af = af;
 		if (af == AF_INET6) {
 			memcpy (&ip->data, data, sizeof (struct in6_addr));
@@ -257,10 +345,11 @@ lua_ip_push (lua_State *L, int af, gpointer data)
 		else {
 			memcpy (&ip->data, data, sizeof (struct in_addr));
 		}
-		pip = lua_newuserdata (L, sizeof (struct rspamd_lua_ip *));
-		lua_setclass (L, "rspamd{ip}", -1);
-		*pip = ip;
+
 	}
+	pip = lua_newuserdata (L, sizeof (struct rspamd_lua_ip *));
+	lua_setclass (L, "rspamd{ip}", -1);
+	*pip = ip;
 }
 
 void
@@ -273,6 +362,7 @@ lua_ip_push_fromstring (lua_State *L, const gchar *ip_str)
 	}
 	else {
 		ip = g_slice_alloc (sizeof (struct rspamd_lua_ip));
+		ip->is_valid = TRUE;
 		if (inet_pton (AF_INET, ip_str, &ip->data.ip4) == 1) {
 			ip->af = AF_INET;
 		}
@@ -280,9 +370,7 @@ lua_ip_push_fromstring (lua_State *L, const gchar *ip_str)
 			ip->af = AF_INET6;
 		}
 		else {
-			g_slice_free1 (sizeof (struct rspamd_lua_ip), ip);
-			lua_pushnil (L);
-			return;
+			ip->is_valid = FALSE;
 		}
 
 		pip = lua_newuserdata (L, sizeof (struct rspamd_lua_ip *));

@@ -40,8 +40,8 @@ local ip_score_set = function(task)
 	if action then
 		-- Check whitelist 
 		if whitelist then
-			local ipnum = task:get_from_ip_num()
-			if ipnum and whitelist:get_key(ipnum) then
+			local ipnum = task:get_from_ip():to_number()
+			if task:get_from_ip():is_valid() and whitelist:get_key(ipnum) then
 				-- Address is whitelisted
 				return
 			end
@@ -49,7 +49,7 @@ local ip_score_set = function(task)
 		-- Now check action
 		if action == 'reject' then
 			local ip = task:get_from_ip()
-			if ip then
+			if ip:is_valid() then
 				local cb = make_key_cb(ip)
 				if reject_score > 0 then
 					rspamd_redis.make_request(task, keystorage_host, keystorage_port, cb, 'INCRBY %b %b', ip, reject_score)
@@ -59,7 +59,7 @@ local ip_score_set = function(task)
 			end
 		elseif action == 'add header' then
 			local ip = task:get_from_ip()
-			if ip then
+			if ip:is_valid() then
 				local cb = make_key_cb(ip)
 				if add_header_score > 0 then
 					rspamd_redis.make_request(task, keystorage_host, keystorage_port, cb, 'INCRBY %b %b', ip, add_header_score)
@@ -69,7 +69,7 @@ local ip_score_set = function(task)
 			end
 		elseif action == 'no action' then
 			local ip = task:get_from_ip()
-			if ip then
+			if ip:is_valid() then
 				local cb = make_key_cb(ip)
 				if no_action_score > 0 then
 					rspamd_redis.make_request(task, keystorage_host, keystorage_port, cb, 'INCRBY %b %b', ip, no_action_score)
@@ -101,9 +101,9 @@ local ip_score_check = function(task)
 		end
 	end
 	local ip = task:get_from_ip()
-	if ip then
+	if ip:is_valid() then
 		if whitelist then
-			local ipnum = task:get_from_ip_num()
+			local ipnum = task:get_from_ip():to_number()
 			if whitelist:get_key(ipnum) then
 				-- Address is whitelisted
 				return
