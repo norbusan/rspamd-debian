@@ -272,6 +272,8 @@ enum state
   , s_req_http_major
   , s_req_first_http_minor
   , s_req_http_minor
+  , s_req_spamc_start
+  , s_req_spamc
   , s_req_line_almost_done
 
   , s_header_field_start
@@ -925,7 +927,7 @@ size_t http_parser_execute (http_parser *parser,
             /* or PROPFIND|PROPPATCH|PUT|PATCH|PURGE */
             break;
           case 'R': parser->method = HTTP_REPORT; break;
-          case 'S': parser->method = HTTP_SUBSCRIBE; /* or SEARCH */ break;
+          case 'S': parser->method = HTTP_SUBSCRIBE; /* or SEARCH or SYMBOLS */ break;
           case 'T': parser->method = HTTP_TRACE; break;
           case 'U': parser->method = HTTP_UNLOCK; /* or UNSUBSCRIBE */ break;
           default:
@@ -949,12 +951,18 @@ size_t http_parser_execute (http_parser *parser,
 
         matcher = method_strings[parser->method];
         if (ch == ' ' && matcher[parser->index] == '\0') {
-          parser->state = s_req_spaces_before_url;
+          if (parser->method != HTTP_SYMBOLS && parser->method != HTTP_CHECK) {
+            parser->state = s_req_spaces_before_url;
+          }
+          else {
+            parser->state = s_req_spamc_start;
+          }
         } else if (ch == matcher[parser->index]) {
           ; /* nada */
         } else if (parser->method == HTTP_CONNECT) {
           if (parser->index == 1 && ch == 'H') {
-            parser->method = HTTP_CHECKOUT;
+            /* XXX: CHECKOUT has been removed */
+            parser->method = HTTP_CHECK;
           } else if (parser->index == 2  && ch == 'P') {
             parser->method = HTTP_COPY;
           } else {
@@ -977,7 +985,10 @@ size_t http_parser_execute (http_parser *parser,
         } else if (parser->method == HTTP_SUBSCRIBE) {
           if (parser->index == 1 && ch == 'E') {
             parser->method = HTTP_SEARCH;
-          } else {
+          } else if (ch == 'Y') {
+            parser->method = HTTP_SYMBOLS;
+          }
+          else {
             SET_ERRNO(HPE_INVALID_METHOD);
             goto error;
           }
@@ -1203,6 +1214,32 @@ size_t http_parser_execute (http_parser *parser,
         }
 
         break;
+      }
+      case s_req_spamc_start: {
+    	  if (ch == 'S') {
+    		  parser->flags |= F_SPAMC;
+    		  parser->state = s_req_spamc;
+    	  }
+    	  else if (ch == 'R') {
+    		  parser->state = s_req_spamc;
+    	  }
+    	  else if (ch != ' ') {
+    		  SET_ERRNO(HPE_INVALID_CONSTANT);
+    		  goto error;
+    	  }
+
+          break;
+      }
+
+      case s_req_spamc:
+      {
+          if (ch == CR) {
+            parser->state = s_req_line_almost_done;
+          }
+          else if (ch == LF) {
+            parser->state = s_header_field_start;
+          }
+          break;
       }
 
       /* end of request line */
@@ -1572,7 +1609,7 @@ size_t http_parser_execute (http_parser *parser,
             parser->flags |= F_CONNECTION_KEEP_ALIVE;
             break;
           case h_connection_close:
-            parser->flags |= F_CONNECTION_CLOSE;
+            /* XXX: not needed for rspamd parser->flags |= F_CONNECTION_CLOSE; */
             break;
           case h_transfer_encoding_chunked:
             parser->flags |= F_CHUNKED;
@@ -1922,7 +1959,7 @@ http_should_keep_alive (const http_parser *parser)
 {
   if (parser->http_major > 0 && parser->http_minor > 0) {
     /* HTTP/1.1 */
-    if (parser->flags & F_CONNECTION_CLOSE) {
+    if (!(parser->flags & F_CONNECTION_KEEP_ALIVE)) {
       return 0;
     }
   } else {

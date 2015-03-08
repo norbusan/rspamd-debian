@@ -8,7 +8,7 @@ rspamc - rspamd command line client
 
 rspamc [*options*] [*command*] [*input-file*]...
 
-rspamc \-\-help
+rspamc --help
 
 # DESCRIPTION
 
@@ -20,8 +20,8 @@ Rspamc supports the following commands:
 * Control commands
 	* *learn_spam*: learn message as spam
 	* *learn_ham*: learn message as ham
-	* *fuzzy_add*: add message to fuzzy storage (check `\-f` and `\-w` options for this command)
-	* *fuzzy_del*: delete message from fuzzy storage (check `\-f` option for this command)
+	* *fuzzy_add*: add message to fuzzy storage (check `-f` and `-w` options for this command)
+	* *fuzzy_del*: delete message from fuzzy storage (check `-f` option for this command)
 	* *stat*: show rspamd statistics
 	* *stat_reset*: show and reset rspamd statistics (useful for graphs)
 	* *counters*: display rspamd symbols statistics
@@ -30,7 +30,7 @@ Rspamc supports the following commands:
 	* *add_action*: add or modify action settings
 
 Control commands that modifies rspamd state are considered as privileged and basically requires a password
-to be specified with `\-P` option (see **OPTIONS**, below, for details). 
+to be specified with `-P` option (see **OPTIONS**, below, for details). 
 This depends on a controller's settings and is discussed in `rspamd-workers` page.
 
 `Input files` may be either regular file(s) or a directory to scan. If no files are specified rspamc reads
@@ -39,11 +39,11 @@ requires input.
 
 # OPTIONS
 
-\-h *host[:port]*, \--connect=*host[:port]*
-	Specify host and port
+-h *host[:port]*, \--connect=*host[:port]*
+:	Specify host and port
 	
-\-P *password*, \--password=*password*
-	Specify control password
+-P *password*, \--password=*password*
+:	Specify control password
 	
 -c *name*, \--classifier=*name*
 :	Classifier to learn spam or ham (bayes is used by default)
@@ -82,10 +82,28 @@ requires input.
 :	Imitate hostname passing from MTA (rspamd assumes that it is verified by MTA)
 
 -t *seconds*, \--timeout=*seconds*
-:	Timeout for waiting for a reply
+:	Timeout for waiting for a reply (can be floating point number, e.g. 0.1)
 
 -b *host:port*, \--bind=*host:port*
 :	Bind to specified ip address
+
+-j, \--json
+:	Output formatted JSON
+
+\--ucl
+:	Output UCL
+
+\--raw
+:	Output raw data received from rspamd (compacted JSON)
+
+\--headers
+:	Output HTTP headers from a reply
+
+\--extended-urls
+:	Output URLs in an extended format, showing full URL, host and the part of host that was used by surbl module (if enabled).
+
+-n *parallel_count*, \--max-requests=*parallel_count*
+:	Maximum number of requests to rspamd executed in parallel (8 by default)
 
 \--commands
 :	List available commands
@@ -106,15 +124,15 @@ Check files:
 	
 Learn files:
 
-	rspamc \-P pass learn_spam file1 file2 file3
+	rspamc -P pass learn_spam file1 file2 file3
 
 Add fuzzy hash to set 2:
 	
-	rspamc \-P pass \-f 2 \-w 10 fuzzy_add file1 file2
+	rspamc -P pass -f 2 -w 10 fuzzy_add file1 file2
 	
 Delete fuzzy hash from other server:
 
-	rspamc \-P pass \-h hostname:11334 \-f 2 fuzzy_del file1 file2
+	rspamc -P pass -h hostname:11334 -f 2 fuzzy_del file1 file2
 	
 Get statistics:
 	

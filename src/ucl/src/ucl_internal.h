@@ -24,16 +24,69 @@
 #ifndef UCL_INTERNAL_H_
 #define UCL_INTERNAL_H_
 
-#include <sys/types.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/param.h>
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#else
+/* Help embedded builds */
+#define HAVE_SYS_TYPES_H
+#define HAVE_SYS_MMAN_H
+#define HAVE_SYS_STAT_H
+#define HAVE_SYS_PARAM_H
+#define HAVE_LIMITS_H
+#define HAVE_FCNTL_H
+#define HAVE_ERRNO_H
+#define HAVE_UNISTD_H
+#define HAVE_CTYPE_H
+#define HAVE_STDIO_H
+#define HAVE_STRING_H
+#define HAVE_FLOAT_H
+#define HAVE_LIBGEN_H
+#define HAVE_MATH_H
+#define HAVE_STDBOOL_H
+#define HAVE_STDINT_H
+#define HAVE_STDARG_H
+#ifndef _WIN32
+# define HAVE_REGEX_H
+#endif
+#endif
 
+#ifdef HAVE_SYS_TYPES_H
+#include <sys/types.h>
+#endif
+
+#ifdef HAVE_SYS_MMAN_H
+# ifndef _WIN32
+#  include <sys/mman.h>
+# endif
+#endif
+#ifdef HAVE_SYS_STAT_H
+#include <sys/stat.h>
+#endif
+#ifdef HAVE_SYS_PARAM_H
+#include <sys/param.h>
+#endif
+
+#ifdef HAVE_LIMITS_H
 #include <limits.h>
+#endif
+#ifdef HAVE_FCNTL_H
 #include <fcntl.h>
+#endif
+#ifdef HAVE_ERRNO_H
 #include <errno.h>
+#endif
+#ifdef HAVE_UNISTD_H
 #include <unistd.h>
+#endif
+#ifdef HAVE_CTYPE_H
 #include <ctype.h>
+#endif
+#ifdef HAVE_STDIO_H
+#include <stdio.h>
+#endif
+#ifdef HAVE_STRING_H
+#include <string.h>
+#endif
 
 #include "utlist.h"
 #include "utstring.h"
@@ -44,6 +97,10 @@
 
 #ifdef HAVE_OPENSSL
 #include <openssl/evp.h>
+#endif
+
+#ifndef __DECONST
+#define __DECONST(type, var)    ((type)(uintptr_t)(const void *)(var))
 #endif
 
 /**
@@ -106,6 +163,7 @@ struct ucl_chunk {
 	size_t remain;
 	unsigned int line;
 	unsigned int column;
+	unsigned priority;
 	struct ucl_chunk *next;
 };
 
@@ -125,7 +183,7 @@ struct ucl_variable {
 	char *value;
 	size_t var_len;
 	size_t value_len;
-	struct ucl_variable *next;
+	struct ucl_variable *prev, *next;
 };
 
 struct ucl_parser {
@@ -135,12 +193,21 @@ struct ucl_parser {
 	int flags;
 	ucl_object_t *top_obj;
 	ucl_object_t *cur_obj;
+	char *cur_file;
 	struct ucl_macro *macroes;
 	struct ucl_stack *stack;
 	struct ucl_chunk *chunks;
 	struct ucl_pubkey *keys;
 	struct ucl_variable *variables;
+	ucl_variable_handler var_handler;
+	void *var_data;
 	UT_string *err;
+};
+
+struct ucl_object_userdata {
+	ucl_object_t obj;
+	ucl_userdata_dtor dtor;
+	ucl_userdata_emitter emitter;
 };
 
 /**
@@ -157,9 +224,11 @@ size_t ucl_unescape_json_string (char *str, size_t len);
  * @param err error ptr
  * @return
  */
-bool ucl_include_handler (const unsigned char *data, size_t len, void* ud);
+bool ucl_include_handler (const unsigned char *data, size_t len,
+		const ucl_object_t *args, void* ud);
 
-bool ucl_try_include_handler (const unsigned char *data, size_t len, void* ud);
+bool ucl_try_include_handler (const unsigned char *data, size_t len,
+		const ucl_object_t *args, void* ud);
 
 /**
  * Handle includes macro
@@ -169,7 +238,8 @@ bool ucl_try_include_handler (const unsigned char *data, size_t len, void* ud);
  * @param err error ptr
  * @return
  */
-bool ucl_includes_handler (const unsigned char *data, size_t len, void* ud);
+bool ucl_includes_handler (const unsigned char *data, size_t len,
+		const ucl_object_t *args, void* ud);
 
 size_t ucl_strlcpy (char *dst, const char *src, size_t siz);
 size_t ucl_strlcpy_unsafe (char *dst, const char *src, size_t siz);
@@ -205,7 +275,7 @@ ucl_create_err (UT_string **err, const char *fmt, ...)
 static inline bool
 ucl_maybe_parse_boolean (ucl_object_t *obj, const unsigned char *start, size_t len)
 {
-	const unsigned char *p = start;
+	const char *p = (const char *)start;
 	bool ret = false, val = false;
 
 	if (len == 5) {
@@ -259,28 +329,71 @@ ucl_maybe_parse_boolean (ucl_object_t *obj, const unsigned char *start, size_t l
  * @return 0 if string is numeric and error code (EINVAL or ERANGE) in case of conversion error
  */
 int ucl_maybe_parse_number (ucl_object_t *obj,
-		const char *start, const char *end, const char **pos, bool allow_double, bool number_bytes);
+		const char *start, const char *end, const char **pos,
+		bool allow_double, bool number_bytes, bool allow_time);
 
 
-static inline ucl_object_t *
+static inline const ucl_object_t *
 ucl_hash_search_obj (ucl_hash_t* hashlin, ucl_object_t *obj)
 {
-	return (ucl_object_t *)ucl_hash_search (hashlin, obj->key, obj->keylen);
+	return (const ucl_object_t *)ucl_hash_search (hashlin, obj->key, obj->keylen);
 }
 
-static inline ucl_hash_t *
-ucl_hash_insert_object (ucl_hash_t *hashlin, ucl_object_t *obj) UCL_WARN_UNUSED_RESULT;
+static inline ucl_hash_t * ucl_hash_insert_object (ucl_hash_t *hashlin,
+		const ucl_object_t *obj,
+		bool ignore_case) UCL_WARN_UNUSED_RESULT;
 
 static inline ucl_hash_t *
-ucl_hash_insert_object (ucl_hash_t *hashlin, ucl_object_t *obj)
+ucl_hash_insert_object (ucl_hash_t *hashlin,
+		const ucl_object_t *obj,
+		bool ignore_case)
 {
 	if (hashlin == NULL) {
-		hashlin = ucl_hash_create ();
+		hashlin = ucl_hash_create (ignore_case);
 	}
 	ucl_hash_insert (hashlin, obj, obj->key, obj->keylen);
 
 	return hashlin;
 }
 
+/**
+ * Get standard emitter context for a specified emit_type
+ * @param emit_type type of emitter
+ * @return context or NULL if input is invalid
+ */
+const struct ucl_emitter_context *
+ucl_emit_get_standard_context (enum ucl_emitter emit_type);
+
+/**
+ * Serialize string as JSON string
+ * @param str string to emit
+ * @param buf target buffer
+ */
+void ucl_elt_string_write_json (const char *str, size_t size,
+		struct ucl_emitter_context *ctx);
+
+/**
+ * Write multiline string using `EOD` as string terminator
+ * @param str
+ * @param size
+ * @param ctx
+ */
+void ucl_elt_string_write_multiline (const char *str, size_t size,
+		struct ucl_emitter_context *ctx);
+
+/**
+ * Emit a single object to string
+ * @param obj
+ * @return
+ */
+unsigned char * ucl_object_emit_single_json (const ucl_object_t *obj);
+
+/**
+ * Check whether a specified string is long and should be likely printed in
+ * multiline mode
+ * @param obj
+ * @return
+ */
+bool ucl_maybe_long_string (const ucl_object_t *obj);
 
 #endif /* UCL_INTERNAL_H_ */

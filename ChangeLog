@@ -1,18 +1,281 @@
-0.6.9:
-	* Fix serious bug in DNS random code.
-	* Rename symbol HFILTER_HOSTNAME_NOPTR (@AlexeySa)
-	* Fix Hfilter for null text part (@AlexeySa)
-	* Fix rule MISSING_MIMEOLE for IPB forum (@AlexeySa)
-	* Tweak default RBL module config for brevity (@fatalbanana)
-	* Fix nameservers setup.
-	* Fix overrides for a metric. (#33)
-	* Fix memory leak in fuzzy_add command.
-	* Debianization (by @dottedmag).
-	* Rework resolver library.
-	* Rework LRU hash logic.
-	* Fix users in debian package (by @dottedmag).
-	* Rework bloom hash library to use XXHash.
-	* Remove judy and use glib hash tables from fuzzy_storage.
+0.8.3:
+	* Various critical fixes in distribution (by @dottedmag and @fatalbanana)
+	* Fixed bugs in url detector to parse certain patterns
+	* Add default host and helo for a client
+	* Some sanity checks for tokenizer and classifier
+	* Reiterate on systemd support
+	* Fix missing symbol registration
+	* Add support of spamc compatible output
+	* Filter double-dots in rbl.lua validate_dns (by @fatalbanana)
+	* Update ucl submodule due to critical bugfix
+
+0.8.2:
+	* Create fuzzy db if it does not exist
+	* Fix: Centos init script: configtest() (by @AlexeySa)
+	* Enable one_shot for RECEIVED_SPAMHAUS_XBL - Fixes #102 (by @fatalbanana)
+	* Update Exim patch (by @fatalbanana)
+	* Fix processing of unix sockets.
+	* Allow applying settings to authenticated users (by @fatalbanana)
+	* Make settings priorities work as documented (by @fatalbanana)
+	* Fix race condition in symbols planner
+	* Add DNSWL_BLOCKED symbol (by @fatalbanana)
+	* Make Exim pass usernames to rspamd (by @fatalbanana)
+	* Update RBL module (by @fatalbanana):
+		- fix indentation;
+		- collapse loops;
+		- avoid calling for un-needed information;
+		- allow disabling RBLs for authenticated users
+	* once_received.lua: Fix indentation & add exclusion for authenticated users (by @fatalbanana)
+	* hfilter.lua: Add exclusion for authenticated users (by @AlexeySa)
+	* Updates to hfilter rules (by @AlexeySa)
+	* Set empty <> user or addr for msgs without FROM (by @eneq123)
+	* Fix: attempt to index field '?' (a nil value) (by @eneq123)
+	* Fix: if not exist Date-header (by @AlexeySa)
+	* Add task:get_content() method.
+	* rbl.lua: Ignore private IP space (by @fatalbanana)
+	* Allow to check radix maps from lua by rspamd{ip}
+	* Make local exclusions configurable per-RBL (by @fatalbanana)
+	* Add rspamd_config:radix_from_config() (by @fatalbanana)
+	* Support emails dnsbl in rbl (by @fatalbanana)
+	* Complete rework of url extraction logic
+	* Allow customizations for unix sockets. (fixes #182)
+	* Set lua path according to rspamd settings.
+	* Import lua-functional for plugins stuff.
+	* Completely rewrite multimap plugin in functional style.
+	* Fix FORGED_MUA_THUNDERBIRD_MSGID (fixes #186)
+	* Check IPv6 addresses at dnswl.org and Spamhaus whitelist (by @fatalbanana)
+	* Add lowercase utility for utf8 strings.
+	* Various fixes to build system
+	* Updated debian configuration infrastructure (by @dottedmag)
+
+0.8.1:
+	* Add sqlite and perl as dependencies for RPM/Debian packages (by @fatalbanana)
+	* Remove whitelist.lua from RPM file list (by @fatalbanana)
+	* Make Exim pass hostnames to rspamd (by @fatalbanana)
+	* Fix building on Fedora (by @fatalbanana)
+	* Add toggle for disabling installation of systemd units on Linux (by @fatalbanana)
+	* Fix double format rounding that caused output corruption (reported by @fatalbanana)
+	* Revert broken change for destructors ordering that led to memory corruption
+	* Do not reset symbols case of settings if parsed from lua (reported by @andrejzverev)
+	* Fix build on SunOS (by @wiedi)
+	* Fix multiple crashes on broken DKIM DNS records
+	* Fix critical issue with composites weights removing
+	* Fix memory corruption in composites processing code
+	* Ignore non-SPF TXT records when parsing SPF includes
+
+0.8.0:
+	* New fuzzy check logic:
+		- use shingles algorithm for fuzzy matching
+		- use blake2 instead of md5 for larger output space
+		- combine fuzzy and strict matching
+		- allow to organize private storages by means of keys
+		- preserve compatibility with previous versions
+	* New fuzzy storage:
+		- use sqlite instead of own memory based hash tables
+		- rework commands interface
+		- add conversion from the old format
+		- add fuzzy match by shignles
+		- support old rspamd versions
+	* Add lemmatizing for words used in fuzzy hashes that allows to improve match
+	quality by using of the first forms of all words
+	* Rework language detection
+	* Fix several critical bugs, memory leaks and deadlocks:
+		- memory leak in HTML nodes parsing
+		- deadlock in logger code
+		- deadlock in signals processing
+		- crashes in fuzzy_storage
+		- crashes in tokenizers if the input was empty
+	* Import new libucl with several bugfixes and improvements
+	* Support listening on ipv6 addresses only
+	* Fix macro expansion in SPF module
+	* Several bugfixes in DKIM module
+	* Add load headers support for mime parts to the lua API
+	* Add documentation for:
+		- workers in general
+		- fuzzy_storage worker
+		- fuzzy_check plugin
+		- mimepart and textpart lua API modules
+
+0.7.6:
+	* Apply boundary fix for dkim simple canonization
+	* Fix ping command
+	* Return nil if header was not found in lua_task
+	* Fix hang in upstreams revive logic
+	* Decode entitles when normalizing HTML parts
+	* Fix logic of finding URLs in HTML parts
+	* Do not include \0 into length of text when performing conversion to utf8
+	* Fix raw vs parsed reperesentations
+		Raw parts are now:
+			- decoded b64/qp, but *NOT* converted to utf-8
+		Processed parts are now:
+			- converted to UTF-8
+			- normalized if needed (e.g. HTML tags are stripped)
+	* Rework DKIM canonization to line based
+	* Fix fuzzy hashes addding
+	* Use more specific hash function for fuzzy
+	* Fix leaking of iconv descriptors
+	* Fix PTR resolving in lua resolver
+	* Rework spf module.
+		- Copy data to memory pool as cached record might be destroyed causing
+		  freed memory being passed to the protocol output (use after free)
+		- Allow SPF_NEUTRAL policy to be handled separately
+		- Add R_SPF_NEUTRAL to the default config
+	* Rework `register_symbols` function
+	* Allow to disable components of hfilter
+
+0.7.5:
+	* Fix owner when creating folder /run/rspamd (by @sfirmery)
+	* Fix IP validity checks
+	* Decode URLs obtained from HTML tags
+	* Fix crash with unweighted upstreams
+	* Stop processing headers in parts
+	* Set sockaddr.sa_family properly when connectig to upstreams
+	* Fix reload issues in surbl and fuzzy_check (reported by @citrin)
+	* Fix timeouts in redirector
+	* Improve lua errors reporting
+	* Fix lua closures processing in libucl
+	* Rework calling of lua functions from regexp module
+	* Choose raw regexp for raw headers
+	* Rework conversion to utf since glib one is broken
+	* Ignore SGML style tags in html
+	* Fix old bug with non-capturing https urls
+	* Fix memory corruption on fuzzy reload (reported by @citrin)
+	* Fix percents display in rspamc
+	* Fix buffer update for DKIM
+	* Do not validate utf for raw headers
+
+0.7.4:
+	* Fix build under *BSD
+	* Detect HAN unicode script
+	* Implement language detection heuristic for text parts
+	* Fix time output in history
+	* Improve piechart coloring
+	* Fix \r\n conversion in DKIM module (reported by @citrin)
+	* Try to detect systems with no IPv6 support
+	* Fix multiple/single values in use settings (reported by @citrin)
+	*  Rework IP addresses in upstreams:
+		- Select ipv4/unix addresses if they exist and use ipv6 for ipv6 only
+		  upstreams (since the support of ipv6 is poor in many OSes and
+		  environments)
+		- Free IP list on upstream destruction
+		- Add test cases for addresses selection
+		- Allow adding of free form IP addresses to upstreams
+    * Fix endiannes in lua_radix search (reported by @citrin)
+    * Soft shutdown should also set wanna_die flag (reported by @citrin)
+    * Stop use-after-free in event loop termination
+    * Fix processing of very short messages in DKIM (reported by @citrin)
+    * Detect systems without shared mutexes
+    * Fix issues with PTR and MX elements in SPF parser (reported by @citrin)
+
+0.7.3:
+	* New upstreams code:
+		- simplify upstreams API;
+		- unify strings parsing in upstreams definition;
+		- add configuration options for the upstreams;
+		- for failed upstreams re-resolve their addresses;
+		- use all resolved addresses for an upstream (round-robin);
+		- implement stable hashing and use it by default for upstreams;
+		- add unit test for upstreams module.
+	* Rework signals processing in all rspamd workers:
+		- signals are now processed in the event loop;
+		- implement the most common signal handlers for all workers;
+		- add callbacks for workers specific signal handlers
+	*  Fix critical issue with fuzzy storage:
+		Fuzzy stroage could not save any hashes on termination due to bugged
+		signals handling
+    * Fix roll history IP storage
+    * Rework ipv4/ipv6 handling in parsing addresses:
+		- turn off support of IPV6_V6ONLY socket option;
+		- create ipv6 socket prior to ipv4 one to handle systems with v6/v4 
+		sockets enabled (Linux)
+    * Remove CBL as it's wholly included in Spamhaus XBL (by @fatalbanana)
+    * Remove nszones.com fake RBL (by @citrin)
+    * Fix upstreams interaction for fuzzy_check
+    * Verify spf PTR records (reported by @citrin)
+    * Fix spf MX records parsing
+    * Add compatibility for old libevent (by @yellowman)
+    * Sync bugfixes from libucl
+
+0.7.2:
+	* Convert all maps to the compressed radix trie
+	* Allow IPv6 addresses in IP maps
+	* Remove dynamic items support from symbols cache
+	* Allow hex encoded output of strings
+	* Fix bug with control connections count
+	* Process fuzzy weight correctly (reported by @fatalbanana)
+	* Remove extra reference retain of http connection on error
+	* Remove deprecated options from the default config
+	* Add `one_shot` attr to metric's symbols
+	* Doc: add documentation for metrics
+	* Add Upstart job to debian packaging (by @CameronNemo)
+	* Config: improve SURBL symbols descriptions (by @citrin)
+	* Config: reflect SURBL changes (by @citrin):
+    	- Outblaze removed, malware moved to separate list:
+    	http://www.surbl.org/news/internal/MW-malware-sublist-added-to-multi
+    * Fix C modules initialization on restart
+    * Treat single IP as a single IP in radix lists (reported by @citrin)
+    * Do not touch file and core limits if not asked explicitly (reported by @citrin)
+    * Improve logging for fuzzy errors
+    * Block SIGPIPE for HTTP writing
+    * Doc: update manual pages
+    * Fix HTTP connection termination
+    * Reduce default number of parallel requests to 8
+    * Sync with libucl include features
+
+0.7.1:
+	* Fix typo in stat output.
+	* Fix issues with includes crossing with the system includes
+	* Restore testing framework
+	* Add radix trie test suite
+	* Implement new path-compressed radix trie.
+	    - The performance benefit over the old algorithm is about 1.5 times.
+		- Memory usage is significantly lower as well.
+	    - Now radix trie can accept any IPv4/IPv6 values
+	* Various improvements to the memory pools code
+	* Fix writing reply to a client when no filters are defined
+	* Write base32 encoded fuzzy
+	* Fix 'soft reject' action
+	* Fix rspamd reload and modules reconfiguration
+	* Fix subject rewriting for the default subject
+	* Fix states for processing task and pre-filters
+	* Fix issues with connection closing
+	* Fix crashes in rdns
+	* Fix ratelimit pre-filter
+	* Update exim patch.
+		- Update to the recent exim version
+		- Strip extra leading src/ from the patch
+		- Remove sendfile since it was broken
+		- Fix rspamd spam report for exim
+	* Improve documentation
+
+0.7.0:
+	* Use HTTP protocol for all operatiosn
+	* Webui worker is now removed and controller works as webui
+	* Allow to serve static files via controller by option `static_dir`
+	* Rspamd interface is now a part of rspamd
+	* Rspamc client has been rewritten to use HTTP and non-blocking mode
+	allowing to start multiple operations simultaneously (see `-n` option)
+	* Lua API was completely reworked to satisfy modern standards of LUA:
+		* Module `lua-message` was removed
+		* Reduced number of superglobals registered by rspamd
+		* Many functions has been redesigned
+		* Symbols registration is now more convenient
+	* Users settings has been rewritten as lua plugin
+	* Reworked headers system as gmime's based one misses many headers and is
+	very slow to get headers values
+	* Reorganized code and removed embedded jannsson by using UCL for all json
+	parsing
+	* Migrated to `librdns` for DNS resolving that improves concurrency for
+	DNS requests significantly
+	* Fixed tonns of bugs in MIME processing
+	* Improved metrcis and default symbol's weights
+	* Added new RBL's
+	* Fixed a number of issues in the modules
+	* Removed several memory leaks found
+	* Fix unicode processing
+	* Fix fuzzy checking for unicode parts
+	* Significantly improve documentation and especially LUA API docs
+	* See migration notes at https://rspamd.com/doc/migration.html
 
 0.6.8:
 	* Controller now listen for localhost and not for 127.0.0.1 by default

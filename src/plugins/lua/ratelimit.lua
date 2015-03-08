@@ -1,3 +1,29 @@
+--[[
+Copyright (c) 2011-2015, Vsevolod Stakhov <vsevolod@highsecure.ru>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+]]--
+
 -- A plugin that implements ratelimits using redis or kvstorage server
 
 -- Default port for redis upstreams
@@ -14,15 +40,23 @@ local settings = {
 	-- Limit for all bounce mail (burst 10, rate 2 per hour)
 	bounce_to = {[1] = 10, [2] = 0.000555556, [3] = 4}, 
 	-- Limit for bounce mail per one source ip (burst 5, rate 1 per hour)
-	bounce_to_ip = {[1] = 5 , [2] = 0.000277778, [3] = 5} 
+	bounce_to_ip = {[1] = 5 , [2] = 0.000277778, [3] = 5},
+ 
+        -- Limit for all mail per user (authuser) (burst 20, rate 1 per minute)
+	user = {[1] = 20, [2] = 0.01666666667, [3] = 6}
+
 }
 -- Senders that are considered as bounce
-local bounce_senders = {'postmaster', 'mailer-daemon', '', 'null', 'fetchmail-daemon'}
+local bounce_senders = {'postmaster', 'mailer-daemon', '', 'null', 'fetchmail-daemon', 'mdaemon'}
 -- Do not check ratelimits for these senders
 local whitelisted_rcpts = {'postmaster', 'mailer-daemon'}
 local whitelisted_ip = nil
 local max_rcpt = 5
 local upstreams = nil
+
+local rspamd_logger = require "rspamd_logger"
+local rspamd_redis = require "rspamd_redis"
+local upstream_list = require "rspamd_upstream_list"
 
 --- Parse atime and bucket of limit
 local function parse_limit_data(str)
@@ -39,10 +73,12 @@ end
 --- Check specific limit inside redis
 local function check_specific_limit (task, limit, key)
 
-	local upstream = upstreams:get_upstream_by_hash(key, task:get_date())
+	local upstream = upstreams:get_upstream_by_hash(key)
+	local addr = upstream:get_addr()
 	--- Called when value was set on server
 	local function rate_set_key_cb(task, err, data)
 		if err then
+		  rspamd_logger.info('got error while getting limit: ' .. err)
 			upstream:fail()
 		else
 			upstream:ok()
@@ -58,31 +94,34 @@ local function check_specific_limit (task, limit, key)
 			bucket = bucket - limit[2] * (ntime - atime);
 			if bucket > 0 then
 				local lstr = string.format('%.7f:%.7f', ntime, bucket)
-				rspamd_redis.make_request(task, upstream:get_ip_string(), upstream:get_port(), rate_set_key_cb, 
+				rspamd_redis.make_request(task, addr:to_string(), addr:get_port(), rate_set_key_cb, 
 							'SET %b %b', key, lstr)
 				if bucket > limit[1] then
-					task:set_pre_result(rspamd_actions['soft reject'], 'Ratelimit exceeded')
+					task:set_pre_result('soft reject', 'Ratelimit exceeded: ' .. key)
 				end
 			else
-				rspamd_redis.make_request(task, upstream:get_ip_string(), upstream:get_port(), rate_set_key_cb, 
+				rspamd_redis.make_request(task, addr:to_string(), addr:get_port(), rate_set_key_cb, 
 							'DEL %b', key)
 			end
 		end
 		if err then
+		  rspamd_logger.info('got error while getting limit: ' .. err)
 			upstream:fail()
 		end	
 	end
 	if upstream then
-		rspamd_redis.make_request(task, upstream:get_ip_string(), upstream:get_port(), rate_get_cb, 'GET %b', key)
+		rspamd_redis.make_request(task, addr:to_string(), addr:get_port(), rate_get_cb, 'GET %b', key)
 	end
 end
 
 --- Set specific limit inside redis
 local function set_specific_limit (task, limit, key)
-	local upstream = upstreams:get_upstream_by_hash(key,  task:get_date())
+	local upstream = upstreams:get_upstream_by_hash(key)
+	local addr = upstream:get_addr()
 	--- Called when value was set on server
 	local function rate_set_key_cb(task, err, data)
 		if err then
+		  rspamd_logger.info('got error while setting limit: ' .. err)
 			upstream:fail()
 		else
 			upstream:ok()
@@ -94,8 +133,8 @@ local function set_specific_limit (task, limit, key)
 			--- Add new entry
 			local tv = task:get_timeval()
 			local atime = tv['tv_usec'] / 1000000. + tv['tv_sec']
-			local lstr = string.format('%.7f:1', atime)
-			rspamd_redis.make_request(task, upstream:get_ip_string(), upstream:get_port(), rate_set_key_cb, 
+			local lstr = string.format('%.7f:1', atime)	
+			rspamd_redis.make_request(task, addr:to_string(), addr:get_port(), rate_set_key_cb, 
 							'SET %b %b', key, lstr)
 		elseif data then
 			local atime, bucket = parse_limit_data(data)
@@ -104,24 +143,25 @@ local function set_specific_limit (task, limit, key)
 			-- Leak messages
 			bucket = bucket - limit[2] * (ntime - atime) + 1;
 			local lstr = string.format('%.7f:%.7f', ntime, bucket)
-			rspamd_redis.make_request(task, upstream:get_ip_string(), upstream:get_port(), rate_set_key_cb, 
+			rspamd_redis.make_request(task, addr:to_string(), addr:get_port(), rate_set_key_cb, 
 							'SET %b %b', key, lstr)
 		elseif err then
+		  rspamd_logger.info('got error while setting limit: ' .. err)
 			upstream:fail()
 		end
 	end
 	if upstream then
-		rspamd_redis.make_request(task, upstream:get_ip_string(), upstream:get_port(), rate_set_cb, 'GET %b', key)
+		rspamd_redis.make_request(task, addr:to_string(), addr:get_port(), rate_set_cb, 'GET %b', key)
 	end
 end
 
 --- Make rate key
 local function make_rate_key(from, to, ip)
-	if from and ip then
+	if from and ip and ip:is_valid() then
 		return string.format('%s:%s:%s', from, to, ip:to_string())
 	elseif from then
 		return string.format('%s:%s', from, to)
-	elseif ip then
+	elseif ip and ip:is_valid() then
 		return string.format('%s:%s', to, ip:to_string())
 	elseif to then
 		return to
@@ -142,20 +182,9 @@ end
 
 --- Check or update ratelimit
 local function rate_test_set(task, func)
-	
-	-- Returns local part component of address
-	local function get_local_part(str)
-		pos,_ = string.find(str, '@', 0, true)
-		if not pos then
-			return str
-		else
-			return string.sub(str, 1, pos - 1)
-		end
-	end
-	
 	-- Get initial task data
 	local ip = task:get_from_ip()
-	if ip and whitelisted_ip then
+	if ip and ip:is_valid() and whitelisted_ip then
 		if whitelisted_ip:get_key(ip) then
 			-- Do not check whitelisted ip
 			return
@@ -164,9 +193,6 @@ local function rate_test_set(task, func)
 	-- Parse all rcpts 
 	local rcpts = task:get_recipients()
 	local rcpts_user = {}
-	if not rcpts then
-		rcpts = task:get_recipients_headers()
-	end
 	if rcpts then
 		if table.maxn(rcpts) > max_rcpt then
 			rspamd_logger.info(string.format('message <%s> contains %d recipients, maximum is %d',
@@ -174,20 +200,24 @@ local function rate_test_set(task, func)
 			return
 		end
 		for i,r in ipairs(rcpts) do
-			rcpts_user[i] = get_local_part(r['addr'])
+			rcpts_user[i] = r['user']
 		end
 	end
 	-- Parse from
 	local from = task:get_from()
-	local from_user = ''
-	if not from then
-		from = task:get_from_headers()
-	end
+	local from_user = '<>'
+	local from_addr = '<>'
 	if from then
-		from_user = get_local_part(from[1]['addr'])
+		from_user = from[1]['user']
+		from_addr = from[1]['addr']
 	end
-	
-	if not from_user or not rcpts_user[1] then
+	-- Get user (authuser)
+	local auser = task:get_user()
+	if auser then
+		func(task, settings['user'], make_rate_key (auser, '<auth>', nil))
+	end
+
+	if not rcpts_user[1] then
 		-- Nothing to check
 		return
 	end
@@ -205,7 +235,7 @@ local function rate_test_set(task, func)
 		func(task, settings['to'], make_rate_key (nil, r['addr'], nil))
 		if ip then
 			func(task, settings['to_ip'], make_rate_key (nil, r['addr'], ip))
-			func(task, settings['to_ip_from'], make_rate_key (from[1]['addr'], r['addr'], ip))
+			func(task, settings['to_ip_from'], make_rate_key (from_addr, r['addr'], ip))
 		end
 	end
 end
@@ -270,6 +300,8 @@ local function parse_limit(str)
 		set_limit(settings['bounce_to'], params[2], params[3])
 	elseif params[1] == 'bounce_to_ip' then
 		set_limit(settings['bounce_to_ip'], params[2], params[3])
+        elseif params[1] == 'user' then
+                set_limit(settings['user'], params[2], params[3])
 	else
 		rspamd_logger.err('invalid limit type: ' .. params[1])
 	end

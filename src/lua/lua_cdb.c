@@ -31,22 +31,22 @@ LUA_FUNCTION_DEF (cdb, lookup);
 LUA_FUNCTION_DEF (cdb, get_name);
 LUA_FUNCTION_DEF (cdb, destroy);
 
-static const struct luaL_reg    cdblib_m[] = {
+static const struct luaL_reg cdblib_m[] = {
 	LUA_INTERFACE_DEF (cdb, lookup),
 	LUA_INTERFACE_DEF (cdb, get_name),
-	{"__tostring", lua_class_tostring},
+	{"__tostring", rspamd_lua_class_tostring},
 	{"__gc", lua_cdb_destroy},
 	{NULL, NULL}
 };
-static const struct luaL_reg    cdblib_f[] = {
+static const struct luaL_reg cdblib_f[] = {
 	LUA_INTERFACE_DEF (cdb, create),
 	{NULL, NULL}
 };
 
-static struct cdb	*
+static struct cdb *
 lua_check_cdb (lua_State * L)
 {
-	void                           *ud = luaL_checkudata (L, 1, "rspamd{cdb}");
+	void *ud = luaL_checkudata (L, 1, "rspamd{cdb}");
 
 	luaL_argcheck (L, ud != NULL, 1, "'cdb' expected");
 	return ud ? *((struct cdb **)ud) : NULL;
@@ -55,9 +55,9 @@ lua_check_cdb (lua_State * L)
 static gint
 lua_cdb_create (lua_State *L)
 {
-	struct cdb                     *cdb, **pcdb;
-	const gchar                    *filename;
-	gint                            fd;
+	struct cdb *cdb, **pcdb;
+	const gchar *filename;
+	gint fd;
 
 	filename = luaL_checkstring (L, 1);
 	/* If file begins with cdb://, just skip it */
@@ -79,8 +79,8 @@ lua_cdb_create (lua_State *L)
 			lua_pushnil (L);
 		}
 		else {
-			pcdb = lua_newuserdata (L, sizeof (struct cdb*));
-			lua_setclass (L, "rspamd{cdb}", -1);
+			pcdb = lua_newuserdata (L, sizeof (struct cdb *));
+			rspamd_lua_setclass (L, "rspamd{cdb}", -1);
 			*pcdb = cdb;
 		}
 	}
@@ -91,7 +91,7 @@ lua_cdb_create (lua_State *L)
 static gint
 lua_cdb_get_name (lua_State *L)
 {
-	struct cdb                     *cdb = lua_check_cdb (L);
+	struct cdb *cdb = lua_check_cdb (L);
 
 	lua_pushstring (L, cdb->filename);
 	return 1;
@@ -100,11 +100,11 @@ lua_cdb_get_name (lua_State *L)
 static gint
 lua_cdb_lookup (lua_State *L)
 {
-	struct cdb                     *cdb = lua_check_cdb (L);
-	const gchar                    *what;
-	gchar                          *value;
-	gsize                           vlen;
-	gint64                          vpos;
+	struct cdb *cdb = lua_check_cdb (L);
+	const gchar *what;
+	gchar *value;
+	gsize vlen;
+	gint64 vpos;
 
 	/*
 	 * XXX: this code is placed here because event_loop is called inside workers, so start
@@ -134,7 +134,7 @@ lua_cdb_lookup (lua_State *L)
 static gint
 lua_cdb_destroy (lua_State *L)
 {
-	struct cdb                     *cdb = lua_check_cdb (L);
+	struct cdb *cdb = lua_check_cdb (L);
 
 	if (cdb) {
 		cdb_free (cdb);
@@ -146,7 +146,16 @@ lua_cdb_destroy (lua_State *L)
 	return 0;
 }
 
-gint
+static gint
+lua_load_cdb (lua_State *L)
+{
+	lua_newtable (L);
+	luaL_register (L, NULL, cdblib_f);
+
+	return 1;
+}
+
+void
 luaopen_cdb (lua_State * L)
 {
 	luaL_newmetatable (L, "rspamd{cdb}");
@@ -158,10 +167,8 @@ luaopen_cdb (lua_State * L)
 	lua_pushstring (L, "rspamd{cdb}");
 	lua_rawset (L, -3);
 
-	luaL_register (L, NULL, cdblib_m);
-	luaL_register (L, "cdb", cdblib_f);
-
+	luaL_register (L, NULL,	 cdblib_m);
 	lua_pop (L, 1);                      /* remove metatable from stack */
 
-	return 1;
+	rspamd_lua_add_preload (L, "rspamd_cdb", lua_load_cdb);
 }

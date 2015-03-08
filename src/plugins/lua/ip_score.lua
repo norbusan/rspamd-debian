@@ -1,3 +1,29 @@
+--[[
+Copyright (c) 2011-2015, Vsevolod Stakhov <vsevolod@highsecure.ru>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+]]--
+
 -- IP score is a module that set ip score of specific ip and 
 
 -- Default settings
@@ -12,6 +38,8 @@ local symbol = 'IP_SCORE'
 local normalize_score = 100 
 local whitelist = nil
 local expire = 240
+local rspamd_redis = require "rspamd_redis"
+local rspamd_logger = require "rspamd_logger"
 
 -- Set score based on metric's action
 local ip_score_set = function(task)
@@ -40,8 +68,7 @@ local ip_score_set = function(task)
 	if action then
 		-- Check whitelist 
 		if whitelist then
-			local ipnum = task:get_from_ip():to_number()
-			if task:get_from_ip():is_valid() and whitelist:get_key(ipnum) then
+			if task:get_from_ip():is_valid() and whitelist:get_key(task:get_from_ip()) then
 				-- Address is whitelisted
 				return
 			end
@@ -103,8 +130,7 @@ local ip_score_check = function(task)
 	local ip = task:get_from_ip()
 	if ip:is_valid() then
 		if whitelist then
-			local ipnum = task:get_from_ip():to_number()
-			if whitelist:get_key(ipnum) then
+			if whitelist:get_key(task:get_from_ip()) then
 				-- Address is whitelisted
 				return
 			end

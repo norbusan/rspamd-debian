@@ -19,24 +19,41 @@ typedef struct token_node_s {
 /* Common tokenizer structure */
 struct tokenizer {
 	gchar *name;
-	gint (*tokenize_func)(struct tokenizer *tokenizer, memory_pool_t *pool, f_str_t *input,
-			GTree **cur, gboolean save_token, gboolean is_utf, GList *exceptions);
-	gchar* (*get_next_word)(f_str_t *buf, f_str_t *token, GList **exceptions);
+	gint (*tokenize_func)(struct tokenizer *tokenizer,
+			rspamd_mempool_t *pool,
+			GArray *words,
+			GTree **cur,
+			gboolean save_token,
+			gboolean is_utf,
+			GList *exceptions);
+	gchar * (*get_next_word)(rspamd_fstring_t *buf, rspamd_fstring_t *token, GList **exceptions);
 };
 
 /* Compare two token nodes */
 int token_node_compare_func (gconstpointer a, gconstpointer b);
+
 /* Get tokenizer structure by name or return NULL if this name is not found */
-struct tokenizer* get_tokenizer (const char *name);
+struct tokenizer * get_tokenizer (const char *name);
+
 /* Get next word from specified f_str_t buf */
-gchar* get_next_word (f_str_t *buf, f_str_t *token, GList **exceptions);
+gchar * rspamd_tokenizer_get_word (rspamd_fstring_t *buf,
+		rspamd_fstring_t *token, GList **exceptions);
+
+/* Tokenize text into array of words (rspamd_fstring_t type) */
+GArray * rspamd_tokenize_text (gchar *text, gsize len, gboolean is_utf,
+		gsize min_len, GList **exceptions);
+
 /* OSB tokenize function */
-int osb_tokenize_text (struct tokenizer *tokenizer, memory_pool_t *pool, f_str_t *input,
-		GTree **cur, gboolean save_token, gboolean is_utf, GList *exceptions);
-/* Common tokenizer for headers */
-int tokenize_headers (memory_pool_t *pool, struct worker_task *task, GTree **cur);
+int osb_tokenize_text (struct tokenizer *tokenizer,
+	rspamd_mempool_t *pool,
+	GArray *input,
+	GTree **cur,
+	gboolean save_token,
+	gboolean is_utf,
+	GList *exceptions);
+
 /* Make tokens for a subject */
-void tokenize_subject (struct worker_task *task, GTree ** tree);
+void tokenize_subject (struct rspamd_task *task, GTree ** tree);
 
 /* Array of all defined tokenizers */
 extern struct tokenizer tokenizers[];

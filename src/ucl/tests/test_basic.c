@@ -21,28 +21,48 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <stdio.h>
-#include <errno.h>
 #include "ucl.h"
+#include "ucl_internal.h"
 
 int
 main (int argc, char **argv)
 {
-	char inbuf[8192];
-	struct ucl_parser *parser, *parser2;
+	char inbuf[8192], *test_in = NULL;
+	struct ucl_parser *parser = NULL, *parser2 = NULL;
 	ucl_object_t *obj;
 	FILE *in, *out;
-	unsigned char *emitted;
+	unsigned char *emitted = NULL;
 	const char *fname_in = NULL, *fname_out = NULL;
-	int ret = 0;
+	int ret = 0, inlen, opt, json = 0, compact = 0, yaml = 0;
+
+	while ((opt = getopt(argc, argv, "jcy")) != -1) {
+		switch (opt) {
+		case 'j':
+			json = 1;
+			break;
+		case 'c':
+			compact = 1;
+			break;
+		case 'y':
+			yaml = 1;
+			break;
+		default: /* '?' */
+			fprintf (stderr, "Usage: %s [-jcy] [in] [out]\n",
+					argv[0]);
+			exit (EXIT_FAILURE);
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
 
 	switch (argc) {
-	case 2:
-		fname_in = argv[1];
+	case 1:
+		fname_in = argv[0];
 		break;
-	case 3:
-		fname_in = argv[1];
-		fname_out = argv[2];
+	case 2:
+		fname_in = argv[0];
+		fname_out = argv[1];
 		break;
 	}
 
@@ -56,10 +76,21 @@ main (int argc, char **argv)
 		in = stdin;
 	}
 	parser = ucl_parser_new (UCL_PARSER_KEY_LOWERCASE);
+	ucl_parser_register_variable (parser, "ABI", "unknown");
+
+	if (fname_in != NULL) {
+		ucl_parser_set_filevars (parser, fname_in, true);
+	}
 
 	while (!feof (in)) {
-		fread (inbuf, sizeof (inbuf), 1, in);
-		ucl_parser_add_chunk (parser, inbuf, strlen (inbuf));
+		memset (inbuf, 0, sizeof (inbuf));
+		if (fread (inbuf, 1, sizeof (inbuf) - 1, in) == 0) {
+			break;
+		}
+		inlen = strlen (inbuf);
+		test_in = malloc (inlen);
+		memcpy (test_in, inbuf, inlen);
+		ucl_parser_add_chunk (parser, (const unsigned char *)test_in, inlen);
 	}
 	fclose (in);
 
@@ -72,17 +103,30 @@ main (int argc, char **argv)
 	else {
 		out = stdout;
 	}
-	if (ucl_parser_get_error(parser) != NULL) {
+	if (ucl_parser_get_error (parser) != NULL) {
 		fprintf (out, "Error occurred: %s\n", ucl_parser_get_error(parser));
 		ret = 1;
 		goto end;
 	}
 	obj = ucl_parser_get_object (parser);
-	emitted = ucl_object_emit (obj, UCL_EMIT_CONFIG);
+	if (json) {
+		if (compact) {
+			emitted = ucl_object_emit (obj, UCL_EMIT_JSON_COMPACT);
+		}
+		else {
+			emitted = ucl_object_emit (obj, UCL_EMIT_JSON);
+		}
+	}
+	else if (yaml) {
+		emitted = ucl_object_emit (obj, UCL_EMIT_YAML);
+	}
+	else {
+		emitted = ucl_object_emit (obj, UCL_EMIT_CONFIG);
+	}
 	ucl_parser_free (parser);
 	ucl_object_unref (obj);
 	parser2 = ucl_parser_new (UCL_PARSER_KEY_LOWERCASE);
-	ucl_parser_add_chunk (parser2, emitted, strlen (emitted));
+	ucl_parser_add_string (parser2, (const char *)emitted, 0);
 
 	if (ucl_parser_get_error(parser2) != NULL) {
 		fprintf (out, "Error occurred: %s\n", ucl_parser_get_error(parser2));
@@ -94,7 +138,20 @@ main (int argc, char **argv)
 		free (emitted);
 	}
 	obj = ucl_parser_get_object (parser2);
-	emitted = ucl_object_emit (obj, UCL_EMIT_CONFIG);
+	if (json) {
+		if (compact) {
+			emitted = ucl_object_emit (obj, UCL_EMIT_JSON_COMPACT);
+		}
+		else {
+			emitted = ucl_object_emit (obj, UCL_EMIT_JSON);
+		}
+	}
+	else if (yaml) {
+		emitted = ucl_object_emit (obj, UCL_EMIT_YAML);
+	}
+	else {
+		emitted = ucl_object_emit (obj, UCL_EMIT_CONFIG);
+	}
 
 	fprintf (out, "%s\n", emitted);
 	ucl_object_unref (obj);
@@ -105,6 +162,9 @@ end:
 	}
 	if (parser2 != NULL) {
 		ucl_parser_free (parser2);
+	}
+	if (test_in != NULL) {
+		free (test_in);
 	}
 
 	fclose (out);

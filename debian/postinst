@@ -18,11 +18,6 @@ case "$1" in
                $SERVER_USER
 
        chown $SERVER_USER: $SERVER_HOME $SERVER_LOG
-
-       # Remove accidentally created directory (<= 05.05.2014)
-       if [ -d /_rspamd:_rspamd ]; then
-           rmdir /_rspamd:_rspamd
-       fi
     ;;
 
     abort-*)
@@ -33,6 +28,15 @@ case "$1" in
         exit 1
     ;;
 esac
+
+if [ -x /etc/init.d/rspamd ]; then
+    update-rc.d rspamd defaults >/dev/null
+    if [ -d /run/systemd/systemd ]; then
+        systemctl --system daemon-reload >/dev/null || true
+    else
+        invoke-rc.d rspamd start || exit $?
+    fi
+fi
 
 #DEBHELPER#
 

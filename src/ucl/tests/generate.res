@@ -1,13 +1,13 @@
+key0 = 0.100000;
 key1 = "test string";
 key2 = "test \\nstring";
 key3 = "  test string    \n";
 key4 [
-    [
-        10,
-        10.100000,
-    ],
-    true,
+    9.999000,
+    10,
+    10.100000,
 ]
+key4 = true;
 key5 = "";
 key6 = "";
 key7 = "   \\n";

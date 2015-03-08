@@ -26,11 +26,11 @@ Control commands
 .IP \[bu] 2
 \f[I]learn_ham\f[]: learn message as ham
 .IP \[bu] 2
-\f[I]fuzzy_add\f[]: add message to fuzzy storage (check \f[C]\\\-f\f[]
-and \f[C]\\\-w\f[] options for this command)
+\f[I]fuzzy_add\f[]: add message to fuzzy storage (check \f[C]\-f\f[] and
+\f[C]\-w\f[] options for this command)
 .IP \[bu] 2
 \f[I]fuzzy_del\f[]: delete message from fuzzy storage (check
-\f[C]\\\-f\f[] option for this command)
+\f[C]\-f\f[] option for this command)
 .IP \[bu] 2
 \f[I]stat\f[]: show rspamd statistics
 .IP \[bu] 2
@@ -47,7 +47,7 @@ graphs)
 .RE
 .PP
 Control commands that modifies rspamd state are considered as privileged
-and basically requires a password to be specified with \f[C]\\\-P\f[]
+and basically requires a password to be specified with \f[C]\-P\f[]
 option (see \f[B]OPTIONS\f[], below, for details).
 This depends on a controller\[aq]s settings and is discussed in
 \f[C]rspamd\-workers\f[] page.
@@ -58,12 +58,16 @@ If no files are specified rspamc reads from the standard input.
 Controller commands usually does not accept any input, however learn*
 and fuzzy* commands requires input.
 .SH OPTIONS
-.PP
-\-h \f[I]host[:port]\f[], \-\-connect=\f[I]host[:port]\f[] Specify host
-and port
-.PP
-\-P \f[I]password\f[], \-\-password=\f[I]password\f[] Specify control
-password
+.TP
+.B \-h \f[I]host[:port]\f[], \-\-connect=\f[I]host[:port]\f[]
+Specify host and port
+.RS
+.RE
+.TP
+.B \-P \f[I]password\f[], \-\-password=\f[I]password\f[]
+Specify control password
+.RS
+.RE
 .TP
 .B \-c \f[I]name\f[], \-\-classifier=\f[I]name\f[]
 Classifier to learn spam or ham (bayes is used by default)
@@ -127,12 +131,45 @@ MTA)
 .RE
 .TP
 .B \-t \f[I]seconds\f[], \-\-timeout=\f[I]seconds\f[]
-Timeout for waiting for a reply
+Timeout for waiting for a reply (can be floating point number, e.g.
+0.1)
 .RS
 .RE
 .TP
 .B \-b \f[I]host:port\f[], \-\-bind=\f[I]host:port\f[]
 Bind to specified ip address
+.RS
+.RE
+.TP
+.B \-j, \-\-json
+Output formatted JSON
+.RS
+.RE
+.TP
+.B \-\-ucl
+Output UCL
+.RS
+.RE
+.TP
+.B \-\-raw
+Output raw data received from rspamd (compacted JSON)
+.RS
+.RE
+.TP
+.B \-\-headers
+Output HTTP headers from a reply
+.RS
+.RE
+.TP
+.B \-\-extended\-urls
+Output URLs in an extended format, showing full URL, host and the part
+of host that was used by surbl module (if enabled).
+.RS
+.RE
+.TP
+.B \-n \f[I]parallel_count\f[],
+\-\-max\-requests=\f[I]parallel_count\f[]
+Maximum number of requests to rspamd executed in parallel (8 by default)
 .RS
 .RE
 .TP
@@ -166,7 +203,7 @@ Learn files:
 .IP
 .nf
 \f[C]
-rspamc\ \\\-P\ pass\ learn_spam\ file1\ file2\ file3
+rspamc\ \-P\ pass\ learn_spam\ file1\ file2\ file3
 \f[]
 .fi
 .PP
@@ -174,7 +211,7 @@ Add fuzzy hash to set 2:
 .IP
 .nf
 \f[C]
-rspamc\ \\\-P\ pass\ \\\-f\ 2\ \\\-w\ 10\ fuzzy_add\ file1\ file2
+rspamc\ \-P\ pass\ \-f\ 2\ \-w\ 10\ fuzzy_add\ file1\ file2
 \f[]
 .fi
 .PP
@@ -182,7 +219,7 @@ Delete fuzzy hash from other server:
 .IP
 .nf
 \f[C]
-rspamc\ \\\-P\ pass\ \\\-h\ hostname:11334\ \\\-f\ 2\ fuzzy_del\ file1\ file2
+rspamc\ \-P\ pass\ \-h\ hostname:11334\ \-f\ 2\ fuzzy_del\ file1\ file2
 \f[]
 .fi
 .PP

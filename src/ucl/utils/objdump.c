@@ -28,62 +28,68 @@
 #include "ucl.h"
 
 void
-ucl_obj_dump(ucl_object_t *obj, unsigned int shift)
+ucl_obj_dump (const ucl_object_t *obj, unsigned int shift)
 {
 	int num = shift * 4 + 5;
 	char *pre = (char *) malloc (num * sizeof(char));
-	ucl_object_t *cur, *tmp;
+	const ucl_object_t *cur, *tmp;
+	ucl_object_iter_t it = NULL, it_obj = NULL;
 
 	pre[--num] = 0x00;
 	while (num--)
 		pre[num] = 0x20;
 
-	while (obj != NULL ) {
+	tmp = obj;
+
+	while ((obj = ucl_iterate_object (tmp, &it, false))) {
 		printf ("%sucl object address: %p\n", pre + 4, obj);
-		if (obj->hh.key != NULL) {
+		if (obj->key != NULL) {
 			printf ("%skey: \"%s\"\n", pre, ucl_object_key (obj));
 		}
-		printf ("%sref: %d\n", pre, obj->ref);
-		printf ("%slen: %zd\n", pre, obj->len);
+		printf ("%sref: %u\n", pre, obj->ref);
+		printf ("%slen: %u\n", pre, obj->len);
 		printf ("%sprev: %p\n", pre, obj->prev);
 		printf ("%snext: %p\n", pre, obj->next);
 		if (obj->type == UCL_OBJECT) {
 			printf ("%stype: UCL_OBJECT\n", pre);
 			printf ("%svalue: %p\n", pre, obj->value.ov);
-			HASH_ITER (hh, obj->value.ov, cur, tmp) {
+			it_obj = NULL;
+			while ((cur = ucl_iterate_object (obj, &it_obj, true))) {
 				ucl_obj_dump (cur, shift + 2);
 			}
 		}
 		else if (obj->type == UCL_ARRAY) {
 			printf ("%stype: UCL_ARRAY\n", pre);
-			printf ("%svalue: %p\n", pre, obj->value.ov);
-			ucl_obj_dump (obj->value.ov, shift + 2);
+			printf ("%svalue: %p\n", pre, obj->value.av);
+			it_obj = NULL;
+			while ((cur = ucl_iterate_object (obj, &it_obj, true))) {
+				ucl_obj_dump (cur, shift + 2);
+			}
 		}
 		else if (obj->type == UCL_INT) {
 			printf ("%stype: UCL_INT\n", pre);
-			printf ("%svalue: %ld\n", pre, obj->value.iv);
+			printf ("%svalue: %jd\n", pre, (intmax_t)ucl_object_toint (obj));
 		}
 		else if (obj->type == UCL_FLOAT) {
 			printf ("%stype: UCL_FLOAT\n", pre);
-			printf ("%svalue: %f\n", pre, obj->value.dv);
+			printf ("%svalue: %f\n", pre, ucl_object_todouble (obj));
 		}
 		else if (obj->type == UCL_STRING) {
 			printf ("%stype: UCL_STRING\n", pre);
-			 printf ("%svalue: \"%s\"\n", pre, ucl_obj_tostring (obj));
+			printf ("%svalue: \"%s\"\n", pre, ucl_object_tostring (obj));
 		}
 		else if (obj->type == UCL_BOOLEAN) {
 			printf ("%stype: UCL_BOOLEAN\n", pre);
-			printf ("%svalue: %s\n", pre, (obj->value.iv) ? "true" : "false");
+			printf ("%svalue: %s\n", pre, ucl_object_tostring_forced (obj));
 		}
 		else if (obj->type == UCL_TIME) {
 			printf ("%stype: UCL_TIME\n", pre);
-			printf ("%svalue: %f\n", pre, obj->value.dv);
+			printf ("%svalue: %f\n", pre, ucl_object_todouble (obj));
 		}
 		else if (obj->type == UCL_USERDATA) {
 			printf ("%stype: UCL_USERDATA\n", pre);
 			printf ("%svalue: %p\n", pre, obj->value.ud);
 		}
-		obj = obj->next;
 	}
 
 	free (pre);
@@ -93,11 +99,11 @@ int
 main(int argc, char **argv)
 {
 	const char *fn = NULL;
-	char inbuf[8192];
+	unsigned char inbuf[8192];
 	struct ucl_parser *parser;
-	int k, ret = 0;
+	int k, ret = 0, r = 0;
 	ucl_object_t *obj = NULL;
-	ucl_object_t *par;
+	const ucl_object_t *par;
 	FILE *in;
 
 	if (argc > 1) {
@@ -115,19 +121,19 @@ main(int argc, char **argv)
 	}
 
 	parser = ucl_parser_new (0);
-	while (!feof (in)) {
-		fread (inbuf, sizeof (inbuf), 1, in);
-		ucl_parser_add_chunk (parser, inbuf, strlen (inbuf));
+	while (!feof (in) && r < (int)sizeof (inbuf)) {
+		r += fread (inbuf + r, 1, sizeof (inbuf) - r, in);
 	}
+	ucl_parser_add_chunk (parser, inbuf, r);
 	fclose (in);
-	if (ucl_parser_get_error(parser) ) {
+	if (ucl_parser_get_error(parser)) {
 		printf ("Error occured: %s\n", ucl_parser_get_error(parser));
 		ret = 1;
 		goto end;
 	}
 
 	obj = ucl_parser_get_object (parser);
-	if (ucl_parser_get_error(parser)) {
+	if (ucl_parser_get_error (parser)) {
 		printf ("Error occured: %s\n", ucl_parser_get_error(parser));
 		ret = 1;
 		goto end;
@@ -136,7 +142,7 @@ main(int argc, char **argv)
 	if (argc > 2) {
 		for (k = 2; k < argc; k++) {
 			printf ("search for \"%s\"... ", argv[k]);
-			par = ucl_obj_get_key (obj, argv[k]);
+			par = ucl_object_find_key (obj, argv[k]);
 			printf ("%sfound\n", (par == NULL )?"not ":"");
 			ucl_obj_dump (par, 0);
 		}
@@ -146,11 +152,11 @@ main(int argc, char **argv)
 	}
 
 end:
-	if (parser != NULL ) {
+	if (parser != NULL) {
 		ucl_parser_free (parser);
 	}
-	if (obj != NULL ) {
-		ucl_obj_unref (obj);
+	if (obj != NULL) {
+		ucl_object_unref (obj);
 	}
 
 	return ret;

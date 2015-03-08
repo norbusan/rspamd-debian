@@ -1,7 +1,33 @@
+--[[
+Copyright (c) 2011-2015, Vsevolod Stakhov <vsevolod@highsecure.ru>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+]]--
+
 -- Module for checking mail list headers
 
 local symbol = 'MAILLIST'
-
+local rspamd_logger = require "rspamd_logger"
 -- EZMLM
 -- Mailing-List: .*run by ezmlm
 -- Precedence: bulk
@@ -9,34 +35,33 @@ local symbol = 'MAILLIST'
 -- List-Help: <mailto:
 -- List-Unsubscribe: <mailto:[a-zA-Z\.-]+-unsubscribe@
 -- List-Subscribe: <mailto:[a-zA-Z\.-]+-subscribe@
-function check_ml_ezmlm(task)
-	local message = task:get_message()
+local function check_ml_ezmlm(task)
 	-- Mailing-List
-	local header = message:get_header('mailing-list')
-	if not header or not string.find(header[1], 'ezmlm$') then
+	local header = task:get_header('mailing-list')
+	if not header or not string.find(header, 'ezmlm$') then
 		return false
 	end
 	-- Precedence
-	header = message:get_header('precedence')
-	if not header or not string.match(header[1], '^bulk$') then
+	header = task:get_header('precedence')
+	if not header or not string.match(header, '^bulk$') then
 		return false
 	end
 	-- Other headers
-	header = message:get_header('list-post')
-	if not header or not string.find(header[1], '^<mailto:') then
+	header = task:get_header('list-post')
+	if not header or not string.find(header, '^<mailto:') then
 		return false
 	end
-	header = message:get_header('list-help')
-	if not header or not string.find(header[1], '^<mailto:') then
+	header = task:get_header('list-help')
+	if not header or not string.find(header, '^<mailto:') then
 		return false
 	end
 	-- Subscribe and unsubscribe
-	header = message:get_header('list-subscribe')
-	if not header or not string.find(header[1], '<mailto:[a-zA-Z.-]+-subscribe@') then
+	header = task:get_header('list-subscribe')
+	if not header or not string.find(header, '<mailto:[a-zA-Z.-]+-subscribe@') then
 		return false
 	end
-	header = message:get_header('list-unsubscribe')
-	if not header or not string.find(header[1], '<mailto:[a-zA-Z.-]+-unsubscribe@') then
+	header = task:get_header('list-unsubscribe')
+	if not header or not string.find(header, '<mailto:[a-zA-Z.-]+-unsubscribe@') then
 		return false
 	end
 
@@ -52,52 +77,51 @@ end
 -- List-Unsubscribe: .*<mailto:.*=unsubscribe>
 -- List-Archive: 
 -- X-Mailman-Version: \d
-function check_ml_mailman(task)
-	local message = task:get_message()
+local function check_ml_mailman(task)
 	-- Mailing-List
-	local header = message:get_header('x-mailman-version')
-	if not header or not string.find(header[1], '^%d') then
+	local header = task:get_header('x-mailman-version')
+	if not header or not string.find(header, '^%d') then
 		return false
 	end
 	-- Precedence
-	header = message:get_header('precedence')
-	if not header or (not string.match(header[1], '^bulk$') and not string.match(header[1], '^list$')) then
+	header = task:get_header('precedence')
+	if not header or (not string.match(header, '^bulk$') and not string.match(header, '^list$')) then
 		return false
 	end
 	-- For reminders we have other headers than for normal messages
-	header = message:get_header('x-list-administrivia')
-	local subject = message:get_header('subject')
-	if (header and string.find(header[1], 'yes')) or (subject and string.find(subject[1], 'mailing list memberships reminder$')) then
-		if not message:get_header('errors-to') or not message:get_header('x-beenthere') then
+	header = task:get_header('x-list-administrivia')
+	local subject = task:get_header('subject')
+	if (header and string.find(header, 'yes')) or (subject and string.find(subject, 'mailing list memberships reminder$')) then
+		if not task:get_header('errors-to') or not task:get_header('x-beenthere') then
 			return false
 		end
-		header = message:get_header('x-no-archive')
-		if not header or not string.find(header[1], 'yes') then
+		header = task:get_header('x-no-archive')
+		if not header or not string.find(header, 'yes') then
 			return false
 		end
 		return true
 	end
 
 	-- Other headers
-	header = message:get_header('list-id')
+	header = task:get_header('list-id')
 	if not header then
 		return false
 	end
-	header = message:get_header('list-post')
-	if not header or not string.find(header[1], '^<mailto:') then
+	header = task:get_header('list-post')
+	if not header or not string.find(header, '^<mailto:') then
 		return false
 	end
-	header = message:get_header('list-help')
-	if not header or not string.find(header[1], '^<mailto:') then
+	header = task:get_header('list-help')
+	if not header or not string.find(header, '^<mailto:') then
 		return false
 	end
 	-- Subscribe and unsubscribe
-	header = message:get_header('list-subscribe')
-	if not header or not string.find(header[1], '<mailto:.*=subscribe>') then
+	header = task:get_header('list-subscribe')
+	if not header or not string.find(header, '<mailto:.*=subscribe>') then
 		return false
 	end
-	header = message:get_header('list-unsubscribe')
-	if not header or not string.find(header[1], '<mailto:.*=unsubscribe>') then
+	header = task:get_header('list-unsubscribe')
+	if not header or not string.find(header, '<mailto:.*=unsubscribe>') then
 		return false
 	end
 
@@ -114,38 +138,37 @@ end
 -- List-Archive:  <http://subscribe.ru/archive/.*>
 -- List-Owner: <mailto:.*-owner@subscribe.ru>
 -- List-Post: NO
-function check_ml_subscriberu(task)
-	local message = task:get_message()
+local function check_ml_subscriberu(task)
 	-- List-Id
-	local header = message:get_header('list-id')
-	if not header or not string.find(header[1], '^<.*%.subscribe%.ru>$') then
+	local header = task:get_header('list-id')
+	if not header or not string.find(header, '^<.*%.subscribe%.ru>$') then
 		return false
 	end
 	-- Precedence
-	header = message:get_header('precedence')
-	if not header or not string.match(header[1], '^normal$') then
+	header = task:get_header('precedence')
+	if not header or not string.match(header, '^normal$') then
 		return false
 	end
 	-- Other headers
-	header = message:get_header('list-archive')
-	if not header or not string.find(header[1], '^<http://subscribe.ru/archive/.*>$') then
+	header = task:get_header('list-archive')
+	if not header or not string.find(header, '^<http://subscribe.ru/archive/.*>$') then
 		return false
 	end
-	header = message:get_header('list-owner')
-	if not header or not string.find(header[1], '^<mailto:.*-owner@subscribe.ru>$') then
+	header = task:get_header('list-owner')
+	if not header or not string.find(header, '^<mailto:.*-owner@subscribe.ru>$') then
 		return false
 	end
-	header = message:get_header('list-help')
-	if not header or not string.find(header[1], '^<http://subscribe.ru/catalog/.*>$') then
+	header = task:get_header('list-help')
+	if not header or not string.find(header, '^<http://subscribe.ru/catalog/.*>$') then
 		return false
 	end
 	-- Subscribe and unsubscribe
-	header = message:get_header('list-subscribe')
-	if not header or not string.find(header[1], '^<mailto:.*-sub@subscribe.ru>$') then
+	header = task:get_header('list-subscribe')
+	if not header or not string.find(header, '^<mailto:.*-sub@subscribe.ru>$') then
 		return false
 	end
-	header = message:get_header('list-unsubscribe')
-	if not header or not string.find(header[1], '^<mailto:.*-unsub@subscribe.ru>$') then
+	header = task:get_header('list-unsubscribe')
+	if not header or not string.find(header, '^<mailto:.*-unsub@subscribe.ru>$') then
 		return false
 	end
 
@@ -154,18 +177,17 @@ function check_ml_subscriberu(task)
 end
 
 -- RFC 2369 headers
-function check_rfc2369(task)
-	local message = task:get_message()
-	local header = message:get_header('List-Id')
+local function check_rfc2369(task)
+	local header = task:get_header('List-Id')
 	if not header then
 		return false
 	end
-	header = message:get_header('List-Unsubscribe')
-	if not header or not string.find(header[1], '^^<.+>$') then
+	header = task:get_header('List-Unsubscribe')
+	if not header or not string.find(header, '^^<.+>$') then
 		return false
 	end
-	header = message:get_header('List-Subscribe')
-	if not header or not string.find(header[1], '^^<.+>$') then
+	header = task:get_header('List-Subscribe')
+	if not header or not string.find(header, '^^<.+>$') then
 		return false
 	end
 	
@@ -173,10 +195,9 @@ function check_rfc2369(task)
 end
 
 -- RFC 2919 headers
-function check_rfc2919(task)
-	local message = task:get_message()
-	local header = message:get_header('List-Id')
-	if not header or not string.find(header[1], '^<.+>$') then
+local function check_rfc2919(task)
+	local header = task:get_header('List-Id')
+	if not header or not string.find(header, '^<.+>$') then
 		return false
 	end
 	
@@ -187,9 +208,8 @@ end
 -- header exists X-Google-Loop
 -- RFC 2919 headers exist
 --
-function check_ml_googlegroup(task)
-	local message = task:get_message()
-	local header = message:get_header('X-Google-Loop')
+local function check_ml_googlegroup(task)
+	local header = task:get_header('X-Google-Loop')
 	
 	if not header then
 		return false
@@ -203,15 +223,14 @@ end
 -- Check Precendence for 'Bulk' or 'List'
 --
 -- And nothing more can be extracted :(
-function check_ml_majordomo(task)
-	local message = task:get_message()
-	local header = message:get_header('Sender')
-	if not header or (not string.find(header[1], '^owner-.*$') and not string.find(header[1], '^.*-owner$')) then
+local function check_ml_majordomo(task)
+	local header = task:get_header('Sender')
+	if not header or (not string.find(header, '^owner-.*$') and not string.find(header, '^.*-owner$')) then
 		return false
 	end
 	
-	local header = message:get_header('Precedence')
-	if not header or (header[1] ~= 'list' and header[1] ~= 'bulk') then
+	local header = task:get_header('Precedence')
+	if not header or (header ~= 'list' and header ~= 'bulk') then
 		return false
 	end
 
@@ -222,9 +241,8 @@ end
 -- X-Listserver = CommuniGate Pro LIST
 -- RFC 2919 headers exist
 --
-function check_ml_cgp(task)
-	local message = task:get_message()
-	local header = message:get_header('X-Listserver')
+local function check_ml_cgp(task)
+	local header = task:get_header('X-Listserver')
 	
 	if not header or header ~= 'CommuniGate Pro LIST' then
 		return false
@@ -233,7 +251,7 @@ function check_ml_cgp(task)
 	return check_rfc2919(task)
 end
 
-function check_maillist(task)
+local function check_maillist(task)
 	if check_ml_ezmlm(task) then
 		task:insert_result(symbol, 1, 'ezmlm')
 	elseif check_ml_mailman(task) then
@@ -258,6 +276,6 @@ end
 local opts =  rspamd_config:get_all_opt('maillist')if opts then
 	if opts['symbol'] then
 		symbol = opts['symbol'] 
-		rspamd_config:register_symbol(symbol, 1.0, 'check_maillist')
+		rspamd_config:register_symbol(symbol, 1.0, check_maillist)
 	end
 end

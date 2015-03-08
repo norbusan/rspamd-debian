@@ -77,11 +77,6 @@ Specify config file(s) to sign
 Specify private key to sign
 .RS
 .RE
-.TP
-.B \-\-convert\-config=\f[I]path\f[]
-Convert configuration to UCL
-.RS
-.RE
 .SH EXAMPLES
 .PP
 Run rspamd daemon with default configuration:
@@ -96,7 +91,7 @@ Run rspamd in foreground with custom configuration:
 .IP
 .nf
 \f[C]
-rspamd\ \\\-f\ \\\-c\ ~/rspamd.conf
+rspamd\ \-f\ \-c\ ~/rspamd.conf
 \f[]
 .fi
 .PP
@@ -104,7 +99,7 @@ Run rspamd specifying user and group:
 .IP
 .nf
 \f[C]
-rspamd\ \\\-u\ rspamd\ \\\-g\ rspamd\ \\\-c\ /etc/rspamd/rspamd.conf
+rspamd\ \-u\ rspamd\ \-g\ rspamd\ \-c\ /etc/rspamd/rspamd.conf
 \f[]
 .fi
 .PP
@@ -112,7 +107,7 @@ Test lua scripts using rspamd API:
 .IP
 .nf
 \f[C]
-rspamd\ \\\-\\\-test\-lua=~/test1.lua\ \\\-\\\-test\-lua=~/test2.lua
+rspamd\ \-\-test\-lua=~/test1.lua\ \-\-test\-lua=~/test2.lua
 \f[]
 .fi
 .PP
@@ -120,16 +115,7 @@ Sign config files for \f[C]\&.includes\f[] macro:
 .IP
 .nf
 \f[C]
-rspamd\ \\\-\\\-private\-key=sign.key\ \\\-\\\-sign\-config=rspamd.conf
-\f[]
-.fi
-.PP
-Convert old \f[C]XML\f[] config to the \f[C]UCL\f[] format (since
-0.6.0):
-.IP
-.nf
-\f[C]
-rspamd\ \\\-c\ /etc/rspamd.xml\ \\\-\\\-convert\-config=/etc/rspamd/rspamd.conf
+rspamd\ \-\-private\-key=sign.key\ \-\-sign\-config=rspamd.conf
 \f[]
 .fi
 .SH SEE ALSO

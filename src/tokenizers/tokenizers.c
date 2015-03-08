@@ -30,11 +30,11 @@
 #include "main.h"
 #include "tokenizers.h"
 
-struct tokenizer                tokenizers[] = {
-	{"osb-text", osb_tokenize_text, get_next_word},
+struct tokenizer tokenizers[] = {
+	{"osb-text", osb_tokenize_text, rspamd_tokenizer_get_word},
 };
 
-const int                       primes[] = {
+const int primes[] = {
 	1, 7,
 	3, 13,
 	5, 29,
@@ -48,38 +48,38 @@ const int                       primes[] = {
 };
 
 const gchar t_delimiters[255] = {
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-		1, 0, 0, 1, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 1, 0, 1, 1, 1, 1, 1, 0,
-		1, 1, 1, 1, 1, 1, 1, 1, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
-		1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 1, 1, 1, 1, 1, 1, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 1, 1, 1, 1, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		0, 0, 0, 0, 0
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+	1, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 1, 0, 1, 1, 1, 1, 1, 0,
+	1, 1, 1, 1, 1, 1, 1, 1, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
+	1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 1, 1, 1, 1, 1, 1, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 1, 1, 1, 1, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0
 };
 
-struct tokenizer               *
+struct tokenizer *
 get_tokenizer (const char *name)
 {
-	guint                            i;
+	guint i;
 
 	for (i = 0; i < sizeof (tokenizers) / sizeof (tokenizers[0]); i++) {
 		if (strcmp (tokenizers[i].name, name) == 0) {
@@ -93,7 +93,7 @@ get_tokenizer (const char *name)
 int
 token_node_compare_func (gconstpointer a, gconstpointer b)
 {
-	const token_node_t             *aa = a, *bb = b;
+	const token_node_t *aa = a, *bb = b;
 
 	if (aa->h1 == bb->h1) {
 		return aa->h2 - bb->h2;
@@ -104,17 +104,17 @@ token_node_compare_func (gconstpointer a, gconstpointer b)
 
 /* Get next word from specified f_str_t buf */
 gchar *
-get_next_word (f_str_t * buf, f_str_t * token, GList **exceptions)
+rspamd_tokenizer_get_word (rspamd_fstring_t * buf, rspamd_fstring_t * token, GList **exceptions)
 {
-	gsize                           remain, pos;
-	guchar                         *p;
-	struct process_exception	   *ex = NULL;
+	gsize remain, pos;
+	guchar *p;
+	struct process_exception *ex = NULL;
 
 	if (buf == NULL) {
 		return NULL;
 	}
 
-	if (*exceptions != NULL) {
+	if (exceptions != NULL && *exceptions != NULL) {
 		ex = (*exceptions)->data;
 	}
 
@@ -166,7 +166,7 @@ get_next_word (f_str_t * buf, f_str_t * token, GList **exceptions)
 		token->len++;
 		pos++;
 		remain--;
-		p ++;
+		p++;
 	}
 
 	if (remain == 0) {
@@ -176,106 +176,82 @@ get_next_word (f_str_t * buf, f_str_t * token, GList **exceptions)
 	return p;
 }
 
-/* Struct to access gmime headers */
-struct raw_header {
-	struct raw_header              *next;
-	char                           *name;
-	char                           *value;
-};
-
-typedef struct _GMimeHeader {
-	GHashTable                     *hash;
-	GHashTable                     *writers;
-	struct raw_header              *headers;
-} local_GMimeHeader;
-
-int
-tokenize_headers (memory_pool_t * pool, struct worker_task *task, GTree ** tree)
+GArray *
+rspamd_tokenize_text (gchar *text, gsize len, gboolean is_utf,
+		gsize min_len, GList **exceptions)
 {
-	token_node_t                   *new = NULL;
-	f_str_t                         headername;
-	f_str_t                         headervalue;
+	rspamd_fstring_t token, buf;
+	gchar *pos;
+	gsize l;
+	GArray *res;
 
-	if (*tree == NULL) {
-		*tree = g_tree_new (token_node_compare_func);
-		memory_pool_add_destructor (pool, (pool_destruct_func) g_tree_destroy, *tree);
+	if (len == 0 || text == NULL) {
+		return NULL;
 	}
-#ifndef GMIME24
-	struct raw_header              *h;
 
-	h = GMIME_OBJECT (task->message)->headers->headers;
-	while (h) {
-		if (h->name && h->value) {
-			new = memory_pool_alloc (pool, sizeof (token_node_t));
-			headername.begin = h->name;
-			headername.len = strlen (h->name);
-			headervalue.begin = h->value;
-			headervalue.len = strlen (h->value);
-			new->h1 = fstrhash (&headername) * primes[0];
-			new->h2 = fstrhash (&headervalue) * primes[1];
-			if (g_tree_lookup (*tree, new) == NULL) {
-				g_tree_insert (*tree, new, new);
-			}
+	buf.begin = text;
+	buf.len = len;
+	buf.size = buf.len;
+	token.begin = NULL;
+	token.len = 0;
+
+	res = g_array_new (FALSE, FALSE, sizeof (rspamd_fstring_t));
+	while ((pos = rspamd_tokenizer_get_word (&buf,
+			&token, exceptions)) != NULL) {
+		if (is_utf) {
+			l = g_utf8_strlen (token.begin, token.len);
 		}
-		h = h->next;
-	}
-#else
-	GMimeHeaderList                *ls;
-	GMimeHeaderIter                *iter;
-	const char                     *name;
-	const char                     *value;
-
-	ls = GMIME_OBJECT (task->message)->headers;
-	iter = g_mime_header_iter_new ();
-
-	if (g_mime_header_list_get_iter (ls, iter)) {
-		while (g_mime_header_iter_is_valid (iter)) {
-			new = memory_pool_alloc (pool, sizeof (token_node_t));
-			name = g_mime_header_iter_get_name (iter);
-			value = g_mime_header_iter_get_value (iter);
-			headername.begin = (u_char *)name;
-			headername.len = strlen (name);
-			headervalue.begin = (u_char *)value;
-			headervalue.len = strlen (value);
-			new->h1 = fstrhash (&headername) * primes[0];
-			new->h2 = fstrhash (&headervalue) * primes[1];
-			if (g_tree_lookup (*tree, new) == NULL) {
-				g_tree_insert (*tree, new, new);
-			}
-			if (!g_mime_header_iter_next (iter)) {
-				break;
-			}
+		else {
+			l = token.len;
 		}
+		if (min_len > 0 && l < min_len) {
+			token.begin = pos;
+			continue;
+		}
+		g_array_append_val (res, token);
+
+		token.begin = pos;
 	}
-	g_mime_header_iter_free (iter);
-#endif
-	return TRUE;
+
+	return res;
 }
 
+
 void
-tokenize_subject (struct worker_task *task, GTree ** tree)
+tokenize_subject (struct rspamd_task *task, GTree ** tree)
 {
-	f_str_t                         subject;
-	const gchar                    *sub;
-	struct tokenizer               *osb_tokenizer;
+	gchar *sub;
+	struct tokenizer *osb_tokenizer;
+	GArray *words;
 
 	if (*tree == NULL) {
 		*tree = g_tree_new (token_node_compare_func);
-		memory_pool_add_destructor (task->task_pool, (pool_destruct_func) g_tree_destroy, *tree);
+		rspamd_mempool_add_destructor (task->task_pool,
+			(rspamd_mempool_destruct_t) g_tree_destroy, *tree);
 	}
 
 	osb_tokenizer = get_tokenizer ("osb-text");
 
 	/* Try to use pre-defined subject */
 	if (task->subject != NULL) {
-		subject.begin = task->subject;
-		subject.len = strlen (task->subject);
-		osb_tokenizer->tokenize_func (osb_tokenizer, task->task_pool, &subject, tree, FALSE, TRUE, NULL);
+		sub = task->subject;
 	}
-	if ((sub = g_mime_message_get_subject (task->message)) != NULL) {
-		subject.begin = (gchar *)sub;
-		subject.len = strlen (sub);
-		osb_tokenizer->tokenize_func (osb_tokenizer, task->task_pool, &subject, tree, FALSE, TRUE, NULL);
+	else {
+		sub = (gchar *)g_mime_message_get_subject (task->message);
+	}
+
+	if (sub != NULL) {
+		words = rspamd_tokenize_text (sub, strlen (sub), TRUE, 0, NULL);
+		if (words != NULL) {
+			osb_tokenizer->tokenize_func (osb_tokenizer,
+					task->task_pool,
+					words,
+					tree,
+					FALSE,
+					TRUE,
+					NULL);
+			g_array_free (words, TRUE);
+		}
 	}
 }
 

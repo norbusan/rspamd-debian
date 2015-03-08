@@ -90,6 +90,14 @@
  # error "Undefined or unknown BYTE_ORDER"
  #endif
  
+#ifdef _MSC_VER
+# define RSPAMD_PACKED(name) \
+    __pragma(pack(push, 1)) struct name __pragma(pack(pop))
+#elif defined(__GNUC__)
+# define RSPAMD_PACKED(name) struct __attribute__((packed)) name
+#else
+# define RSPAMD_PACKED(name) struct name
+#endif
 
 
 #cmakedefine HAVE_SYS_QUEUE_H    1
@@ -209,11 +217,10 @@
 
 #cmakedefine HAVE_IPV6_V6ONLY    1
 
-#if (defined(__i386__) || defined(__x86_64__)  || defined(_M_IX86))
-/* Use murmur hash for UTHash for these platforms */
-#define HASH_FUNCTION HASH_MUR
-#define HASH_USING_NO_STRICT_ALIASING
-#endif
+#cmakedefine HAVE_CTYPE_H        1
+#cmakedefine HAVE_SCHED_YEILD    1
+#cmakedefine HAVE_PTHREAD_PROCESS_SHARED 1
+
 /* Configure allocator */
 #define uthash_malloc(sz) g_slice_alloc(sz)
 #define uthash_free(ptr,sz) g_slice_free1(sz, ptr)
@@ -224,6 +231,7 @@
 #define RSPAMD_DBDIR "${DBDIR}"
 #define RSPAMD_EXAMPLESDIR "${EXAMPLESDIR}"
 #define RSPAMD_PLUGINSDIR "${PLUGINSDIR}"
+#define RSPAMD_WWWDIR "${WWWDIR}"
 #define RSPAMD_PREFIX "${CMAKE_INSTALL_PREFIX}"
 
 #define RVERSION          "${RSPAMD_VERSION}"
@@ -326,6 +334,10 @@
 #include <sys/timeb.h>
 #endif
 
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif
+
 /* sysexits */
 #ifdef HAVE_SYSEXITS_H
 #include <sysexits.h>
@@ -414,43 +426,12 @@
 #include <search.h>
 #endif
 
-#ifdef HAVE_LOCALE_H
-#include <locale.h>
-#define HAVE_SETLOCALE 1
-#endif
-
-#ifdef HAVE_SYS_EVENTFD_H
-#include <sys/eventfd.h>
-#endif
-
-#ifdef HAVE_AIO_H
-#include <aio.h>
-#endif
-
-#ifdef HAVE_SYS_SENDFILE_H
-#include <sys/sendfile.h>
-#endif
-
 #ifdef WITH_GPERF_TOOLS
 #include <google/profiler.h>
 #endif
 
-#ifdef HAVE_FETCH_H
-#include <fetch.h>
-#elif defined(CURL_FOUND)
-#include <curl/curl.h>
-#endif
-
-#ifdef HAVE_READPASSPHRASE_H
-#include <readpassphrase.h>
-#endif
-
-#ifdef HAVE_TERMIOS_H
-#include <termios.h>
-#endif
-
-#ifdef HAVE_PATHS_H
-#include <paths.h>
+#ifdef HAVE_SCHED_YIELD
+#include <sched.h>
 #endif
 
 #include <errno.h>
@@ -489,19 +470,21 @@ typedef off_t goffset;
 
 /* Forwarded declaration */
 struct module_ctx;
-struct config_file;
+struct rspamd_config;
 struct rspamd_worker;
 
 typedef struct module_s {
 	const gchar *name;
-	int (*module_init_func)(struct config_file *cfg, struct module_ctx **ctx);
-	int (*module_config_func)(struct config_file *cfg);
-	int (*module_reconfig_func)(struct config_file *cfg);
+	int (*module_init_func)(struct rspamd_config *cfg, struct module_ctx **ctx);
+	int (*module_config_func)(struct rspamd_config *cfg);
+	int (*module_reconfig_func)(struct rspamd_config *cfg);
+	int (*module_attach_controller_func)(struct module_ctx *ctx, 
+		GHashTable *custom_commands);
 } module_t;
 
 typedef struct worker_s {
 	const gchar *name;
-	gpointer (*worker_init_func)(struct config_file *cfg);
+	gpointer (*worker_init_func)(struct rspamd_config *cfg);
 	void (*worker_start_func)(struct rspamd_worker *worker);
 	gboolean has_socket;
 	gboolean unique;

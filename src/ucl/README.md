@@ -1,7 +1,32 @@
+# LIBUCL
+
+[![Build Status](https://travis-ci.org/vstakhov/libucl.svg?branch=master)](https://travis-ci.org/vstakhov/libucl)[![Coverity](https://scan.coverity.com/projects/4138/badge.svg)](https://scan.coverity.com/projects/4138)
+
+**Table of Contents**  *generated with [DocToc](http://doctoc.herokuapp.com/)*
+
+- [Introduction](#introduction)
+- [Basic structure](#basic-structure)
+- [Improvements to the json notation](#improvements-to-the-json-notation)
+	- [General syntax sugar](#general-syntax-sugar)
+	- [Automatic arrays creation](#automatic-arrays-creation)
+	- [Named keys hierarchy](#named-keys-hierarchy)
+	- [Convenient numbers and booleans](#convenient-numbers-and-booleans)
+- [General improvements](#general-improvements)
+	- [Commments](#commments)
+	- [Macros support](#macros-support)
+	- [Variables support](#variables-support)
+	- [Multiline strings](#multiline-strings)
+- [Emitter](#emitter)
+- [Validation](#validation)
+- [Performance](#performance)
+- [Conclusion](#conclusion)
+
 ## Introduction
 
 This document describes the main features and principles of the configuration
 language called `UCL` - universal configuration language.
+
+If you are looking for the libucl API documentation you can find it at [this page](doc/api.md).
 
 ## Basic structure
 
@@ -114,12 +139,58 @@ is converted to:
 }
 ```
 
+### Named keys hierarchy
+
+UCL accepts named keys and organize them into objects hierarchy internally. Here is an example of this process:
+```nginx
+section "blah" {
+	key = value;
+}
+section foo {
+	key = value;
+}
+```
+
+is converted to the following object:
+
+```nginx
+section {
+	blah {
+		key = value;
+	}
+	foo {
+		key = value;
+	}
+}
+```
+    
+Plain definitions may be more complex and contain more than a single level of nested objects:
+   
+```nginx
+section "blah" "foo" {
+	key = value;
+}
+```
+
+is presented as:
+
+```nginx    
+section {
+	blah {
+		foo {
+			key = value;
+		}
+	}
+}
+```
+
 ### Convenient numbers and booleans
 
 * Numbers can have suffixes to specify standard multipliers:
     + `[kKmMgG]` - standard 10 base multipliers (so `1k` is translated to 1000)
     + `[kKmMgG]b` - 2 power multipliers (so `1kb` is translated to 1024)
     + `[s|min|d|w|y]` - time multipliers, all time values are translated to float number of seconds, for example `10min` is translated to 600.0 and `10ms` is translated to 0.01
+* Hexadecimal integers can be used by `0x` prefix, for example `key = 0xff`. However, floating point values can use decimal base only.
 * Booleans can be specified as `true` or `yes` or `on` and `false` or `no` or `off`.
 * It is still possible to treat numbers and booleans as strings by enclosing them in double quotes.
 
@@ -148,18 +219,76 @@ UCL supports external macros both multiline and single line ones:
 ```nginx
 .macro "sometext";
 .macro {
-     Some long text
-     ....
+    Some long text
+    ....
 };
 ```
-There are two internal macros provided by UCL:
 
-* `include` - read a file `/path/to/file` or an url `http://example.com/file` and include it to the current place of
-UCL configuration;
-* `includes` - read a file or an url like the previous macro, but fetch and check the signature file (which is obtained
-by `.sig` suffix appending).
+Moreover, each macro can accept an optional list of arguments in braces. These
+arguments themselves are the UCL object that is parsed and passed to a macro as
+options:
 
-Public keys which are used for the last command are specified by the concrete UCL user.
+```nginx
+.macro(param=value) "something";
+.macro(param={key=value}) "something";
+.macro(.include "params.conf") "something";
+.macro(#this is multiline macro
+param = [value1, value2]) "something";
+.macro(key="()") "something";
+```
+
+UCL also provide a convenient `include` macro to load content from another files
+to the current UCL object. This macro accepts either path to file:
+
+```nginx
+.include "/full/path.conf"
+.include "./relative/path.conf"
+.include "${CURDIR}/path.conf"
+```
+
+or URL (if ucl is built with url support provided by either `libcurl` or `libfetch`):
+
+	.include "http://example.com/file.conf"
+
+`.include` macro supports a set of options:
+
+* `try` (default: **false**) - if this option is `true` than UCL treats errors on loading of
+this file as non-fatal. For example, such a file can be absent but it won't stop the parsing
+of the top-level document.
+* `sign` (default: **false**) - if this option is `true` UCL loads and checks the signature for
+a file from path named `<FILEPATH>.sig`. Trusted public keys should be provided for UCL API after
+parser is created but before any configurations are parsed.
+* `glob` (default: **false**) - if this option is `true` UCL treats the filename as GLOB pattern and load
+all files that matches the specified pattern (normally the format of patterns is defined in `glob` manual page
+for your operating system). This option is meaningless for URL includes.
+* `url` (default: **true**) - allow URL includes.
+* `priority` (default: 0) - specify priority for the include (see below).
+
+Priorities are used by UCL parser to manage the policy of objects rewriting during including other files
+as following:
+
+* If we have two objects with the same priority then we form an implicit array
+* If a new object has bigger priority then we overwrite an old one
+* If a new object has lower priority then we ignore it
+
+By default, the priority of top-level object is set to zero (lowest priority). Currently,
+you can define up to 16 priorities (from 0 to 15). Includes with bigger priorities will
+rewrite keys from the objects with lower priorities as specified by the policy.
+
+### Variables support
+
+UCL supports variables in input. Variables are registered by a user of the UCL parser and can be presented in the following forms:
+
+* `${VARIABLE}`
+* `$VARIABLE`
+
+UCL currently does not support nested variables. To escape variables one could use double dollar signs:
+
+* `$${VARIABLE}` is converted to `${VARIABLE}`
+* `$$VARIABLE` is converted to `$VARIABLE`
+
+However, if no valid variables are found in a string, no expansion will be performed (and `$$` thus remains unchanged). This may be a subject
+to change in future libucl releases.
 
 ### Multiline strings
 
@@ -198,6 +327,10 @@ Each UCL object can be serialized to one of the three supported formats:
 * `Configuration` - nginx like notation;
 * `YAML` - yaml inlined notation.
 
+## Validation
+
+UCL allows validation of objects. It uses the same schema that is used for json: [json schema v4](http://json-schema.org). UCL supports the full set of json schema with the exception of remote references. This feature is unlikely useful for configuration objects. Of course, a schema definition can be in UCL format instead of JSON that simplifies schemas writing. Moreover, since UCL supports multiple values for keys in an object it is possible to specify generic integer constraints `maxValues` and `minValues` to define the limits of values count in a single key. UCL currently is not absolutely strict about validation schemas themselves, therefore UCL users should supply valid schemas (as it is defined in json-schema draft v4) to ensure that the input objects are validated properly.
+
 ## Performance
 
 Are UCL parser and emitter fast enough? Well, there are some numbers.
@@ -226,7 +359,7 @@ ucl: emitted compact json in 0.0991 seconds
 ucl: emitted yaml in 0.1354 seconds
 ```
 
-You can do your own benchmarks by running `make test` in libucl top directory.
+You can do your own benchmarks by running `make check` in libucl top directory.
 
 ## Conclusion
 

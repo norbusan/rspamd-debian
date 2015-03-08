@@ -36,22 +36,22 @@
 #include <openssl/rsa.h>
 #include <openssl/pem.h>
 
-LUA_FUNCTION_DEF (rsa_pubkey, load);
-LUA_FUNCTION_DEF (rsa_pubkey, create);
-LUA_FUNCTION_DEF (rsa_pubkey, gc);
-LUA_FUNCTION_DEF (rsa_privkey, load);
-LUA_FUNCTION_DEF (rsa_privkey, create);
-LUA_FUNCTION_DEF (rsa_privkey, gc);
+LUA_FUNCTION_DEF (rsa_pubkey,	 load);
+LUA_FUNCTION_DEF (rsa_pubkey,	 create);
+LUA_FUNCTION_DEF (rsa_pubkey,	 gc);
+LUA_FUNCTION_DEF (rsa_privkey,	 load);
+LUA_FUNCTION_DEF (rsa_privkey,	 create);
+LUA_FUNCTION_DEF (rsa_privkey,	 gc);
 LUA_FUNCTION_DEF (rsa_signature, create);
 LUA_FUNCTION_DEF (rsa_signature, load);
 LUA_FUNCTION_DEF (rsa_signature, save);
 LUA_FUNCTION_DEF (rsa_signature, gc);
-LUA_FUNCTION_DEF (rsa, verify_memory);
-LUA_FUNCTION_DEF (rsa, verify_file);
-LUA_FUNCTION_DEF (rsa, sign_file);
-LUA_FUNCTION_DEF (rsa, sign_memory);
+LUA_FUNCTION_DEF (rsa,			 verify_memory);
+LUA_FUNCTION_DEF (rsa,			 verify_file);
+LUA_FUNCTION_DEF (rsa,			 sign_file);
+LUA_FUNCTION_DEF (rsa,			 sign_memory);
 
-static const struct luaL_reg    rsalib_f[] = {
+static const struct luaL_reg rsalib_f[] = {
 	LUA_INTERFACE_DEF (rsa, verify_memory),
 	LUA_INTERFACE_DEF (rsa, verify_file),
 	LUA_INTERFACE_DEF (rsa, sign_memory),
@@ -60,46 +60,46 @@ static const struct luaL_reg    rsalib_f[] = {
 };
 
 static const struct luaL_reg rsapubkeylib_f[] = {
-		LUA_INTERFACE_DEF (rsa_pubkey, load),
-		LUA_INTERFACE_DEF (rsa_pubkey, create),
-		{NULL, NULL}
+	LUA_INTERFACE_DEF (rsa_pubkey, load),
+	LUA_INTERFACE_DEF (rsa_pubkey, create),
+	{NULL, NULL}
 };
 
 static const struct luaL_reg rsapubkeylib_m[] = {
-		{"__tostring", lua_class_tostring},
-		{"__gc", lua_rsa_pubkey_gc},
-		{NULL, NULL}
+	{"__tostring", rspamd_lua_class_tostring},
+	{"__gc", lua_rsa_pubkey_gc},
+	{NULL, NULL}
 };
 
 static const struct luaL_reg rsaprivkeylib_f[] = {
-		LUA_INTERFACE_DEF (rsa_privkey, load),
-		LUA_INTERFACE_DEF (rsa_privkey, create),
-		{NULL, NULL}
+	LUA_INTERFACE_DEF (rsa_privkey, load),
+	LUA_INTERFACE_DEF (rsa_privkey, create),
+	{NULL, NULL}
 };
 
 static const struct luaL_reg rsaprivkeylib_m[] = {
-		{"__tostring", lua_class_tostring},
-		{"__gc", lua_rsa_privkey_gc},
-		{NULL, NULL}
+	{"__tostring", rspamd_lua_class_tostring},
+	{"__gc", lua_rsa_privkey_gc},
+	{NULL, NULL}
 };
 
 static const struct luaL_reg rsasignlib_f[] = {
-		LUA_INTERFACE_DEF (rsa_signature, load),
-		LUA_INTERFACE_DEF (rsa_signature, create),
-		{NULL, NULL}
+	LUA_INTERFACE_DEF (rsa_signature, load),
+	LUA_INTERFACE_DEF (rsa_signature, create),
+	{NULL, NULL}
 };
 
 static const struct luaL_reg rsasignlib_m[] = {
-		LUA_INTERFACE_DEF (rsa_signature, save),
-		{"__tostring", lua_class_tostring},
-		{"__gc", lua_rsa_signature_gc},
-		{NULL, NULL}
+	LUA_INTERFACE_DEF (rsa_signature, save),
+	{"__tostring", rspamd_lua_class_tostring},
+	{"__gc", lua_rsa_signature_gc},
+	{NULL, NULL}
 };
 
 static RSA *
 lua_check_rsa_pubkey (lua_State * L, int pos)
 {
-	void                           *ud = luaL_checkudata (L, pos, "rspamd{rsa_pubkey}");
+	void *ud = luaL_checkudata (L, pos, "rspamd{rsa_pubkey}");
 
 	luaL_argcheck (L, ud != NULL, 1, "'rsa_pubkey' expected");
 	return ud ? *((RSA **)ud) : NULL;
@@ -108,25 +108,25 @@ lua_check_rsa_pubkey (lua_State * L, int pos)
 static RSA *
 lua_check_rsa_privkey (lua_State * L, int pos)
 {
-	void                           *ud = luaL_checkudata (L, pos, "rspamd{rsa_privkey}");
+	void *ud = luaL_checkudata (L, pos, "rspamd{rsa_privkey}");
 
 	luaL_argcheck (L, ud != NULL, 1, "'rsa_privkey' expected");
 	return ud ? *((RSA **)ud) : NULL;
 }
 
-static f_str_t *
+static rspamd_fstring_t *
 lua_check_rsa_sign (lua_State * L, int pos)
 {
-	void                           *ud = luaL_checkudata (L, pos, "rspamd{rsa_signature}");
+	void *ud = luaL_checkudata (L, pos, "rspamd{rsa_signature}");
 
 	luaL_argcheck (L, ud != NULL, 1, "'rsa_signature' expected");
-	return ud ? *((f_str_t **)ud) : NULL;
+	return ud ? *((rspamd_fstring_t **)ud) : NULL;
 }
 
 static gint
 lua_rsa_pubkey_load (lua_State *L)
 {
-	RSA	*rsa = NULL, **prsa;
+	RSA *rsa = NULL, **prsa;
 	const gchar *filename;
 	FILE *f;
 
@@ -134,18 +134,20 @@ lua_rsa_pubkey_load (lua_State *L)
 	if (filename != NULL) {
 		f = fopen (filename, "r");
 		if (f == NULL) {
-			msg_err ("cannot open pubkey from file: %s, %s", filename, strerror (errno));
+			msg_err ("cannot open pubkey from file: %s, %s",
+				filename,
+				strerror (errno));
 			lua_pushnil (L);
 		}
 		else {
-			if (! PEM_read_RSA_PUBKEY (f, &rsa, NULL, NULL)) {
+			if (!PEM_read_RSA_PUBKEY (f, &rsa, NULL, NULL)) {
 				msg_err ("cannot open pubkey from file: %s, %s", filename,
-						ERR_error_string (ERR_get_error (), NULL));
+					ERR_error_string (ERR_get_error (), NULL));
 				lua_pushnil (L);
 			}
 			else {
 				prsa = lua_newuserdata (L, sizeof (RSA *));
-				lua_setclass (L, "rspamd{rsa_pubkey}", -1);
+				rspamd_lua_setclass (L, "rspamd{rsa_pubkey}", -1);
 				*prsa = rsa;
 			}
 			fclose (f);
@@ -160,7 +162,7 @@ lua_rsa_pubkey_load (lua_State *L)
 static gint
 lua_rsa_pubkey_create (lua_State *L)
 {
-	RSA	*rsa = NULL, **prsa;
+	RSA *rsa = NULL, **prsa;
 	const gchar *buf;
 	BIO *bp;
 
@@ -168,14 +170,14 @@ lua_rsa_pubkey_create (lua_State *L)
 	if (buf != NULL) {
 		bp = BIO_new_mem_buf ((void *)buf, -1);
 
-		if (! PEM_read_bio_RSA_PUBKEY (bp, &rsa, NULL, NULL)) {
+		if (!PEM_read_bio_RSA_PUBKEY (bp, &rsa, NULL, NULL)) {
 			msg_err ("cannot parse pubkey: %s",
-					ERR_error_string (ERR_get_error (), NULL));
+				ERR_error_string (ERR_get_error (), NULL));
 			lua_pushnil (L);
 		}
 		else {
 			prsa = lua_newuserdata (L, sizeof (RSA *));
-			lua_setclass (L, "rspamd{rsa_pubkey}", -1);
+			rspamd_lua_setclass (L, "rspamd{rsa_pubkey}", -1);
 			*prsa = rsa;
 		}
 		BIO_free (bp);
@@ -201,7 +203,7 @@ lua_rsa_pubkey_gc (lua_State *L)
 static gint
 lua_rsa_privkey_load (lua_State *L)
 {
-	RSA	*rsa = NULL, **prsa;
+	RSA *rsa = NULL, **prsa;
 	const gchar *filename;
 	FILE *f;
 
@@ -209,18 +211,20 @@ lua_rsa_privkey_load (lua_State *L)
 	if (filename != NULL) {
 		f = fopen (filename, "r");
 		if (f == NULL) {
-			msg_err ("cannot open private key from file: %s, %s", filename, strerror (errno));
+			msg_err ("cannot open private key from file: %s, %s",
+				filename,
+				strerror (errno));
 			lua_pushnil (L);
 		}
 		else {
-			if (! PEM_read_RSAPrivateKey (f, &rsa, NULL, NULL)) {
+			if (!PEM_read_RSAPrivateKey (f, &rsa, NULL, NULL)) {
 				msg_err ("cannot open private key from file: %s, %s", filename,
-						ERR_error_string (ERR_get_error (), NULL));
+					ERR_error_string (ERR_get_error (), NULL));
 				lua_pushnil (L);
 			}
 			else {
 				prsa = lua_newuserdata (L, sizeof (RSA *));
-				lua_setclass (L, "rspamd{rsa_privkey}", -1);
+				rspamd_lua_setclass (L, "rspamd{rsa_privkey}", -1);
 				*prsa = rsa;
 			}
 			fclose (f);
@@ -235,7 +239,7 @@ lua_rsa_privkey_load (lua_State *L)
 static gint
 lua_rsa_privkey_create (lua_State *L)
 {
-	RSA	*rsa = NULL, **prsa;
+	RSA *rsa = NULL, **prsa;
 	const gchar *buf;
 	BIO *bp;
 
@@ -243,14 +247,14 @@ lua_rsa_privkey_create (lua_State *L)
 	if (buf != NULL) {
 		bp = BIO_new_mem_buf ((void *)buf, -1);
 
-		if (! PEM_read_bio_RSAPrivateKey (bp, &rsa, NULL, NULL)) {
+		if (!PEM_read_bio_RSAPrivateKey (bp, &rsa, NULL, NULL)) {
 			msg_err ("cannot parse private key: %s",
-					ERR_error_string (ERR_get_error (), NULL));
+				ERR_error_string (ERR_get_error (), NULL));
 			lua_pushnil (L);
 		}
 		else {
 			prsa = lua_newuserdata (L, sizeof (RSA *));
-			lua_setclass (L, "rspamd{rsa_privkey}", -1);
+			rspamd_lua_setclass (L, "rspamd{rsa_privkey}", -1);
 			*prsa = rsa;
 		}
 		BIO_free (bp);
@@ -276,7 +280,7 @@ lua_rsa_privkey_gc (lua_State *L)
 static gint
 lua_rsa_signature_load (lua_State *L)
 {
-	f_str_t *sig, **psig;
+	rspamd_fstring_t *sig, **psig;
 	const gchar *filename;
 	gpointer data;
 	int fd;
@@ -286,13 +290,16 @@ lua_rsa_signature_load (lua_State *L)
 	if (filename != NULL) {
 		fd = open (filename, O_RDONLY);
 		if (fd == -1) {
-			msg_err ("cannot open signature file: %s, %s", filename, strerror (errno));
+			msg_err ("cannot open signature file: %s, %s", filename,
+				strerror (errno));
 			lua_pushnil (L);
 		}
 		else {
-			sig = g_malloc (sizeof (f_str_t));
+			sig = g_malloc (sizeof (rspamd_fstring_t));
 			if (fstat (fd, &st) == -1 ||
-					(data = mmap (NULL,  st.st_size, PROT_READ, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+				(data =
+				mmap (NULL, st.st_size, PROT_READ, MAP_SHARED, fd,
+				0)) == MAP_FAILED) {
 				msg_err ("cannot mmap file %s: %s", filename, strerror (errno));
 				lua_pushnil (L);
 			}
@@ -301,8 +308,8 @@ lua_rsa_signature_load (lua_State *L)
 				sig->len = sig->size;
 				sig->begin = g_malloc (sig->len);
 				memcpy (sig->begin, data, sig->len);
-				psig = lua_newuserdata (L, sizeof (f_str_t *));
-				lua_setclass (L, "rspamd{rsa_signature}", -1);
+				psig = lua_newuserdata (L, sizeof (rspamd_fstring_t *));
+				rspamd_lua_setclass (L, "rspamd{rsa_signature}", -1);
 				*psig = sig;
 				munmap (data, st.st_size);
 			}
@@ -318,7 +325,7 @@ lua_rsa_signature_load (lua_State *L)
 static gint
 lua_rsa_signature_save (lua_State *L)
 {
-	f_str_t *sig;
+	rspamd_fstring_t *sig;
 	gint fd, flags;
 	const gchar *filename;
 	gboolean forced = FALSE, res = TRUE;
@@ -339,7 +346,9 @@ lua_rsa_signature_save (lua_State *L)
 		}
 		fd = open (filename, flags, 00644);
 		if (fd == -1) {
-			msg_err ("cannot create a signature file: %s, %s", filename, strerror (errno));
+			msg_err ("cannot create a signature file: %s, %s",
+				filename,
+				strerror (errno));
 			lua_pushboolean (L, FALSE);
 		}
 		else {
@@ -347,7 +356,9 @@ lua_rsa_signature_save (lua_State *L)
 				if (errno == EINTR) {
 					continue;
 				}
-				msg_err ("cannot write to a signature file: %s, %s", filename, strerror (errno));
+				msg_err ("cannot write to a signature file: %s, %s",
+					filename,
+					strerror (errno));
 				res = FALSE;
 				break;
 			}
@@ -365,18 +376,18 @@ lua_rsa_signature_save (lua_State *L)
 static gint
 lua_rsa_signature_create (lua_State *L)
 {
-	f_str_t *sig, **psig;
+	rspamd_fstring_t *sig, **psig;
 	const gchar *data;
 
 	data = luaL_checkstring (L, 1);
 	if (data != NULL) {
-		sig = g_malloc (sizeof (f_str_t));
+		sig = g_malloc (sizeof (rspamd_fstring_t));
 		sig->len = strlen (data);
 		sig->size = sig->len;
 		sig->begin = g_malloc (sig->len);
 		memcpy (sig->begin, data, sig->len);
-		psig = lua_newuserdata (L, sizeof (f_str_t *));
-		lua_setclass (L, "rspamd{rsa_signature}", -1);
+		psig = lua_newuserdata (L, sizeof (rspamd_fstring_t *));
+		rspamd_lua_setclass (L, "rspamd{rsa_signature}", -1);
 		*psig = sig;
 	}
 
@@ -386,7 +397,7 @@ lua_rsa_signature_create (lua_State *L)
 static gint
 lua_rsa_signature_gc (lua_State *L)
 {
-	f_str_t *sig = lua_check_rsa_sign (L, 1);
+	rspamd_fstring_t *sig = lua_check_rsa_sign (L, 1);
 
 	if (sig != NULL) {
 		if (sig->begin != NULL) {
@@ -412,7 +423,7 @@ static gint
 lua_rsa_verify_memory (lua_State *L)
 {
 	RSA *rsa;
-	f_str_t *signature;
+	rspamd_fstring_t *signature;
 	const gchar *data;
 	gchar *data_sig;
 	gint ret;
@@ -427,7 +438,7 @@ lua_rsa_verify_memory (lua_State *L)
 				signature->begin, signature->len, rsa);
 		if (ret == 0) {
 			msg_info ("cannot check rsa signature for data: %s",
-					ERR_error_string (ERR_get_error (), NULL));
+				ERR_error_string (ERR_get_error (), NULL));
 			lua_pushboolean (L, FALSE);
 		}
 		else {
@@ -456,7 +467,7 @@ static gint
 lua_rsa_verify_file (lua_State *L)
 {
 	RSA *rsa;
-	f_str_t *signature;
+	rspamd_fstring_t *signature;
 	const gchar *filename;
 	gchar *data = NULL, *data_sig;
 	gint ret, fd;
@@ -474,17 +485,21 @@ lua_rsa_verify_file (lua_State *L)
 		}
 		else {
 			if (fstat (fd, &st) == -1 ||
-					(data = mmap (NULL,  st.st_size, PROT_READ, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+				(data =
+				mmap (NULL, st.st_size, PROT_READ, MAP_SHARED, fd,
+				0)) == MAP_FAILED) {
 				msg_err ("cannot mmap file %s: %s", filename, strerror (errno));
 				lua_pushnil (L);
 			}
 			else {
-				data_sig = g_compute_checksum_for_data (G_CHECKSUM_SHA256, data, st.st_size);
+				data_sig = g_compute_checksum_for_data (G_CHECKSUM_SHA256,
+						data,
+						st.st_size);
 				ret = RSA_verify (NID_sha1, data_sig, strlen (data_sig),
 						signature->begin, signature->len, rsa);
 				if (ret == 0) {
 					msg_info ("cannot check rsa signature for file: %s, %s",
-							filename, ERR_error_string (ERR_get_error (), NULL));
+						filename, ERR_error_string (ERR_get_error (), NULL));
 					lua_pushboolean (L, FALSE);
 				}
 				else {
@@ -517,7 +532,7 @@ static gint
 lua_rsa_sign_memory (lua_State *L)
 {
 	RSA *rsa;
-	f_str_t *signature, **psig;
+	rspamd_fstring_t *signature, **psig;
 	const gchar *data;
 	gchar *data_sig;
 	gint ret;
@@ -526,7 +541,7 @@ lua_rsa_sign_memory (lua_State *L)
 	data = luaL_checkstring (L, 2);
 
 	if (rsa != NULL && data != NULL) {
-		signature = g_malloc (sizeof (f_str_t));
+		signature = g_malloc (sizeof (rspamd_fstring_t));
 		signature->len = RSA_size (rsa);
 		signature->size = signature->len;
 		signature->begin = g_malloc (signature->len);
@@ -535,14 +550,14 @@ lua_rsa_sign_memory (lua_State *L)
 				signature->begin, (guint *)&signature->len, rsa);
 		if (ret == 0) {
 			msg_info ("cannot make a signature for data: %s",
-					ERR_error_string (ERR_get_error (), NULL));
+				ERR_error_string (ERR_get_error (), NULL));
 			lua_pushnil (L);
 			g_free (signature->begin);
 			g_free (signature);
 		}
 		else {
-			psig = lua_newuserdata (L, sizeof (f_str_t *));
-			lua_setclass (L, "rspamd{rsa_signature}", -1);
+			psig = lua_newuserdata (L, sizeof (rspamd_fstring_t *));
+			rspamd_lua_setclass (L, "rspamd{rsa_signature}", -1);
 			*psig = signature;
 		}
 		g_free (data_sig);
@@ -568,7 +583,7 @@ static gint
 lua_rsa_sign_file (lua_State *L)
 {
 	RSA *rsa;
-	f_str_t *signature, **psig;
+	rspamd_fstring_t *signature, **psig;
 	const gchar *filename;
 	gchar *data = NULL, *data_sig;
 	gint ret, fd;
@@ -585,28 +600,32 @@ lua_rsa_sign_file (lua_State *L)
 		}
 		else {
 			if (fstat (fd, &st) == -1 ||
-					(data = mmap (NULL,  st.st_size, PROT_READ, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+				(data =
+				mmap (NULL, st.st_size, PROT_READ, MAP_SHARED, fd,
+				0)) == MAP_FAILED) {
 				msg_err ("cannot mmap file %s: %s", filename, strerror (errno));
 				lua_pushnil (L);
 			}
 			else {
-				signature = g_malloc (sizeof (f_str_t));
+				signature = g_malloc (sizeof (rspamd_fstring_t));
 				signature->len = RSA_size (rsa);
 				signature->size = signature->len;
 				signature->begin = g_malloc (signature->len);
-				data_sig = g_compute_checksum_for_string (G_CHECKSUM_SHA256, data, st.st_size);
+				data_sig = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+						data,
+						st.st_size);
 				ret = RSA_sign (NID_sha1, data_sig, strlen (data_sig),
 						signature->begin, (guint *)&signature->len, rsa);
 				if (ret == 0) {
 					msg_info ("cannot make a signature for data: %s",
-							ERR_error_string (ERR_get_error (), NULL));
+						ERR_error_string (ERR_get_error (), NULL));
 					lua_pushnil (L);
 					g_free (signature->begin);
 					g_free (signature);
 				}
 				else {
-					psig = lua_newuserdata (L, sizeof (f_str_t *));
-					lua_setclass (L, "rspamd{rsa_signature}", -1);
+					psig = lua_newuserdata (L, sizeof (rspamd_fstring_t *));
+					rspamd_lua_setclass (L, "rspamd{rsa_signature}", -1);
 					*psig = signature;
 				}
 				g_free (data_sig);
@@ -622,7 +641,43 @@ lua_rsa_sign_file (lua_State *L)
 	return 1;
 }
 
-gint
+static gint
+lua_load_pubkey (lua_State * L)
+{
+	lua_newtable (L);
+	luaL_register (L, NULL, rsapubkeylib_f);
+
+	return 1;
+}
+
+static gint
+lua_load_privkey (lua_State * L)
+{
+	lua_newtable (L);
+	luaL_register (L, NULL, rsaprivkeylib_f);
+
+	return 1;
+}
+
+static gint
+lua_load_signature (lua_State * L)
+{
+	lua_newtable (L);
+	luaL_register (L, NULL, rsasignlib_f);
+
+	return 1;
+}
+
+static gint
+lua_load_rsa (lua_State * L)
+{
+	lua_newtable (L);
+	luaL_register (L, NULL, rsalib_f);
+
+	return 1;
+}
+
+void
 luaopen_rsa (lua_State * L)
 {
 	luaL_newmetatable (L, "rspamd{rsa_pubkey}");
@@ -635,7 +690,7 @@ luaopen_rsa (lua_State * L)
 	lua_rawset (L, -3);
 
 	luaL_register (L, NULL, rsapubkeylib_m);
-	luaL_register (L, "rsa_pubkey", rsapubkeylib_f);
+	rspamd_lua_add_preload (L, "rspamd_rsa_pubkey", lua_load_pubkey);
 
 	luaL_newmetatable (L, "rspamd{rsa_privkey}");
 	lua_pushstring (L, "__index");
@@ -647,7 +702,7 @@ luaopen_rsa (lua_State * L)
 	lua_rawset (L, -3);
 
 	luaL_register (L, NULL, rsaprivkeylib_m);
-	luaL_register (L, "rsa_privkey", rsaprivkeylib_f);
+	rspamd_lua_add_preload (L, "rspamd_rsa_privkey", lua_load_privkey);
 
 	luaL_newmetatable (L, "rspamd{rsa_signature}");
 	lua_pushstring (L, "__index");
@@ -659,21 +714,18 @@ luaopen_rsa (lua_State * L)
 	lua_rawset (L, -3);
 
 	luaL_register (L, NULL, rsasignlib_m);
-	luaL_register (L, "rsa_signature", rsasignlib_f);
+	rspamd_lua_add_preload (L, "rspamd_rsa_signature", lua_load_signature);
 
-	luaL_register (L, "rsa", rsalib_f);
+	rspamd_lua_add_preload (L, "rspamd_rsa", lua_load_rsa);
 
-	return 1;
+	lua_settop (L, 0);
 }
 
 #else
-gint
+void
 luaopen_rsa (lua_State * L)
 {
 	msg_info ("this rspamd version is not linked against openssl, therefore no "
-			"RSA support is available");
-
-	return 1;
-
+		"RSA support is available");
 }
 #endif

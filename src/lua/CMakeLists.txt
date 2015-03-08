@@ -1,9 +1,7 @@
 # Lua support makefile
 SET(LUASRC			  lua_common.c
 					  lua_task.c
-					  lua_message.c
 					  lua_config.c
-					  lua_rcl.c
 					  lua_classifier.c
 					  lua_cfg_file.c
 					  lua_regexp.c
@@ -29,6 +27,7 @@ ELSE(ENABLE_LUAJIT MATCHES "ON")
 	TARGET_LINK_LIBRARIES(rspamd-lua "${LUA_LIBRARY}")
 ENDIF(ENABLE_LUAJIT MATCHES "ON")
 TARGET_LINK_LIBRARIES(rspamd-lua ${GLIB2_LIBRARIES})
+TARGET_LINK_LIBRARIES(rspamd-lua lua-ucl)
 IF(GMIME24)
 	TARGET_LINK_LIBRARIES(rspamd-lua ${GMIME24_LIBRARIES})
 ELSE(GMIME24)

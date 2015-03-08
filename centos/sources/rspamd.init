@@ -14,7 +14,7 @@
 # chkconfig:   - 85 15 
 # description:  rspamd is a spam filtering system
 # processname: rspamd
-# config:      /etc/rspamd/rspamd.conf
+# config:      /etc/rspamd/rspamd.sysvinit.conf
 # config:      /etc/sysconfig/rspamd
 # pidfile:     /var/run/rspamd/rspamd.pid
 
@@ -30,9 +30,9 @@
 rspamd="/usr/bin/rspamd"
 prog=$(basename $rspamd)
 
-RSPAMD_CONF_FILE="/etc/rspamd/rspamd.conf"
-RSPAMD_USER="rspamd"
-RSPAMD_GROUP="rspamd"
+RSPAMD_CONF_FILE="/etc/rspamd/rspamd.sysvinit.conf"
+RSPAMD_USER="_rspamd"
+RSPAMD_GROUP="_rspamd"
 
 [ -f /etc/sysconfig/rspamd ] && . /etc/sysconfig/rspamd
 
@@ -87,7 +87,7 @@ force_reload() {
 }
 
 configtest() {
-  $rspamd -t -c $RSPAMD_CONF_FILE
+  $rspamd -u $RSPAMD_USER -g $RSPAMD_GROUP -t -c $RSPAMD_CONF_FILE
 }
 
 rh_status() {
@@ -122,6 +122,7 @@ case "$1" in
         ;;
     condrestart|try-restart)
         rh_status_q || exit 0
+        restart
 	    ;;
     *)
         echo $"Usage: $0 {start|stop|status|restart|condrestart|try-restart|reload|force-reload|configtest}"

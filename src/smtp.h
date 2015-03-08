@@ -2,9 +2,10 @@
 #define RSPAMD_SMTP_H
 
 #include "config.h"
+#include "libutil/upstream.h"
+#include "libmime/smtp_utils.h"
+#include "libmime/smtp_proto.h"
 #include "main.h"
-#include "upstream.h"
-#include "smtp_utils.h"
 
 struct rspamd_dns_resolver;
 
@@ -20,11 +21,11 @@ enum rspamd_smtp_stage {
 };
 
 struct smtp_worker_ctx {
-	struct smtp_upstream upstreams[MAX_SMTP_UPSTREAMS];
+	struct upstream_list *upstreams;
 	gsize upstream_num;
 	gchar *upstreams_str;
-	
-	memory_pool_t *pool;
+
+	rspamd_mempool_t *pool;
 	gchar *smtp_banner;
 	gchar *smtp_banner_str;
 	guint32 smtp_delay;
@@ -67,13 +68,13 @@ enum rspamd_smtp_state {
 
 struct smtp_session {
 	struct smtp_worker_ctx *ctx;
-	struct config_file *cfg;
-	memory_pool_t *pool;
+	struct rspamd_config *cfg;
+	rspamd_mempool_t *pool;
 
 	enum rspamd_smtp_state state;
 	enum rspamd_smtp_state upstream_state;
 	struct rspamd_worker *worker;
-	struct worker_task *task;
+	struct rspamd_task *task;
 	struct in_addr client_addr;
 	gchar *hostname;
 	gchar *error;
@@ -90,12 +91,12 @@ struct smtp_session {
 	GList *cur_rcpt;
 
 	guint errors;
-	
+
 	struct rspamd_async_session *s;
 	rspamd_io_dispatcher_t *dispatcher;
 	rspamd_io_dispatcher_t *upstream_dispatcher;
 
-	struct smtp_upstream *upstream;
+	struct upstream *upstream;
 
 	struct event *delay_timer;
 
@@ -105,7 +106,8 @@ struct smtp_session {
 	struct event_base *ev_base;
 };
 
-typedef gboolean (*smtp_filter_t)(struct smtp_session *session, gpointer filter_data);
+typedef gboolean (*smtp_filter_t)(struct smtp_session *session,
+	gpointer filter_data);
 
 struct smtp_filter {
 	smtp_filter_t filter;
@@ -116,6 +118,9 @@ struct smtp_filter {
  * Register new SMTP filter
  * XXX: work is still in progress
  */
-void register_smtp_filter (struct smtp_worker_ctx *ctx, enum rspamd_smtp_stage stage, smtp_filter_t filter, gpointer filter_data);
+void register_smtp_filter (struct smtp_worker_ctx *ctx,
+	enum rspamd_smtp_stage stage,
+	smtp_filter_t filter,
+	gpointer filter_data);
 
 #endif

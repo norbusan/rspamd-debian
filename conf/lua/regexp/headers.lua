@@ -18,6 +18,7 @@
 -- Definitions of header regexps
 
 local reconf = config['regexp']
+local rspamd_regexp = require "rspamd_regexp"
 
 -- Subject needs encoding
 -- Define encodings types
@@ -152,8 +153,8 @@ reconf['CC_EXCESS_QP'] = string.format('%s & !%s', cc_encoded_qp, cc_needs_mime)
 -- OE X-Mailer header
 local oe_mua = 'X-Mailer=/\\bOutlook Express [456]\\./H'
 -- OE Message ID format
-local oe_msgid_1 = 'Message-Id=/^[A-Za-z0-9-]{7}[A-Za-z0-9]{20}\\@hotmail\\.com$/mH'
-local oe_msgid_2 = 'Message-Id=/^(?:[0-9a-f]{8}|[0-9a-f]{12})\\$[0-9a-f]{8}\\$[0-9a-f]{8}\\@\\S+$/mH'
+local oe_msgid_1 = 'Message-Id=/^<?[A-Za-z0-9-]{7}[A-Za-z0-9]{20}\\@hotmail\\.com>?$/mH'
+local oe_msgid_2 = 'Message-Id=/^<?(?:[0-9a-f]{8}|[0-9a-f]{12})\\$[0-9a-f]{8}\\$[0-9a-f]{8}\\@\\S+>?$/H'
 -- EZLM remail of message
 local lyris_ezml_remailer = 'List-Unsubscribe=/<mailto:(?:leave-\\S+|\\S+-unsubscribe)\\@\\S+>$/H'
 -- Header of wacky sendmail
@@ -161,11 +162,11 @@ local wacky_sendmail_version = 'Received=/\\/CWT\\/DCE\\)/H'
 -- Iplanet received header
 local iplanet_messaging_server = 'Received=/iPlanet Messaging Server/H'
 -- Hotmail message id
-local hotmail_baydav_msgid = 'Message-Id=/^BAY\\d+-DAV\\d+[A-Z0-9]{25}\\@phx\\.gbl$/mH'
+local hotmail_baydav_msgid = 'Message-Id=/^<?BAY\\d+-DAV\\d+[A-Z0-9]{25}\\@phx\\.gbl?>$/H'
 -- Sympatico message id
-local sympatico_msgid = 'Message-Id=/^BAYC\\d+-PASMTP\\d+[A-Z0-9]{25}\\@CEZ\\.ICE$/mH'
+local sympatico_msgid = 'Message-Id=/^<?BAYC\\d+-PASMTP\\d+[A-Z0-9]{25}\\@CEZ\\.ICE>?$/H'
 -- Mailman message id
-local mailman_msgid = 'Message-ID=/^<mailman\\.\\d+\\.\\d+\\.\\d+\\..+\\@\\S+>$/XS'
+local mailman_msgid = 'Message-ID=/^<mailman\\.\\d+\\.\\d+\\.\\d+\\..+\\@\\S+>$/H'
 -- Message id seems to be forged
 local unusable_msgid = string.format('(%s | %s | %s | %s | %s | %s)', 
 					lyris_ezml_remailer, wacky_sendmail_version, iplanet_messaging_server, hotmail_baydav_msgid, sympatico_msgid, mailman_msgid)
@@ -173,9 +174,9 @@ local unusable_msgid = string.format('(%s | %s | %s | %s | %s | %s)',
 local forged_oe = string.format('(%s & !%s & !%s & !%s)', oe_mua, oe_msgid_1, oe_msgid_2, unusable_msgid)
 -- Outlook specific headers
 local outlook_dollars_mua = 'X-Mailer=/^Microsoft Outlook(?: 8| CWS, Build 9|, Build 10)\\./H'
-local outlook_dollars_other = 'Message-Id=/^\\!\\~\\!/mH'
-local vista_msgid = 'Message-Id=/^[A-F\\d]{32}\\@\\S+$/mH'
-local ims_msgid = 'Message-Id=/^[A-F\\d]{36,40}\\@\\S+$/mH'
+local outlook_dollars_other = 'Message-Id=/^<?\\!\\~\\!>?/H'
+local vista_msgid = 'Message-Id=/^<?[A-F\\d]{32}\\@\\S+>?$/H'
+local ims_msgid = 'Message-Id=/^<?[A-F\\d]{36,40}\\@\\S+>?$/H'
 -- Forged outlook headers
 local forged_outlook_dollars = string.format('(%s & !%s & !%s & !%s & !%s & !%s',
 					outlook_dollars_mua, oe_msgid_2, outlook_dollars_other, vista_msgid, ims_msgid, unusable_msgid)
@@ -211,9 +212,9 @@ reconf['SUSPICIOUS_BOUNDARY4']	= string.format('(%s) & (%s)', suspicious_boundar
 -- The Bat! X-Mailer header
 local thebat_mua_any = 'X-Mailer=/^\\s*The Bat!/H'
 -- The Bat! common Message-ID template
-local thebat_msgid_common = 'Message-ID=/^\\d+\\.\\d+\\@\\S+$/mH'
+local thebat_msgid_common = 'Message-ID=/^<?\\d+\\.\\d+\\@\\S+>?$/mH'
 -- Correct The Bat! Message-ID template
-local thebat_msgid = 'Message-ID=/^\\d+\\.(19[789]\\d|20\\d\\d)(0\\d|1[012])([012]\\d|3[01])([0-5]\\d)([0-5]\\d)([0-5]\\d)\\@\\S+/mH'
+local thebat_msgid = 'Message-ID=/^<?\\d+\\.(19[789]\\d|20\\d\\d)(0\\d|1[012])([012]\\d|3[01])([0-5]\\d)([0-5]\\d)([0-5]\\d)\\@\\S+>?/mH'
 -- Summary rule for forged The Bat! Message-ID header
 reconf['FORGED_MUA_THEBAT_MSGID'] = string.format('(%s) & !(%s) & (%s) & !(%s)', thebat_mua_any, thebat_msgid, thebat_msgid_common, unusable_msgid)
 -- Summary rule for forged The Bat! Message-ID header with unknown template
@@ -224,19 +225,14 @@ reconf['FORGED_MUA_THEBAT_MSGID_UNKNOWN'] = string.format('(%s) & !(%s) & !(%s) 
 -- KMail User-Agent header
 local kmail_mua = 'User-Agent=/^\\s*KMail\\/1\\.\\d+\\.\\d+/H'
 -- KMail common Message-ID template
-local kmail_msgid_common = 'Message-Id=/^\\s*\\d+\\.\\d+\\.\\S+\\@\\S+$/mH'
+local kmail_msgid_common = 'Message-Id=/^<?\\s*\\d+\\.\\d+\\.\\S+\\@\\S+>?$/mH'
 function kmail_msgid (task)
-	local msg = task:get_message()
 	local regexp_text = '<(\\S+)>\\|(19[789]\\d|20\\d\\d)(0\\d|1[012])([012]\\d|3[01])([0-5]\\d)([0-5]\\d)\\.\\d+\\.\\1$'
-	local re = regexp.get_cached(regexp_text)
-	if not re then re = regexp.create(regexp_text, '') end
-	local header_msgid = msg:get_header('Message-Id')
+	local re = rspamd_regexp.create_cached(regexp_text)
+	local header_msgid = task:get_header('Message-Id')
 	if header_msgid then
-		for _,header_from in ipairs(msg:get_header('From')) do
-	    		if re:match(header_from.."|"..header_msgid[1]) then
-				return true
-			end
-		end
+		local header_from = task:get_header('From')
+		if header_from and re:match(header_from.."|"..header_msgid) then return true end
 	end
 	return false
 end
@@ -249,11 +245,11 @@ reconf['FORGED_MUA_KMAIL_MSGID_UNKNOWN'] = string.format('(%s) & !(%s) & !(%s)',
 -- Opera Mail User-Agent header
 local opera1x_mua = 'User-Agent=/^\\s*Opera Mail\\/1[01]\\.\\d+ /H'
 -- Opera Mail Message-ID template
-local opera1x_msgid = 'Message-ID=/^op\\.[a-z\\d]{14}\\@\\S+$/mHS'
+local opera1x_msgid = 'Message-ID=/^<?op\\.[a-z\\d]{14}\\@\\S+>?$/H'
 -- Suspicious Opera Mail User-Agent header
 local suspicious_opera10w_mua = 'User-Agent=/^\\s*Opera Mail\\/10\\.\\d+ \\(Windows\\)$/H'
 -- Suspicious Opera Mail Message-ID, apparently from KMail
-local suspicious_opera10w_msgid = 'Message-Id=/^2009\\d{8}\\.\\d+\\.\\S+\\@\\S+$/mHS'
+local suspicious_opera10w_msgid = 'Message-Id=/^<?2009\\d{8}\\.\\d+\\.\\S+\\@\\S+?>$/H'
 -- Summary rule for forged Opera Mail User-Agent header and Message-ID header from KMail
 reconf['SUSPICIOUS_OPERA_10W_MSGID'] = string.format('(%s) & (%s)', suspicious_opera10w_mua, suspicious_opera10w_msgid)
 -- Summary rule for forged Opera Mail Message-ID header
@@ -262,13 +258,13 @@ reconf['FORGED_MUA_OPERA_MSGID'] = string.format('(%s) & !(%s) & !(%s) & !(%s)',
 
 -- Detect forged Mozilla Mail/Thunderbird/Seamonkey headers
 -- Mozilla based X-Mailer
-local user_agent_mozilla5	= 'User-Agent=/^\\s*Mozilla\\/5\\.0/'
-local user_agent_thunderbird	= 'User-Agent=/^\\s*(Thunderbird|Mozilla Thunderbird|Mozilla\\/.*Gecko\\/.*Thunderbird\\/)/'
-local user_agent_seamonkey	= 'User-Agent=/^\\s*Mozilla\\/5\\.0\\s.+\\sSeaMonkey\\/\\d+\\.\\d+/'
+local user_agent_mozilla5	= 'User-Agent=/^\\s*Mozilla\\/5\\.0/H'
+local user_agent_thunderbird	= 'User-Agent=/^\\s*(Thunderbird|Mozilla Thunderbird|Mozilla\\/.*Gecko\\/.*Thunderbird\\/)/H'
+local user_agent_seamonkey	= 'User-Agent=/^\\s*Mozilla\\/5\\.0\\s.+\\sSeaMonkey\\/\\d+\\.\\d+/H'
 local user_agent_mozilla	= string.format('(%s) & !(%s) & !(%s)', user_agent_mozilla5, user_agent_thunderbird, user_agent_seamonkey)
 -- Mozilla based common Message-ID template
-local mozilla_msgid_common	= 'Message-ID=/^\\s*<[\\dA-F]{8}\\.\\d{1,7}\\@([^>\\.]+\\.)+[^>\\.]+>$/X'
-local mozilla_msgid		= 'Message-ID=/^\\s*<(3[3-9A-F]|4[\\dA-F]|5[\\dA-F])[\\dA-F]{6}\\.(\\d0){0,3}\\d\\@([^>\\.]+\\.)+[^>\\.]+>$/XS'
+local mozilla_msgid_common	= 'Message-ID=/^\\s*<[\\dA-F]{8}\\.\\d{1,7}\\@([^>\\.]+\\.)+[^>\\.]+>$/H'
+local mozilla_msgid		= 'Message-ID=/^\\s*<(3[3-9A-F]|4[\\dA-F]|5[\\dA-F])[\\dA-F]{6}\\.(\\d0){0,3}\\d\\@([^>\\.]+\\.)+[^>\\.]+>$/H'
 -- Summary rule for forged Mozilla Mail Message-ID header
 reconf['FORGED_MUA_MOZILLA_MAIL_MSGID'] = string.format('(%s) & (%s) & !(%s) & !(%s)', user_agent_mozilla, mozilla_msgid_common, mozilla_msgid, unusable_msgid)
 reconf['FORGED_MUA_MOZILLA_MAIL_MSGID_UNKNOWN'] = string.format('(%s) & !(%s) & !(%s) & !(%s)', user_agent_mozilla, mozilla_msgid_common, mozilla_msgid, unusable_msgid)
@@ -281,8 +277,8 @@ reconf['FORGED_MUA_SEAMONKEY_MSGID_UNKNOWN'] = string.format('(%s) & !(%s) & !(%
 
 
 -- Message id validity
-local sane_msgid = 'Message-Id=/^[^<>\\\\ \\t\\n\\r\\x0b\\x80-\\xff]+\\@[^<>\\\\ \\t\\n\\r\\x0b\\x80-\\xff]+\\s*$/mH'
-local msgid_comment = 'Message-Id=/\\(.*\\)/mH'
+local sane_msgid = 'Message-Id=/^<?[^<>\\\\ \\t\\n\\r\\x0b\\x80-\\xff]+\\@[^<>\\\\ \\t\\n\\r\\x0b\\x80-\\xff]+>?\\s*$/H'
+local msgid_comment = 'Message-Id=/\\(.*\\)/H'
 reconf['INVALID_MSGID'] = string.format('(%s) & !((%s) | (%s))', has_mid, sane_msgid, msgid_comment)
 
 
@@ -296,7 +292,7 @@ reconf['MIME_HEADER_CTYPE_ONLY'] = string.format('!(%s) & !(%s) & (%s) & !(%s) &
 
 
 -- Forged Exchange messages
-local msgid_dollars_ok = 'Message-Id=/[0-9a-f]{4,}\\$[0-9a-f]{4,}\\$[0-9a-f]{4,}\\@\\S+/Hr'
+local msgid_dollars_ok = 'Message-Id=/[0-9a-f]{4,}\\$[0-9a-f]{4,}\\$[0-9a-f]{4,}\\@\\S+/H'
 local mimeole_ms = 'X-MimeOLE=/^Produced By Microsoft MimeOLE/H'
 local rcvd_with_exchange = 'Received=/with Microsoft Exchange Server/H'
 reconf['RATWARE_MS_HASH'] = string.format('(%s) & !(%s) & !(%s)', msgid_dollars_ok, mimeole_ms, rcvd_with_exchange)
@@ -339,7 +335,7 @@ reconf['REPTO_QUOTE_YAHOO'] = string.format('(%s) & ((%s) | (%s))', repto_quote,
 local xm_gnus = 'X-Mailer=/^Gnus v/H'
 local xm_msoe5 = 'X-Mailer=/^Microsoft Outlook Express 5/H'
 local xm_msoe6 = 'X-Mailer=/^Microsoft Outlook Express 6/H'
-local xm_mso12 = 'X-Mailer=/^Microsoft Office Outlook 12\\.0/H'
+local xm_mso12 = 'X-Mailer=/^Microsoft(?: Office Outlook 12\\.0| Outlook 14\\.0)/H'
 local xm_cgpmapi = 'X-Mailer=/^CommuniGate Pro MAPI Connector/H'
 local xm_moz4 = 'X-Mailer=/^Mozilla 4/H'
 local xm_skyri = 'X-Mailer=/^SKYRiXgreen/H'
@@ -371,7 +367,7 @@ local yandex_received = 'Received=/^\\s*from \\S+\\.(yandex\\.ru|yandex\\.net)/m
 local yandex = string.format('(%s) & ((%s) | (%s) | (%s))', yandex_received, yandex_from, yandex_x_envelope_from, yandex_return_path)
 -- Tabs as delimiters between header names and header values
 function check_header_delimiter_tab(task, header_name)
-	for _,rh in ipairs(task:get_raw_header(header_name)) do
+	for _,rh in ipairs(task:get_header_full(header_name)) do
 		if rh['tab_separated'] then return true end
 	end
 	return false
@@ -383,7 +379,7 @@ reconf['HEADER_REPLYTO_DELIMITER_TAB'] = string.format('(%s) & !(%s)', 'check_he
 reconf['HEADER_DATE_DELIMITER_TAB'] = string.format('(%s) & !(%s)', 'check_header_delimiter_tab(Date)', yandex)
 -- Empty delimiters between header names and header values
 function check_header_delimiter_empty(task, header_name)
-	for _,rh in ipairs(task:get_raw_header(header_name)) do
+	for _,rh in ipairs(task:get_header_full(header_name)) do
 		if rh['empty_separator'] then return true end
 	end
 	return false
@@ -432,11 +428,10 @@ reconf['FORGED_GENERIC_RECEIVED3'] =	'Received=/^\\s*(.+\\n)*by \\d{1,3}\\.\\d{1
 
 reconf['FORGED_GENERIC_RECEIVED4'] =	'Received=/^\\s*(.+\\n)*from localhost by \\S+;\\s+\\w{3}, \\d+ \\w{3} 20\\d\\d \\d\\d\\:\\d\\d\\:\\d\\d [+-]\\d\\d\\d0[\\s\\r\\n]*$/X'
 
-reconf['FORGED_GENERIC_RECEIVED5'] = function (task)
+rspamd_config.FORGED_GENERIC_RECEIVED5 = function (task)
 	local regexp_text = '^\\s*from \\[(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\].*\\n(.+\\n)*\\s*from \\1 by \\S+;\\s+\\w{3}, \\d+ \\w{3} 20\\d\\d \\d\\d\\:\\d\\d\\:\\d\\d [+-]\\d\\d\\d0$'
-	local re = regexp.get_cached(regexp_text)
-	if not re then re = regexp.create(regexp_text, 'i') end
-	local headers_recv = task:get_raw_header('Received')
+	local re = rspamd_regexp.create_cached(regexp_text, 'i')
+	local headers_recv = task:get_header_full('Received')
 	if headers_recv then
 		for _,header_r in ipairs(headers_recv) do
 			if re:match(header_r['value']) then
@@ -449,18 +444,17 @@ end
 
 reconf['INVALID_POSTFIX_RECEIVED'] =	'Received=/ \\(Postfix\\) with ESMTP id [A-Z\\d]+([\\s\\r\\n]+for <\\S+?>)?;[\\s\\r\\n]*[A-Z][a-z]{2}, \\d{1,2} [A-Z][a-z]{2} \\d\\d\\d\\d \\d\\d:\\d\\d:\\d\\d [\\+\\-]\\d\\d\\d\\d$/X'
 
-reconf['INVALID_EXIM_RECEIVED'] = function (task)
+rspamd_config.INVALID_EXIM_RECEIVED = function (task)
 	local checked = 0
-	local headers_to = task:get_message():get_header('To')
+	local headers_to = task:get_header_full('To')
 	if headers_to then
-		local headers_recv = task:get_raw_header('Received')
+		local headers_recv = task:get_header_full('Received')
 		local regexp_text = '^[^\\n]*?<?\\S+?\\@(\\S+)>?\\|.*from \\d+\\.\\d+\\.\\d+\\.\\d+ \\(HELO \\S+\\)[\\s\\r\\n]*by \\1 with esmtp \\(\\S*?[\\?\\@\\(\\)\\s\\.\\+\\*\'\'\\/\\\\,]\\S*\\)[\\s\\r\\n]+id \\S*?[\\)\\(<>\\/\\\\,\\-:=]'
-		local re = regexp.get_cached(regexp_text)
-		if not re then re = regexp.create(regexp_text, 's') end
+		local re = rspamd_regexp.create_cached(regexp_text, 's')
 		if headers_recv then
 			for _,header_to in ipairs(headers_to) do
 				for _,header_r in ipairs(headers_recv) do
-					if re:match(header_to.."|"..header_r['value']) then
+					if re:match(header_to['value'].."|"..header_r['value']) then
         		        return true
         			end
 				end
@@ -475,18 +469,17 @@ reconf['INVALID_EXIM_RECEIVED'] = function (task)
 	return false
 end
 
-reconf['INVALID_EXIM_RECEIVED2'] = function (task)
+rspamd_config.INVALID_EXIM_RECEIVED2 = function (task)
 	local checked = 0
-	local headers_to = task:get_message():get_header('To')
+	local headers_to = task:get_header_full('To')
 	if headers_to then
-		local headers_recv = task:get_raw_header('Received')
+		local headers_recv = task:get_header_full('Received')
 		local regexp_text = '^[^\\n]*?<?\\S+?\\@(\\S+)>?\\|.*from \\d+\\.\\d+\\.\\d+\\.\\d+ \\(HELO \\S+\\)[\\s\\r\\n]*by \\1 with esmtp \\([A-Z]{9,12} [A-Z]{5,6}\\)[\\s\\r\\n]+id [a-zA-Z\\d]{6}-[a-zA-Z\\d]{6}-[a-zA-Z\\d]{2}[\\s\\r\\n]+'
-		local re = regexp.get_cached(regexp_text)
-		if not re then re = regexp.create(regexp_text, 's') end
+		local re = rspamd_regexp.create_cached(regexp_text, 's')
 		if headers_recv then
 			for _,header_to in ipairs(headers_to) do
 				for _,header_r in ipairs(headers_recv) do
-					if re:match(header_to.."|"..header_r['value']) then
+					if re:match(header_to['value'].."|"..header_r['value']) then
         		        return true
         			end
 				end

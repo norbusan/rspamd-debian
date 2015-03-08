@@ -37,7 +37,17 @@ if [ $# -gt 2 ] ; then
 	rm ${TEST_DIR}/generate.out
 fi
 
-if [ $# -gt 1 -a -x "/usr/bin/xz" ] ; then
+if [ $# -gt 3 ] ; then
+	rm /tmp/_ucl_test_schema.out ||true
+	for i in ${TEST_DIR}/schema/*.json ; do
+		_name=`basename $i`
+		printf "running schema test suite $_name... "
+		cat $i | $4 >> /tmp/_ucl_test_schema.out && ( echo "OK" ) || ( echo "Fail" )
+	done
+fi
+
+sh -c "xz -c < /dev/null > /dev/null"
+if [ $? -eq 0 -a $# -gt 1 ] ; then
 	echo 'Running speed tests'
 	for _tin in ${TEST_DIR}/*.xz ; do
 		echo "Unpacking $_tin..."

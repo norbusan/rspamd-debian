@@ -32,59 +32,62 @@
 /* Minimum length of token */
 #define MIN_LEN 4
 
-extern const int                primes[];
+extern const int primes[];
 
 int
-osb_tokenize_text (struct tokenizer *tokenizer, memory_pool_t * pool, f_str_t * input, GTree ** tree,
-		gboolean save_token, gboolean is_utf, GList *exceptions)
+osb_tokenize_text (struct tokenizer *tokenizer,
+	rspamd_mempool_t * pool,
+	GArray * input,
+	GTree ** tree,
+	gboolean save_token,
+	gboolean is_utf,
+	GList *exceptions)
 {
-	token_node_t                   *new = NULL;
-	f_str_t                         token = { NULL, 0, 0 };
-	guint32                         hashpipe[FEATURE_WINDOW_SIZE], h1, h2;
-	gint                            i, l, processed = 0;
-	gchar                          *res;
+	token_node_t *new = NULL;
+	rspamd_fstring_t *token;
+	guint32 hashpipe[FEATURE_WINDOW_SIZE], h1, h2;
+	gint i, processed = 0;
+	guint w;
+
+	if (input == NULL) {
+		return FALSE;
+	}
 
 	if (*tree == NULL) {
 		*tree = g_tree_new (token_node_compare_func);
-		memory_pool_add_destructor (pool, (pool_destruct_func) g_tree_destroy, *tree);
+		rspamd_mempool_add_destructor (pool,
+			(rspamd_mempool_destruct_t) g_tree_destroy,
+			*tree);
 	}
 
 	memset (hashpipe, 0xfe, FEATURE_WINDOW_SIZE * sizeof (hashpipe[0]));
 
-	while ((res = tokenizer->get_next_word (input, &token, &exceptions)) != NULL) {
-		/* Skip small words */
-		if (is_utf) {
-			l = g_utf8_strlen (token.begin, token.len);
-		}
-		else {
-			l = token.len;
-		}
-		if (l < MIN_LEN) {
-			token.begin = res;
-			continue;
-		}
+	for (w = 0; w < input->len; w ++) {
+		token = &g_array_index (input, rspamd_fstring_t, w);
 
 		if (processed < FEATURE_WINDOW_SIZE) {
 			/* Just fill a hashpipe */
 			hashpipe[FEATURE_WINDOW_SIZE - ++processed] =
-					fstrhash_lowercase (&token, is_utf);
+				rspamd_fstrhash_lc (token, is_utf);
 		}
 		else {
 			/* Shift hashpipe */
 			for (i = FEATURE_WINDOW_SIZE - 1; i > 0; i--) {
 				hashpipe[i] = hashpipe[i - 1];
 			}
-			hashpipe[0] = fstrhash_lowercase (&token, is_utf);
-			processed ++;
+			hashpipe[0] = rspamd_fstrhash_lc (token, is_utf);
+			processed++;
 
 			for (i = 1; i < FEATURE_WINDOW_SIZE; i++) {
 				h1 = hashpipe[0] * primes[0] + hashpipe[i] * primes[i << 1];
-				h2 = hashpipe[0] * primes[1] + hashpipe[i] * primes[(i << 1) - 1];
-				new = memory_pool_alloc0 (pool, sizeof (token_node_t));
+				h2 = hashpipe[0] * primes[1] + hashpipe[i] *
+					primes[(i << 1) - 1];
+				new = rspamd_mempool_alloc0 (pool, sizeof (token_node_t));
 				new->h1 = h1;
 				new->h2 = h2;
 				if (save_token) {
-					new->extra = (uintptr_t)memory_pool_fstrdup (pool, &token);
+					new->extra =
+						(uintptr_t)rspamd_mempool_fstrdup (pool, token);
 				}
 
 				if (g_tree_lookup (*tree, new) == NULL) {
@@ -92,18 +95,17 @@ osb_tokenize_text (struct tokenizer *tokenizer, memory_pool_t * pool, f_str_t * 
 				}
 			}
 		}
-		token.begin = res;
 	}
 
 	if (processed <= FEATURE_WINDOW_SIZE) {
 		for (i = 1; i < processed; i++) {
 			h1 = hashpipe[0] * primes[0] + hashpipe[i] * primes[i << 1];
 			h2 = hashpipe[0] * primes[1] + hashpipe[i] * primes[(i << 1) - 1];
-			new = memory_pool_alloc0 (pool, sizeof (token_node_t));
+			new = rspamd_mempool_alloc0 (pool, sizeof (token_node_t));
 			new->h1 = h1;
 			new->h2 = h2;
 			if (save_token) {
-				new->extra = (uintptr_t)memory_pool_fstrdup (pool, &token);
+				new->extra = (uintptr_t)rspamd_mempool_fstrdup (pool, token);
 			}
 
 			if (g_tree_lookup (*tree, new) == NULL) {

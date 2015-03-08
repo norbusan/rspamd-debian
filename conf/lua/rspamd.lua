@@ -1,3 +1,29 @@
+--[[
+Copyright (c) 2011-2015, Vsevolod Stakhov <vsevolod@highsecure.ru>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+]]--
+
 -- This is main lua config file for rspamd
 
 config['regexp'] = {}
@@ -24,7 +50,7 @@ reconf['R_FLASH_REDIR_IMGSHACK'] = '/^(?:http:\\/\\/)?img\\d{1,5}\\.imageshack\\
 -- Different text parts
 reconf['R_PARTS_DIFFER'] = 'compare_parts_distance(50)';
 
-reconf['R_EMPTY_IMAGE'] = function (task)
+rspamd_config.R_EMPTY_IMAGE = function (task)
 	parts = task:get_text_parts()
 	if parts then
 		for _,part in ipairs(parts) do
@@ -41,26 +67,33 @@ reconf['R_EMPTY_IMAGE'] = function (task)
 end
 
 -- Date issues
-reconf['DATE_IN_FUTURE'] = function(task)
+rspamd_config.MISSING_DATE = function(task)
 	if rspamd_config:get_api_version() >= 5 then
-		local m = task:get_message()
-		local dm = m:get_date()
-		local dt = task:get_date()
-		-- An hour
-		if dm - dt > 3600 then
+		if not task:get_header_raw('Date') then
 			return true
 		end
 	end
 	
 	return false
 end
-reconf['DATE_IN_PAST'] = function(task)
+rspamd_config.DATE_IN_FUTURE = function(task)
 	if rspamd_config:get_api_version() >= 5 then
-		local m = task:get_message()
-		local dm = m:get_date()
-		local dt = task:get_date()
+		local dm = task:get_date{format = 'message'}
+		local dt = task:get_date{format = 'connect'}
+		-- An 2 hour
+		if dm > 0 and dm - dt > 7200 then
+			return true
+		end
+	end
+	
+	return false
+end
+rspamd_config.DATE_IN_PAST = function(task)
+	if rspamd_config:get_api_version() >= 5 then
+    local dm = task:get_date{format = 'message', gmt = true}
+    local dt = task:get_date{format = 'connect', gmt = true}
 		-- A day
-		if dt - dm > 86400 then
+		if dm > 0 and dt - dm > 86400 then
 			return true
 		end
 	end
@@ -79,7 +112,7 @@ local function file_exists(filename)
 end
 
 if file_exists('hfilter.lua') then
-    dofile('hfilter.lua')
+  dofile('hfilter.lua')
 end
 
 if file_exists('rspamd.local.lua') then
