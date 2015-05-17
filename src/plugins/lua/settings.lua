@@ -28,7 +28,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -- Settings documentation can be found here:
 -- https://rspamd.com/doc/configuration/settings.html
 
-local set_section = rspamd_config:get_key("settings")
+local set_section = rspamd_config:get_all_opt("settings")
 local settings = {}
 local settings_initialized = false
 local max_pri = 0
@@ -291,9 +291,6 @@ local function process_settings_table(tbl)
           local re = rspamd_regexp.create(addr)
           if re then
             out['regexp'] = re
-            setmetatable(out, {
-              __gc = function(t) t['regexp']:destroy() end
-            })
           else
             rspamd_logger.err("bad regexp: " .. addr)
             return nil

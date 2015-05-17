@@ -22,42 +22,43 @@
  */
 
 #include "lua_common.h"
-#include "expressions.h"
+#include "regexp.h"
 
 /***
+ * @module rspamd_regexp
  * Rspamd regexp is an utility module that handles rspamd perl compatible
  * regular expressions
- * @module rspamd_regexp
  * @example
  * local rspamd_regexp = require "rspamd_regexp"
  *
- * local re = rspamd_regexp.create_cached('/^\\s*some_string\\s*^/i')
+ * local re = rspamd_regexp.create_cached('/^\\s*some_string\\s*$/i')
  * re:match('some_string')
- * -- Required since regexp are optimized to be stored in the cache
- * re:destroy()
- *
- * -- Or it is possible to use metatable if re is an element of some table
- * local tbl = {}
- * tbl['key'] = rspamd_regexp.create_cached('.*')
- * setmetatable(tbl, {
- * 	__gc = function(t) t:destroy() end
- * })
+ * local re = rspamd_regexp.create_cached('/\\s+/i')
+ * re:split('word word   word') -- returns ['word', 'word', 'word']
  */
 
 LUA_FUNCTION_DEF (regexp, create);
 LUA_FUNCTION_DEF (regexp, create_cached);
 LUA_FUNCTION_DEF (regexp, get_cached);
 LUA_FUNCTION_DEF (regexp, get_pattern);
+LUA_FUNCTION_DEF (regexp, set_limit);
+LUA_FUNCTION_DEF (regexp, search);
 LUA_FUNCTION_DEF (regexp, match);
+LUA_FUNCTION_DEF (regexp, matchn);
 LUA_FUNCTION_DEF (regexp, split);
 LUA_FUNCTION_DEF (regexp, destroy);
+LUA_FUNCTION_DEF (regexp, gc);
 
 static const struct luaL_reg regexplib_m[] = {
 	LUA_INTERFACE_DEF (regexp, get_pattern),
+	LUA_INTERFACE_DEF (regexp, set_limit),
 	LUA_INTERFACE_DEF (regexp, match),
+	LUA_INTERFACE_DEF (regexp, matchn),
+	LUA_INTERFACE_DEF (regexp, search),
 	LUA_INTERFACE_DEF (regexp, split),
 	LUA_INTERFACE_DEF (regexp, destroy),
 	{"__tostring", lua_regexp_get_pattern},
+	{"__gc", lua_regexp_gc},
 	{NULL, NULL}
 };
 static const struct luaL_reg regexplib_f[] = {
@@ -67,11 +68,15 @@ static const struct luaL_reg regexplib_f[] = {
 	{NULL, NULL}
 };
 
+#define LUA_REGEXP_FLAG_DESTROYED (1 << 0)
+#define IS_DESTROYED(re) ((re)->re_flags & LUA_REGEXP_FLAG_DESTROYED)
+
 rspamd_mempool_t *regexp_static_pool = NULL;
 
 struct rspamd_lua_regexp {
-	GRegex *re;
+	rspamd_regexp_t *re;
 	gchar *re_pattern;
+	gsize match_limit;
 	gint re_flags;
 };
 
@@ -98,11 +103,9 @@ lua_check_regexp (lua_State * L)
 static int
 lua_regexp_create (lua_State *L)
 {
-	gint regexp_flags = 0;
-	GRegex *re;
+	rspamd_regexp_t *re;
 	struct rspamd_lua_regexp *new, **pnew;
-	const gchar *string, *flags_str = NULL, *slash;
-	gchar *pattern;
+	const gchar *string, *flags_str = NULL;
 	GError *err = NULL;
 
 	string = luaL_checkstring (L, 1);
@@ -110,71 +113,20 @@ lua_regexp_create (lua_State *L)
 		flags_str = luaL_checkstring (L, 2);
 	}
 
-	if (string[0] == '/') {
-		/* We have likely slashed regexp */
-		slash = strrchr (string, '/');
-		if (slash != NULL && slash != string) {
-			flags_str = slash + 1;
-			pattern = g_malloc (slash - string - 1);
-			rspamd_strlcpy (pattern, string + 1, slash - string - 1);
-		}
-		else {
-			pattern = g_strdup (string);
-		}
-	}
-	else {
-		pattern = g_strdup (string);
-	}
-
-	if (flags_str && flags_str != '\0') {
-		while (*flags_str) {
-			switch (*flags_str) {
-			case 'i':
-				regexp_flags |= G_REGEX_CASELESS;
-				break;
-			case 'm':
-				regexp_flags |= G_REGEX_MULTILINE;
-				break;
-			case 's':
-				regexp_flags |= G_REGEX_DOTALL;
-				break;
-			case 'x':
-				regexp_flags |= G_REGEX_EXTENDED;
-				break;
-			case 'u':
-				regexp_flags |= G_REGEX_UNGREEDY;
-				break;
-			case 'o':
-				regexp_flags |= G_REGEX_OPTIMIZE;
-				break;
-			case 'r':
-				regexp_flags |= G_REGEX_RAW;
-				break;
-			default:
-				msg_info ("invalid regexp flag: %c", *flags_str);
-				break;
-			}
-			flags_str++;
-		}
-	}
-
-	re = g_regex_new (pattern, regexp_flags, 0, &err);
+	re = rspamd_regexp_new (string, flags_str, &err);
 	if (re == NULL) {
-		g_free (pattern);
 		lua_pushnil (L);
 		msg_info ("cannot parse regexp: %s, error: %s",
 			string,
 			err == NULL ? "undefined" : err->message);
+		g_error_free (err);
 	}
 	else {
-		new = g_slice_alloc (sizeof (struct rspamd_lua_regexp));
+		new = g_slice_alloc0 (sizeof (struct rspamd_lua_regexp));
 		new->re = re;
-		new->re_flags = regexp_flags;
-		new->re_pattern = pattern;
 		pnew = lua_newuserdata (L, sizeof (struct rspamd_lua_regexp *));
 		rspamd_lua_setclass (L, "rspamd{regexp}", -1);
 		*pnew = new;
-		re_cache_add (new->re_pattern, new, regexp_static_pool);
 	}
 
 	return 1;
@@ -191,12 +143,20 @@ lua_regexp_create (lua_State *L)
 static int
 lua_regexp_get_cached (lua_State *L)
 {
+	rspamd_regexp_t *re;
 	struct rspamd_lua_regexp *new, **pnew;
-	const gchar *line;
+	const gchar *string, *flags_str = NULL;
 
-	line = luaL_checkstring (L, 1);
-	new = re_cache_check (line, regexp_static_pool);
-	if (new) {
+	string = luaL_checkstring (L, 1);
+	if (lua_gettop (L) == 2) {
+		flags_str = luaL_checkstring (L, 2);
+	}
+
+	re = rspamd_regexp_cache_query (NULL, string, flags_str);
+
+	if (re) {
+		new = g_slice_alloc0 (sizeof (struct rspamd_lua_regexp));
+		new->re = rspamd_regexp_ref (re);
 		pnew = lua_newuserdata (L, sizeof (struct rspamd_lua_regexp *));
 		rspamd_lua_setclass (L, "rspamd{regexp}", -1);
 		*pnew = new;
@@ -226,18 +186,42 @@ lua_regexp_get_cached (lua_State *L)
 static int
 lua_regexp_create_cached (lua_State *L)
 {
-	const gchar *line;
+	rspamd_regexp_t *re;
 	struct rspamd_lua_regexp *new, **pnew;
+	const gchar *string, *flags_str = NULL;
+	GError *err = NULL;
 
-	line = luaL_checkstring (L, 1);
-	new = re_cache_check (line, regexp_static_pool);
-	if (new) {
+	string = luaL_checkstring (L, 1);
+	if (lua_gettop (L) == 2) {
+		flags_str = luaL_checkstring (L, 2);
+	}
+
+	re = rspamd_regexp_cache_query (NULL, string, flags_str);
+
+	if (re) {
+		new = g_slice_alloc0 (sizeof (struct rspamd_lua_regexp));
+		new->re = rspamd_regexp_ref (re);
 		pnew = lua_newuserdata (L, sizeof (struct rspamd_lua_regexp *));
+
 		rspamd_lua_setclass (L, "rspamd{regexp}", -1);
 		*pnew = new;
 	}
 	else {
-		return lua_regexp_create (L);
+		re = rspamd_regexp_cache_create (NULL, string, flags_str, &err);
+		if (re == NULL) {
+			lua_pushnil (L);
+			msg_info ("cannot parse regexp: %s, error: %s",
+					string,
+					err == NULL ? "undefined" : err->message);
+			g_error_free (err);
+		}
+		else {
+			new = g_slice_alloc0 (sizeof (struct rspamd_lua_regexp));
+			new->re = rspamd_regexp_ref (re);
+			pnew = lua_newuserdata (L, sizeof (struct rspamd_lua_regexp *));
+			rspamd_lua_setclass (L, "rspamd{regexp}", -1);
+			*pnew = new;
+		}
 	}
 
 	return 1;
@@ -253,16 +237,45 @@ lua_regexp_get_pattern (lua_State *L)
 {
 	struct rspamd_lua_regexp *re = lua_check_regexp (L);
 
-	if (re) {
-		lua_pushstring (L, re->re_pattern);
+	if (re && re->re && !IS_DESTROYED (re)) {
+		lua_pushstring (L, rspamd_regexp_get_pattern (re->re));
+	}
+	else {
+		lua_pushnil (L);
 	}
 
 	return 1;
 }
 
 /***
- * @method re:match(line)
- * Match line against regular expression object. If line matches then this
+ * @method re:set_limit(lim)
+ * Set maximum size of text length to be matched with this regexp (if `lim` is
+ * less or equal to zero then all texts are checked)
+ * @param {number} lim limit in bytes
+ */
+static int
+lua_regexp_set_limit (lua_State *L)
+{
+	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	gint64 lim;
+
+	lim = luaL_checknumber (L, 2);
+
+	if (re && re->re && !IS_DESTROYED (re)) {
+		if (lim > 0) {
+			re->match_limit = lim;
+		}
+		else {
+			re->match_limit = 0;
+		}
+	}
+
+	return 0;
+}
+
+/***
+ * @method re:search(line)
+ * Search line in regular expression object. If line matches then this
  * function returns the table of captured strings. Otherwise, nil is returned.
  *
  * @param {string} line match the specified line against regexp object
@@ -270,48 +283,171 @@ lua_regexp_get_pattern (lua_State *L)
  * @example
  * local re = regexp.create_cached('/^\s*([0-9]+)\s*$/')
  * -- returns nil
- * local m1 = re:match('blah')
- * local m2 = re:match('   190   ')
+ * local m1 = re:search('blah')
+ * local m2 = re:search('   190   ')
  * -- prints '190'
  * print(m2[1])
  */
 static int
-lua_regexp_match (lua_State *L)
+lua_regexp_search (lua_State *L)
 {
 	struct rspamd_lua_regexp *re = lua_check_regexp (L);
-	GMatchInfo *mi;
 	const gchar *data;
-	gchar **matches;
+	const gchar *start = NULL, *end = NULL;
 	gint i;
+	gsize len;
+	gboolean matched = FALSE;
 
-	if (re) {
-		data = luaL_checkstring (L, 2);
+	if (re && !IS_DESTROYED (re)) {
+		data = luaL_checklstring (L, 2, &len);
 		if (data) {
-			if ((re->re_flags & G_REGEX_RAW) == 0) {
-				/* Validate input */
-				if (!g_utf8_validate (data, -1, NULL)) {
-					lua_pushnil (L);
-					return 1;
-				}
+			lua_newtable (L);
+			i = 0;
+
+			if (re->match_limit > 0) {
+				len = MIN (len, re->match_limit);
 			}
-			if (g_regex_match_full (re->re, data, -1, 0, 0, &mi, NULL)) {
-				matches = g_match_info_fetch_all (mi);
-				lua_newtable (L);
-				for (i = 1; matches[i - 1] != NULL; i++) {
-					lua_pushstring (L, matches[i - 1]);
-					lua_rawseti (L, -2, i);
-				}
-				g_strfreev (matches);
+
+			while (rspamd_regexp_search (re->re, data, len, &start, &end, FALSE)) {
+				lua_pushlstring (L, start, end - start);
+				lua_rawseti (L, -2, ++i);
+				matched = TRUE;
 			}
-			else {
+			if (!matched) {
+				lua_pop (L, 1);
 				lua_pushnil (L);
 			}
-			g_match_info_free (mi);
 			return 1;
 		}
 	}
 
 	lua_pushnil (L);
+
+	return 1;
+}
+
+/***
+ * @method re:match(line[, raw_match])
+ * Matches line against the regular expression and return true if line matches
+ * (partially or completely)
+ *
+ * @param {string} line match the specified line against regexp object
+ * @param {bool} match raw regexp instead of utf8 one
+ * @return {bool} true if `line` matches
+ */
+static int
+lua_regexp_match (lua_State *L)
+{
+	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	struct rspamd_lua_text *t;
+	const gchar *data = NULL;
+	gsize len = 0;
+	gboolean raw = FALSE;
+
+	if (re && !IS_DESTROYED (re)) {
+		if (lua_type (L, 2) == LUA_TSTRING) {
+			data = luaL_checklstring (L, 2, &len);
+		}
+		else if (lua_type (L, 2) == LUA_TUSERDATA) {
+			t = lua_check_text (L, 2);
+			if (t != NULL) {
+				data = t->start;
+				len = t->len;
+			}
+		}
+
+		if (lua_gettop (L) == 3) {
+			raw = lua_toboolean (L, 3);
+		}
+
+		if (data) {
+			if (re->match_limit > 0) {
+				len = MIN (len, re->match_limit);
+			}
+
+			if (rspamd_regexp_search (re->re, data, len, NULL, NULL, raw)) {
+				lua_pushboolean (L, TRUE);
+			}
+			else {
+				lua_pushboolean (L, FALSE);
+			}
+			return 1;
+		}
+	}
+
+	lua_pushnil (L);
+
+	return 1;
+}
+
+/***
+ * @method re:matchn(line, max_matches, [, raw_match])
+ * Matches line against the regular expression and return number of matches if line matches
+ * (partially or completely). This process stop when `max_matches` is reached.
+ * If `max_matches` is zero, then only a single match is counted which is equal to
+ * @see re:match If `max_matches` is negative, then all matches are considered.
+ *
+ * @param {string} line match the specified line against regexp object
+ * @param {number} max_matches maximum number of matches
+ * @param {bool} match raw regexp instead of utf8 one
+ * @return {number} number of matches found in the `line` argument
+ */
+static int
+lua_regexp_matchn (lua_State *L)
+{
+	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	struct rspamd_lua_text *t;
+	const gchar *data = NULL, *start = NULL, *end = NULL;
+	gint max_matches, matches;
+	gsize len = 0;
+	gboolean raw = FALSE;
+
+	if (re && !IS_DESTROYED (re)) {
+		if (lua_type (L, 2) == LUA_TSTRING) {
+			data = luaL_checklstring (L, 2, &len);
+		}
+		else if (lua_type (L, 2) == LUA_TUSERDATA) {
+			t = lua_check_text (L, 2);
+			if (t != NULL) {
+				data = t->start;
+				len = t->len;
+			}
+		}
+
+		max_matches = lua_tonumber (L, 3);
+
+		if (lua_gettop (L) == 4) {
+			raw = lua_toboolean (L, 4);
+		}
+
+		if (data) {
+			matches = 0;
+
+			if (re->match_limit > 0) {
+				len = MIN (len, re->match_limit);
+			}
+
+			for (;;) {
+				if (rspamd_regexp_search (re->re, data, len, &start, &end, raw)) {
+					matches ++;
+				}
+				else {
+					break;
+				}
+
+				if (max_matches >= 0 && matches >= max_matches) {
+					break;
+				}
+			}
+
+			lua_pushnumber (L, matches);
+
+			return 1;
+		}
+	}
+
+	lua_pushnil (L);
+
 	return 1;
 }
 
@@ -331,26 +467,45 @@ lua_regexp_split (lua_State *L)
 {
 	struct rspamd_lua_regexp *re = lua_check_regexp (L);
 	const gchar *data;
-	gchar **parts;
+	gboolean matched = FALSE;
+	gsize len;
+	const gchar *start = NULL, *end = NULL, *old_start;
 	gint i;
 
-	if (re) {
-		data = luaL_checkstring (L, 2);
+	if (re && !IS_DESTROYED (re)) {
+		data = luaL_checklstring (L, 2, &len);
+
+		if (re->match_limit > 0) {
+			len = MIN (len, re->match_limit);
+		}
+
 		if (data) {
-			if ((re->re_flags & G_REGEX_RAW) == 0) {
-				/* Validate input */
-				if (!g_utf8_validate (data, -1, NULL)) {
-					lua_pushnil (L);
-					return 1;
-				}
-			}
-			parts = g_regex_split (re->re, data, 0);
 			lua_newtable (L);
-			for (i = 1; parts[i - 1] != NULL; i++) {
-				lua_pushstring (L, parts[i - 1]);
-				lua_rawseti (L, -2, i);
+			i = 0;
+			old_start = data;
+			while (rspamd_regexp_search (re->re, data, len, &start, &end, FALSE)) {
+				if (start - old_start > 0) {
+					lua_pushlstring (L, old_start, start - old_start);
+					lua_rawseti (L, -2, ++i);
+					matched = TRUE;
+				}
+				old_start = end;
 			}
-			g_strfreev (parts);
+
+			if (len > 0 && (end == NULL || end < data + len)) {
+				if (end == NULL) {
+					end = data;
+				}
+
+				lua_pushlstring (L, end, (data + len) - end);
+				lua_rawseti (L, -2, ++i);
+				matched = TRUE;
+			}
+
+			if (!matched) {
+				lua_pop (L, 1);
+				lua_pushnil (L);
+			}
 			return 1;
 		}
 	}
@@ -361,9 +516,7 @@ lua_regexp_split (lua_State *L)
 
 /***
  * @method re:destroy()
- * We are not using `__gc` meta-method as it is usually good idea to have
- * compiled regexps to be stored permanently, so this method can be used
- * for avoiding memory leaks for temporary regexps
+ * Destroy regexp from caches if needed (the pointer is removed by garbadge collector)
  */
 static gint
 lua_regexp_destroy (lua_State *L)
@@ -371,10 +524,26 @@ lua_regexp_destroy (lua_State *L)
 	struct rspamd_lua_regexp *to_del = lua_check_regexp (L);
 
 	if (to_del) {
-		re_cache_del (to_del->re_pattern, regexp_static_pool);
-		g_regex_unref (to_del->re);
-		g_free (to_del->re_pattern);
-		g_slice_free1 (sizeof (struct rspamd_lua_regexp), to_del);
+		rspamd_regexp_cache_remove (NULL, to_del->re);
+		rspamd_regexp_unref (to_del->re);
+		to_del->re = NULL;
+		to_del->re_flags |= LUA_REGEXP_FLAG_DESTROYED;
+	}
+
+	return 0;
+}
+
+static gint
+lua_regexp_gc (lua_State *L)
+{
+	struct rspamd_lua_regexp *to_del = lua_check_regexp (L);
+
+	if (to_del) {
+		if (!IS_DESTROYED (to_del)) {
+			rspamd_regexp_unref (to_del->re);
+		}
+
+		g_slice_free1 (sizeof (*to_del), to_del);
 	}
 
 	return 0;
@@ -390,7 +559,7 @@ lua_load_regexp (lua_State * L)
 }
 
 void
-luaopen_glib_regexp (lua_State * L)
+luaopen_regexp (lua_State * L)
 {
 	luaL_newmetatable (L, "rspamd{regexp}");
 	lua_pushstring (L, "__index");

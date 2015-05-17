@@ -1,16 +1,5 @@
 # Rspamd metrics settings
 
-## Table of Contents
-
-* [Options](options.md)
-* [Logging](logging.md)
-* [Metrics](metrics.md)
-* [Composites](composites.md)
-* [User settings](settings.md)
-* [Statistic configuration](statistic.md)
-* [Workers](../workers/index.md)
-* [Modules](../modules/index.md)
-
 ## Introduction
 
 Metrics section provides configuration for symbols weights and actions apllied for a message by rspamd.
@@ -116,3 +105,35 @@ symbol {
 ~~~
 
 A single metric can contain multiple symbols definitions.
+
+
+## Symbol groups
+
+Symbols can be grouped to specify their common functionality. For example, one might group all
+`RBL` symbols all together. Moreover, from rspamd 0.9 it is possible to specify group score limit,
+which could be useful, for instance if some specific group should not unconditionally send a message
+to `spam` class. Here is an example of such a functionality:
+
+~~~nginx
+metric {
+	name = default; # This is mandatory option
+	
+	group {
+		name = "RBL group";
+		max_score = 6.0;
+		
+		symbol {
+			name = "RBL1";
+			weight = 1;
+		}
+		symbol {
+			name = "RBL2";
+			weight = 4;
+		}
+		symbol {
+			name = "RBL3";
+			weight = 5;
+		}
+	}
+}
+~~~

@@ -43,11 +43,12 @@
 
 #include "config.h"
 #include "libmime/message.h"
-#include "libmime/expressions.h"
 #include "libutil/hash.h"
 #include "libutil/map.h"
 #include "main.h"
 #include "surbl.h"
+#include "regexp.h"
+#include "acism.h"
 
 #include "utlist.h"
 
@@ -110,8 +111,8 @@ exception_insert (gpointer st, gconstpointer key, gpointer value)
 	val->begin = (gchar *)key;
 	val->len = strlen (key);
 	if (t[level] == NULL) {
-		t[level] = g_hash_table_new_full (rspamd_fstring_hash,
-				rspamd_fstring_equal,
+		t[level] = g_hash_table_new_full (rspamd_fstring_icase_hash,
+				rspamd_fstring_icase_equal,
 				g_free,
 				NULL);
 	}
@@ -151,56 +152,63 @@ fin_exceptions_list (rspamd_mempool_t * pool, struct map_cb_data *data)
 	}
 }
 
+struct rspamd_redirector_map_cb {
+	GHashTable *re_hash;
+	GArray *patterns;
+};
+
 static void
 redirector_insert (gpointer st, gconstpointer key, gpointer value)
 {
-	GHashTable *t = st;
+	struct rspamd_redirector_map_cb *cbdata = st;
+	GHashTable *t;
 	const gchar *p = key, *begin = key;
-	gchar *new;
-	gsize len;
-	GRegex *re = NO_REGEXP;
+	gchar *pattern;
+	ac_trie_pat_t pat;
+	rspamd_regexp_t *re = NO_REGEXP;
 	GError *err = NULL;
-	guint idx;
 
+	t = cbdata->re_hash;
 	while (*p && !g_ascii_isspace (*p)) {
 		p++;
 	}
 
-	len = p - begin;
-	new = g_malloc (len + 1);
-	memcpy (new, begin, len);
-	new[len] = '\0';
-	idx = surbl_module_ctx->redirector_ptrs->len;
-	rspamd_trie_insert (surbl_module_ctx->redirector_trie, new, idx);
-	g_ptr_array_add (surbl_module_ctx->redirector_ptrs, new);
+	pat.len = p - begin;
+	pattern = g_malloc (pat.len + 1);
+	rspamd_strlcpy (pattern, begin, pat.len + 1);
+	pat.ptr = pattern;
+
+	g_array_append_val (cbdata->patterns, pat);
 
 	if (g_ascii_isspace (*p)) {
 		while (g_ascii_isspace (*p) && *p) {
 			p++;
 		}
 		if (*p) {
-			re = g_regex_new (p,
-					G_REGEX_RAW | G_REGEX_OPTIMIZE | G_REGEX_NO_AUTO_CAPTURE | G_REGEX_CASELESS,
-					0,
+			re = rspamd_regexp_new (p,
+					"ir",
 					&err);
 			if (re == NULL) {
-				msg_warn ("could not read regexp: %s while reading regexp %s",
-					err->message,
+				msg_warn ("could not read regexp: %e while reading regexp %s",
+					err,
 					p);
+				g_error_free (err);
 				re = NO_REGEXP;
+			}
+			else {
+				g_hash_table_insert (t, pattern, re);
 			}
 		}
 	}
-	g_hash_table_insert (t, new, re);
 }
 
 static void
 redirector_item_free (gpointer p)
 {
-	GRegex *re;
+	rspamd_regexp_t *re;
 	if (p != NULL && p != NO_REGEXP) {
-		re = (GRegex *)p;
-		g_regex_unref (re);
+		re = (rspamd_regexp_t *)p;
+		rspamd_regexp_unref (re);
 	}
 }
 
@@ -210,11 +218,18 @@ read_redirectors_list (rspamd_mempool_t * pool,
 	gint len,
 	struct map_cb_data *data)
 {
+	struct rspamd_redirector_map_cb *cbdata;
+
 	if (data->cur_data == NULL) {
-		data->cur_data = g_hash_table_new_full (rspamd_strcase_hash,
+		cbdata = g_slice_alloc0 (sizeof (*cbdata));
+		cbdata->patterns = g_array_sized_new (FALSE, FALSE,
+				sizeof (ac_trie_pat_t), 32);
+
+		cbdata->re_hash = g_hash_table_new_full (rspamd_strcase_hash,
 				rspamd_strcase_equal,
-				g_free,
+				NULL,
 				redirector_item_free);
+		data->cur_data = cbdata;
 	}
 
 	return rspamd_parse_abstract_list (pool,
@@ -227,15 +242,37 @@ read_redirectors_list (rspamd_mempool_t * pool,
 void
 fin_redirectors_list (rspamd_mempool_t * pool, struct map_cb_data *data)
 {
+	struct rspamd_redirector_map_cb *cbdata;
+	guint i;
+	ac_trie_pat_t *pat;
+
 	if (data->prev_data) {
-		g_hash_table_destroy (data->prev_data);
+		cbdata = data->prev_data;
+
+		for (i = 0; i < cbdata->patterns->len; i ++) {
+			pat = &g_array_index (cbdata->patterns, ac_trie_pat_t, i);
+			g_free ((gpointer)pat->ptr);
+		}
+
+		g_hash_table_unref (cbdata->re_hash);
+		g_array_free (cbdata->patterns, TRUE);
+		acism_destroy (surbl_module_ctx->redirector_trie);
+		g_slice_free1 (sizeof (*cbdata), cbdata);
 	}
+
+	cbdata = data->cur_data;
+	surbl_module_ctx->redirector_ptrs = cbdata->patterns;
+	surbl_module_ctx->redirector_hosts = cbdata->re_hash;
+	surbl_module_ctx->redirector_trie = acism_create (
+			(const ac_trie_pat_t *)cbdata->patterns->data,
+			cbdata->patterns->len);
+	g_assert (surbl_module_ctx->redirector_trie != NULL);
 }
 
 gint
 surbl_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 {
-	surbl_module_ctx = g_malloc (sizeof (struct surbl_ctx));
+	surbl_module_ctx = g_malloc0 (sizeof (struct surbl_ctx));
 
 	surbl_module_ctx->use_redirector = 0;
 	surbl_module_ctx->suffixes = NULL;
@@ -245,11 +282,6 @@ surbl_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 	surbl_module_ctx->tld2_file = NULL;
 	surbl_module_ctx->whitelist_file = NULL;
 	surbl_module_ctx->redirectors = NULL;
-	surbl_module_ctx->redirector_trie = rspamd_trie_create (TRUE);
-	surbl_module_ctx->redirector_ptrs = g_ptr_array_new ();
-
-	surbl_module_ctx->redirector_hosts = g_hash_table_new (rspamd_strcase_hash,
-			rspamd_strcase_equal);
 	surbl_module_ctx->whitelist = g_hash_table_new (rspamd_strcase_hash,
 			rspamd_strcase_equal);
 	/* Zero exceptions hashes */
@@ -260,16 +292,6 @@ surbl_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 	rspamd_mempool_add_destructor (surbl_module_ctx->surbl_pool,
 		(rspamd_mempool_destruct_t) g_hash_table_destroy,
 		surbl_module_ctx->whitelist);
-	rspamd_mempool_add_destructor (surbl_module_ctx->surbl_pool,
-		(rspamd_mempool_destruct_t) g_hash_table_destroy,
-		surbl_module_ctx->redirector_hosts);
-
-	rspamd_mempool_add_destructor (surbl_module_ctx->surbl_pool,
-		(rspamd_mempool_destruct_t) rspamd_trie_free,
-		surbl_module_ctx->redirector_trie);
-	rspamd_mempool_add_destructor (surbl_module_ctx->surbl_pool,
-		(rspamd_mempool_destruct_t) g_ptr_array_unref,
-		surbl_module_ctx->redirector_ptrs);
 
 	*ctx = (struct module_ctx *)surbl_module_ctx;
 
@@ -282,16 +304,24 @@ surbl_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 static void
 register_bit_symbols (struct rspamd_config *cfg, struct suffix_item *suffix)
 {
-	GList *cur;
+	guint i;
+	GHashTableIter it;
 	struct surbl_bit_item *bit;
+	gpointer k, v;
 
-	if (suffix->bits != NULL) {
-		/* Prepend bit to symbol */
-		cur = g_list_first (suffix->bits);
-		while (cur) {
-			bit = (struct surbl_bit_item *)cur->data;
+	if (suffix->ips != NULL) {
+		g_hash_table_iter_init (&it, suffix->ips);
+
+		while (g_hash_table_iter_next (&it, &k, &v)) {
+			bit = v;
 			register_virtual_symbol (&cfg->cache, bit->symbol, 1);
-			cur = g_list_next (cur);
+			msg_debug ("bit: %d", bit->bit);
+		}
+	}
+	else if (suffix->bits != NULL) {
+		for (i = 0; i < suffix->bits->len; i++) {
+			bit = &g_array_index (suffix->bits, struct surbl_bit_item, i);
+			register_virtual_symbol (&cfg->cache, bit->symbol, 1);
 		}
 	}
 	else {
@@ -308,23 +338,16 @@ surbl_module_config (struct rspamd_config *cfg)
 
 	const ucl_object_t *value, *cur, *cur_rule, *cur_bit;
 	ucl_object_iter_t it = NULL;
-	const gchar *redir_val;
+	const gchar *redir_val, *ip_val;
 	guint32 bit;
-	gint i, idx;
 
 
 	if ((value =
 		rspamd_config_get_module_opt (cfg, "surbl", "redirector")) != NULL) {
-		i = 0;
-		LL_FOREACH (value, cur)
-		{
-			i++;
-		}
 		surbl_module_ctx->redirectors = rspamd_upstreams_create ();
 		rspamd_mempool_add_destructor (surbl_module_ctx->surbl_pool,
 				(rspamd_mempool_destruct_t)rspamd_upstreams_destroy,
 				surbl_module_ctx->redirectors);
-		idx = 0;
 		LL_FOREACH (value, cur)
 		{
 			redir_val = ucl_obj_tostring (cur);
@@ -332,7 +355,6 @@ surbl_module_config (struct rspamd_config *cfg)
 					redir_val, 80, NULL)) {
 				surbl_module_ctx->use_redirector = TRUE;
 			}
-			i++;
 		}
 	}
 	if ((value =
@@ -382,7 +404,7 @@ surbl_module_config (struct rspamd_config *cfg)
 		rspamd_map_add (cfg, ucl_obj_tostring (
 				value),
 			"SURBL redirectors list", read_redirectors_list, fin_redirectors_list,
-			(void **)&surbl_module_ctx->redirector_hosts);
+			(void **)&surbl_module_ctx->redirector_map_data);
 	}
 
 	if ((value =
@@ -422,13 +444,17 @@ surbl_module_config (struct rspamd_config *cfg)
 				msg_err ("surbl rule must have explicit symbol definition");
 				continue;
 			}
-			new_suffix = rspamd_mempool_alloc (surbl_module_ctx->surbl_pool,
+			new_suffix = rspamd_mempool_alloc0 (surbl_module_ctx->surbl_pool,
 					sizeof (struct suffix_item));
 			new_suffix->suffix = rspamd_mempool_strdup (
 				surbl_module_ctx->surbl_pool,
 				ucl_obj_tostring (cur));
 			new_suffix->options = 0;
-			new_suffix->bits = NULL;
+			new_suffix->bits = g_array_new (FALSE, FALSE,
+					sizeof (struct surbl_bit_item));
+			rspamd_mempool_add_destructor (surbl_module_ctx->surbl_pool,
+					(rspamd_mempool_destruct_t)rspamd_array_free_hard,
+					new_suffix->bits);
 
 			cur = ucl_obj_get_key (cur_rule, "symbol");
 			if (cur == NULL) {
@@ -477,11 +503,53 @@ surbl_module_config (struct rspamd_config *cfg)
 
 						msg_debug ("add new bit suffix: %d with symbol: %s",
 							(gint)new_bit->bit, new_bit->symbol);
-						new_suffix->bits = g_list_prepend (new_suffix->bits,
+						g_array_append_val (new_suffix->bits, *new_bit);
+					}
+				}
+			}
+			cur = ucl_obj_get_key (cur_rule, "ips");
+			if (cur != NULL && cur->type == UCL_OBJECT) {
+				it = NULL;
+				new_suffix->ips = g_hash_table_new (g_int_hash, g_int_equal);
+				rspamd_mempool_add_destructor (surbl_module_ctx->surbl_pool,
+						(rspamd_mempool_destruct_t)g_hash_table_unref,
+						new_suffix->ips);
+
+				while ((cur_bit =
+						ucl_iterate_object (cur, &it, true)) != NULL) {
+					if (ucl_object_key (cur_bit) != NULL) {
+						gchar *p;
+
+						ip_val = ucl_obj_tostring (cur_bit);
+						new_bit = rspamd_mempool_alloc (
+								surbl_module_ctx->surbl_pool,
+								sizeof (struct surbl_bit_item));
+
+						if (inet_pton (AF_INET, ip_val, &bit) != 1) {
+							msg_err ("cannot parse ip %s: %s", ip_val,
+									strerror (errno));
+							continue;
+						}
+
+						new_bit->bit = bit;
+						new_bit->symbol = rspamd_mempool_strdup (
+								surbl_module_ctx->surbl_pool,
+								ucl_object_key (cur_bit));
+						/* Convert to uppercase */
+						p = new_bit->symbol;
+						while (*p) {
+							*p = g_ascii_toupper (*p);
+							p ++;
+						}
+
+						msg_debug ("add new IP suffix: %d with symbol: %s",
+								(gint)new_bit->bit, new_bit->symbol);
+						g_hash_table_insert (new_suffix->ips, &new_bit->bit,
 								new_bit);
 					}
 				}
 			}
+
 			surbl_module_ctx->suffixes = g_list_prepend (
 				surbl_module_ctx->suffixes,
 				new_suffix);
@@ -507,11 +575,8 @@ surbl_module_config (struct rspamd_config *cfg)
 	cur_opt = surbl_module_ctx->suffixes;
 	while (cur_opt) {
 		cur_suffix = cur_opt->data;
-		if (cur_suffix->bits != NULL) {
+		if (cur_suffix->bits != NULL || cur_suffix->ips != NULL) {
 			register_bit_symbols (cfg, cur_suffix);
-			rspamd_mempool_add_destructor (surbl_module_ctx->surbl_pool,
-				(rspamd_mempool_destruct_t) g_list_free,
-				cur_suffix->bits);
 		}
 		cur_opt = g_list_next (cur_opt);
 	}
@@ -533,11 +598,6 @@ surbl_module_reconfig (struct rspamd_config *cfg)
 	surbl_module_ctx->tld2_file = NULL;
 	surbl_module_ctx->whitelist_file = NULL;
 	surbl_module_ctx->redirectors = NULL;
-	surbl_module_ctx->redirector_trie = rspamd_trie_create (TRUE);
-	surbl_module_ctx->redirector_ptrs = g_ptr_array_new ();
-
-	surbl_module_ctx->redirector_hosts = g_hash_table_new (rspamd_strcase_hash,
-			rspamd_strcase_equal);
 	surbl_module_ctx->whitelist = g_hash_table_new (rspamd_strcase_hash,
 			rspamd_strcase_equal);
 	/* Zero exceptions hashes */
@@ -556,13 +616,6 @@ surbl_module_reconfig (struct rspamd_config *cfg)
 		(rspamd_mempool_destruct_t) g_list_free,
 		surbl_module_ctx->suffixes);
 
-	rspamd_mempool_add_destructor (surbl_module_ctx->surbl_pool,
-		(rspamd_mempool_destruct_t) rspamd_trie_free,
-		surbl_module_ctx->redirector_trie);
-	rspamd_mempool_add_destructor (surbl_module_ctx->surbl_pool,
-		(rspamd_mempool_destruct_t) g_ptr_array_unref,
-		surbl_module_ctx->redirector_ptrs);
-
 	/* Perform configure */
 	return surbl_module_config (cfg);
 }
@@ -576,14 +629,14 @@ format_surbl_request (rspamd_mempool_t * pool,
 	gboolean append_suffix,
 	GError ** err,
 	gboolean forced,
-	GTree *tree,
+	GHashTable *tree,
 	struct rspamd_url *url)
 {
 	GHashTable *t;
 	gchar *result = NULL, *dots[MAX_LEVELS],
 		num_buf[sizeof("18446744073709551616")], *p;
 	gint len, slen, r, i, dots_num = 0, level = MAX_LEVELS;
-	gboolean is_numeric = TRUE;
+	gboolean is_numeric = TRUE, found_exception = FALSE;
 	guint64 ip_num;
 	rspamd_fstring_t f;
 
@@ -676,38 +729,47 @@ format_surbl_request (rspamd_mempool_t * pool,
 						(dots[dots_num - i - 1] - hostname->begin + 1);
 					if (g_hash_table_lookup (t, &f) != NULL) {
 						level = dots_num - i - 1;
+						found_exception = TRUE;
 						break;
 					}
 				}
 			}
 		}
-		if (level != MAX_LEVELS) {
-			if (level == 0) {
-				r = rspamd_snprintf (result,
-						len,
-						"%*s",
-						(gint)hostname->len,
-						hostname->begin);
+
+		if (found_exception || url->tldlen == 0) {
+			if (level != MAX_LEVELS) {
+				if (level == 0) {
+					r = rspamd_snprintf (result,
+							len,
+							"%V",
+							hostname);
+				}
+				else {
+					r = rspamd_snprintf (result, len, "%*s",
+							(gint)(hostname->len -
+									(dots[level - 1] - hostname->begin + 1)),
+									dots[level - 1] + 1);
+				}
 			}
-			else {
+			else if (dots_num >= 2) {
 				r = rspamd_snprintf (result, len, "%*s",
 						(gint)(hostname->len -
-						(dots[level - 1] - hostname->begin + 1)),
-						dots[level - 1] + 1);
+								(dots[dots_num - 2] - hostname->begin + 1)),
+								dots[dots_num - 2] + 1);
 			}
-		}
-		else if (dots_num >= 2) {
-			r = rspamd_snprintf (result, len, "%*s",
-					(gint)(hostname->len -
-					(dots[dots_num - 2] - hostname->begin + 1)),
-					dots[dots_num - 2] + 1);
+			else {
+				r = rspamd_snprintf (result,
+						len,
+						"%V",
+						hostname);
+			}
 		}
 		else {
 			r = rspamd_snprintf (result,
-					len,
-					"%*s",
-					(gint)hostname->len,
-					hostname->begin);
+						len,
+						"%*s",
+						url->tldlen,
+						url->tld);
 		}
 	}
 
@@ -715,25 +777,25 @@ format_surbl_request (rspamd_mempool_t * pool,
 	url->surbllen = r;
 
 	if (tree != NULL) {
-		if (g_tree_lookup (tree, result) != NULL) {
+		if (g_hash_table_lookup (tree, result) != NULL) {
 			msg_debug ("url %s is already registered", result);
-			g_set_error (err, SURBL_ERROR, /* error domain */
-				DUPLICATE_ERROR,        /* error code */
-				"URL is duplicated: %s",        /* error message format string */
+			g_set_error (err, SURBL_ERROR,
+				DUPLICATE_ERROR,
+				"URL is duplicated: %s",
 				result);
 			return NULL;
 		}
 		else {
-			g_tree_insert (tree, result, result);
+			g_hash_table_insert (tree, result, url);
 		}
 	}
 
 	if (!forced &&
 		g_hash_table_lookup (surbl_module_ctx->whitelist, result) != NULL) {
 		msg_debug ("url %s is whitelisted", result);
-		g_set_error (err, SURBL_ERROR, /* error domain */
-			WHITELIST_ERROR,                /* error code */
-			"URL is whitelisted: %s",               /* error message format string */
+		g_set_error (err, SURBL_ERROR,
+			WHITELIST_ERROR,
+			"URL is whitelisted: %s",
 			result);
 		return NULL;
 	}
@@ -755,7 +817,7 @@ format_surbl_request (rspamd_mempool_t * pool,
 
 static void
 make_surbl_requests (struct rspamd_url *url, struct rspamd_task *task,
-	struct suffix_item *suffix, gboolean forced, GTree *tree)
+	struct suffix_item *suffix, gboolean forced, GHashTable *tree)
 {
 	gchar *surbl_req;
 	rspamd_fstring_t f;
@@ -783,8 +845,8 @@ make_surbl_requests (struct rspamd_url *url, struct rspamd_task *task,
 	}
 	else if (err != NULL && err->code != WHITELIST_ERROR && err->code !=
 		DUPLICATE_ERROR) {
-		msg_info ("cannot format url string for surbl %s, %s", struri (
-				url), err->message);
+		msg_info ("cannot format url string for surbl %s, %e", struri (
+				url), err);
 		g_error_free (err);
 		return;
 	}
@@ -799,14 +861,22 @@ process_dns_results (struct rspamd_task *task,
 	gchar *url,
 	guint32 addr)
 {
-	GList *cur;
+	guint i;
 	struct surbl_bit_item *bit;
 
-	if (suffix->bits != NULL) {
-		cur = g_list_first (suffix->bits);
+	if (suffix->ips && g_hash_table_size (suffix->ips) > 0) {
 
-		while (cur) {
-			bit = (struct surbl_bit_item *)cur->data;
+		bit = g_hash_table_lookup (suffix->ips, &addr);
+		if (bit != NULL) {
+			rspamd_task_insert_result (task, bit->symbol, 1,
+				g_list_prepend (NULL,
+				rspamd_mempool_strdup (task->task_pool, url)));
+		}
+	}
+	else if (suffix->bits != NULL && suffix->bits->len > 0) {
+		for (i = 0; i < suffix->bits->len; i ++) {
+
+			bit = &g_array_index (suffix->bits, struct surbl_bit_item, i);
 			debug_task ("got result(%d) AND bit(%d): %d",
 				(gint)addr,
 				(gint)ntohl (bit->bit),
@@ -816,7 +886,6 @@ process_dns_results (struct rspamd_task *task,
 					g_list_prepend (NULL,
 					rspamd_mempool_strdup (task->task_pool, url)));
 			}
-			cur = g_list_next (cur);
 		}
 	}
 	else {
@@ -830,12 +899,8 @@ static void
 dns_callback (struct rdns_reply *reply, gpointer arg)
 {
 	struct dns_param *param = (struct dns_param *)arg;
-	struct rspamd_task *task;
 	struct rdns_reply_entry *elt;
 
-	task = param->task;
-
-	debug_task ("in surbl request callback");
 	/* If we have result from DNS server, this url exists in SURBL, so increase score */
 	if (reply->code == RDNS_RC_NOERROR && reply->entries) {
 		msg_info ("<%s> domain [%s] is in surbl %s", param->task->message_id,
@@ -847,7 +912,7 @@ dns_callback (struct rdns_reply *reply, gpointer arg)
 		}
 	}
 	else {
-		debug_task ("<%s> domain [%s] is not in surbl %s",
+		msg_debug ("<%s> domain [%s] is not in surbl %s",
 			param->task->message_id, param->host_resolve,
 			param->suffix->suffix);
 	}
@@ -858,145 +923,80 @@ free_redirector_session (void *ud)
 {
 	struct redirector_param *param = (struct redirector_param *)ud;
 
-	event_del (&param->ev);
-	g_string_free (param->buf, TRUE);
+	rspamd_http_connection_unref (param->conn);
 	close (param->sock);
 }
 
 static void
-redirector_callback (gint fd, short what, void *arg)
+surbl_redirector_error (struct rspamd_http_connection *conn,
+	GError *err)
 {
-	struct redirector_param *param = (struct redirector_param *)arg;
-	gchar url_buf[512];
+	struct redirector_param *param = (struct redirector_param *)conn->ud;
+
+	msg_err ("connection with http server %s terminated incorrectly: %e",
+		rspamd_inet_address_to_string (rspamd_upstream_addr (param->redirector)),
+		err);
+	rspamd_upstream_fail (param->redirector);
+	remove_normal_event (param->task->s, free_redirector_session,
+			param);
+}
+
+static int
+surbl_redirector_finish (struct rspamd_http_connection *conn,
+		struct rspamd_http_message *msg)
+{
+	struct redirector_param *param = (struct redirector_param *)conn->ud;
 	gint r, urllen;
-	struct timeval *timeout;
-	struct rspamd_task *task;
-	gchar *p, *c, *urlstr;
-	gboolean found = FALSE;
+	const GString *hdr;
+	gchar *urlstr;
 
-	task = param->task;
+	if (msg->code == 200) {
+		hdr = rspamd_http_message_find_header (msg, "Uri");
 
-	switch (param->state) {
-	case STATE_CONNECT:
-		/* We have write readiness after connect call, so reinit event */
-		if (what == EV_WRITE) {
-			timeout =
-				rspamd_mempool_alloc (param->task->task_pool,
-					sizeof (struct timeval));
-			double_to_tv (surbl_module_ctx->read_timeout, timeout);
-			event_del (&param->ev);
-			event_set (&param->ev,
-				param->sock,
-				EV_READ | EV_PERSIST,
-				redirector_callback,
-				(void *)param);
-			event_add (&param->ev, timeout);
-			r = rspamd_snprintf (url_buf,
-					sizeof (url_buf),
-					"GET %s HTTP/1.0\r\n\r\n",
-					struri (param->url));
-			if (write (param->sock, url_buf, r) == -1) {
-				msg_err ("write failed %s to %s", strerror (
-						errno), rspamd_upstream_name (param->redirector));
-				rspamd_upstream_fail (param->redirector);
-				remove_normal_event (param->task->s,
-					free_redirector_session,
-					param);
-				return;
-			}
-			param->state = STATE_READ;
-		}
-		else {
-			msg_info (
-				"<%s> connection to redirector %s timed out while waiting for write",
-				param->task->message_id,
-				rspamd_upstream_name (param->redirector));
-			rspamd_upstream_fail (param->redirector);
-			remove_normal_event (param->task->s, free_redirector_session,
-				param);
+		if (hdr != NULL) {
+			msg_info ("<%s> got reply from redirector: '%s' -> '%v'",
+					param->task->message_id,
+					struri (param->url),
+					hdr);
+			urllen = hdr->len;
+			urlstr = rspamd_mempool_alloc (param->task->task_pool,
+					urllen + 1);
+			rspamd_strlcpy (urlstr, hdr->str, urllen + 1);
+			r = rspamd_url_parse (param->url, urlstr, urllen,
+					param->task->task_pool);
 
-			return;
-		}
-		break;
-	case STATE_READ:
-		if (what == EV_READ) {
-			r = read (param->sock, url_buf, sizeof (url_buf) - 1);
-			if (r <= 0) {
-				msg_err ("read failed: %s from %s", strerror (
-						errno), rspamd_upstream_name (param->redirector));
-				rspamd_upstream_fail (param->redirector);
+			if (r == URI_ERRNO_OK) {
 				make_surbl_requests (param->url,
-					param->task,
-					param->suffix,
-					FALSE,
-					param->tree);
-				remove_normal_event (param->task->s,
-					free_redirector_session,
-					param);
-				return;
+						param->task,
+						param->suffix,
+						FALSE,
+						param->tree);
 			}
-
-			g_string_append_len (param->buf, url_buf, r);
-
-			if ((p = strstr (param->buf->str, "Uri: ")) != NULL) {
-				p += sizeof ("Uri: ") - 1;
-				c = p;
-				while (p++ < param->buf->str + param->buf->len - 1) {
-					if (*p == '\r' || *p == '\n') {
-						*p = '\0';
-						found = TRUE;
-						break;
-					}
-				}
-
-				if (found) {
-					debug_task ("<%s> got reply from redirector: '%s' -> '%s'",
-						param->task->message_id,
-						struri (param->url),
-						c);
-
-					urllen = strlen (c);
-					urlstr = rspamd_mempool_alloc (param->task->task_pool,
-							urllen + 1);
-					rspamd_strlcpy (urlstr, c, urllen + 1);
-					r = rspamd_url_parse (param->url, urlstr, urllen,
-							param->task->task_pool);
-
-					if (r == URI_ERRNO_OK) {
-						make_surbl_requests (param->url,
-							param->task,
-							param->suffix,
-							FALSE,
-							param->tree);
-					}
-				}
-			}
-			rspamd_upstream_ok (param->redirector);
-			remove_normal_event (param->task->s, free_redirector_session,
-				param);
 		}
-		else {
-			msg_info (
-				"<%s> reading redirector %s timed out, while waiting for read",
-				rspamd_upstream_name (param->redirector),
-				param->task->message_id);
-			rspamd_upstream_fail (param->redirector);
-			remove_normal_event (param->task->s, free_redirector_session,
-				param);
-		}
-		break;
 	}
+	else {
+		msg_info ("<%s> could not resolve '%s' on redirector",
+				param->task->message_id,
+				struri (param->url));
+	}
+
+	rspamd_upstream_ok (param->redirector);
+	remove_normal_event (param->task->s, free_redirector_session,
+			param);
+
+	return 0;
 }
 
 
 static void
 register_redirector_call (struct rspamd_url *url, struct rspamd_task *task,
-	struct suffix_item *suffix, const gchar *rule, GTree *tree)
+	struct suffix_item *suffix, const gchar *rule, GHashTable *tree)
 {
 	gint s = -1;
 	struct redirector_param *param;
 	struct timeval *timeout;
 	struct upstream *selected;
+	struct rspamd_http_message *msg;
 
 	selected = rspamd_upstream_get (surbl_module_ctx->redirectors,
 			RSPAMD_UPSTREAM_ROUND_ROBIN);
@@ -1019,20 +1019,26 @@ register_redirector_call (struct rspamd_url *url, struct rspamd_task *task,
 			sizeof (struct redirector_param));
 	param->url = url;
 	param->task = task;
-	param->state = STATE_CONNECT;
+	param->conn = rspamd_http_connection_new (NULL, surbl_redirector_error,
+			surbl_redirector_finish,
+			RSPAMD_HTTP_CLIENT_SIMPLE,
+			RSPAMD_HTTP_CLIENT, NULL);
+	msg = rspamd_http_new_message (HTTP_REQUEST);
+	g_string_assign (msg->url, struri (url));
 	param->sock = s;
 	param->suffix = suffix;
 	param->redirector = selected;
-	param->buf = g_string_sized_new (1024);
 	param->tree = tree;
 	timeout = rspamd_mempool_alloc (task->task_pool, sizeof (struct timeval));
-	double_to_tv (surbl_module_ctx->connect_timeout, timeout);
-	event_set (&param->ev, s, EV_WRITE, redirector_callback, (void *)param);
-	event_add (&param->ev, timeout);
+	double_to_tv (surbl_module_ctx->read_timeout, timeout);
+
 	register_async_event (task->s,
 		free_redirector_session,
 		param,
 		g_quark_from_static_string ("surbl"));
+
+	rspamd_http_connection_write_message (param->conn, msg, NULL,
+			NULL, param, s, timeout, task->ev_base);
 
 	msg_info (
 		"<%s> registered redirector call for %s to %s, according to rule: %s",
@@ -1042,60 +1048,62 @@ register_redirector_call (struct rspamd_url *url, struct rspamd_task *task,
 		rule);
 }
 
-static gboolean
+static gint
+surbl_redirector_trie_cb (int strnum, int textpos, void *context)
+{
+	struct rspamd_url *url = context;
+
+	if (textpos == (gint)url->hostlen) {
+		return strnum + 1;
+	}
+
+	return 0;
+}
+
+static void
 surbl_tree_url_callback (gpointer key, gpointer value, void *data)
 {
 	struct redirector_param *param = data;
 	struct rspamd_task *task;
 	struct rspamd_url *url = value;
-	gchar *red_domain;
-	const gchar *pos;
-	GRegex *re;
-	guint idx, len;
+	rspamd_regexp_t *re;
+	gint idx = 0, state = 0;
+	ac_trie_pat_t *pat;
 
 	task = param->task;
 	debug_task ("check url %s", struri (url));
 
 	if (url->hostlen <= 0) {
-		return FALSE;
+		return;
 	}
 
 	if (surbl_module_ctx->use_redirector) {
 		/* Search in trie */
-		if (surbl_module_ctx->redirector_trie &&
-			(pos =
-			rspamd_trie_lookup (surbl_module_ctx->redirector_trie, url->host,
-			url->hostlen, &idx)) != NULL &&
-			idx < surbl_module_ctx->redirector_ptrs->len) {
-			/* Get corresponding prefix */
-			red_domain = g_ptr_array_index (surbl_module_ctx->redirector_ptrs,
-					idx);
-			if (red_domain != NULL) {
-				len = strlen (red_domain);
-				/* First check that we have found domain at the end of host */
-				if (pos + len == url->host + url->hostlen &&
-					(pos == url->host || *(pos - 1) == '.')) {
-					/* Try to find corresponding regexp */
-					re = g_hash_table_lookup (
+		if (surbl_module_ctx->redirector_trie) {
+			idx = acism_lookup (surbl_module_ctx->redirector_trie, url->host,
+					url->hostlen, surbl_redirector_trie_cb, url, &state, true);
+			if (idx > 0) {
+				pat = &g_array_index (surbl_module_ctx->redirector_ptrs,
+						ac_trie_pat_t, idx - 1);
+				/* Try to find corresponding regexp */
+				re = g_hash_table_lookup (
 						surbl_module_ctx->redirector_hosts,
-						red_domain);
-					if (re != NULL &&
-						(re == NO_REGEXP ||
-						g_regex_match (re, url->string, 0, NULL))) {
-						/* If no regexp found or founded regexp matches url string register redirector's call */
-						if (surbl_module_ctx->redirector_symbol != NULL) {
-							rspamd_task_insert_result (param->task,
+						pat->ptr);
+				if (re == NULL || rspamd_regexp_search (re, url->string, 0,
+						NULL, NULL, TRUE)) {
+					if (surbl_module_ctx->redirector_symbol != NULL) {
+						rspamd_task_insert_result (param->task,
 								surbl_module_ctx->redirector_symbol,
 								1,
-								g_list_prepend (NULL, red_domain));
-						}
-						register_redirector_call (url,
+								g_list_prepend (NULL, rspamd_mempool_strdup
+										(task->task_pool, pat->ptr)));
+					}
+					register_redirector_call (url,
 							param->task,
 							param->suffix,
-							red_domain,
+							pat->ptr,
 							param->tree);
-						return FALSE;
-					}
+					return;
 				}
 			}
 		}
@@ -1106,8 +1114,6 @@ surbl_tree_url_callback (gpointer key, gpointer value, void *data)
 		make_surbl_requests (url, param->task, param->suffix, FALSE,
 			param->tree);
 	}
-
-	return FALSE;
 }
 
 static void
@@ -1118,108 +1124,9 @@ surbl_test_url (struct rspamd_task *task, void *user_data)
 
 	param.task = task;
 	param.suffix = suffix;
-	param.tree = g_tree_new ((GCompareFunc)strcmp);
+	param.tree = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
 	rspamd_mempool_add_destructor (task->task_pool,
-		(rspamd_mempool_destruct_t)g_tree_destroy,
+		(rspamd_mempool_destruct_t)g_hash_table_unref,
 		param.tree);
-	g_tree_foreach (task->urls, surbl_tree_url_callback, &param);
+	g_hash_table_foreach (task->urls, surbl_tree_url_callback, &param);
 }
-/*
- * Handlers of URLS command
- */
-#if 0
-struct urls_tree_cb_data {
-	gchar *buf;
-	gsize len;
-	gsize off;
-	struct rspamd_task *task;
-};
-
-static gboolean
-calculate_buflen_cb (gpointer key, gpointer value, gpointer cbdata)
-{
-	struct urls_tree_cb_data *cb = cbdata;
-	struct rspamd_url *url = value;
-
-	cb->len += strlen (struri (url)) + url->hostlen + sizeof (" <\"\">, ") - 1;
-
-	return FALSE;
-}
-
-static gboolean
-write_urls_buffer (gpointer key, gpointer value, gpointer cbdata)
-{
-	struct urls_tree_cb_data *cb = cbdata;
-	struct rspamd_url *url = value;
-	rspamd_fstring_t f;
-	gchar *urlstr;
-	gsize len;
-
-	f.begin = url->host;
-	f.len = url->hostlen;
-	if ((urlstr =
-		format_surbl_request (cb->task->task_pool, &f, NULL, FALSE, NULL,
-		FALSE)) != NULL) {
-		len = strlen (urlstr);
-		if (cb->off + len >= cb->len) {
-			msg_info (
-				"cannot write urls header completely, stripped reply at: %z",
-				cb->off);
-			return TRUE;
-		}
-		else {
-			cb->off += rspamd_snprintf (cb->buf + cb->off,
-					cb->len - cb->off,
-					" %s <\"%s\">,",
-					urlstr,
-					struri (url));
-		}
-	}
-
-	return FALSE;
-}
-
-
-static gboolean
-urls_command_handler (struct rspamd_task *task)
-{
-	struct urls_tree_cb_data cb;
-
-	/* First calculate buffer length */
-	cb.len = sizeof (RSPAMD_REPLY_BANNER "/1.0 0 " SPAMD_OK CRLF "Urls: " CRLF);
-	cb.off = 0;
-	g_tree_foreach (task->urls, calculate_buflen_cb, &cb);
-
-	cb.buf = rspamd_mempool_alloc (task->task_pool, cb.len * sizeof (gchar));
-	cb.off += rspamd_snprintf (cb.buf + cb.off,
-			cb.len - cb.off,
-			"%s/%s 0 %s" CRLF "Urls:",
-			(task->proto == SPAMC_PROTO) ? SPAMD_REPLY_BANNER : RSPAMD_REPLY_BANNER,
-			"1.3",
-			SPAMD_OK);
-	cb.task = task;
-
-	/* Write urls to buffer */
-	g_tree_foreach (task->urls, write_urls_buffer, &cb);
-
-	/* Strip last ',' */
-	if (cb.buf[cb.off - 1] == ',') {
-		cb.buf[--cb.off] = '\0';
-	}
-	/* Write result */
-	if (!rspamd_dispatcher_write (task->dispatcher, cb.buf, cb.off, FALSE,
-		TRUE)) {
-		return FALSE;
-	}
-	if (!rspamd_dispatcher_write (task->dispatcher, CRLF, sizeof (CRLF) - 1,
-		FALSE, TRUE)) {
-		return FALSE;
-	}
-	task->state = STATE_REPLY;
-
-	return TRUE;
-}
-#endif
-/*
- * vi:ts=4
- */

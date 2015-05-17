@@ -36,7 +36,7 @@
 
 static gchar *connect_str = "localhost";
 static gchar *password = NULL;
-static gchar *ip = "127.0.0.1";
+static gchar *ip = NULL;
 static gchar *from = NULL;
 static gchar *deliver_to = NULL;
 static gchar *rcpt = NULL;
@@ -57,6 +57,7 @@ static gboolean json = FALSE;
 static gboolean headers = FALSE;
 static gboolean raw = FALSE;
 static gboolean extended_urls = FALSE;
+static gchar *key = NULL;
 
 static GOptionEntry entries[] =
 {
@@ -106,6 +107,8 @@ static GOptionEntry entries[] =
 	  "Maximum count of parallel requests to rspamd", NULL },
 	{ "extended-urls", 0, 0, G_OPTION_ARG_NONE, &extended_urls,
 	   "Output urls in extended format", NULL },
+	{ "key", 0, 0, G_OPTION_ARG_STRING, &key,
+	   "Use specified pubkey to encrypt request", NULL },
 	{ NULL, 0, 0, G_OPTION_ARG_NONE, NULL, NULL, NULL }
 };
 
@@ -444,7 +447,7 @@ rspamc_metric_output (const ucl_object_t *obj)
 {
 	ucl_object_iter_t it = NULL;
 	const ucl_object_t *cur;
-	gdouble score, required_score;
+	gdouble score = 0, required_score = 0;
 	gint got_scores = 0;
 
 	rspamd_fprintf (stdout, "[Metric: %s]\n", ucl_object_key (obj));
@@ -564,9 +567,8 @@ rspamc_uptime_output (ucl_object_t *obj)
 			hours = seconds / 3600;
 			minutes = seconds / 60 - hours * 60;
 			seconds -= hours * 3600 + minutes * 60;
-			rspamd_printf ("%L hour%s %L minute%s %L second%s\n", hours,
-				hours > 1 ? "s" : "", minutes,
-				minutes > 1 ? "s" : "",
+			rspamd_printf ("%L hour %L minute%s %L second%s\n", hours,
+				minutes, minutes > 1 ? "s" : "",
 				seconds, seconds > 1 ? "s" : "");
 		}
 	}
@@ -675,9 +677,12 @@ rspamc_stat_statfile (const ucl_object_t *obj, GString *out)
 	else {
 		rspamd_printf_gstring (out, "Statfile: %s ", symbol);
 	}
-	rspamd_printf_gstring (out, "length: %HL; free blocks: %HL; total blocks: %HL; "
-		"free: %.2f%%\n", size, blocks - used_blocks, blocks,
-		(blocks - used_blocks) * 100.0 / (gdouble)blocks);
+
+	if (blocks != 0) {
+		rspamd_printf_gstring (out, "length: %HL; free blocks: %HL; total blocks: %HL; "
+				"free: %.2f%%; learned: %L\n", size, blocks - used_blocks, blocks,
+				(blocks - used_blocks) * 100.0 / (gdouble)blocks, version);
+	}
 }
 
 static void
@@ -725,12 +730,40 @@ rspamc_stat_output (ucl_object_t *obj)
 	rspamd_printf_gstring (out, "Fuzzy hashes expired: %L\n",
 		ucl_object_toint (ucl_object_find_key (obj, "fuzzy_expired")));
 
+	st = ucl_object_find_key (obj, "fuzzy_checked");
+	if (st != NULL && ucl_object_type (st) == UCL_ARRAY) {
+		rspamd_printf_gstring (out, "Fuzzy hashes checked: ");
+		iter = NULL;
+
+		while ((cur = ucl_iterate_object (st, &iter, true)) != NULL) {
+			rspamd_printf_gstring (out, "%hL ", ucl_object_toint (cur));
+		}
+
+		rspamd_printf_gstring (out, "\n");
+	}
+
+	st = ucl_object_find_key (obj, "fuzzy_found");
+	if (st != NULL && ucl_object_type (st) == UCL_ARRAY) {
+		rspamd_printf_gstring (out, "Fuzzy hashes found: ");
+		iter = NULL;
+
+		while ((cur = ucl_iterate_object (st, &iter, true)) != NULL) {
+			rspamd_printf_gstring (out, "%hL ", ucl_object_toint (cur));
+		}
+
+		rspamd_printf_gstring (out, "\n");
+	}
+
 	st = ucl_object_find_key (obj, "statfiles");
 	if (st != NULL && ucl_object_type (st) == UCL_ARRAY) {
+		iter = NULL;
+
 		while ((cur = ucl_iterate_object (st, &iter, true)) != NULL) {
 			rspamc_stat_statfile (cur, out);
 		}
 	}
+	rspamd_printf_gstring (out, "Total learns: %L\n",
+			ucl_object_toint (ucl_object_find_key (obj, "total_learns")));
 
 	rspamd_fprintf (stdout, "%v", out);
 }
@@ -823,7 +856,7 @@ rspamc_process_input (struct event_base *ev_base, struct rspamc_command *cmd,
 		port = 0;
 	}
 
-	conn = rspamd_client_init (ev_base, connectv[0], port, timeout);
+	conn = rspamd_client_init (ev_base, connectv[0], port, timeout, key);
 	g_strfreev (connectv);
 
 	if (conn != NULL) {

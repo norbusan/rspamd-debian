@@ -24,6 +24,7 @@
 #include "rspamdclient.h"
 #include "util.h"
 #include "http.h"
+#include "keypairs_cache.h"
 
 #ifdef HAVE_FETCH_H
 #include <fetch.h>
@@ -39,11 +40,14 @@ struct rspamd_client_request;
 struct rspamd_client_connection {
 	gint fd;
 	GString *server_name;
+	gpointer key;
+	gpointer keypair;
 	struct event_base *ev_base;
 	struct timeval timeout;
 	struct rspamd_http_connection *http_conn;
 	gboolean req_sent;
 	struct rspamd_client_request *req;
+	struct rspamd_keypair_cache *keys_cache;
 };
 
 struct rspamd_client_request {
@@ -109,7 +113,7 @@ rspamd_client_finish_handler (struct rspamd_http_connection *conn,
 					msg->status ? msg->status->str : "unknown error");
 			req->cb (c, msg, c->server_name->str, NULL, req->ud, err);
 			g_error_free (err);
-			return -1;
+			return 0;
 		}
 
 		parser = ucl_parser_new (0);
@@ -119,7 +123,7 @@ rspamd_client_finish_handler (struct rspamd_http_connection *conn,
 			ucl_parser_free (parser);
 			req->cb (c, msg, c->server_name->str, NULL, req->ud, err);
 			g_error_free (err);
-			return -1;
+			return 0;
 		}
 
 		req->cb (c, msg, c->server_name->str, ucl_parser_get_object (
@@ -127,12 +131,12 @@ rspamd_client_finish_handler (struct rspamd_http_connection *conn,
 		ucl_parser_free (parser);
 	}
 
-	return -1;
+	return 0;
 }
 
 struct rspamd_client_connection *
 rspamd_client_init (struct event_base *ev_base, const gchar *name,
-	guint16 port, gdouble timeout)
+	guint16 port, gdouble timeout, const gchar *key)
 {
 	struct rspamd_client_connection *conn;
 	gint fd;
@@ -142,21 +146,36 @@ rspamd_client_init (struct event_base *ev_base, const gchar *name,
 		return NULL;
 	}
 
-	conn = g_slice_alloc (sizeof (struct rspamd_client_connection));
+	conn = g_slice_alloc0 (sizeof (struct rspamd_client_connection));
 	conn->ev_base = ev_base;
 	conn->fd = fd;
 	conn->req_sent = FALSE;
+	conn->keys_cache = rspamd_keypair_cache_new (32);
 	conn->http_conn = rspamd_http_connection_new (rspamd_client_body_handler,
 			rspamd_client_error_handler,
 			rspamd_client_finish_handler,
 			0,
-			RSPAMD_HTTP_CLIENT);
+			RSPAMD_HTTP_CLIENT,
+			conn->keys_cache);
+
 	conn->server_name = g_string_new (name);
 	if (port != 0) {
 		rspamd_printf_gstring (conn->server_name, ":%d", (int)port);
 	}
 
 	double_to_tv (timeout, &conn->timeout);
+
+	if (key) {
+		conn->key = rspamd_http_connection_make_peer_key (key);
+		if (conn->key) {
+			conn->keypair = rspamd_http_connection_gen_key ();
+			rspamd_http_connection_set_key (conn->http_conn, conn->keypair);
+		}
+		else {
+			rspamd_client_destroy (conn);
+			return NULL;
+		}
+	}
 
 	return conn;
 }
@@ -178,6 +197,10 @@ rspamd_client_command (struct rspamd_client_connection *conn,
 	req->ud = ud;
 
 	req->msg = rspamd_http_new_message (HTTP_REQUEST);
+	if (conn->key) {
+		req->msg->peer_key = rspamd_http_connection_key_ref (conn->key);
+	}
+
 	if (in != NULL) {
 		/* Read input stream */
 		req->msg->body = g_string_sized_new (BUFSIZ);
@@ -233,6 +256,12 @@ rspamd_client_destroy (struct rspamd_client_connection *conn)
 			g_slice_free1 (sizeof (struct rspamd_client_request), conn->req);
 		}
 		close (conn->fd);
+		if (conn->key) {
+			rspamd_http_connection_key_unref (conn->key);
+		}
+		if (conn->keypair) {
+			rspamd_http_connection_key_unref (conn->keypair);
+		}
 		g_string_free (conn->server_name, TRUE);
 		g_slice_free1 (sizeof (struct rspamd_client_connection), conn);
 	}

@@ -34,7 +34,6 @@
 
 #include "config.h"
 #include "libmime/message.h"
-#include "libmime/expressions.h"
 #include "libserver/spf.h"
 #include "libutil/hash.h"
 #include "libutil/map.h"
@@ -48,7 +47,7 @@
 #define DEFAULT_CACHE_MAXAGE 86400
 
 struct spf_ctx {
-	gint (*filter) (struct rspamd_task * task);
+	struct module_ctx ctx;
 	const gchar *symbol_fail;
 	const gchar *symbol_softfail;
 	const gchar *symbol_neutral;
@@ -62,8 +61,6 @@ struct spf_ctx {
 static struct spf_ctx *spf_module_ctx = NULL;
 
 static void spf_symbol_callback (struct rspamd_task *task, void *unused);
-static GList * spf_record_copy (GList *addrs);
-static void spf_record_destroy (gpointer list);
 
 /* Initialization */
 gint spf_module_init (struct rspamd_config *cfg, struct module_ctx **ctx);
@@ -166,8 +163,8 @@ spf_module_config (struct rspamd_config *cfg)
 	spf_module_ctx->spf_hash = rspamd_lru_hash_new (
 			cache_size,
 			cache_expire,
-			g_free,
-			spf_record_destroy);
+			NULL,
+			(GDestroyNotify)spf_record_unref);
 
 	return res;
 }
@@ -188,63 +185,54 @@ static gboolean
 spf_check_element (struct spf_addr *addr, struct rspamd_task *task)
 {
 	gboolean res = FALSE;
-	guint8 *s, *d, t;
+	const guint8 *s, *d;
 	gchar *spf_result;
+	guint af, mask, bmask, addrlen;
 	const gchar *spf_message, *spf_symbol;
-	guint nbits, addrlen;
-	struct in_addr in4s, in4d;
-	struct in6_addr in6s, in6d;
 	GList *opts = NULL;
 
+	if (task->from_addr == NULL) {
+		return FALSE;
+	}
+
+	af = rspamd_inet_address_get_af (task->from_addr);
 	/* Basic comparing algorithm */
-	if ((addr->data.normal.ipv6 && task->from_addr.af == AF_INET6) ||
-		(!addr->data.normal.ipv6 && task->from_addr.af == AF_INET)) {
-		if (addr->data.normal.ipv6) {
-			addrlen = sizeof (struct in6_addr);
-			memcpy (&in6s, &addr->data.normal.d.in6,
-				sizeof (struct in6_addr));
-			memcpy (&in6d, &task->from_addr.addr.s6.sin6_addr,
-				sizeof (struct in6_addr));
-			s = (guint8 *)&in6s;
-			d = (guint8 *)&in6d;
+	if (((addr->flags & RSPAMD_SPF_FLAG_IPV6) && af == AF_INET6) ||
+		((addr->flags & RSPAMD_SPF_FLAG_IPV4) && af == AF_INET)) {
+		d = rspamd_inet_address_get_radix_key (task->from_addr, &addrlen);
+
+		if (af == AF_INET6) {
+			s = (const guint8 *)addr->addr6;
+			mask = addr->m.dual.mask_v6;
 		}
 		else {
-			addrlen = sizeof (struct in_addr);
-			memcpy (&in4s, &addr->data.normal.d.in4,
-				sizeof (struct in_addr));
-			memcpy (&in4d, &task->from_addr.addr.s4.sin_addr,
-				sizeof (struct in_addr));
-			s = (guint8 *)&in4s;
-			d = (guint8 *)&in4d;
+			s = (const guint8 *)addr->addr4;
+			mask = addr->m.dual.mask_v4;
 		}
-		/* Move pointers to the less significant byte */
-		t = 0x1;
-		s += addrlen - 1;
-		d += addrlen - 1;
-		/* TODO: improve this cycle by masking by words */
-		for (nbits = 0;
-			nbits < addrlen * CHAR_BIT - addr->data.normal.mask;
-			nbits++) {
-			/* Skip bits from the beginning as we know that data is in network byte order */
-			if (nbits != 0 && nbits % 8 == 0) {
-				/* Move pointer to the next byte */
-				s--;
-				d--;
-				t = 0x1;
+
+		/* Compare the first bytes */
+		bmask = mask / CHAR_BIT;
+		if (bmask > addrlen) {
+			msg_info ("bad mask length: %d", mask);
+		}
+		else if (memcmp (s, d, bmask) == 0) {
+
+			if (bmask * CHAR_BIT != mask) {
+				/* Compare the remaining bits */
+				s += bmask;
+				d += bmask;
+				mask = (0xff << (CHAR_BIT - (mask - bmask * 8))) & 0xff;
+				if ((*s & mask) == (*d & mask)) {
+					res = TRUE;
+				}
 			}
-			*s |= t;
-			*d |= t;
-			t <<= 1;
-		}
-		if (addr->data.normal.ipv6) {
-			res = memcmp (&in6d, &in6s, sizeof (struct in6_addr)) == 0;
-		}
-		else {
-			res = memcmp (&in4d, &in4s, sizeof (struct in_addr)) == 0;
+			else {
+				res = TRUE;
+			}
 		}
 	}
 	else {
-		if (addr->data.normal.addr_any) {
+		if (addr->flags & RSPAMD_SPF_FLAG_ANY) {
 			res = TRUE;
 		}
 		else {
@@ -284,49 +272,40 @@ spf_check_element (struct spf_addr *addr, struct rspamd_task *task)
 	return FALSE;
 }
 
-static gboolean
-spf_check_list (GList *list, struct rspamd_task *task)
+static void
+spf_check_list (struct spf_resolved *rec, struct rspamd_task *task)
 {
-	GList *cur;
+	guint i;
 	struct spf_addr *addr;
 
-	cur = list;
-
-	while (cur) {
-		addr = cur->data;
-		if (addr->is_list) {
-			/* Recursive call */
-			if (spf_check_list (addr->data.list, task)) {
-				return TRUE;
-			}
+	for (i = 0; i < rec->elts->len; i ++) {
+		addr = &g_array_index (rec->elts, struct spf_addr, i);
+		if (spf_check_element (addr, task)) {
+			break;
 		}
-		else {
-			if (spf_check_element (addr, task)) {
-				return TRUE;
-			}
-		}
-		cur = g_list_next (cur);
 	}
-
-	return FALSE;
 }
 
 static void
-spf_plugin_callback (struct spf_record *record, struct rspamd_task *task)
+spf_plugin_callback (struct spf_resolved *record, struct rspamd_task *task)
 {
-	GList *l;
+	struct spf_resolved *l;
 
-	if (record && record->addrs && record->sender_domain) {
+	if (record && record->elts->len > 0 && record->domain) {
 
 		if ((l =
 			rspamd_lru_hash_lookup (spf_module_ctx->spf_hash,
-			record->sender_domain, task->tv.tv_sec)) == NULL) {
-			l = spf_record_copy (record->addrs);
+			record->domain, task->tv.tv_sec)) == NULL) {
+
+			l = spf_record_ref (record);
 			rspamd_lru_hash_insert (spf_module_ctx->spf_hash,
-				g_strdup (record->sender_domain),
-				l, task->tv.tv_sec, record->ttl);
+				record->domain, l,
+				task->tv.tv_sec, record->ttl);
+
 		}
+		spf_record_ref (l);
 		spf_check_list (l, task);
+		spf_record_unref (l);
 	}
 }
 
@@ -334,80 +313,23 @@ spf_plugin_callback (struct spf_record *record, struct rspamd_task *task)
 static void
 spf_symbol_callback (struct rspamd_task *task, void *unused)
 {
-	gchar *domain;
-	GList *l;
+	const gchar *domain;
+	struct spf_resolved *l;
 
 	if (radix_find_compressed_addr (spf_module_ctx->whitelist_ip,
-			&task->from_addr) == RADIX_NO_VALUE) {
+			task->from_addr) == RADIX_NO_VALUE) {
 		domain = get_spf_domain (task);
 		if (domain) {
 			if ((l =
 				rspamd_lru_hash_lookup (spf_module_ctx->spf_hash, domain,
 				task->tv.tv_sec)) != NULL) {
+				spf_record_ref (l);
 				spf_check_list (l, task);
+				spf_record_unref (l);
 			}
 			else if (!resolve_spf (task, spf_plugin_callback)) {
 				msg_info ("cannot make spf request for [%s]", task->message_id);
 			}
 		}
 	}
-}
-
-/*
- * Make a deep copy of list, note copy is REVERSED
- */
-static GList *
-spf_record_copy (GList *addrs)
-{
-	GList *cur, *newl = NULL;
-	struct spf_addr *addr, *newa;
-
-	cur = addrs;
-
-	while (cur) {
-		addr = cur->data;
-		newa = g_malloc (sizeof (struct spf_addr));
-		memcpy (newa, addr, sizeof (struct spf_addr));
-		if (addr->is_list) {
-			/* Recursive call */
-			newa->data.list = spf_record_copy (addr->data.list);
-		}
-		else {
-			if (addr->spf_string) {
-				newa->spf_string = g_strdup (addr->spf_string);
-			}
-		}
-		newl = g_list_prepend (newl, newa);
-		cur = g_list_next (cur);
-	}
-
-	return newl;
-}
-
-/*
- * Destroy allocated spf list
- */
-
-
-static void
-spf_record_destroy (gpointer list)
-{
-	GList *cur = list;
-	struct spf_addr *addr;
-
-	while (cur) {
-		addr = cur->data;
-		if (addr->is_list) {
-			spf_record_destroy (addr->data.list);
-		}
-		else {
-			if (addr->spf_string) {
-				g_free (addr->spf_string);
-			}
-		}
-		g_free (addr);
-		cur = g_list_next (cur);
-	}
-
-	g_list_free (list);
 }

@@ -13,7 +13,6 @@
 #include "libutil/logger.h"
 #include "libutil/http.h"
 #include "libutil/upstream.h"
-#include "libserver/statfile.h"
 #include "libserver/url.h"
 #include "libserver/protocol.h"
 #include "libserver/buffer.h"
@@ -70,6 +69,13 @@ struct rspamd_worker_signal_handler {
 	void *handler_data;
 };
 
+struct rspamd_controller_pbkdf {
+	gint id;
+	guint rounds;
+	gsize salt_len;
+	gsize key_len;
+};
+
 
 /**
  * Module
@@ -78,11 +84,21 @@ struct rspamd_worker_signal_handler {
 struct pidfh;
 struct rspamd_config;
 struct tokenizer;
-struct classifier;
+struct rspamd_stat_classifier;
 struct rspamd_classifier_config;
 struct mime_part;
 struct rspamd_dns_resolver;
 struct rspamd_task;
+
+/**
+ * The epoch of the fuzzy client
+ */
+enum rspamd_fuzzy_epoch {
+	RSPAMD_FUZZY_EPOCH6 = 0, /**< pre 0.6.x */
+	RSPAMD_FUZZY_EPOCH8,     /**< 0.8 till 0.9 */
+	RSPAMD_FUZZY_EPOCH9,     /**< 0.9 + */
+	RSPAMD_FUZZY_EPOCH_MAX
+};
 
 /**
  * Server statistics
@@ -95,6 +111,8 @@ struct rspamd_stat {
 	guint messages_learned;                             /**< messages learned								*/
 	guint fuzzy_hashes;                                 /**< number of fuzzy hashes stored					*/
 	guint fuzzy_hashes_expired;                         /**< number of fuzzy hashes expired					*/
+	guint64 fuzzy_hashes_checked[RSPAMD_FUZZY_EPOCH_MAX]; /**< ammount of check requests for each epoch		*/
+	guint64 fuzzy_hashes_found[RSPAMD_FUZZY_EPOCH_MAX]; /**< amount of hashes found by epoch				*/
 };
 
 /**
@@ -110,7 +128,6 @@ struct rspamd_main {
 	struct rspamd_stat *stat;                                   /**< pointer to statistics							*/
 
 	rspamd_mempool_t *server_pool;                                  /**< server's memory pool							*/
-	statfile_pool_t *statfile_pool;                             /**< shared statfiles pool							*/
 	GHashTable *workers;                                        /**< workers pool indexed by pid                    */
 	rspamd_logger_t *logger;
 	uid_t workers_uid;                                          /**< worker's uid running to                        */
@@ -181,6 +198,8 @@ struct controller_session {
  */
 struct module_ctx {
 	gint (*filter)(struct rspamd_task *task);                   /**< pointer to headers process function			*/
+	module_t *mod;												/**< module pointer									*/
+	gboolean enabled;											/**< true if module is enabled in configuration		*/
 };
 
 /**

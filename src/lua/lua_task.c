@@ -25,18 +25,12 @@
 
 #include "lua_common.h"
 #include "message.h"
-#include "expressions.h"
 #include "protocol.h"
 #include "filter.h"
 #include "dns.h"
 #include "util.h"
 #include "images.h"
 #include "cfg_file.h"
-#include "statfile.h"
-#include "tokenizers/tokenizers.h"
-#include "classifiers/classifiers.h"
-#include "binlog.h"
-#include "statfile_sync.h"
 #include "diff.h"
 
 /***
@@ -169,7 +163,7 @@ LUA_FUNCTION_DEF (task, get_urls);
  */
 LUA_FUNCTION_DEF (task, get_content);
 /***
- * @method task:get_urls()
+ * @method task:get_emails()
  * Get all email addresses found in a message.
  * @return {table rspamd_url} list of all email addresses found
  */
@@ -252,6 +246,11 @@ LUA_FUNCTION_DEF (task, get_raw_headers);
  */
 LUA_FUNCTION_DEF (task, get_received_headers);
 /***
+ * @method task:get_queue_id()
+ * Returns queue ID of the message being processed.
+ */
+LUA_FUNCTION_DEF (task, get_queue_id);
+/***
  * @method task:get_resolver()
  * Returns ready to use rspamd_resolver object suitable for making asynchronous DNS requests.
  * @return {rspamd_resolver} resolver object associated with the task's session
@@ -278,15 +277,7 @@ LUA_FUNCTION_DEF (task, get_resolver);
  * Increment number of DNS requests for the task. Is used just for logging purposes.
  */
 LUA_FUNCTION_DEF (task, inc_dns_req);
-/***
- * @method task:call_rspamd_function(function[, param, param...])
- * Calls rspamd expression function `func` with the specified parameters.
- * It returns the boolean result of function invocation.
- * @param {string} function name of internal or registered lua function to call
- * @param {list of strings} params parameters for a function
- * @return {bool} true or false returned by expression function
- */
-LUA_FUNCTION_DEF (task, call_rspamd_function);
+
 /***
  * @method task:get_recipients([type])
  * Return SMTP or MIME recipients for a task. This function returns list of internet addresses each one is a table with the following structure:
@@ -363,6 +354,7 @@ LUA_FUNCTION_DEF (task, get_images);
  * - `metric` - name of metric
  * - `score` - score of a symbol in that metric
  * - `options` - a table of strings representing options of a symbol
+ * - `group` - a group of symbol (or 'ungrouped')
  * @param {string} name symbol's name
  * @return {list of tables} list of tables or nil if symbol was not found in any metric
  */
@@ -435,6 +427,22 @@ LUA_FUNCTION_DEF (task, learn);
  */
 LUA_FUNCTION_DEF (task, set_settings);
 
+/***
+ * @method task:cache_get(str)
+ * Return cached value for the specified string. Returns value less than 0 if str is not in the cache
+ * @param {string} str key to get from the cache
+ * @return {number} value of key or value less than 0 if a key has not been found
+ */
+LUA_FUNCTION_DEF (task, cache_get);
+
+/***
+ * @method task:cache_set(str, value)
+ * Write new or rewrite existing value of the cached key 'str'
+ * @param {string} str key to set in the cache
+ * @return {number} previous value of the key or value less than zero
+ */
+LUA_FUNCTION_DEF (task, cache_set);
+
 static const struct luaL_reg tasklib_f[] = {
 	LUA_INTERFACE_DEF (task, create_empty),
 	LUA_INTERFACE_DEF (task, create_from_buffer),
@@ -462,9 +470,9 @@ static const struct luaL_reg tasklib_m[] = {
 	LUA_INTERFACE_DEF (task, get_header_full),
 	LUA_INTERFACE_DEF (task, get_raw_headers),
 	LUA_INTERFACE_DEF (task, get_received_headers),
+	LUA_INTERFACE_DEF (task, get_queue_id),
 	LUA_INTERFACE_DEF (task, get_resolver),
 	LUA_INTERFACE_DEF (task, inc_dns_req),
-	LUA_INTERFACE_DEF (task, call_rspamd_function),
 	LUA_INTERFACE_DEF (task, get_recipients),
 	LUA_INTERFACE_DEF (task, get_from),
 	LUA_INTERFACE_DEF (task, get_user),
@@ -486,152 +494,11 @@ static const struct luaL_reg tasklib_m[] = {
 	LUA_INTERFACE_DEF (task, get_metric_action),
 	LUA_INTERFACE_DEF (task, learn),
 	LUA_INTERFACE_DEF (task, set_settings),
+	LUA_INTERFACE_DEF (task, cache_get),
+	LUA_INTERFACE_DEF (task, cache_set),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
 };
-
-/* Textpart methods */
-/***
- * @module rspamd_textpart
- * This module provides access to text parts found in a message
- */
-
-/***
- * @method textpart:get_content()
- * Get parsed content of a part
- * @return {string} text contained in the part
- */
-LUA_FUNCTION_DEF (textpart, get_content);
-/***
- * @method textpart:get_length()
- * Get length of the text inside the part
- * @return {integer} the lenght of text part in bytes
- */
-LUA_FUNCTION_DEF (textpart, get_length);
-/***
- * @method textpart:is_empty()
- * Check whether a part is empty
- * @return {bool} `true` if a part is empty
- */
-LUA_FUNCTION_DEF (textpart, is_empty);
-/***
- * @method textpart:is_html()
- * Check whether a part contains HTML
- * @return {bool} `true` if a part html part
- */
-LUA_FUNCTION_DEF (textpart, is_html);
-/***
- * @method textpart:get_fuzzy()
- * Get fuzzy hash for a message
- * @return {string} fuzzy hash of the part
- */
-LUA_FUNCTION_DEF (textpart, get_fuzzy);
-/***
- * @method textpart:get_language()
- * Return short language code detected for the part
- * @return {string} language code for the part or nil if language has not been detected
- */
-LUA_FUNCTION_DEF (textpart, get_language);
-/***
- * @method textpart:compare_distance(part)
- * Compares two parts
- * @param {textpart} another text part
- * @return {number} similarity rate from 0.0 (different parts) to 1.0 (equal parts)
- */
-LUA_FUNCTION_DEF (textpart, compare_distance);
-
-static const struct luaL_reg textpartlib_m[] = {
-	LUA_INTERFACE_DEF (textpart, get_content),
-	LUA_INTERFACE_DEF (textpart, get_length),
-	LUA_INTERFACE_DEF (textpart, is_empty),
-	LUA_INTERFACE_DEF (textpart, is_html),
-	LUA_INTERFACE_DEF (textpart, get_fuzzy),
-	LUA_INTERFACE_DEF (textpart, get_language),
-	LUA_INTERFACE_DEF (textpart, compare_distance),
-	{"__tostring", rspamd_lua_class_tostring},
-	{NULL, NULL}
-};
-
-/* Mimepart methods */
-
-/***
- * @module rspamd_mimepart
- * This module provides access to mime parts found in a message
-@example
-rspamd_config.MISSING_CONTENT_TYPE = function(task)
-	local parts = task:get_parts()
-	if parts and table.maxn(parts) > 1 then
-		-- We have more than one part
-		for _,p in ipairs(parts) do
-			local ct = p:get_header('Content-Type')
-			-- And some parts have no Content-Type header
-			if not ct then
-				return true
-			end
-		end
-	end
-	return false
-end
- */
-
-/***
- * @method mimepart:get_header(name[, case_sensitive])
- * Get decoded value of a header specified with optional case_sensitive flag.
- * By default headers are searched in caseless matter.
- * @param {string} name name of header to get
- * @param {boolean} case_sensitive case sensitiveness flag to search for a header
- * @return {string} decoded value of a header
- */
-LUA_FUNCTION_DEF (mimepart, get_header);
-/***
- * @method mimepart:get_header_raw(name[, case_sensitive])
- * Get raw value of a header specified with optional case_sensitive flag.
- * By default headers are searched in caseless matter.
- * @param {string} name name of header to get
- * @param {boolean} case_sensitive case sensitiveness flag to search for a header
- * @return {string} raw value of a header
- */
-LUA_FUNCTION_DEF (mimepart, get_header_raw);
-/***
- * @method mimepart:get_header_full(name[, case_sensitive])
- * Get raw value of a header specified with optional case_sensitive flag.
- * By default headers are searched in caseless matter. This method returns more
- * information about the header as a list of tables with the following structure:
- *
- * - `name` - name of a header
- * - `value` - raw value of a header
- * - `decoded` - decoded value of a header
- * - `tab_separated` - `true` if a header and a value are separated by `tab` character
- * - `empty_separator` - `true` if there are no separator between a header and a value
- * @param {string} name name of header to get
- * @param {boolean} case_sensitive case sensitiveness flag to search for a header
- * @return {list of tables} all values of a header as specified above
-@example
-function check_header_delimiter_tab(task, header_name)
-	for _,rh in ipairs(task:get_header_full(header_name)) do
-		if rh['tab_separated'] then return true end
-	end
-	return false
-end
- */
-LUA_FUNCTION_DEF (mimepart, get_header_full);
-LUA_FUNCTION_DEF (mimepart, get_content);
-LUA_FUNCTION_DEF (mimepart, get_length);
-LUA_FUNCTION_DEF (mimepart, get_type);
-LUA_FUNCTION_DEF (mimepart, get_filename);
-
-static const struct luaL_reg mimepartlib_m[] = {
-	LUA_INTERFACE_DEF (mimepart, get_content),
-	LUA_INTERFACE_DEF (mimepart, get_length),
-	LUA_INTERFACE_DEF (mimepart, get_type),
-	LUA_INTERFACE_DEF (mimepart, get_filename),
-	LUA_INTERFACE_DEF (mimepart, get_header),
-	LUA_INTERFACE_DEF (mimepart, get_header_raw),
-	LUA_INTERFACE_DEF (mimepart, get_header_full),
-	{"__tostring", rspamd_lua_class_tostring},
-	{NULL, NULL}
-};
-
 
 /* Image methods */
 LUA_FUNCTION_DEF (image, get_width);
@@ -650,50 +517,26 @@ static const struct luaL_reg imagelib_m[] = {
 	{NULL, NULL}
 };
 
-/* URL methods */
-LUA_FUNCTION_DEF (url, get_length);
-LUA_FUNCTION_DEF (url, get_host);
-LUA_FUNCTION_DEF (url, get_user);
-LUA_FUNCTION_DEF (url, get_path);
-LUA_FUNCTION_DEF (url, get_text);
-LUA_FUNCTION_DEF (url, is_phished);
-LUA_FUNCTION_DEF (url, get_phished);
+/* Blob methods */
+LUA_FUNCTION_DEF (text, len);
+LUA_FUNCTION_DEF (text, str);
+LUA_FUNCTION_DEF (text, ptr);
 
-static const struct luaL_reg urllib_m[] = {
-	LUA_INTERFACE_DEF (url, get_length),
-	LUA_INTERFACE_DEF (url, get_host),
-	LUA_INTERFACE_DEF (url, get_user),
-	LUA_INTERFACE_DEF (url, get_path),
-	LUA_INTERFACE_DEF (url, get_text),
-	LUA_INTERFACE_DEF (url, is_phished),
-	LUA_INTERFACE_DEF (url, get_phished),
-	{"__tostring", rspamd_lua_class_tostring},
+static const struct luaL_reg textlib_m[] = {
+	LUA_INTERFACE_DEF (text, len),
+	LUA_INTERFACE_DEF (text, str),
+	LUA_INTERFACE_DEF (text, ptr),
+	{"__tostring", lua_text_str},
 	{NULL, NULL}
 };
 
 /* Utility functions */
-static struct rspamd_task *
-lua_check_task (lua_State * L)
+struct rspamd_task *
+lua_check_task (lua_State * L, gint pos)
 {
-	void *ud = luaL_checkudata (L, 1, "rspamd{task}");
-	luaL_argcheck (L, ud != NULL, 1, "'task' expected");
+	void *ud = luaL_checkudata (L, pos, "rspamd{task}");
+	luaL_argcheck (L, ud != NULL, pos, "'task' expected");
 	return ud ? *((struct rspamd_task **)ud) : NULL;
-}
-
-static struct mime_text_part *
-lua_check_textpart (lua_State * L)
-{
-	void *ud = luaL_checkudata (L, 1, "rspamd{textpart}");
-	luaL_argcheck (L, ud != NULL, 1, "'textpart' expected");
-	return ud ? *((struct mime_text_part **)ud) : NULL;
-}
-
-static struct mime_part *
-lua_check_mimepart (lua_State * L)
-{
-	void *ud = luaL_checkudata (L, 1, "rspamd{mimepart}");
-	luaL_argcheck (L, ud != NULL, 1, "'mimepart' expected");
-	return ud ? *((struct mime_part **)ud) : NULL;
 }
 
 static struct rspamd_image *
@@ -704,13 +547,15 @@ lua_check_image (lua_State * L)
 	return ud ? *((struct rspamd_image **)ud) : NULL;
 }
 
-static struct rspamd_url *
-lua_check_url (lua_State * L)
+struct rspamd_lua_text *
+lua_check_text (lua_State * L, gint pos)
 {
-	void *ud = luaL_checkudata (L, 1, "rspamd{url}");
-	luaL_argcheck (L, ud != NULL, 1, "'url' expected");
-	return ud ? *((struct rspamd_url **)ud) : NULL;
+	void *ud = luaL_checkudata (L, pos, "rspamd{text}");
+	luaL_argcheck (L, ud != NULL, pos, "'text' expected");
+	return ud ? (struct rspamd_lua_text *)ud : NULL;
 }
+
+/* Task methods */
 
 static int
 lua_task_create_empty (lua_State *L)
@@ -737,7 +582,9 @@ lua_task_create_from_buffer (lua_State *L)
 		ptask = lua_newuserdata (L, sizeof (gpointer));
 		rspamd_lua_setclass (L, "rspamd{task}", -1);
 		*ptask = task;
-		task->msg = g_string_new_len (data, len);
+		task->msg.start = rspamd_mempool_alloc (task->task_pool, len + 1);
+		memcpy ((gpointer)task->msg.start, data, len);
+		task->msg.len = len;
 	}
 	return 1;
 }
@@ -745,9 +592,9 @@ lua_task_create_from_buffer (lua_State *L)
 static int
 lua_task_process_message (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
-	if (task != NULL && task->msg != NULL && task->msg->len > 0) {
+	if (task != NULL && task->msg.len > 0) {
 		if (process_message (task) == 0) {
 			lua_pushboolean (L, TRUE);
 		}
@@ -765,7 +612,7 @@ lua_task_process_message (lua_State *L)
 static int
 lua_task_get_cfg (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	struct rspamd_config **pcfg;
 
 	pcfg = lua_newuserdata (L, sizeof (gpointer));
@@ -778,7 +625,7 @@ lua_task_get_cfg (lua_State *L)
 static int
 lua_task_set_cfg (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	void *ud = luaL_checkudata (L, 2, "rspamd{config}");
 
 	luaL_argcheck (L, ud != NULL, 1, "'config' expected");
@@ -789,7 +636,7 @@ lua_task_set_cfg (lua_State *L)
 static int
 lua_task_destroy (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task != NULL) {
 		rspamd_task_free (task, FALSE);
@@ -802,7 +649,7 @@ static int
 lua_task_get_message (lua_State * L)
 {
 	GMimeMessage **pmsg;
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task != NULL && task->message != NULL) {
 		pmsg = lua_newuserdata (L, sizeof (GMimeMessage *));
@@ -819,7 +666,7 @@ static int
 lua_task_get_mempool (lua_State * L)
 {
 	rspamd_mempool_t **ppool;
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task != NULL) {
 		ppool = lua_newuserdata (L, sizeof (rspamd_mempool_t *));
@@ -836,7 +683,7 @@ static int
 lua_task_get_session (lua_State * L)
 {
 	struct rspamd_async_session **psession;
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task != NULL) {
 		psession = lua_newuserdata (L, sizeof (void *));
@@ -853,7 +700,7 @@ static int
 lua_task_get_ev_base (lua_State * L)
 {
 	struct event_base **pbase;
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task != NULL) {
 		pbase = lua_newuserdata (L, sizeof (struct event_base *));
@@ -869,7 +716,7 @@ lua_task_get_ev_base (lua_State * L)
 static gint
 lua_task_insert_result (lua_State * L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	const gchar *symbol_name, *param;
 	double flag;
 	GList *params = NULL;
@@ -896,7 +743,7 @@ lua_task_insert_result (lua_State * L)
 static gint
 lua_task_set_pre_result (lua_State * L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	struct metric_result *mres;
 	gchar *action_str;
 	gint action = METRIC_ACTION_MAX;
@@ -940,31 +787,29 @@ struct lua_tree_cb_data {
 	int i;
 };
 
-static gboolean
+static void
 lua_tree_url_callback (gpointer key, gpointer value, gpointer ud)
 {
-	struct rspamd_url **purl;
+	struct rspamd_lua_url *url;
 	struct lua_tree_cb_data *cb = ud;
 
-	purl = lua_newuserdata (cb->L, sizeof (struct rspamd_url *));
+	url = lua_newuserdata (cb->L, sizeof (struct rspamd_lua_url));
 	rspamd_lua_setclass (cb->L, "rspamd{url}", -1);
-	*purl = value;
+	url->url = value;
 	lua_rawseti (cb->L, -2, cb->i++);
-
-	return FALSE;
 }
 
 static gint
 lua_task_get_urls (lua_State * L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	struct lua_tree_cb_data cb;
 
 	if (task) {
 		lua_newtable (L);
 		cb.i = 1;
 		cb.L = L;
-		g_tree_foreach (task->urls, lua_tree_url_callback, &cb);
+		g_hash_table_foreach (task->urls, lua_tree_url_callback, &cb);
 		return 1;
 	}
 
@@ -975,10 +820,15 @@ lua_task_get_urls (lua_State * L)
 static gint
 lua_task_get_content (lua_State * L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
+	struct rspamd_lua_text *t;
 
-	if (task && task->msg) {
-		lua_pushlstring (L, task->msg->str, task->msg->len);
+	if (task) {
+		t = lua_newuserdata (L, sizeof (*t));
+		rspamd_lua_setclass (L, "rspamd{text}", -1);
+		t->len = task->msg.len;
+		t->start = task->msg.start;
+
 		return 1;
 	}
 
@@ -989,14 +839,14 @@ lua_task_get_content (lua_State * L)
 static gint
 lua_task_get_emails (lua_State * L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	struct lua_tree_cb_data cb;
 
 	if (task) {
 		lua_newtable (L);
 		cb.i = 1;
 		cb.L = L;
-		g_tree_foreach (task->emails, lua_tree_url_callback, &cb);
+		g_hash_table_foreach (task->emails, lua_tree_url_callback, &cb);
 		return 1;
 	}
 
@@ -1008,7 +858,7 @@ static gint
 lua_task_get_text_parts (lua_State * L)
 {
 	gint i = 1;
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	GList *cur;
 	struct mime_text_part *part, **ppart;
 
@@ -1034,7 +884,7 @@ static gint
 lua_task_get_parts (lua_State * L)
 {
 	gint i = 1;
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	GList *cur;
 	struct mime_part *part, **ppart;
 
@@ -1057,8 +907,8 @@ lua_task_get_parts (lua_State * L)
 }
 
 
-static gint
-lua_push_header (lua_State * L,
+gint
+rspamd_lua_push_header (lua_State * L,
 		GHashTable *hdrs,
 		const gchar *name,
 		gboolean strong,
@@ -1138,7 +988,7 @@ static gint
 lua_task_get_header_common (lua_State *L, gboolean full, gboolean raw)
 {
 	gboolean strong = FALSE;
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	const gchar *name;
 
 	name = luaL_checkstring (L, 2);
@@ -1147,7 +997,7 @@ lua_task_get_header_common (lua_State *L, gboolean full, gboolean raw)
 		if (lua_gettop (L) == 3) {
 			strong = lua_toboolean (L, 3);
 		}
-		return lua_push_header (L, task->raw_headers, name, strong, full, raw);
+		return rspamd_lua_push_header (L, task->raw_headers, name, strong, full, raw);
 	}
 	lua_pushnil (L);
 	return 1;
@@ -1174,10 +1024,14 @@ lua_task_get_header_raw (lua_State * L)
 static gint
 lua_task_get_raw_headers (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
+	struct rspamd_lua_text *t;
 
 	if (task) {
-		lua_pushstring (L, task->raw_headers_str);
+		t = lua_newuserdata (L, sizeof (*t));
+		rspamd_lua_setclass (L, "rspamd{text}", -1);
+		t->start = task->raw_headers_str;
+		t->len = strlen (t->start);
 	}
 	else {
 		lua_pushnil (L);
@@ -1189,7 +1043,7 @@ lua_task_get_raw_headers (lua_State *L)
 static gint
 lua_task_get_received_headers (lua_State * L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	GList *cur;
 	struct received_header *rh;
 	gint i = 1;
@@ -1229,9 +1083,23 @@ lua_task_get_received_headers (lua_State * L)
 }
 
 static gint
+lua_task_get_queue_id (lua_State *L)
+{
+	struct rspamd_task *task = lua_check_task (L, 1);
+
+	if (task && task->queue_id != NULL && strcmp (task->queue_id, "undef") != 0) {
+		lua_pushstring (L, task->queue_id);
+		return 1;
+	}
+
+	lua_pushnil (L);
+	return 1;
+}
+
+static gint
 lua_task_get_resolver (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	struct rspamd_dns_resolver **presolver;
 
 	if (task != NULL && task->resolver != NULL) {
@@ -1249,7 +1117,7 @@ lua_task_get_resolver (lua_State *L)
 static gint
 lua_task_inc_dns_req (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task != NULL) {
 		task->dns_requests++;
@@ -1257,45 +1125,6 @@ lua_task_inc_dns_req (lua_State *L)
 
 	return 0;
 }
-
-static gint
-lua_task_call_rspamd_function (lua_State * L)
-{
-	struct rspamd_task *task = lua_check_task (L);
-	struct expression_function f;
-	gint i, top;
-	gboolean res;
-	gchar *arg;
-
-	if (task) {
-		f.name = (gchar *)luaL_checkstring (L, 2);
-		if (f.name) {
-			f.args = NULL;
-			top = lua_gettop (L);
-			/* Get arguments after function name */
-			for (i = 3; i <= top; i++) {
-				arg = (gchar *)luaL_checkstring (L, i);
-				if (arg != NULL) {
-					f.args = g_list_prepend (f.args, arg);
-				}
-			}
-			res = call_expression_function (&f, task, L);
-			lua_pushboolean (L, res);
-			if (f.args) {
-				g_list_free (f.args);
-			}
-
-			return 1;
-		}
-	}
-
-	lua_pushnil (L);
-
-	return 1;
-
-}
-
-
 
 static gboolean
 lua_push_internet_address (lua_State *L, InternetAddress *ia)
@@ -1379,7 +1208,7 @@ lua_push_internet_address_list (lua_State *L, InternetAddressList *addrs)
 static gint
 lua_task_get_recipients (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	InternetAddressList *addrs;
 	gint what = 0;
 
@@ -1426,7 +1255,7 @@ lua_task_get_recipients (lua_State *L)
 static gint
 lua_task_get_from (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	InternetAddressList *addrs;
 	gint what = 0;
 
@@ -1473,7 +1302,7 @@ lua_task_get_from (lua_State *L)
 static gint
 lua_task_get_user (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task && task->user != NULL) {
 		lua_pushstring (L, task->user);
@@ -1487,7 +1316,7 @@ lua_task_get_user (lua_State *L)
 static gint
 lua_task_set_user (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	const gchar *new_user;
 
 	if (task) {
@@ -1503,10 +1332,10 @@ lua_task_set_user (lua_State *L)
 static gint
 lua_task_get_from_ip (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task) {
-		rspamd_lua_ip_push (L, &task->from_addr);
+		rspamd_lua_ip_push (L, task->from_addr);
 	}
 	else {
 		lua_pushnil (L);
@@ -1533,10 +1362,10 @@ lua_task_get_from_ip_num (lua_State *L)
 static gint
 lua_task_get_client_ip (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task) {
-		rspamd_lua_ip_push (L, &task->client_addr);
+		rspamd_lua_ip_push (L, task->client_addr);
 	}
 	else {
 		lua_pushnil (L);
@@ -1548,7 +1377,7 @@ lua_task_get_client_ip (lua_State *L)
 static gint
 lua_task_get_helo (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task) {
 		if (task->helo != NULL) {
@@ -1564,7 +1393,7 @@ lua_task_get_helo (lua_State *L)
 static gint
 lua_task_set_helo (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	const gchar *new_helo;
 
 	if (task) {
@@ -1580,7 +1409,7 @@ lua_task_set_helo (lua_State *L)
 static gint
 lua_task_get_hostname (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task) {
 		if (task->hostname != NULL) {
@@ -1610,7 +1439,7 @@ lua_task_get_hostname (lua_State *L)
 static gint
 lua_task_set_hostname (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	const gchar *new_hostname;
 
 	if (task) {
@@ -1627,7 +1456,7 @@ lua_task_set_hostname (lua_State *L)
 static gint
 lua_task_get_images (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	gint i = 1;
 	GList *cur;
 	struct rspamd_image **pimg;
@@ -1673,6 +1502,18 @@ lua_push_symbol_result (lua_State *L,
 			lua_pushstring (L, "score");
 			lua_pushnumber (L, s->score);
 			lua_settable (L, -3);
+
+			if (s->def) {
+				lua_pushstring (L, "group");
+				lua_pushstring (L, s->def->gr->name);
+				lua_settable (L, -3);
+			}
+			else {
+				lua_pushstring (L, "group");
+				lua_pushstring (L, "ungrouped");
+				lua_settable (L, -3);
+			}
+
 			if (s->options) {
 				opt = s->options;
 				lua_pushstring (L, "options");
@@ -1695,7 +1536,7 @@ lua_push_symbol_result (lua_State *L,
 static gint
 lua_task_get_symbol (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	const gchar *symbol;
 	struct metric *metric;
 	GList *cur = NULL, *metric_list;
@@ -1791,7 +1632,7 @@ lua_task_detect_date_type (lua_State *L, gint idx, gboolean *gmt)
 static gint
 lua_task_get_date (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	gdouble tim;
 	enum lua_date_type type = DATE_CONNECT;
 	gboolean gmt = TRUE;
@@ -1855,7 +1696,7 @@ lua_task_get_date (lua_State *L)
 static gint
 lua_task_get_message_id (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task != NULL && task->message_id != NULL) {
 		lua_pushstring (L, task->message_id);
@@ -1870,7 +1711,7 @@ lua_task_get_message_id (lua_State *L)
 static gint
 lua_task_get_timeval (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 
 	if (task != NULL) {
 		lua_newtable (L);
@@ -1892,7 +1733,7 @@ lua_task_get_timeval (lua_State *L)
 static gint
 lua_task_learn (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	gboolean is_spam = FALSE;
 	const gchar *clname;
 	struct rspamd_classifier_config *cl;
@@ -1934,7 +1775,7 @@ lua_task_learn (lua_State *L)
 static gint
 lua_task_set_settings (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	ucl_object_t *settings;
 
 	settings = ucl_object_lua_import (L, 2);
@@ -1946,9 +1787,43 @@ lua_task_set_settings (lua_State *L)
 }
 
 static gint
+lua_task_cache_get (lua_State *L)
+{
+	struct rspamd_task *task = lua_check_task (L, 1);
+	const gchar *k = luaL_checkstring (L, 2);
+	gint res = RSPAMD_TASK_CACHE_NO_VALUE;
+
+	if (task && k) {
+		res = rspamd_task_re_cache_check (task, k);
+	}
+
+	lua_pushnumber (L, res);
+
+	return 1;
+}
+
+static gint
+lua_task_cache_set (lua_State *L)
+{
+	struct rspamd_task *task = lua_check_task (L, 1);
+	const gchar *k = luaL_checkstring (L, 2);
+	gint res = RSPAMD_TASK_CACHE_NO_VALUE, param = RSPAMD_TASK_CACHE_NO_VALUE;;
+
+	param = lua_tonumber (L, 3);
+	if (task && k && param >= 0) {
+		res = rspamd_task_re_cache_check (task, k);
+		rspamd_task_re_cache_add (task, k, param);
+	}
+
+	lua_pushnumber (L, res);
+
+	return 1;
+}
+
+static gint
 lua_task_get_metric_score (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	const gchar *metric_name;
 	struct metric_result *metric_res;
 
@@ -1979,7 +1854,7 @@ lua_task_get_metric_score (lua_State *L)
 static gint
 lua_task_get_metric_action (lua_State *L)
 {
-	struct rspamd_task *task = lua_check_task (L);
+	struct rspamd_task *task = lua_check_task (L, 1);
 	const gchar *metric_name;
 	struct metric_result *metric_res;
 	enum rspamd_metric_action action;
@@ -2001,324 +1876,6 @@ lua_task_get_metric_action (lua_State *L)
 	}
 
 	return 0;
-}
-
-/***
- * @module mime_textpart
- * This module provides different methods to manipulate text parts data. Text parts
- * could be obtained from the `rspamd_task` by using of method `task:get_text_parts()`
-@example
-rspamd_config.R_EMPTY_IMAGE = function (task)
-	parts = task:get_text_parts()
-	if parts then
-		for _,part in ipairs(parts) do
-			if part:is_empty() then
-				images = task:get_images()
-				if images then
-					return true
-				end
-				return false
-			end
-		end
-	end
-	return false
-end
- */
-
-/***
- * @method text_part:get_content()
- * Get the text of the part
- * @return {string} `UTF8` encoded content of the part
- */
-static gint
-lua_textpart_get_content (lua_State * L)
-{
-	struct mime_text_part *part = lua_check_textpart (L);
-
-	if (part == NULL || part->is_empty) {
-		lua_pushnil (L);
-		return 1;
-	}
-
-	lua_pushlstring (L, (const gchar *)part->content->data, part->content->len);
-
-	return 1;
-}
-
-/***
- * @method text_part:get_length()
- * Get length of the text of the part
- * @return {integer} length of part in **bytes**
- */
-static gint
-lua_textpart_get_length (lua_State * L)
-{
-	struct mime_text_part *part = lua_check_textpart (L);
-
-	if (part == NULL) {
-		lua_pushnil (L);
-		return 1;
-	}
-
-	if (part->is_empty) {
-		lua_pushnumber (L, 0);
-	}
-	else {
-		lua_pushnumber (L, part->content->len);
-	}
-
-	return 1;
-}
-
-/***
- * @method text_part:is_empty()
- * Returns `true` if the specified part is empty
- * @return {bool} whether a part is empty
- */
-static gint
-lua_textpart_is_empty (lua_State * L)
-{
-	struct mime_text_part *part = lua_check_textpart (L);
-
-	if (part == NULL) {
-		lua_pushnil (L);
-		return 1;
-	}
-
-	lua_pushboolean (L, part->is_empty);
-
-	return 1;
-}
-/***
- * @method text_part:is_html()
- * Returns `true` if the specified part has HTML content
- * @return {bool} whether a part is HTML part
- */
-static gint
-lua_textpart_is_html (lua_State * L)
-{
-	struct mime_text_part *part = lua_check_textpart (L);
-
-	if (part == NULL) {
-		lua_pushnil (L);
-		return 1;
-	}
-
-	lua_pushboolean (L, part->is_html);
-
-	return 1;
-}
-
-/***
- * @method text_part:get_fuzzy()
- * Returns base32 encoded value of fuzzy hash of the specified part
- * @return {string} fuzzy hash value
- */
-static gint
-lua_textpart_get_fuzzy (lua_State * L)
-{
-	struct mime_text_part *part = lua_check_textpart (L);
-	gchar *out;
-
-	if (part == NULL || part->is_empty) {
-		lua_pushnil (L);
-		return 1;
-	}
-
-	out = rspamd_encode_base32 (part->fuzzy->hash_pipe,
-			strlen (part->fuzzy->hash_pipe));
-	lua_pushstring (L, out);
-	g_free (out);
-
-	return 1;
-}
-
-/***
- * @method text_part:is_language()
- * Returns the code of the most used unicode script in the text part. Does not work with raw parts
- * @return {string} short abbreviation (such as `ru`) for the script's language
- */
-static gint
-lua_textpart_get_language (lua_State * L)
-{
-	struct mime_text_part *part = lua_check_textpart (L);
-
-	if (part != NULL) {
-		if (part->lang_code != NULL && part->lang_code[0] != '\0') {
-			lua_pushstring (L, part->lang_code);
-			return 1;
-		}
-	}
-
-	lua_pushnil (L);
-	return 1;
-}
-
-/***
- * @method text_part:compare_distance(other)
- * Calculates the difference to another text part.  This function is intended to work with
- * the parts of `multipart/alternative` container only. If the two parts are not the parts of the
- * same `multipart/alternative` container, then they are considered as unrelated and
- * `-1` is returned.
- * @param {text_part} other text part to compare
- * @return {integer} commodity percentage (e.g. the same strings give `100`, different give `0` and unrelated give `-1`)
- */
-static gint
-lua_textpart_compare_distance (lua_State * L)
-{
-	struct mime_text_part *part = lua_check_textpart (L), *other;
-	void *ud = luaL_checkudata (L, 2, "rspamd{textpart}");
-	gint diff = -1;
-	GMimeObject *parent;
-	const GMimeContentType *ct;
-
-	luaL_argcheck (L, ud != NULL, 2, "'textpart' expected");
-	other = ud ? *((struct mime_text_part **)ud) : NULL;
-
-	if (other != NULL && part->parent && part->parent == other->parent) {
-		parent = part->parent;
-		ct = g_mime_object_get_content_type (parent);
-#ifndef GMIME24
-		if (ct == NULL ||
-			!g_mime_content_type_is_type (ct, "multipart", "alternative")) {
-#else
-		if (ct == NULL ||
-			!g_mime_content_type_is_type ((GMimeContentType *)ct, "multipart",
-			"alternative")) {
-#endif
-			diff = -1;
-
-		}
-		else {
-			if (!part->is_empty && !other->is_empty) {
-				if (part->diff_str != NULL && other->diff_str != NULL) {
-					diff = rspamd_diff_distance (part->diff_str,
-							other->diff_str);
-				}
-				else {
-					diff = rspamd_fuzzy_compare_parts (part, other);
-				}
-			}
-			else if ((part->is_empty &&
-				!other->is_empty) || (!part->is_empty && other->is_empty)) {
-				/* Empty and non empty parts are different */
-				diff = 0;
-			}
-		}
-	}
-	else {
-		diff = -1;
-	}
-
-
-	lua_pushinteger (L, diff);
-
-	return 1;
-}
-
-/* Mimepart implementation */
-
-static gint
-lua_mimepart_get_content (lua_State * L)
-{
-	struct mime_part *part = lua_check_mimepart (L);
-
-	if (part == NULL) {
-		lua_pushnil (L);
-		return 1;
-	}
-
-	lua_pushlstring (L, (const gchar *)part->content->data, part->content->len);
-
-	return 1;
-}
-
-static gint
-lua_mimepart_get_length (lua_State * L)
-{
-	struct mime_part *part = lua_check_mimepart (L);
-
-	if (part == NULL) {
-		lua_pushnil (L);
-		return 1;
-	}
-
-	lua_pushinteger (L, part->content->len);
-
-	return 1;
-}
-
-static gint
-lua_mimepart_get_type (lua_State * L)
-{
-	struct mime_part *part = lua_check_mimepart (L);
-
-	if (part == NULL) {
-		lua_pushnil (L);
-		lua_pushnil (L);
-		return 2;
-	}
-#ifndef GMIME24
-	lua_pushstring (L, part->type->type);
-	lua_pushstring (L, part->type->subtype);
-#else
-	lua_pushstring (L, g_mime_content_type_get_media_type (part->type));
-	lua_pushstring (L, g_mime_content_type_get_media_subtype (part->type));
-#endif
-
-	return 2;
-}
-
-static gint
-lua_mimepart_get_filename (lua_State * L)
-{
-	struct mime_part *part = lua_check_mimepart (L);
-
-	if (part == NULL || part->filename == NULL) {
-		lua_pushnil (L);
-		return 1;
-	}
-
-	lua_pushstring (L, part->filename);
-
-	return 1;
-}
-
-static gint
-lua_mimepart_get_header_common (lua_State *L, gboolean full, gboolean raw)
-{
-	gboolean strong = FALSE;
-	struct mime_part *part = lua_check_mimepart (L);
-	const gchar *name;
-
-	name = luaL_checkstring (L, 2);
-
-	if (name && part) {
-		if (lua_gettop (L) == 3) {
-			strong = lua_toboolean (L, 3);
-		}
-		return lua_push_header (L, part->raw_headers, name, strong, full, raw);
-	}
-	lua_pushnil (L);
-	return 1;
-}
-
-static gint
-lua_mimepart_get_header_full (lua_State * L)
-{
-	return lua_mimepart_get_header_common (L, TRUE, TRUE);
-}
-
-static gint
-lua_mimepart_get_header (lua_State * L)
-{
-	return lua_mimepart_get_header_common (L, FALSE, FALSE);
-}
-
-static gint
-lua_mimepart_get_header_raw (lua_State * L)
-{
-	return lua_mimepart_get_header_common (L, FALSE, TRUE);
 }
 
 /* Image functions */
@@ -2396,42 +1953,29 @@ lua_image_get_filename (lua_State *L)
 	return 1;
 }
 
-/* URL part */
+/* Text methods */
 static gint
-lua_url_get_length (lua_State *L)
+lua_text_len (lua_State *L)
 {
-	struct rspamd_url *url = lua_check_url (L);
+	struct rspamd_lua_text *t = lua_check_text (L, 1);
+	gsize l = 0;
 
-	if (url != NULL) {
-		lua_pushinteger (L, strlen (struri (url)));
+	if (t != NULL) {
+		l = t->len;
 	}
-	else {
-		lua_pushnil (L);
-	}
+
+	lua_pushnumber (L, l);
+
 	return 1;
 }
 
 static gint
-lua_url_get_host (lua_State *L)
+lua_text_str (lua_State *L)
 {
-	struct rspamd_url *url = lua_check_url (L);
+	struct rspamd_lua_text *t = lua_check_text (L, 1);
 
-	if (url != NULL) {
-		lua_pushlstring (L, url->host, url->hostlen);
-	}
-	else {
-		lua_pushnil (L);
-	}
-	return 1;
-}
-
-static gint
-lua_url_get_user (lua_State *L)
-{
-	struct rspamd_url *url = lua_check_url (L);
-
-	if (url != NULL && url->user != NULL) {
-		lua_pushlstring (L, url->user, url->userlen);
+	if (t != NULL) {
+		lua_pushlstring (L, t->start, t->len);
 	}
 	else {
 		lua_pushnil (L);
@@ -2441,66 +1985,17 @@ lua_url_get_user (lua_State *L)
 }
 
 static gint
-lua_url_get_path (lua_State *L)
+lua_text_ptr (lua_State *L)
 {
-	struct rspamd_url *url = lua_check_url (L);
+	struct rspamd_lua_text *t = lua_check_text (L, 1);
 
-	if (url != NULL) {
-		lua_pushlstring (L, url->data, url->datalen);
+	if (t != NULL) {
+		lua_pushlightuserdata (L, (gpointer)t->start);
 	}
 	else {
 		lua_pushnil (L);
 	}
 
-	return 1;
-}
-
-static gint
-lua_url_get_text (lua_State *L)
-{
-	struct rspamd_url *url = lua_check_url (L);
-
-	if (url != NULL) {
-		lua_pushstring (L, struri (url));
-	}
-	else {
-		lua_pushnil (L);
-	}
-
-	return 1;
-}
-
-static gint
-lua_url_is_phished (lua_State *L)
-{
-	struct rspamd_url *url = lua_check_url (L);
-
-	if (url != NULL) {
-		lua_pushboolean (L, url->is_phished);
-	}
-	else {
-		lua_pushnil (L);
-	}
-
-	return 1;
-}
-
-static gint
-lua_url_get_phished (lua_State *L)
-{
-	struct rspamd_url **purl, *url = lua_check_url (L);
-
-	if (url) {
-		if (url->is_phished && url->phished_url != NULL) {
-			purl = lua_newuserdata (L, sizeof (struct rspamd_url *));
-			rspamd_lua_setclass (L, "rspamd{url}", -1);
-			*purl = url->phished_url;
-
-			return 1;
-		}
-	}
-
-	lua_pushnil (L);
 	return 1;
 }
 
@@ -2525,22 +2020,6 @@ luaopen_task (lua_State * L)
 }
 
 void
-luaopen_textpart (lua_State * L)
-{
-	rspamd_lua_new_class (L, "rspamd{textpart}", textpartlib_m);
-	luaL_register (L, "rspamd_textpart", null_reg);
-
-	lua_pop (L, 1);                      /* remove metatable from stack */
-}
-
-void
-luaopen_mimepart (lua_State * L)
-{
-	rspamd_lua_new_class (L, "rspamd{mimepart}", mimepartlib_m);
-	lua_pop (L, 1);                      /* remove metatable from stack */
-}
-
-void
 luaopen_image (lua_State * L)
 {
 	rspamd_lua_new_class (L, "rspamd{image}", imagelib_m);
@@ -2548,9 +2027,18 @@ luaopen_image (lua_State * L)
 }
 
 void
-luaopen_url (lua_State * L)
+luaopen_text (lua_State *L)
 {
-	rspamd_lua_new_class (L, "rspamd{url}", urllib_m);
-	lua_pop (L, 1);                      /* remove metatable from stack */
+	rspamd_lua_new_class (L, "rspamd{text}", textlib_m);
+	lua_pop (L, 1);
 }
 
+void
+rspamd_lua_task_push (lua_State *L, struct rspamd_task *task)
+{
+	struct rspamd_task **ptask;
+
+	ptask = lua_newuserdata (L, sizeof (gpointer));
+	rspamd_lua_setclass (L, "rspamd{task}", -1);
+	*ptask = task;
+}

@@ -33,6 +33,7 @@
 
 #include "config.h"
 #include "http_parser.h"
+#include "keypairs_cache.h"
 
 enum rspamd_http_connection_type {
 	RSPAMD_HTTP_SERVER,
@@ -45,6 +46,7 @@ enum rspamd_http_connection_type {
 struct rspamd_http_header {
 	GString *name;
 	GString *value;
+	GString *combined;
 	struct rspamd_http_header *next, *prev;
 };
 
@@ -63,6 +65,8 @@ struct rspamd_http_message {
 	GString *status;
 	struct rspamd_http_header *headers;
 	GString *body;
+	GString body_buf;
+	gpointer peer_key;
 	enum http_parser_type type;
 	time_t date;
 	gint code;
@@ -76,7 +80,8 @@ struct rspamd_http_message {
  */
 enum rspamd_http_options {
 	RSPAMD_HTTP_BODY_PARTIAL = 0x1, /**< Call body handler on all body data portions */
-	RSPAMD_HTTP_CLIENT_SIMPLE = 0x2 /**< Read HTTP client reply automatically */
+	RSPAMD_HTTP_CLIENT_SIMPLE = 0x2, /**< Read HTTP client reply automatically */
+	RSPAMD_HTTP_CLIENT_ENCRYPTED = 0x4 /**< Encrypt data for client */
 };
 
 struct rspamd_http_connection_private;
@@ -112,6 +117,7 @@ struct rspamd_http_connection {
 	rspamd_http_body_handler_t body_handler;
 	rspamd_http_error_handler_t error_handler;
 	rspamd_http_finish_handler_t finish_handler;
+	struct rspamd_keypair_cache *cache;
 	gpointer ud;
 	unsigned opts;
 	enum rspamd_http_connection_type type;
@@ -125,7 +131,7 @@ struct rspamd_http_connection_entry {
 	struct rspamd_http_connection *conn;
 	gpointer ud;
 	gboolean is_reply;
-	struct rspamd_http_connection_entry *next;
+	struct rspamd_http_connection_entry *prev, *next;
 };
 
 struct rspamd_http_connection_router {
@@ -134,7 +140,9 @@ struct rspamd_http_connection_router {
 	struct timeval tv;
 	struct timeval *ptv;
 	struct event_base *ev_base;
+	struct rspamd_keypair_cache *cache;
 	gchar *default_fs_path;
+	gpointer key;
 	rspamd_http_router_error_handler_t error_handler;
 	rspamd_http_router_finish_handler_t finish_handler;
 };
@@ -150,7 +158,69 @@ struct rspamd_http_connection * rspamd_http_connection_new (
 	rspamd_http_error_handler_t error_handler,
 	rspamd_http_finish_handler_t finish_handler,
 	unsigned opts,
-	enum rspamd_http_connection_type type);
+	enum rspamd_http_connection_type type,
+	struct rspamd_keypair_cache *cache);
+
+/**
+ * Load the encryption keypair
+ * @param key base32 encoded privkey and pubkey (in that order)
+ * @param keylen length of base32 string
+ * @return opaque pointer pr NULL in case of error
+ */
+gpointer rspamd_http_connection_make_key (gchar *key, gsize keylen);
+
+/**
+ * Generate the encryption keypair
+ * @return opaque pointer pr NULL in case of error
+ */
+gpointer rspamd_http_connection_gen_key (void);
+
+/**
+ * Set key pointed by an opaque pointer
+ * @param conn connection structure
+ * @param key opaque key structure
+ */
+void rspamd_http_connection_set_key (struct rspamd_http_connection *conn,
+		gpointer key);
+
+/**
+ * Returns TRUE if a connection is encrypted
+ * @param conn
+ * @return
+ */
+gboolean rspamd_http_connection_is_encrypted (struct rspamd_http_connection *conn);
+
+/** Print pubkey */
+#define RSPAMD_KEYPAIR_PUBKEY 0x1
+/** Print secret key */
+#define RSPAMD_KEYPAIR_PRIVKEY 0x2
+/** Print key id */
+#define RSPAMD_KEYPAIR_ID 0x4
+/** Encode output with base 32 */
+#define RSPAMD_KEYPAIR_BASE32 0x8
+/** Human readable output */
+#define RSPAMD_KEYPAIR_HUMAN 0x16
+/**
+ * Print keypair encoding it if needed
+ * @param key key to print
+ * @param how flags that specifies printing behaviour
+ * @return newly allocated string with keypair
+ */
+GString *rspamd_http_connection_print_key (gpointer key, guint how);
+
+/**
+ * Release key pointed by an opaque pointer
+ * @param key opaque key structure
+ */
+void rspamd_http_connection_key_unref (gpointer key);
+
+/**
+ * Increase refcount for a key pointed by an opaque pointer
+ * @param key opaque key structure
+ */
+gpointer rspamd_http_connection_key_ref (gpointer key);
+
+gpointer rspamd_http_connection_make_peer_key (const gchar *key);
 
 /**
  * Handle a request using socket fd and user data ud
@@ -219,6 +289,14 @@ rspamd_http_connection_unref (struct rspamd_http_connection *conn)
 void rspamd_http_connection_reset (struct rspamd_http_connection *conn);
 
 /**
+ * Extract the current message from a connection to deal with separately
+ * @param conn
+ * @return
+ */
+struct rspamd_http_message * rspamd_http_connection_steal_msg (
+		struct rspamd_http_connection *conn);
+
+/**
  * Create new HTTP message
  * @param type request or response
  * @return new http message
@@ -238,21 +316,30 @@ struct rspamd_http_message* rspamd_http_message_from_url (const gchar *url);
  * @param name
  * @param value
  */
-void rspamd_http_message_add_header (struct rspamd_http_message *rep,
+void rspamd_http_message_add_header (struct rspamd_http_message *msg,
 	const gchar *name,
 	const gchar *value);
 
 /**
  * Search for a specified header in message
- * @param rep message
+ * @param msg message
  * @param name name of header
  */
-const gchar * rspamd_http_message_find_header (struct rspamd_http_message *rep,
+const GString * rspamd_http_message_find_header (struct rspamd_http_message *msg,
 	const gchar *name);
 
 /**
- * Free HTTP reply
- * @param rep
+ * Remove specific header from a message
+ * @param msg
+ * @param name
+ * @return
+ */
+gboolean rspamd_http_message_remove_header (struct rspamd_http_message *msg,
+	const gchar *name);
+
+/**
+ * Free HTTP message
+ * @param msg
  */
 void rspamd_http_message_free (struct rspamd_http_message *msg);
 
@@ -277,7 +364,16 @@ struct rspamd_http_connection_router * rspamd_http_router_new (
 	rspamd_http_router_finish_handler_t fh,
 	struct timeval *timeout,
 	struct event_base *base,
-	const char *default_fs_path);
+	const char *default_fs_path,
+	struct rspamd_keypair_cache *cache);
+
+/**
+ * Set encryption key for the HTTP router
+ * @param router router structure
+ * @param key opaque key structure
+ */
+void rspamd_http_router_set_key (struct rspamd_http_connection_router *router,
+		gpointer key);
 
 /**
  * Add new path to the router

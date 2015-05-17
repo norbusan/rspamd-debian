@@ -498,24 +498,30 @@
 			},
 			success: function(data) {
 				$('#modalBody').empty();
-				$.each(data[0].rules, function(i, item) {
-					var max = 20;
-					var min = -20;
-					if (item.weight > max) {
-						max = item.weight * 2;
-					}
-					if (item.weight < min) {
-						min = item.weight * 2;
-					}
+				$.each(data, function(i, group) {
 					items.push('	<div class="row-fluid row-bordered" data-slider="hover">' +
-										'<label class="span5" for="' + item.symbol + '" title="' + item.description + '">' +
-											'<code>' +  item.symbol + '</code><small class="symbol-description">' + item.description + '</small>' +
-										'</label>' +
-										'<div class="span4 spin-cell">' + 
-											'<input class="numeric" autocomplete="off" "type="number" class="input-mini" min="' + min + '" max="' + max + '" step="' + decimalStep(item.weight) + '" tabindex="1" value="' + item.weight + '" id="' + item.symbol + '">' +
-										'</div>' +
+									'<h4>' + group.group + '</h4>' +
 									'</div>');
-					});
+
+					$.each(group.rules, function(i, item) {
+						var max = 20;
+						var min = -20;
+						if (item.weight > max) {
+							max = item.weight * 2;
+						}
+						if (item.weight < min) {
+							min = item.weight * 2;
+						}
+						items.push('	<div class="row-fluid row-bordered" data-slider="hover">' +
+											'<label class="span5" for="' + item.symbol + '" title="' + item.description + '">' +
+												'<code>' +  item.symbol + '</code><small class="symbol-description">' + item.description + '</small>' +
+											'</label>' +
+											'<div class="span4 spin-cell">' + 
+												'<input class="numeric" autocomplete="off" "type="number" class="input-mini" min="' + min + '" max="' + max + '" step="' + decimalStep(item.weight) + '" tabindex="1" value="' + item.weight + '" id="' + item.symbol + '">' +
+											'</div>' +
+										'</div>');
+						});
+				});
 				$('<form/>', { 
 					id: 'symbolsForm', 
 					method: 'post', 
@@ -618,7 +624,47 @@
 				}
 			}
 		});
+		
+		var data = new Object();
+		data.flag=$('#fuzzyFlagUpload').val();
+		data.weight=$('#fuzzyWeightUpload').val();
 
+		var fuzzyUploader = new qq.FineUploader({
+			element: $('#uploadFuzzyFiles')[0],
+			request: {
+				endpoint: 'learnfuzzy',
+				customHeaders: {
+					'Password': getPassword()
+				}
+			},
+			validation: {
+				allowedExtensions: ['eml', 'msg', 'txt', 'html','pdf'],
+				sizeLimit: 52428800
+			},
+			autoUpload: false,
+			text: {
+				uploadButton: '<i class="icon-plus icon-white"></i> Select Files'
+			},
+			retry: {
+				enableAuto: true
+			},
+			template: '<div class="qq-uploader">' +
+						'<pre class="qq-upload-drop-area span12"><span>{dragZoneText}</span></pre>' +
+						'<div class="qq-upload-button btn btn-success">{uploadButtonText}</div>' +
+						'<span class="qq-drop-processing"><span>{dropProcessingText}</span><span class="qq-drop-processing-spinner"></span></span>' +
+						'<ul class="qq-upload-list"></ul>' +
+						'</div>',
+			classes: {
+				success: 'alert-success',
+				fail: 'alert-error'
+			},
+			debug: true,
+			callbacks: {
+				onError: function(){
+					alertMessage('alert-error', 'Cannot upload data');
+				}
+			}
+		});
 		// @upload spam button
 		$('#uploadSpamTrigger').on('click', function() {
 			spamUploader.uploadStoredFiles();
@@ -629,7 +675,12 @@
 			hamUploader.uploadStoredFiles();
 			return false;
 			});
-
+		// @upload fuzzy button
+		$('#uploadFuzzyTrigger').on('click', function() {
+			fuzzyUploader.uploadStoredFiles();
+			uploadText(data,'fuzzy');
+			return false;
+			});
 	}
 
 	// @upload text
@@ -638,7 +689,9 @@
 			var url = 'learnspam';
 		} if (source === 'ham') {
 			var url = 'learnham';
-		} if (source === 'scan') {
+		} if (source=='fuzzy') {
+			var url='learnfuzzy';
+		};if (source === 'scan') {
 			var url = 'scan';
 		};
 		$.ajax({
@@ -751,7 +804,17 @@
 	// @init upload
 	$('[data-upload]').on('click', function() {
 		var source = $(this).data('upload');
-		var data = $('#' + source + 'TextSource').val();
+		if(source=='fuzzy')
+		{
+			//To access the proper 		
+			var data = new String($('#' + source + 'TextSource').val());		
+			data.flag=$('#fuzzyFlagText').val();
+			data.weigth=$('#fuzzyWeightText').val();
+			data.string=data.toString();
+		
+		}
+		else
+			var data = $('#' + source + 'TextSource').val();
 		if (data.length > 0) {
 			if (source == 'scan') {
 				scanText(data);

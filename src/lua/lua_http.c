@@ -27,6 +27,30 @@
 #include "http.h"
 #include "utlist.h"
 
+/***
+ * @module rspamd_http
+ * Rspamd HTTP module represents HTTP asynchronous client available from LUA code.
+ * This module hides all complexity: DNS resolving, sessions management, zero-copy
+ * text transfers and so on under the hood.
+ * @example
+local rspamd_http = require "rspamd_http"
+
+local function symbol_callback(task)
+	local function http_callback(err_message, code, body, headers)
+		task:insert_result('SYMBOL', 1) -- task is available via closure
+	end
+
+ 	rspamd_http.request({
+ 		task=task,
+ 		url='http://example.com/data',
+ 		body=task:get_content(),
+ 		callback=http_callback,
+ 		headers={Header='Value', OtherHeader='Value'},
+ 		mime_type='text/plain',
+ 		})
+ end
+ */
+
 #define MAX_HEADERS_SIZE 8192
 
 LUA_FUNCTION_DEF (http, request);
@@ -44,7 +68,8 @@ struct lua_http_cbdata {
 	struct rspamd_http_message *msg;
 	struct event_base *ev_base;
 	struct timeval tv;
-	rspamd_inet_addr_t addr;
+	rspamd_inet_addr_t *addr;
+	gchar *mime_type;
 	gint fd;
 	gint cbref;
 };
@@ -80,6 +105,14 @@ lua_http_fin (gpointer arg)
 
 	if (cbd->fd != -1) {
 		close (cbd->fd);
+	}
+
+	if (cbd->addr) {
+		rspamd_inet_address_destroy (cbd->addr);
+	}
+
+	if (cbd->mime_type) {
+		g_free (cbd->mime_type);
 	}
 
 	g_slice_free1 (sizeof (struct lua_http_cbdata), cbd);
@@ -149,8 +182,8 @@ lua_http_make_connection (struct lua_http_cbdata *cbd)
 {
 	int fd;
 
-	rspamd_inet_address_set_port (&cbd->addr, cbd->msg->port);
-	fd = rspamd_inet_address_connect (&cbd->addr, SOCK_STREAM, TRUE);
+	rspamd_inet_address_set_port (cbd->addr, cbd->msg->port);
+	fd = rspamd_inet_address_connect (cbd->addr, SOCK_STREAM, TRUE);
 
 	if (fd == -1) {
 		msg_info ("cannot connect to %v", cbd->msg->host);
@@ -158,10 +191,11 @@ lua_http_make_connection (struct lua_http_cbdata *cbd)
 	}
 	cbd->fd = fd;
 	cbd->conn = rspamd_http_connection_new (NULL, lua_http_error_handler,
-			lua_http_finish_handler, RSPAMD_HTTP_CLIENT_SIMPLE, RSPAMD_HTTP_CLIENT);
+			lua_http_finish_handler, RSPAMD_HTTP_CLIENT_SIMPLE,
+			RSPAMD_HTTP_CLIENT, NULL);
 
 	rspamd_http_connection_write_message (cbd->conn, cbd->msg,
-			NULL, NULL, cbd, fd, &cbd->tv, cbd->ev_base);
+			NULL, cbd->mime_type, cbd, fd, &cbd->tv, cbd->ev_base);
 	/* Message is now owned by a connection object */
 	cbd->msg = NULL;
 
@@ -178,10 +212,15 @@ lua_http_dns_handler (struct rdns_reply *reply, gpointer ud)
 		lua_http_maybe_free (cbd);
 	}
 	else {
-		/* XXX: support ipv6 some day */
-		cbd->addr.af = AF_INET;
-		memcpy (&cbd->addr.addr.s4.sin_addr, &reply->entries->content.a.addr,
-				sizeof (struct in_addr));
+		if (reply->entries->type == RDNS_REQUEST_A) {
+			cbd->addr = rspamd_inet_address_new (AF_INET,
+					&reply->entries->content.a.addr);
+		}
+		else if (reply->entries->type == RDNS_REQUEST_AAAA) {
+			cbd->addr = rspamd_inet_address_new (AF_INET6,
+					&reply->entries->content.aaa.addr);
+		}
+
 		if (!lua_http_make_connection (cbd)) {
 			lua_http_push_error (cbd, "unable to make connection to the host");
 			lua_http_maybe_free (cbd);
@@ -208,6 +247,23 @@ lua_http_push_headers (lua_State *L, struct rspamd_http_message *msg)
 	}
 }
 
+/***
+ * @function rspamd_http.request({params...})
+ * This function creates HTTP request and accepts several parameters as a table using key=value syntax.
+ * Required params are:
+ *
+ * - `url`
+ * - `callback`
+ * - `task`
+ * @param {string} url specifies URL for a request in the standard URI form (e.g. 'http://example.com/path')
+ * @param {function} callback specifies callback function in format  `function (err_message, code, body, headers)` that is called on HTTP request completion
+ * @param {task} task if called from symbol handler it is generally a good idea to use the common task objects: event base, DNS resolver and events session
+ * @param {table} headers optional headers in form `[name='value', name='value']`
+ * @param {string} mime_type MIME type of the HTTP content (for example, `text/html`)
+ * @param {string/text} body full body content, can be opaque `rspamd{text}` to avoid data copying
+ * @param {number} timeout floating point request timeout value in seconds (default is 5.0 seconds)
+ * @return {boolean} `true` if a request has been successfuly scheduled. If this value is `false` then some error occurred, the callback thus will not be called
+ */
 static gint
 lua_http_request (lua_State *L)
 {
@@ -218,7 +274,10 @@ lua_http_request (lua_State *L)
 	struct lua_http_cbdata *cbd;
 	struct rspamd_dns_resolver *resolver;
 	struct rspamd_async_session *session;
+	struct rspamd_lua_text *t;
+	struct rspamd_task *task = NULL;
 	gdouble timeout = default_http_timeout;
+	gchar *mime_type = NULL;
 
 	if (lua_gettop (L) >= 2) {
 		/* url, callback and event_base format */
@@ -270,35 +329,47 @@ lua_http_request (lua_State *L)
 		}
 		cbref = luaL_ref (L, LUA_REGISTRYINDEX);
 
-		lua_pushstring (L, "ev_base");
+		lua_pushstring (L, "task");
 		lua_gettable (L, -2);
-		if (luaL_checkudata (L, -1, "rspamd{ev_base}")) {
-			ev_base = *(struct event_base **)lua_touserdata (L, -1);
-		}
-		else {
-			ev_base = NULL;
+		if (lua_type (L, -1) == LUA_TUSERDATA) {
+			task = lua_check_task (L, -1);
+			ev_base = task->ev_base;
+			resolver = task->resolver;
+			session = task->s;
 		}
 		lua_pop (L, 1);
 
-		lua_pushstring (L, "resolver");
-		lua_gettable (L, -2);
-		if (luaL_checkudata (L, -1, "rspamd{resolver}")) {
-			resolver = *(struct rspamd_dns_resolver **)lua_touserdata (L, -1);
-		}
-		else {
-			resolver = lua_http_global_resolver (ev_base);
-		}
-		lua_pop (L, 1);
+		if (task == NULL) {
+			lua_pushstring (L, "ev_base");
+			lua_gettable (L, -2);
+			if (luaL_checkudata (L, -1, "rspamd{ev_base}")) {
+				ev_base = *(struct event_base **)lua_touserdata (L, -1);
+			}
+			else {
+				ev_base = NULL;
+			}
+			lua_pop (L, 1);
 
-		lua_pushstring (L, "session");
-		lua_gettable (L, -2);
-		if (luaL_checkudata (L, -1, "rspamd{session}")) {
-			session = *(struct rspamd_async_session **)lua_touserdata (L, -1);
+			lua_pushstring (L, "resolver");
+			lua_gettable (L, -2);
+			if (luaL_checkudata (L, -1, "rspamd{resolver}")) {
+				resolver = *(struct rspamd_dns_resolver **)lua_touserdata (L, -1);
+			}
+			else {
+				resolver = lua_http_global_resolver (ev_base);
+			}
+			lua_pop (L, 1);
+
+			lua_pushstring (L, "session");
+			lua_gettable (L, -2);
+			if (luaL_checkudata (L, -1, "rspamd{session}")) {
+				session = *(struct rspamd_async_session **)lua_touserdata (L, -1);
+			}
+			else {
+				session = NULL;
+			}
+			lua_pop (L, 1);
 		}
-		else {
-			session = NULL;
-		}
-		lua_pop (L, 1);
 
 		msg = rspamd_http_message_from_url (url);
 		if (msg == NULL) {
@@ -320,16 +391,40 @@ lua_http_request (lua_State *L)
 		}
 		lua_pop (L, 1);
 
+		lua_pushstring (L, "mime_type");
+		lua_gettable (L, -2);
+		if (lua_type (L, -1) == LUA_TSTRING) {
+			mime_type = g_strdup (lua_tostring (L, -1));
+		}
+		lua_pop (L, 1);
+
 		lua_pushstring (L, "body");
 		lua_gettable (L, -2);
 		if (lua_type (L, -1) == LUA_TSTRING) {
 			msg->body = g_string_new (lua_tostring (L, -1));
 		}
+		else if (lua_type (L, -1) == LUA_TUSERDATA) {
+			t = lua_check_text (L, -1);
+			if (t) {
+				/* XXX: is it safe ? */
+				msg->body = g_string_new (NULL);
+				msg->body->str = (gchar *)t->start;
+				msg->body->len = t->len;
+				/* It is not safe unless we set len to avoid body_buf to be freed */
+				msg->body_buf.len = t->len;
+			}
+		}
+
 		lua_pop (L, 1);
 	}
 	else {
 		msg_err ("http request has bad params");
 		lua_pushboolean (L, FALSE);
+
+		if (mime_type) {
+			g_free (mime_type);
+		}
+
 		return 1;
 	}
 
@@ -338,6 +433,7 @@ lua_http_request (lua_State *L)
 	cbd->cbref = cbref;
 	cbd->msg = msg;
 	cbd->ev_base = ev_base;
+	cbd->mime_type = mime_type;
 	msec_to_tv (timeout, &cbd->tv);
 	cbd->fd = -1;
 	if (session) {
@@ -351,7 +447,9 @@ lua_http_request (lua_State *L)
 	if (rspamd_parse_inet_address (&cbd->addr, msg->host->str)) {
 		/* Host is numeric IP, no need to resolve */
 		if (!lua_http_make_connection (cbd)) {
+			lua_http_maybe_free (cbd);
 			lua_pushboolean (L, FALSE);
+
 			return 1;
 		}
 	}

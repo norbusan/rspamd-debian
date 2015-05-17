@@ -676,13 +676,13 @@ check_phishing (struct rspamd_task *task,
 	gsize remain,
 	tag_id_t id)
 {
-	struct rspamd_url *new;
+	struct rspamd_url *text_url;
 	gchar *url_str;
 	const gchar *p, *c;
 	gchar tagbuf[128];
 	struct html_tag *tag;
 	gsize len = 0;
-	gint rc;
+	gint rc, state = 0;
 
 	p = url_text;
 	while (len < remain) {
@@ -730,52 +730,18 @@ check_phishing (struct rspamd_task *task,
 	}
 
 	if (rspamd_url_find (task->task_pool, url_text, len, NULL, NULL, &url_str,
-		TRUE) && url_str != NULL) {
-		new = rspamd_mempool_alloc0 (task->task_pool, sizeof (struct rspamd_url));
-		g_strstrip (url_str);
-		rc = rspamd_url_parse (new, url_str, strlen (url_str), task->task_pool);
+		TRUE, &state) && url_str != NULL) {
+		text_url = rspamd_mempool_alloc0 (task->task_pool, sizeof (struct rspamd_url));
+		rc = rspamd_url_parse (text_url, url_str, strlen (url_str), task->task_pool);
 
 		if (rc == URI_ERRNO_OK) {
-			if (g_ascii_strncasecmp (href_url->host, new->host,
-					MAX (href_url->hostlen, new->hostlen)) != 0) {
-				/* Special check for urls beginning with 'www' */
-				if (new->hostlen > 4 && href_url->hostlen > 4) {
-					p = new->host;
-					c = NULL;
-					if ((p[0] == 'w' || p[0] == 'W') &&
-							(p[1] == 'w' || p[1] == 'W') &&
-							(p[2] == 'w' || p[2] == 'W') &&
-							(p[3] == '.')) {
-						p += 4;
-						c = href_url->host;
-						len = MAX (href_url->hostlen, new->hostlen - 4);
-					}
-					else {
-						p = href_url->host;
-						if ((p[0] == 'w' || p[0] == 'W') &&
-								(p[1] == 'w' || p[1] == 'W') &&
-								(p[2] == 'w' || p[2] == 'W') &&
-								(p[3] == '.')) {
-							p += 4;
-							c = new->host;
-							len = MAX (href_url->hostlen - 4, new->hostlen);
-						}
-					}
-					/* Compare parts and check for phished hostname */
-					if (c != NULL) {
-						if (g_ascii_strncasecmp (p, c, len) != 0) {
-							href_url->is_phished = TRUE;
-							href_url->phished_url = new;
-						}
-					}
-					else {
-						href_url->is_phished = TRUE;
-						href_url->phished_url = new;
-					}
-				}
-				else {
+			if (href_url->hostlen != text_url->hostlen || memcmp (href_url->host,
+					text_url->host, href_url->hostlen) != 0) {
+
+				if (href_url->tldlen != text_url->tldlen || memcmp (href_url->tld,
+						text_url->tld, href_url->tldlen) != 0) {
 					href_url->is_phished = TRUE;
-					href_url->phished_url = new;
+					href_url->phished_url = text_url;
 				}
 			}
 		}
@@ -882,7 +848,7 @@ parse_tag_url (struct rspamd_task *task,
 		url = rspamd_mempool_alloc (task->task_pool, sizeof (struct rspamd_url));
 		rc = rspamd_url_parse (url, url_text, len, task->task_pool);
 
-		if (rc != URI_ERRNO_EMPTY && url->hostlen != 0) {
+		if (rc == URI_ERRNO_OK && url->hostlen != 0) {
 			/*
 			 * Check for phishing
 			 */
@@ -892,14 +858,14 @@ parse_tag_url (struct rspamd_task *task,
 			}
 			if (url->protocol == PROTOCOL_MAILTO) {
 				if (url->userlen > 0) {
-					if (!g_tree_lookup (task->emails, url)) {
-						g_tree_insert (task->emails, url, url);
+					if (!g_hash_table_lookup (task->emails, url)) {
+						g_hash_table_insert (task->emails, url, url);
 					}
 				}
 			}
 			else {
-				if (!g_tree_lookup (task->urls, url)) {
-					g_tree_insert (task->urls, url, url);
+				if (!g_hash_table_lookup (task->urls, url)) {
+					g_hash_table_insert (task->urls, url, url);
 				}
 			}
 		}
@@ -975,7 +941,7 @@ add_html_node (struct rspamd_task *task,
 			if (!check_balance (new, cur_level)) {
 				debug_task (
 					"mark part as unbalanced as it has not pairable closing tags");
-				part->is_balanced = FALSE;
+				part->flags &= ~RSPAMD_MIME_PART_FLAG_BALANCED;
 			}
 		}
 		else if ((data->flags & (FL_XML|FL_SGML)) == 0) {

@@ -65,11 +65,19 @@ If true & private_ips is set appropriately, do not use the RBL if the sending ho
 
 If true & local_exclude_ip_map has been set - do not use the RBL if the sending host address is in the local IP list & do not check received headers baring these addresses.
 
+- default_is_whitelist (false)
+
+If true matches on this list should neutralise any listings where this setting is false and ignore_whitelists is not true.
+
+- default_ignore_whitelists (false)
+
+If true this list should not be neutralised by whitelists.
+
 Other parameters which can be set here are:
 
 - local_exclude_ip_map
 
-Can be set to a URL of a list of IPv4/IPv6 addresses & subnets not to be processed by from/received RBL checks.
+Can be set to a URL of a list of IPv4/IPv6 addresses & subnets not to be considered as local exclusions by exclude_local checks.
 
 - private_ips
 

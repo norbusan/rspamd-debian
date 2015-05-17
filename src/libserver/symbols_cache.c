@@ -52,27 +52,28 @@ cache_cmp (const void *p1, const void *p2)
 	return strcmp (i1->s->symbol, i2->s->symbol);
 }
 
+/* weight, frequency, time */
+#define TIME_ALPHA (1.0 / 10000000.0)
+#define SCORE_FUN(w, f, t) (((w) > 0 ? (w) : 1) * ((f) > 0 ? (f) : 1) / (t > TIME_ALPHA ? t : TIME_ALPHA))
+
 gint
 cache_logic_cmp (const void *p1, const void *p2)
 {
 	const struct cache_item *i1 = p1, *i2 = p2;
 	double w1, w2;
 	double weight1, weight2;
-	double f1 = 0, f2 = 0;
+	double f1 = 0, f2 = 0, t1, t2;
 
 	if (i1->priority == 0 && i2->priority == 0) {
-		if (total_frequency > 0) {
-			f1 =
-				((double)i1->s->frequency * nsymbols) / (double)total_frequency;
-			f2 =
-				((double)i2->s->frequency * nsymbols) / (double)total_frequency;
-		}
+		f1 = (double)i1->s->frequency;
+		f2 = (double)i2->s->frequency;
 		weight1 = i1->metric_weight == 0 ? i1->s->weight : i1->metric_weight;
 		weight2 = i2->metric_weight == 0 ? i2->s->weight : i2->metric_weight;
-		w1 = abs (weight1) * WEIGHT_MULT + f1 * FREQUENCY_MULT +
-			i1->s->avg_time * TIME_MULT;
-		w2 = abs (weight2) * WEIGHT_MULT + f2 * FREQUENCY_MULT +
-			i2->s->avg_time * TIME_MULT;
+		t1 = i1->s->avg_time / 1000000.0;
+		t2 = i2->s->avg_time / 1000000.0;
+		w1 = SCORE_FUN (abs (weight1), f1, t1);
+		w2 = SCORE_FUN (abs (weight2), f2, t2);
+		msg_debug ("%s -> %.2f, %s -> %.2f", i1->s->symbol, w1, i2->s->symbol, w2);
 	}
 	else {
 		/* Strict sorting */
@@ -90,14 +91,16 @@ static double
 rspamd_set_counter (struct cache_item *item, guint32 value)
 {
 	struct counter_data *cd;
-	double alpha;
 	cd = item->cd;
 
-	/* Calculate new value */
+	/* Cumulative moving average */
 	rspamd_mempool_lock_mutex (item->mtx);
 
-	alpha = 2. / (++cd->number + 1);
-	cd->value = cd->value * (1. - alpha) + value * alpha;
+	if (cd->number == 0) {
+		cd->value = 0;
+	}
+
+	cd->value = cd->value + (value - cd->value) / (++cd->number);
 
 	rspamd_mempool_unlock_mutex (item->mtx);
 
@@ -316,7 +319,7 @@ register_symbol_common (struct symbols_cache **cache,
 	GList **target, *cur;
 	struct metric *m;
 	struct rspamd_symbol_def *s;
-	gboolean skipped;
+	gboolean skipped, ghost = (weight == 0.0);
 
 	if (*cache == NULL) {
 		pcache = g_new0 (struct symbols_cache, 1);
@@ -365,8 +368,8 @@ register_symbol_common (struct symbols_cache **cache,
 	}
 
 	/* Check whether this item is skipped */
-	skipped = TRUE;
-	if (!item->is_callback &&
+	skipped = !ghost;
+	if (!ghost && !item->is_callback && pcache->cfg &&
 			g_hash_table_lookup (pcache->cfg->metrics_symbols, name) == NULL) {
 		cur = g_list_first (pcache->cfg->metrics_list);
 		while (cur) {
@@ -401,14 +404,21 @@ register_symbol_common (struct symbols_cache **cache,
 	}
 
 	item->is_skipped = skipped;
+	item->is_ghost = ghost;
+
 	if (skipped) {
 		msg_warn ("symbol %s is not registered in any metric, so skip its check",
 				name);
 	}
 
+	if (ghost) {
+		msg_debug ("symbol %s is registered as ghost symbol, it won't be inserted "
+				"to any metric", name);
+	}
+
 	/* If we have undefined priority determine list according to weight */
 	if (priority == 0) {
-		if (item->s->weight > 0) {
+		if (item->s->weight >= 0) {
 			target = &(*cache)->static_items;
 		}
 		else {
@@ -595,6 +605,7 @@ init_symbols_cache (rspamd_mempool_t * pool,
 		if (lseek (fd, -(cklen), SEEK_END) == -1) {
 			if (errno == EINVAL) {
 				/* Try to create file */
+				close (fd);
 				msg_info ("recreate cache file");
 				if ((fd =
 					open (filename, O_RDWR | O_TRUNC | O_CREAT, S_IWUSR |
@@ -749,9 +760,11 @@ validate_cache (struct symbols_cache *cache,
 		}
 		if (!res) {
 			msg_warn (
-				"symbol '%s' is registered in metric but not found in cache",
+				"symbol '%s' has its score defined but there is no "
+				"corresponding rule registered",
 				cur->data);
 			if (strict) {
+				g_list_free (metric_symbols);
 				return FALSE;
 			}
 		}
@@ -789,11 +802,7 @@ call_symbol_callback (struct rspamd_task * task,
 	struct symbols_cache * cache,
 	gpointer *save)
 {
-#ifdef HAVE_CLOCK_GETTIME
-	struct timespec ts1, ts2;
-#else
-	struct timeval tv1, tv2;
-#endif
+	double t1, t2;
 	guint64 diff;
 	struct cache_item *item = NULL;
 	struct symbol_callback_data *s = *save;
@@ -868,19 +877,8 @@ call_symbol_callback (struct rspamd_task * task,
 		return FALSE;
 	}
 	if (!item->is_virtual && !item->is_skipped) {
-#ifdef HAVE_CLOCK_GETTIME
-# ifdef HAVE_CLOCK_PROCESS_CPUTIME_ID
-		clock_gettime (CLOCK_PROCESS_CPUTIME_ID, &ts1);
-# elif defined(HAVE_CLOCK_VIRTUAL)
-		clock_gettime (CLOCK_VIRTUAL,			 &ts1);
-# else
-		clock_gettime (CLOCK_REALTIME,			 &ts1);
-# endif
-#else
-		if (gettimeofday (&tv1, NULL) == -1) {
-			msg_warn ("gettimeofday failed: %s", strerror (errno));
-		}
-#endif
+		t1 = rspamd_get_ticks ();
+
 		if (G_UNLIKELY (check_debug_symbol (task->cfg, item->s->symbol))) {
 			rspamd_log_debug (rspamd_main->logger);
 			item->func (task, item->user_data);
@@ -890,29 +888,9 @@ call_symbol_callback (struct rspamd_task * task,
 			item->func (task, item->user_data);
 		}
 
+		t2 = rspamd_get_ticks ();
 
-#ifdef HAVE_CLOCK_GETTIME
-# ifdef HAVE_CLOCK_PROCESS_CPUTIME_ID
-		clock_gettime (CLOCK_PROCESS_CPUTIME_ID, &ts2);
-# elif defined(HAVE_CLOCK_VIRTUAL)
-		clock_gettime (CLOCK_VIRTUAL,			 &ts2);
-# else
-		clock_gettime (CLOCK_REALTIME,			 &ts2);
-# endif
-#else
-		if (gettimeofday (&tv2, NULL) == -1) {
-			msg_warn ("gettimeofday failed: %s", strerror (errno));
-		}
-#endif
-
-#ifdef HAVE_CLOCK_GETTIME
-		diff =
-			(ts2.tv_sec -
-			ts1.tv_sec) * 1000000 + (ts2.tv_nsec - ts1.tv_nsec) / 1000;
-#else
-		diff =
-			(tv2.tv_sec - tv1.tv_sec) * 1000000 + (tv2.tv_usec - tv1.tv_usec);
-#endif
+		diff = (t2 - t1) * 1000000;
 		item->s->avg_time = rspamd_set_counter (item, diff);
 	}
 

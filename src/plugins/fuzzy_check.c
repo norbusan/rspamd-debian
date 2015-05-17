@@ -41,7 +41,6 @@
 
 #include "config.h"
 #include "libmime/message.h"
-#include "libmime/expressions.h"
 #include "libutil/map.h"
 #include "libmime/images.h"
 #include "fuzzy_storage.h"
@@ -49,7 +48,6 @@
 #include "main.h"
 #include "blake2.h"
 #include "ottery.h"
-#include "libstemmer.h"
 
 #define DEFAULT_SYMBOL "R_FUZZY_HASH"
 #define DEFAULT_UPSTREAM_ERROR_TIME 10
@@ -66,8 +64,8 @@ struct fuzzy_mapping {
 };
 
 struct fuzzy_mime_type {
-	gchar *type;
-	gchar *subtype;
+	GPatternSpec *type;
+	GPatternSpec *subtype;
 };
 
 struct fuzzy_rule {
@@ -84,7 +82,7 @@ struct fuzzy_rule {
 };
 
 struct fuzzy_ctx {
-	gint (*filter) (struct rspamd_task * task);
+	struct module_ctx ctx;
 	rspamd_mempool_t *fuzzy_pool;
 	GList *fuzzy_rules;
 	struct rspamd_config *cfg;
@@ -122,7 +120,6 @@ struct fuzzy_learn_session {
 };
 
 static struct fuzzy_ctx *fuzzy_module_ctx = NULL;
-static const gchar hex_digits[] = "0123456789abcdef";
 
 static void fuzzy_symbol_callback (struct rspamd_task *task, void *unused);
 
@@ -206,19 +203,22 @@ parse_mime_types (const gchar *str)
 		g_strstrip (strvec[i]);
 		if ((p = strchr (strvec[i], '/')) != NULL) {
 			*p = 0;
-			type =
-				rspamd_mempool_alloc (fuzzy_module_ctx->fuzzy_pool,
+			type = rspamd_mempool_alloc (fuzzy_module_ctx->fuzzy_pool,
 					sizeof (struct fuzzy_mime_type));
-			type->type = rspamd_mempool_strdup (fuzzy_module_ctx->fuzzy_pool,
-					strvec[i]);
-			type->subtype = rspamd_mempool_strdup (fuzzy_module_ctx->fuzzy_pool,
-					p + 1);
+			type->type = g_pattern_spec_new (strvec[i]);
+			type->subtype = g_pattern_spec_new (p + 1);
+			*p = '/';
 			res = g_list_prepend (res, type);
 		}
 		else {
-			msg_info ("bad content type: %s", strvec[i]);
+			type = rspamd_mempool_alloc (fuzzy_module_ctx->fuzzy_pool,
+							sizeof (struct fuzzy_mime_type));
+			type->type = g_pattern_spec_new (strvec[i]);
+			type->subtype = NULL;
 		}
 	}
+
+	g_strfreev (strvec);
 
 	return res;
 }
@@ -232,9 +232,20 @@ fuzzy_check_content_type (struct fuzzy_rule *rule, GMimeContentType *type)
 	cur = rule->mime_types;
 	while (cur) {
 		ft = cur->data;
-		if (g_mime_content_type_is_type (type, ft->type, ft->subtype)) {
-			return TRUE;
+		if (ft->type) {
+
+			if (g_pattern_match_string (ft->type, type->type)) {
+				if (ft->subtype) {
+					if (g_pattern_match_string (ft->subtype, type->subtype)) {
+						return TRUE;
+					}
+				}
+				else {
+					return TRUE;
+				}
+			}
 		}
+
 		cur = g_list_next (cur);
 	}
 
@@ -252,32 +263,6 @@ fuzzy_normalize (gint32 in, double weight)
 #else
 	return (in < weight ? in / weight : weight);
 #endif
-}
-
-static const gchar *
-fuzzy_to_string (rspamd_fuzzy_t *h)
-{
-	static gchar strbuf [FUZZY_HASHLEN * 2 + 1];
-	const int max_print = 5;
-	gint i;
-	guint8 byte;
-
-	for (i = 0; i < max_print; i++) {
-		byte = h->hash_pipe[i];
-		if (byte == '\0') {
-			break;
-		}
-		strbuf[i * 2] = hex_digits[byte >> 4];
-		strbuf[i * 2 + 1] = hex_digits[byte & 0xf];
-	}
-	if (i == max_print) {
-		memcpy (&strbuf[i * 2], "...", 4);
-	}
-	else {
-		strbuf[i * 2] = '\0';
-	}
-
-	return strbuf;
 }
 
 static struct fuzzy_rule *
@@ -534,50 +519,19 @@ fuzzy_io_fin (void *ud)
 	close (session->fd);
 }
 
-static void
-fuzzy_g_array_destructor (gpointer a)
-{
-	GArray *ar = (GArray *)a;
-
-	g_array_free (ar, TRUE);
-}
-
 static GArray *
 fuzzy_preprocess_words (struct mime_text_part *part, rspamd_mempool_t *pool)
 {
 	GArray *res;
-	struct sb_stemmer *stem;
-	rspamd_fstring_t *w, stw;
-	const guchar *r;
-	guint i;
 
-	if (!part->is_utf || !part->language || part->language[0] == '\0') {
+	if (!IS_PART_UTF (part) || !part->language || part->language[0] == '\0' ||
+			part->normalized_words == NULL) {
 		res = part->words;
 	}
 	else {
-		/* Lemmatize words */
-		stem = sb_stemmer_new (part->language, "UTF_8");
-		if (stem == NULL) {
-			msg_debug ("cannot lemmatize %s language", part->language);
-			res = part->words;
-		}
-		else {
-			res = g_array_sized_new (FALSE, FALSE, sizeof (rspamd_fstring_t),
-					part->words->len);
-			for (i = 0; i < part->words->len; i ++) {
-				w = &g_array_index (part->words, rspamd_fstring_t, i);
-				r = sb_stemmer_stem (stem, w->begin, w->len);
-				if (r != NULL) {
-					stw.begin = rspamd_mempool_strdup (pool, r);
-					stw.len = strlen (r);
-					rspamd_str_lc (stw.begin, stw.len);
-					g_array_append_val (res, stw);
-				}
-			}
-			rspamd_mempool_add_destructor (pool, fuzzy_g_array_destructor, res);
-			sb_stemmer_delete (stem);
-		}
+		res = part->normalized_words;
 	}
+
 	return res;
 }
 
@@ -1007,7 +961,7 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 
 	while (cur) {
 		part = cur->data;
-		if (part->is_empty) {
+		if (IS_PART_EMPTY (part)) {
 			cur = g_list_next (cur);
 			continue;
 		}
@@ -1175,10 +1129,10 @@ fuzzy_symbol_callback (struct rspamd_task *task, void *unused)
 	/* Check whitelist */
 	if (fuzzy_module_ctx->whitelist) {
 		if (radix_find_compressed_addr (fuzzy_module_ctx->whitelist,
-				&task->from_addr) != RADIX_NO_VALUE) {
+				task->from_addr) != RADIX_NO_VALUE) {
 			msg_info ("<%s>, address %s is whitelisted, skip fuzzy check",
 				task->message_id,
-				rspamd_inet_address_to_string (&task->from_addr));
+				rspamd_inet_address_to_string (task->from_addr));
 			return;
 		}
 	}
@@ -1260,7 +1214,9 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 	task->cfg = ctx->cfg;
 
 	/* Allocate message from string */
-	task->msg = msg->body;
+	/* XXX: what about encrypted messsages ? */
+	task->msg.start = msg->body->str;
+	task->msg.len = msg->body->len;
 
 	saved = rspamd_mempool_alloc0 (task->task_pool, sizeof (gint));
 	err = rspamd_mempool_alloc0 (task->task_pool, sizeof (GError *));
@@ -1336,7 +1292,7 @@ static gboolean
 fuzzy_controller_handler (struct rspamd_http_connection_entry *conn_ent,
 	struct rspamd_http_message *msg, struct module_ctx *ctx, gint cmd)
 {
-	const gchar *arg;
+	const GString *arg;
 	gchar *err_str;
 	gint value = 1, flag = 0;
 
@@ -1344,18 +1300,18 @@ fuzzy_controller_handler (struct rspamd_http_connection_entry *conn_ent,
 	arg = rspamd_http_message_find_header (msg, "Weight");
 	if (arg) {
 		errno = 0;
-		value = strtol (arg, &err_str, 10);
-		if (errno != 0 || *err_str != '\0') {
-			msg_info ("error converting numeric argument %s", arg);
+		value = strtol (arg->str, &err_str, 10);
+		if (*err_str != '\0' && *err_str != '\r') {
+			msg_info ("error converting numeric argument %v", arg);
 			value = 0;
 		}
 	}
 	arg = rspamd_http_message_find_header (msg, "Flag");
 	if (arg) {
 		errno = 0;
-		flag = strtol (arg, &err_str, 10);
-		if (errno != 0 || *err_str != '\0') {
-			msg_info ("error converting numeric argument %s", arg);
+		flag = strtol (arg->str, &err_str, 10);
+		if (*err_str != '\0' && *err_str != '\r') {
+			msg_info ("error converting numeric argument %v", arg);
 			flag = 0;
 		}
 	}

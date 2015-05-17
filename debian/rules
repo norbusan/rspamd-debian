@@ -14,7 +14,7 @@ override_dh_auto_configure:
 		-DLOGDIR=/var/log/rspamd \
 		-DPLUGINSDIR=/usr/share/rspamd \
 		-DEXAMPLESDIR=/usr/share/doc/rspamd/examples \
-		-DLIBDIR=/usr/lib \
+		-DLIBDIR=/usr/lib/rspamd \
 		-DINCLUDEDIR=/usr/include \
 		-DSYSTEMDDIR=/lib/systemd/system \
 		-DNO_SHARED=ON \
@@ -23,6 +23,9 @@ override_dh_auto_configure:
 		-DFORCE_GMIME24=ON \
 		-DENABLE_HIREDIS=ON \
 		-DWANT_SYSTEMD_UNITS=ON
+
+override_dh_makeshlibs:
+	dh_makeshlibs -Xrspamd-actrie
 
 override_dh_auto_clean:
 	dh_auto_clean

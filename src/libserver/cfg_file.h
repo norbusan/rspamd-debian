@@ -12,13 +12,14 @@
 #include "symbols_cache.h"
 #include "cfg_rcl.h"
 #include "ucl.h"
+#include "regexp.h"
 
 #define DEFAULT_BIND_PORT 11333
 #define DEFAULT_CONTROL_PORT 11334
 
 struct expression;
 struct tokenizer;
-struct classifier;
+struct rspamd_stat_classifier;
 
 enum { VAL_UNDEF=0, VAL_TRUE, VAL_FALSE };
 
@@ -42,38 +43,12 @@ enum rspamd_cred_type {
 };
 
 /**
- * Regexp type: /H - header, /M - mime, /U - url /X - raw header
- */
-enum rspamd_regexp_type {
-	REGEXP_NONE = 0,
-	REGEXP_HEADER,
-	REGEXP_MIME,
-	REGEXP_MESSAGE,
-	REGEXP_URL,
-	REGEXP_RAW_HEADER
-};
-
-/**
  * Logging type
  */
 enum rspamd_log_type {
 	RSPAMD_LOG_CONSOLE,
 	RSPAMD_LOG_SYSLOG,
 	RSPAMD_LOG_FILE
-};
-
-/**
- * Regexp structure
- */
-struct rspamd_regexp {
-	enum rspamd_regexp_type type;                   /**< regexp type										*/
-	gchar *regexp_text;                             /**< regexp text representation							*/
-	GRegex *regexp;                                 /**< glib regexp structure								*/
-	GRegex *raw_regexp;                             /**< glib regexp structure for raw matching				*/
-	gchar *header;                                  /**< header name for header regexps						*/
-	gboolean is_test;                               /**< true if this expression must be tested				*/
-	gboolean is_raw;                                /**< true if this regexp is done by raw matching		*/
-	gboolean is_strong;                             /**< true if headers search must be case sensitive		*/
 };
 
 /**
@@ -94,17 +69,15 @@ enum lua_var_type {
 	LUA_VAR_FUNCTION,
 	LUA_VAR_UNKNOWN
 };
+
 /**
- * Module option
+ * Symbols group
  */
-struct rspamd_module_opt {
-	gchar *param;                                   /**< parameter name										*/
-	gchar *value;                                   /**< parameter value									*/
-	gchar *description;                             /**< parameter description								*/
-	gchar *group;                                   /**< parameter group									*/
-	gpointer actual_data;                           /**< parsed data										*/
-	gboolean is_lua;                                /**< actually this is lua variable						*/
-	enum lua_var_type lua_type;                     /**< type of lua variable								*/
+struct rspamd_symbol_def;
+struct rspamd_symbols_group {
+	gchar *name;
+	struct rspamd_symbol_def *symbols;
+	gdouble max_score;
 };
 
 /**
@@ -114,54 +87,11 @@ struct rspamd_symbol_def {
 	gchar *name;
 	gchar *description;
 	gdouble *weight_ptr;
+	struct rspamd_symbols_group *gr;
 	gboolean one_shot;
+	struct rspamd_symbol_def *next;
 };
 
-/**
- * Symbols group
- */
-struct rspamd_symbols_group {
-	gchar *name;
-	GList *symbols;
-};
-
-/**
- * Statfile section definition
- */
-struct rspamd_statfile_section {
-	guint32 code;                                   /**< section's code										*/
-	guint64 size;                                   /**< size of section									*/
-	double weight;                                  /**< weight coefficient for section						*/
-};
-
-/**
- * Statfile autolearn parameters
- */
-struct statfile_autolearn_params {
-	const gchar *metric;                            /**< metric name for autolearn triggering               */
-	double threshold_min;                           /**< threshold mark										*/
-	double threshold_max;                           /**< threshold mark										*/
-	GList *symbols;                                 /**< list of symbols									*/
-};
-
-/**
- * Sync affinity
- */
-enum sync_affinity {
-	AFFINITY_NONE = 0,
-	AFFINITY_MASTER,
-	AFFINITY_SLAVE
-};
-
-/**
- * Binlog params
- */
-struct statfile_binlog_params {
-	enum sync_affinity affinity;
-	time_t rotate_time;
-	gchar *master_addr;
-	guint16 master_port;
-};
 
 typedef double (*statfile_normalize_func)(struct rspamd_config *cfg,
 	long double score, void *params);
@@ -171,17 +101,17 @@ typedef double (*statfile_normalize_func)(struct rspamd_config *cfg,
  */
 struct rspamd_statfile_config {
 	gchar *symbol;                                  /**< symbol of statfile									*/
-	gchar *path;                                    /**< filesystem pattern (with %r or %f)					*/
 	gchar *label;                                   /**< label of this statfile								*/
-	gsize size;                                     /**< size of statfile									*/
-	GList *sections;                                /**< list of sections in statfile						*/
-	struct statfile_autolearn_params *autolearn;    /**< autolearn params									*/
-	struct statfile_binlog_params *binlog;          /**< binlog params										*/
-	statfile_normalize_func normalizer;             /**< function that is used as normaliser                */
-	void *normalizer_data;                          /**< normalizer function params                         */
-	gchar *normalizer_str;                          /**< source string (for dump)							*/
 	ucl_object_t *opts;                             /**< other options										*/
 	gboolean is_spam;                               /**< spam flag											*/
+	const gchar *backend;							/**< name of statfile's backend							*/
+	struct rspamd_classifier_config *clcf;			/**< parent pointer of classifier configuration			*/
+	gpointer data;									/**< opaque data 										*/
+};
+
+struct rspamd_tokenizer_config {
+	const ucl_object_t *opts;                        /**< other options										*/
+	const gchar *name;								/**< name of tokenizer									*/
 };
 
 /**
@@ -191,15 +121,18 @@ struct rspamd_classifier_config {
 	GList *statfiles;                               /**< statfiles list                                     */
 	GHashTable *labels;                             /**< statfiles with labels								*/
 	gchar *metric;                                  /**< metric of this classifier                          */
-	struct classifier *classifier;                  /**< classifier interface                               */
-	struct tokenizer *tokenizer;                    /**< tokenizer used for classifier						*/
-	GHashTable *opts;                               /**< other options                                      */
+	gchar *classifier;                  			/**< classifier interface                               */
+	struct rspamd_tokenizer_config *tokenizer;      /**< tokenizer used for classifier						*/
+	ucl_object_t *opts;                             /**< other options                                      */
 	GList *pre_callbacks;                           /**< list of callbacks that are called before classification */
 	GList *post_callbacks;                          /**< list of callbacks that are called after classification */
+	gchar *name;									/**< unique name of classifier							*/
+	guint32 min_tokens;								/**< minimal number of tokens to process classifier 	*/
+	guint32 max_tokens;								/**< maximum number of tokens							*/
 };
 
 struct rspamd_worker_bind_conf {
-	rspamd_inet_addr_t *addrs;
+	GPtrArray *addrs;
 	guint cnt;
 	gchar *name;
 	gboolean is_systemd;
@@ -261,8 +194,6 @@ struct rspamd_config {
 	gboolean log_color;                             /**< output colors for console output                   */
 	gboolean log_extended;                          /**< log extended information							*/
 
-	guint32 statfile_sync_interval;                 /**< synchronization interval							*/
-	guint32 statfile_sync_timeout;                  /**< synchronization timeout							*/
 	gboolean mlock_statfile_pool;                   /**< use mlock (2) for locking statfiles				*/
 
 	gboolean delivery_enable;                       /**< is delivery agent is enabled						*/
@@ -278,10 +209,9 @@ struct rspamd_config {
 	GList *filters;                                 /**< linked list of all filters							*/
 	GList *workers;                                 /**< linked list of all workers params					*/
 	struct rspamd_worker_cfg_parser *wrk_parsers;   /**< hash for worker config parsers, indexed by worker quarks */
-	gchar *filters_str;                             /**< string of filters									*/
 	ucl_object_t *rcl_obj;                  /**< rcl object											*/
 	GHashTable * metrics;                            /**< hash of metrics indexed by metric name				*/
-	GList * symbols_groups;                          /**< groups of symbols									*/
+	GHashTable * symbols_groups;                     /**< groups of symbols									*/
 	GList * metrics_list;                            /**< linked list of metrics								*/
 	GHashTable * metrics_symbols;                    /**< hash table of metrics indexed by symbol			*/
 	GHashTable * c_modules;                          /**< hash of c modules indexed by module name			*/
@@ -308,13 +238,15 @@ struct rspamd_config {
 	gchar *cache_filename;                          /**< filename of cache file								*/
 	struct metric *default_metric;                  /**< default metric										*/
 
-	gchar * checksum;                                /**< real checksum of config file						*/
-	gchar * dump_checksum;                           /**< dump checksum of config file						*/
+	gchar * checksum;                               /**< real checksum of config file						*/
+	gchar * dump_checksum;                          /**< dump checksum of config file						*/
 	gpointer lua_state;                             /**< pointer to lua state								*/
 
-	gchar * rrd_file;                                /**< rrd file to store statistics						*/
+	gchar * rrd_file;                               /**< rrd file to store statistics						*/
 
-	gchar * history_file;                            /**< file to save rolling history						*/
+	gchar * history_file;                           /**< file to save rolling history						*/
+
+	gchar * tld_file;								/**< file to load effective tld list from				*/
 
 	gdouble dns_timeout;                            /**< timeout in milliseconds for waiting for dns reply	*/
 	guint32 dns_retransmits;                        /**< maximum retransmits count							*/
@@ -326,6 +258,8 @@ struct rspamd_config {
 	guint upstream_max_errors;						/**< upstream max errors before shutting off			*/
 	gdouble upstream_error_time;					/**< rate of upstream errors							*/
 	gdouble upstream_revive_time;					/**< revive timeout for upstreams						*/
+
+	guint32 min_word_len;							/**< minimum length of the word to be considered		*/
 };
 
 
@@ -374,7 +308,7 @@ guint64 rspamd_config_parse_limit (const gchar *limit, guint len);
  * @param str string representation of flag (eg. 'on')
  * @return numeric value of flag (0 or 1)
  */
-gchar rspamd_config_parse_flag (const gchar *str);
+gchar rspamd_config_parse_flag (const gchar *str, guint len);
 
 /**
  * Do post load actions for config
@@ -452,6 +386,21 @@ void rspamd_ucl_add_conf_macros (struct ucl_parser *parser,
 	struct rspamd_config *cfg);
 
 void rspamd_ucl_add_conf_variables (struct ucl_parser *parser);
+
+/**
+ * Initialize rspamd filtering system (lua and C filters)
+ * @param cfg
+ * @param reconfig
+ * @return
+ */
+gboolean rspamd_init_filters (struct rspamd_config *cfg, bool reconfig);
+
+/**
+ * Init configuration file structure
+ * @param cfg
+ * @param init_lua
+ */
+void rspamd_init_cfg (struct rspamd_config *cfg, gboolean init_lua);
 
 #endif /* ifdef CFG_FILE_H */
 /*

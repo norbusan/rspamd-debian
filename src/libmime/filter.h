@@ -36,6 +36,7 @@ struct symbol {
 	double score;                                   /**< symbol's score							*/
 	GList *options;                                 /**< list of symbol's options				*/
 	const gchar *name;
+	struct rspamd_symbol_def *def;					/**< symbol configuration					*/
 };
 
 struct metric_action {
@@ -67,15 +68,21 @@ struct metric_result {
 	double score;                                   /**< total score							*/
 	enum rspamd_metric_action action;				/**< the current action						*/
 	GHashTable *symbols;                            /**< symbols of metric						*/
+	GHashTable *sym_groups;							/**< groups of symbols						*/
 	gboolean checked;                               /**< whether metric result is consolidated  */
 	double grow_factor;                             /**< current grow factor					*/
 };
 
+
+/**
+ * Subr for composite expressions
+ */
+extern const struct rspamd_atom_subr composite_expr_subr;
 /**
  * Composite structure
  */
 struct rspamd_composite {
-	struct expression *expr;
+	struct rspamd_expression *expr;
 	gint id;
 };
 

@@ -55,6 +55,23 @@ struct lua_locked_state {
 	rspamd_mutex_t *m;
 };
 
+/**
+ * Lua IP address structure
+ */
+struct rspamd_lua_ip {
+	rspamd_inet_addr_t *addr;
+};
+
+struct rspamd_lua_text {
+	const gchar *start;
+	gsize len;
+};
+
+struct rspamd_lua_url {
+	struct rspamd_url *url;
+};
+
+
 /* Common utility functions */
 
 /**
@@ -123,6 +140,33 @@ void rspamd_free_lua_locked (struct lua_locked_state *st);
 void rspamd_lua_ip_push (lua_State *L, rspamd_inet_addr_t *addr);
 
 /**
+ * Push rspamd task structure to lua
+ */
+void rspamd_lua_task_push (lua_State *L, struct rspamd_task *task);
+
+/**
+ * Return lua ip structure at the specified address
+ */
+struct rspamd_lua_ip * lua_check_ip (lua_State * L, gint pos);
+
+struct rspamd_lua_text * lua_check_text (lua_State * L, gint pos);
+
+/**
+ * Push specific header to lua
+ */
+gint rspamd_lua_push_header (lua_State * L,
+	GHashTable *hdrs,
+	const gchar *name,
+	gboolean strong,
+	gboolean full,
+	gboolean raw);
+
+/**
+ * Check for task at the specified position
+ */
+struct rspamd_task *lua_check_task (lua_State * L, gint pos);
+
+/**
  * Push ip address from a string (nil is pushed if a string cannot be converted)
  */
 void rspamd_lua_ip_push_fromstring (lua_State *L, const gchar *ip_str);
@@ -131,15 +175,6 @@ void rspamd_lua_ip_push_fromstring (lua_State *L, const gchar *ip_str);
  * Create type error
  */
 int rspamd_lua_typerror (lua_State *L, int narg, const char *tname);
-
-/**
- * Lua IP address structure
- */
-struct rspamd_lua_ip {
-	rspamd_inet_addr_t addr;
-	gboolean is_valid;
-};
-
 /**
  * Open libraries functions
  */
@@ -161,7 +196,7 @@ void luaopen_image (lua_State *L);
 void luaopen_url (lua_State *L);
 void luaopen_classifier (lua_State *L);
 void luaopen_statfile (lua_State * L);
-void luaopen_glib_regexp (lua_State *L);
+void luaopen_regexp (lua_State *L);
 void luaopen_cdb (lua_State *L);
 void luaopen_xmlrpc (lua_State * L);
 void luaopen_http (lua_State * L);
@@ -173,6 +208,10 @@ void luaopen_io_dispatcher (lua_State * L);
 void luaopen_dns_resolver (lua_State * L);
 void luaopen_rsa (lua_State * L);
 void luaopen_ip (lua_State * L);
+void luaopen_expression (lua_State * L);
+void luaopen_logger (lua_State * L);
+void luaopen_text (lua_State *L);
+void luaopen_util (lua_State * L);
 
 gint rspamd_lua_call_filter (const gchar *function, struct rspamd_task *task);
 gint rspamd_lua_call_chain_filter (const gchar *function,
@@ -203,12 +242,6 @@ double rspamd_lua_normalize (struct rspamd_config *cfg,
 
 /* Config file functions */
 void rspamd_lua_post_load_config (struct rspamd_config *cfg);
-void rspamd_lua_process_elt (struct rspamd_config *cfg,
-	const gchar *name,
-	const gchar *module_name,
-	struct rspamd_module_opt *opt,
-	gint idx,
-	gboolean allow_meta);
 gboolean rspamd_lua_handle_param (struct rspamd_task *task,
 	gchar *mname,
 	gchar *optname,
@@ -218,7 +251,11 @@ gboolean rspamd_lua_check_condition (struct rspamd_config *cfg,
 	const gchar *condition);
 void rspamd_lua_dumpstack (lua_State *L);
 
-struct memory_pool_s * rspamd_lua_check_mempool (lua_State * L);
+/* Set lua path according to the configuration */
+void rspamd_lua_set_path (lua_State *L, struct rspamd_config *cfg);
+
+struct memory_pool_s * rspamd_lua_check_mempool (lua_State * L, gint pos);
+struct rspamd_config * lua_check_config (lua_State * L, gint pos);
 
 
 #endif /* WITH_LUA */

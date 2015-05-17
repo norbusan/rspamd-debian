@@ -2,7 +2,7 @@
 #define RSPAMD_MODULE_SURBL
 
 #include "config.h"
-#include "libutil/trie.h"
+#include "acism.h"
 #include "main.h"
 
 #define DEFAULT_REDIRECTOR_PORT 8080
@@ -17,7 +17,7 @@
 #define MAX_LEVELS 10
 
 struct surbl_ctx {
-	gint (*filter)(struct rspamd_task *task);
+	struct module_ctx ctx;
 	guint16 weight;
 	gdouble connect_timeout;
 	gdouble read_timeout;
@@ -31,8 +31,9 @@ struct surbl_ctx {
 	GHashTable **exceptions;
 	GHashTable *whitelist;
 	GHashTable *redirector_hosts;
-	rspamd_trie_t *redirector_trie;
-	GPtrArray *redirector_ptrs;
+	void *redirector_map_data;
+	ac_trie_t *redirector_trie;
+	GArray *redirector_ptrs;
 	guint use_redirector;
 	struct upstream_list *redirectors;
 	rspamd_mempool_t *surbl_pool;
@@ -42,7 +43,8 @@ struct suffix_item {
 	const gchar *suffix;
 	const gchar *symbol;
 	guint32 options;
-	GList *bits;
+	GArray *bits;
+	GHashTable *ips;
 };
 
 struct dns_param {
@@ -56,14 +58,9 @@ struct redirector_param {
 	struct rspamd_url *url;
 	struct rspamd_task *task;
 	struct upstream *redirector;
-	enum {
-		STATE_CONNECT,
-		STATE_READ
-	} state;
-	GString *buf;
-	struct event ev;
+	struct rspamd_http_connection *conn;
 	gint sock;
-	GTree *tree;
+	GHashTable *tree;
 	struct suffix_item *suffix;
 };
 

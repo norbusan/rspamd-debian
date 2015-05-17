@@ -16,17 +16,24 @@ struct mime_part {
 	GMimeContentType *type;
 	GByteArray *content;
 	GMimeObject *parent;
+	GMimeObject *mime;
 	GHashTable *raw_headers;
 	gchar *checksum;
 	const gchar *filename;
 };
 
+#define RSPAMD_MIME_PART_FLAG_UTF (1 << 0)
+#define RSPAMD_MIME_PART_FLAG_BALANCED (1 << 1)
+#define RSPAMD_MIME_PART_FLAG_EMPTY (1 << 2)
+#define RSPAMD_MIME_PART_FLAG_HTML (1 << 3)
+
+#define IS_PART_EMPTY(part) ((part)->flags & RSPAMD_MIME_PART_FLAG_EMPTY)
+#define IS_PART_UTF(part) ((part)->flags & RSPAMD_MIME_PART_FLAG_UTF)
+#define IS_PART_RAW(part) (!((part)->flags & RSPAMD_MIME_PART_FLAG_UTF))
+#define IS_PART_HTML(part) ((part)->flags & RSPAMD_MIME_PART_FLAG_HTML)
+
 struct mime_text_part {
-	gboolean is_html;
-	gboolean is_raw;
-	gboolean is_balanced;
-	gboolean is_empty;
-	gboolean is_utf;
+	guint flags;
 	GUnicodeScript script;
 	const gchar *lang_code;
 	const gchar *language;
@@ -38,8 +45,11 @@ struct mime_text_part {
 	rspamd_fuzzy_t *fuzzy;
 	rspamd_fuzzy_t *double_fuzzy;
 	GMimeObject *parent;
+	struct mime_part *mime_part;
 	rspamd_fstring_t *diff_str;
 	GArray *words;
+	GArray *normalized_words;
+	guint nlines;
 };
 
 struct received_header {

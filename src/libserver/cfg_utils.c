@@ -29,18 +29,19 @@
 #include "main.h"
 #include "uthash_strcase.h"
 #include "filter.h"
-#include "classifiers/classifiers.h"
 #include "lua/lua_common.h"
 #include "kvstorage_config.h"
 #include "map.h"
 #include "dynamic_cfg.h"
 #include "utlist.h"
+#include "stat_api.h"
 
 #define DEFAULT_SCORE 10.0
 
 #define DEFAULT_RLIMIT_NOFILE 2048
 #define DEFAULT_RLIMIT_MAXCORE 0
 #define DEFAULT_MAP_TIMEOUT 10
+#define DEFAULT_MIN_WORD 4
 
 struct rspamd_ucl_map_cbdata {
 	struct rspamd_config *cfg;
@@ -125,11 +126,12 @@ rspamd_parse_bind_line (struct rspamd_config *cfg,
 	}
 	else {
 		if (!rspamd_parse_host_port_priority_strv (tokens, &cnf->addrs,
-				&cnf->cnt, NULL, &cnf->name, DEFAULT_BIND_PORT, cfg->cfg_pool)) {
+				NULL, &cnf->name, DEFAULT_BIND_PORT, cfg->cfg_pool)) {
 			msg_err ("cannot parse bind line: %s", str);
 			ret = FALSE;
 		}
 		else {
+			cnf->cnt = cnf->addrs->len;
 			LL_PREPEND (cf->bind_conf, cnf);
 		}
 	}
@@ -150,9 +152,6 @@ rspamd_config_defaults (struct rspamd_config *cfg)
 	/* 16 sockets per DNS server */
 	cfg->dns_io_per_server = 16;
 
-	cfg->statfile_sync_interval = 60000;
-	cfg->statfile_sync_timeout = 20000;
-
 	/* 20 Kb */
 	cfg->max_diff = 20480;
 
@@ -166,19 +165,19 @@ rspamd_config_defaults (struct rspamd_config *cfg)
 			rspamd_str_equal);
 	cfg->cfg_params = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
 	cfg->metrics_symbols = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
+	cfg->symbols_groups = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
 
 	cfg->map_timeout = DEFAULT_MAP_TIMEOUT;
 
 	cfg->log_level = G_LOG_LEVEL_WARNING;
 	cfg->log_extended = TRUE;
+
+	cfg->min_word_len = DEFAULT_MIN_WORD;
 }
 
 void
 rspamd_config_free (struct rspamd_config *cfg)
 {
-	GList *cur;
-	struct rspamd_symbols_group *gr;
-
 	rspamd_map_remove_all (cfg);
 	ucl_obj_unref (cfg->rcl_obj);
 	g_hash_table_remove_all (cfg->metrics);
@@ -190,18 +189,7 @@ rspamd_config_free (struct rspamd_config *cfg)
 	g_hash_table_unref (cfg->cfg_params);
 	g_hash_table_destroy (cfg->metrics_symbols);
 	g_hash_table_destroy (cfg->classifiers_symbols);
-	/* Free symbols groups */
-	cur = cfg->symbols_groups;
-	while (cur) {
-		gr = cur->data;
-		if (gr->symbols) {
-			g_list_free (gr->symbols);
-		}
-		cur = g_list_next (cur);
-	}
-	if (cfg->symbols_groups) {
-		g_list_free (cfg->symbols_groups);
-	}
+	g_hash_table_unref (cfg->symbols_groups);
 
 	if (cfg->checksum) {
 		g_free (cfg->checksum);
@@ -264,16 +252,17 @@ rspamd_config_parse_limit (const gchar *limit, guint len)
 }
 
 gchar
-rspamd_config_parse_flag (const gchar *str)
+rspamd_config_parse_flag (const gchar *str, guint len)
 {
-	guint len;
 	gchar c;
 
 	if (!str || !*str) {
 		return -1;
 	}
 
-	len = strlen (str);
+	if (len == 0) {
+		len = strlen (str);
+	}
 
 	switch (len) {
 	case 1:
@@ -331,6 +320,7 @@ rspamd_config_calculate_checksum (struct rspamd_config *cfg)
 	}
 	if (stat (cfg->cfg_name, &st) == -1) {
 		msg_err ("cannot stat %s: %s", cfg->cfg_name, strerror (errno));
+		close (fd);
 		return FALSE;
 	}
 
@@ -371,7 +361,7 @@ rspamd_config_post_load (struct rspamd_config *cfg)
 	clock_getres (CLOCK_REALTIME,			&ts);
 # endif
 
-	cfg->clock_res = (gint)log10 (1000000 / ts.tv_nsec);
+	cfg->clock_res = log10 (1000000. / ts.tv_nsec);
 	if (cfg->clock_res < 0) {
 		cfg->clock_res = 0;
 	}
@@ -382,6 +372,8 @@ rspamd_config_post_load (struct rspamd_config *cfg)
 	/* For gettimeofday */
 	cfg->clock_res = 1;
 #endif
+
+	rspamd_regexp_library_init ();
 
 	if ((def_metric =
 		g_hash_table_lookup (cfg->metrics, DEFAULT_METRIC)) == NULL) {
@@ -394,9 +386,36 @@ rspamd_config_post_load (struct rspamd_config *cfg)
 
 	cfg->default_metric = def_metric;
 
+	if (cfg->tld_file == NULL) {
+		/* Try to guess tld file */
+		GString *fpath = g_string_new (NULL);
+
+		rspamd_printf_gstring (fpath, "%s%c%s", RSPAMD_PLUGINSDIR,
+				G_DIR_SEPARATOR, "effective_tld_names.dat");
+
+		if (access (fpath->str, R_OK)) {
+			msg_warn ("url_tld option is not specified but %s is available,"
+					" therefore this file is assumed as TLD file for URL"
+					" extraction", fpath->str);
+			cfg->tld_file = rspamd_mempool_strdup (cfg->cfg_pool, fpath->str);
+		}
+		else {
+			msg_err ("no url_tld option has been specified, URL's detection "
+					"will be awfully broken");
+		}
+
+		g_string_free (fpath, TRUE);
+	}
+
 	/* Lua options */
 	(void)rspamd_lua_post_load_config (cfg);
 	init_dynamic_config (cfg);
+
+	rspamd_stat_init (cfg);
+	rspamd_url_init (cfg->tld_file);
+
+	/* Insert classifiers symbols */
+	(void)rspamd_config_insert_classify_symbols (cfg);
 }
 
 #if 0
@@ -499,12 +518,6 @@ rspamd_config_new_classifier (struct rspamd_config *cfg,
 		c =
 			rspamd_mempool_alloc0 (cfg->cfg_pool,
 				sizeof (struct rspamd_classifier_config));
-	}
-	if (c->opts == NULL) {
-		c->opts = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
-		rspamd_mempool_add_destructor (cfg->cfg_pool,
-			(rspamd_mempool_destruct_t) g_hash_table_destroy,
-			c->opts);
 	}
 	if (c->labels == NULL) {
 		c->labels = g_hash_table_new_full (rspamd_str_hash,
@@ -692,7 +705,7 @@ rspamd_config_find_classifier (struct rspamd_config *cfg, const gchar *name)
 	while (cur) {
 		cf = cur->data;
 
-		if (g_ascii_strcasecmp (cf->classifier->name, name) == 0) {
+		if (g_ascii_strcasecmp (cf->name, name) == 0) {
 			return cf;
 		}
 
@@ -802,7 +815,7 @@ rspamd_ucl_fin_cb (rspamd_mempool_t * pool, struct map_cb_data *data)
 		return;
 	}
 
-	checksum = XXH32 (cbdata->buf->str, cbdata->buf->len, 0xdead);
+	checksum = XXH64 (cbdata->buf->str, cbdata->buf->len, 0);
 	if (data->map->checksum != checksum) {
 		/* New data available */
 		parser = ucl_parser_new (0);
@@ -833,6 +846,75 @@ rspamd_ucl_fin_cb (rspamd_mempool_t * pool, struct map_cb_data *data)
 	}
 }
 
-/*
- * vi:ts=4
- */
+gboolean
+rspamd_init_filters (struct rspamd_config *cfg, bool reconfig)
+{
+	GList *cur;
+	module_t *mod, **pmod;
+	struct module_ctx *mod_ctx;
+
+	/* Init all compiled modules */
+	for (pmod = modules; *pmod != NULL; pmod ++) {
+		mod = *pmod;
+		mod_ctx = g_slice_alloc0 (sizeof (struct module_ctx));
+
+		if (mod->module_init_func (cfg, &mod_ctx) == 0) {
+			g_hash_table_insert (cfg->c_modules,
+				(gpointer) mod->name,
+				mod_ctx);
+			mod_ctx->mod = mod;
+		}
+	}
+
+	cur = g_list_first (cfg->filters);
+
+	while (cur) {
+		/* Perform modules configuring */
+		mod_ctx = NULL;
+		mod_ctx = g_hash_table_lookup (cfg->c_modules, cur->data);
+
+		if (mod_ctx) {
+			mod = mod_ctx->mod;
+			mod_ctx->enabled = TRUE;
+
+			if (reconfig) {
+				(void)mod->module_reconfig_func (cfg);
+				msg_debug ("reconfig of %s", mod->name);
+			}
+			else {
+				(void)mod->module_config_func (cfg);
+			}
+		}
+
+		if (mod_ctx == NULL) {
+			msg_warn ("requested unknown module %s", cur->data);
+		}
+
+		cur = g_list_next (cur);
+	}
+
+	return rspamd_init_lua_filters (cfg);
+}
+
+void
+rspamd_init_cfg (struct rspamd_config *cfg, gboolean init_lua)
+{
+	cfg->cfg_pool = rspamd_mempool_new (
+			rspamd_mempool_suggest_size ());
+	rspamd_config_defaults (cfg);
+
+	if (init_lua) {
+		cfg->lua_state = rspamd_lua_init (cfg);
+		rspamd_mempool_add_destructor (cfg->cfg_pool,
+				(rspamd_mempool_destruct_t)lua_close, cfg->lua_state);
+	}
+
+	/* Pre-init of cache */
+	cfg->cache = g_new0 (struct symbols_cache, 1);
+	cfg->cache->static_pool = rspamd_mempool_new (
+		rspamd_mempool_suggest_size ());
+	cfg->cache->cfg = cfg;
+	cfg->cache->items_by_symbol = g_hash_table_new (
+		rspamd_str_hash,
+		rspamd_str_equal);
+}

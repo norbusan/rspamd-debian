@@ -46,7 +46,7 @@ struct rspamd_fuzzy_backend {
 };
 
 
-const char *create_tables_sql =
+static const char *create_tables_sql =
 		"BEGIN;"
 		"CREATE TABLE digests("
 		"id INTEGER PRIMARY KEY,"
@@ -60,7 +60,7 @@ const char *create_tables_sql =
 		"digest_id INTEGER REFERENCES digests(id) ON DELETE CASCADE "
 		"ON UPDATE CASCADE);"
 		"COMMIT;";
-const char *create_index_sql =
+static const char *create_index_sql =
 		"BEGIN;"
 		"CREATE UNIQUE INDEX IF NOT EXISTS d ON digests(digest);"
 		"CREATE INDEX IF NOT EXISTS t ON digests(time);"
@@ -390,7 +390,6 @@ rspamd_fuzzy_backend_open_db (const gchar *path, GError **err)
 
 	bk = g_slice_alloc (sizeof (*bk));
 	bk->path = g_strdup (path);
-	bk = g_slice_alloc (sizeof (*bk));
 	bk->db = sqlite;
 	bk->expired = 0;
 
@@ -434,37 +433,43 @@ rspamd_fuzzy_backend_convert (const gchar *path, int fd, GError **err)
 	(void)lseek (fd, 0, SEEK_SET);
 
 	off = sizeof (FUZZY_FILE_MAGIC);
-	if ((map = mmap (NULL, st.st_size - off, PROT_READ, MAP_SHARED, fd,
-			0)) == MAP_FAILED) {
-		g_set_error (err, rspamd_fuzzy_backend_quark (),
-				errno, "Cannot mmap file %s: %s",
-				path, strerror (errno));
-		rspamd_fuzzy_backend_close (nbackend);
-
-		return FALSE;
+	if (off >= st.st_size) {
+		msg_warn ("old fuzzy storage is empty or corrupted, remove it");
 	}
+	else {
+		if ((map = mmap (NULL, st.st_size - off, PROT_READ, MAP_SHARED, fd,
+				0)) == MAP_FAILED) {
+			g_set_error (err, rspamd_fuzzy_backend_quark (),
+					errno, "Cannot mmap file %s: %s",
+					path, strerror (errno));
+			rspamd_fuzzy_backend_close (nbackend);
 
-	end = map + st.st_size;
-	p = map + off;
-
-	rspamd_fuzzy_backend_run_simple (RSPAMD_FUZZY_BACKEND_TRANSACTION_START,
-				nbackend, NULL);
-	while (p < end) {
-		n = (struct rspamd_legacy_fuzzy_node *)p;
-		/* Convert node flag, digest, value, time  */
-		if (rspamd_fuzzy_backend_run_stmt (nbackend, RSPAMD_FUZZY_BACKEND_INSERT,
-				(gint)n->flag, n->h.hash_pipe,
-				(gint64)n->value, n->time) != SQLITE_OK) {
-			msg_warn ("Cannot execute init sql %s: %s",
-					prepared_stmts[RSPAMD_FUZZY_BACKEND_INSERT].sql,
-					sqlite3_errmsg (nbackend->db));
+			return FALSE;
 		}
-		p += sizeof (struct rspamd_legacy_fuzzy_node);
+
+		end = map + st.st_size;
+		p = map + off;
+
+		rspamd_fuzzy_backend_run_simple (RSPAMD_FUZZY_BACKEND_TRANSACTION_START,
+				nbackend, NULL);
+		while (p < end) {
+			n = (struct rspamd_legacy_fuzzy_node *)p;
+			/* Convert node flag, digest, value, time  */
+			if (rspamd_fuzzy_backend_run_stmt (nbackend, RSPAMD_FUZZY_BACKEND_INSERT,
+					(gint)n->flag, n->h.hash_pipe,
+					(gint64)n->value, n->time) != SQLITE_OK) {
+				msg_warn ("Cannot execute init sql %s: %s",
+						prepared_stmts[RSPAMD_FUZZY_BACKEND_INSERT].sql,
+						sqlite3_errmsg (nbackend->db));
+			}
+			p += sizeof (struct rspamd_legacy_fuzzy_node);
+		}
+
+		munmap (map, st.st_size);
+		rspamd_fuzzy_backend_run_simple (RSPAMD_FUZZY_BACKEND_TRANSACTION_COMMIT,
+				nbackend, NULL);
 	}
 
-	munmap (map, st.st_size);
-	rspamd_fuzzy_backend_run_simple (RSPAMD_FUZZY_BACKEND_TRANSACTION_COMMIT,
-					nbackend, NULL);
 	rspamd_fuzzy_backend_run_sql (create_index_sql, nbackend, NULL);
 	rspamd_fuzzy_backend_close (nbackend);
 	rename (tmpdb, path);
@@ -523,6 +528,8 @@ rspamd_fuzzy_backend_open (const gchar *path, GError **err)
 			close (fd);
 		}
 	}
+
+	close (fd);
 
 	/* Open database */
 	if ((res = rspamd_fuzzy_backend_open_db (path, err)) == NULL) {
@@ -719,19 +726,43 @@ gboolean
 rspamd_fuzzy_backend_sync (struct rspamd_fuzzy_backend *backend, gint64 expire)
 {
 	gboolean ret = FALSE;
+	gint64 expire_lim, expired;
+	gint rc;
+	GError *err = NULL;
 
 	/* Perform expire */
 	if (expire > 0) {
-		rspamd_fuzzy_backend_run_simple (RSPAMD_FUZZY_BACKEND_EXPIRE,
-				backend, NULL);
-		backend->expired += sqlite3_changes (backend->db);
+		expire_lim = time (NULL) - expire;
+
+		if (expire_lim > 0) {
+			rc = rspamd_fuzzy_backend_run_stmt (backend,
+					RSPAMD_FUZZY_BACKEND_EXPIRE, expire_lim);
+
+			if (rc == SQLITE_OK) {
+				expired = sqlite3_changes (backend->db);
+
+				if (expired > 0) {
+					backend->expired += expired;
+					msg_info ("expired %L hashes", expired);
+				}
+			}
+			else {
+				msg_warn ("cannot execute expired statement: %s",
+						sqlite3_errmsg (backend->db));
+			}
+		}
+
 	}
 	ret = rspamd_fuzzy_backend_run_simple (RSPAMD_FUZZY_BACKEND_TRANSACTION_COMMIT,
-			backend, NULL);
+			backend, &err);
 
 	if (ret) {
 		ret = rspamd_fuzzy_backend_run_simple (RSPAMD_FUZZY_BACKEND_TRANSACTION_START,
 			backend, NULL);
+	}
+	else {
+		msg_warn ("cannot synchronise fuzzy backend: %e", err);
+		g_error_free (err);
 	}
 
 	return ret;

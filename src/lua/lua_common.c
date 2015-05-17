@@ -23,27 +23,11 @@
  */
 
 #include "lua_common.h"
-#include "expressions.h"
 
 /* Lua module init function */
 #define MODULE_INIT_FUNC "module_init"
 
 const luaL_reg null_reg[] = {
-	{"__tostring", rspamd_lua_class_tostring},
-	{NULL, NULL}
-};
-
-/* Logger methods */
-LUA_FUNCTION_DEF (logger, err);
-LUA_FUNCTION_DEF (logger, warn);
-LUA_FUNCTION_DEF (logger, info);
-LUA_FUNCTION_DEF (logger, debug);
-
-static const struct luaL_reg loggerlib_f[] = {
-	LUA_INTERFACE_DEF (logger, err),
-	LUA_INTERFACE_DEF (logger, warn),
-	LUA_INTERFACE_DEF (logger, info),
-	LUA_INTERFACE_DEF (logger, debug),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
 };
@@ -161,111 +145,6 @@ rspamd_lua_table_get (lua_State *L, const gchar *index)
 }
 
 static void
-lua_common_log (GLogLevelFlags level, lua_State *L, const gchar *msg)
-{
-	lua_Debug d;
-	gchar func_buf[128], *p;
-
-	if (lua_getstack (L, 1, &d) == 1) {
-		(void)lua_getinfo (L, "Sl", &d);
-		if ((p = strrchr (d.short_src, '/')) == NULL) {
-			p = d.short_src;
-		}
-		else {
-			p++;
-		}
-		rspamd_snprintf (func_buf, sizeof (func_buf), "%s:%d", p,
-			d.currentline);
-		if (level == G_LOG_LEVEL_DEBUG) {
-			rspamd_conditional_debug (rspamd_main->logger,
-				NULL,
-				func_buf,
-				"%s",
-				msg);
-		}
-		else {
-			rspamd_common_log_function (rspamd_main->logger,
-				level,
-				func_buf,
-				"%s",
-				msg);
-		}
-	}
-	else {
-		if (level == G_LOG_LEVEL_DEBUG) {
-			rspamd_conditional_debug (rspamd_main->logger,
-				NULL,
-				__FUNCTION__,
-				"%s",
-				msg);
-		}
-		else {
-			rspamd_common_log_function (rspamd_main->logger,
-				level,
-				__FUNCTION__,
-				"%s",
-				msg);
-		}
-	}
-}
-
-/*** Logger interface ***/
-static gint
-lua_logger_err (lua_State * L)
-{
-	const gchar *msg;
-	msg = luaL_checkstring (L, 1);
-	lua_common_log (G_LOG_LEVEL_CRITICAL, L, msg);
-	return 1;
-}
-
-static gint
-lua_logger_warn (lua_State * L)
-{
-	const gchar *msg;
-	msg = luaL_checkstring (L, 1);
-	lua_common_log (G_LOG_LEVEL_WARNING, L, msg);
-	return 1;
-}
-
-static gint
-lua_logger_info (lua_State * L)
-{
-	const gchar *msg;
-	msg = luaL_checkstring (L, 1);
-	lua_common_log (G_LOG_LEVEL_INFO, L, msg);
-	return 1;
-}
-
-static gint
-lua_logger_debug (lua_State * L)
-{
-	const gchar *msg;
-	msg = luaL_checkstring (L, 1);
-	lua_common_log (G_LOG_LEVEL_DEBUG, L, msg);
-	return 1;
-}
-
-
-/*** Init functions ***/
-
-static gint
-lua_load_logger (lua_State *L)
-{
-	lua_newtable (L);
-	luaL_register (L, NULL, loggerlib_f);
-
-	return 1;
-}
-
-static void
-luaopen_logger (lua_State * L)
-{
-	rspamd_lua_add_preload (L, "rspamd_logger", lua_load_logger);
-}
-
-
-static void
 lua_add_actions_global (lua_State *L)
 {
 	gint i;
@@ -281,7 +160,7 @@ lua_add_actions_global (lua_State *L)
 	lua_setglobal (L, "rspamd_actions");
 }
 
-static void
+void
 rspamd_lua_set_path (lua_State *L, struct rspamd_config *cfg)
 {
 	const gchar *old_path, *additional_path = NULL;
@@ -342,7 +221,7 @@ rspamd_lua_init (struct rspamd_config *cfg)
 	luaopen_url (L);
 	luaopen_classifier (L);
 	luaopen_statfile (L);
-	luaopen_glib_regexp (L);
+	luaopen_regexp (L);
 	luaopen_cdb (L);
 	luaopen_xmlrpc (L);
 	luaopen_http (L);
@@ -354,6 +233,9 @@ rspamd_lua_init (struct rspamd_config *cfg)
 	luaopen_dns_resolver (L);
 	luaopen_rsa (L);
 	luaopen_ip (L);
+	luaopen_expression (L);
+	luaopen_text (L);
+	luaopen_util (L);
 
 	rspamd_lua_add_preload (L, "ucl", luaopen_ucl);
 
@@ -395,9 +277,8 @@ gboolean
 rspamd_init_lua_filters (struct rspamd_config *cfg)
 {
 	struct rspamd_config **pcfg;
-	GList *cur, *tmp;
+	GList *cur;
 	struct script_module *module;
-	struct rspamd_statfile_config *st;
 	lua_State *L = cfg->lua_state;
 
 	rspamd_lua_set_path (L, cfg);
@@ -410,7 +291,7 @@ rspamd_init_lua_filters (struct rspamd_config *cfg)
 				msg_info ("load of %s failed: %s", module->path,
 					lua_tostring (L, -1));
 				cur = g_list_next (cur);
-				return FALSE;
+				continue;
 			}
 
 			/* Initialize config structure */
@@ -423,38 +304,21 @@ rspamd_init_lua_filters (struct rspamd_config *cfg)
 			if (lua_pcall (L, 0, LUA_MULTRET, 0) != 0) {
 				msg_info ("init of %s failed: %s", module->path,
 					lua_tostring (L, -1));
-				return FALSE;
+				cur = g_list_next (cur);
+				continue;
 			}
 			if (lua_gettop (L) != 0) {
 				if (lua_tonumber (L, -1) == -1) {
 					msg_info (
 						"%s returned -1 that indicates configuration error",
 						module->path);
-					return FALSE;
 				}
 				lua_pop (L, lua_gettop (L));
 			}
 		}
 		cur = g_list_next (cur);
 	}
-	/* Init statfiles normalizers */
-	cur = g_list_first (cfg->statfiles);
-	while (cur) {
-		st = cur->data;
-		if (st->normalizer == rspamd_lua_normalize) {
-			tmp = st->normalizer_data;
-			if (tmp && (tmp = g_list_next (tmp))) {
-				if (tmp->data) {
-					/* Code must be loaded from data */
-					if (luaL_loadstring (L, tmp->data) != 0) {
-						msg_info ("cannot load normalizer code %s", tmp->data);
-						return FALSE;
-					}
-				}
-			}
-		}
-		cur = g_list_next (cur);
-	}
+
 	/* Assign state */
 	cfg->lua_state = L;
 

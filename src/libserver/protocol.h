@@ -30,6 +30,15 @@ gboolean rspamd_protocol_handle_headers (struct rspamd_task *task,
 	struct rspamd_http_message *msg);
 
 /**
+ * Process control chunk and update task structure accordingly
+ * @param task
+ * @param control
+ * @return
+ */
+gboolean rspamd_protocol_handle_control (struct rspamd_task *task,
+		const ucl_object_t *control);
+
+/**
  * Process HTTP request to the task structure
  * @param task
  * @param msg
@@ -45,6 +54,15 @@ gboolean rspamd_protocol_handle_request (struct rspamd_task *task,
  */
 void rspamd_protocol_http_reply (struct rspamd_http_message *msg,
 	struct rspamd_task *task);
+
+/**
+ * Write reply to ucl object filling log buffer
+ * @param task
+ * @param logbuf
+ * @return
+ */
+ucl_object_t * rspamd_protocol_write_ucl (struct rspamd_task *task,
+		GString *logbuf);
 
 /**
  * Write reply for specified task command

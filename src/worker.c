@@ -36,6 +36,7 @@
 #include "libserver/dns.h"
 #include "libmime/message.h"
 #include "main.h"
+#include "keypairs_cache.h"
 
 #include "lua/lua_common.h"
 
@@ -86,6 +87,10 @@ struct rspamd_worker_ctx {
 	GThreadPool *classify_pool;
 	/* Events base */
 	struct event_base *ev_base;
+	/* Encryption key */
+	gpointer key;
+	/* Keys cache */
+	struct rspamd_keypair_cache *keys_cache;
 };
 
 /*
@@ -127,7 +132,8 @@ rspamd_worker_body_handler (struct rspamd_http_connection *conn,
 		return 0;
 	}
 
-	if (!rspamd_task_process (task, msg, ctx->classify_pool, TRUE)) {
+
+	if (!rspamd_task_process (task, msg, chunk, len, ctx->classify_pool, TRUE)) {
 		task->state = WRITE_REPLY;
 	}
 
@@ -139,8 +145,8 @@ rspamd_worker_error_handler (struct rspamd_http_connection *conn, GError *err)
 {
 	struct rspamd_task *task = (struct rspamd_task *) conn->ud;
 
-	msg_info ("abnormally closing connection from: %s, error: %s",
-		rspamd_inet_address_to_string (&task->client_addr), err->message);
+	msg_info ("abnormally closing connection from: %s, error: %e",
+		rspamd_inet_address_to_string (task->client_addr), err);
 	/* Terminate session immediately */
 	destroy_session (task->s);
 }
@@ -154,7 +160,7 @@ rspamd_worker_finish_handler (struct rspamd_http_connection *conn,
 	if (task->state == CLOSING_CONNECTION || task->state == WRITING_REPLY) {
 		/* We are done here */
 		msg_debug ("normally closing connection from: %s",
-			rspamd_inet_address_to_string (&task->client_addr));
+			rspamd_inet_address_to_string (task->client_addr));
 		destroy_session (task->s);
 	}
 	else if (task->state == WRITE_REPLY) {
@@ -164,7 +170,7 @@ rspamd_worker_finish_handler (struct rspamd_http_connection *conn,
 		 * is read
 		 */
 		msg_debug ("want write message to the wire: %s",
-			rspamd_inet_address_to_string (&task->client_addr));
+			rspamd_inet_address_to_string (task->client_addr));
 		rspamd_protocol_write_reply (task);
 		/* Forcefully set the state */
 		task->state = CLOSING_CONNECTION;
@@ -190,7 +196,7 @@ accept_socket (gint fd, short what, void *arg)
 	struct rspamd_worker *worker = (struct rspamd_worker *) arg;
 	struct rspamd_worker_ctx *ctx;
 	struct rspamd_task *new_task;
-	rspamd_inet_addr_t addr;
+	rspamd_inet_addr_t *addr;
 	gint nfd;
 
 	ctx = worker->ctx;
@@ -215,13 +221,19 @@ accept_socket (gint fd, short what, void *arg)
 	new_task = rspamd_task_new (worker);
 
 	msg_info ("accepted connection from %s port %d",
-		rspamd_inet_address_to_string (&addr),
-		rspamd_inet_address_get_port (&addr));
+		rspamd_inet_address_to_string (addr),
+		rspamd_inet_address_get_port (addr));
 
 	/* Copy some variables */
+	if (ctx->is_mime) {
+		new_task->flags |= RSPAMD_TASK_FLAG_MIME;
+	}
+	else {
+		new_task->flags &= ~RSPAMD_TASK_FLAG_MIME;
+	}
+
 	new_task->sock = nfd;
-	new_task->is_mime = ctx->is_mime;
-	memcpy (&new_task->client_addr, &addr, sizeof (addr));
+	new_task->client_addr = addr;
 
 	worker->srv->stat->connections_count++;
 	new_task->resolver = ctx->resolver;
@@ -231,7 +243,8 @@ accept_socket (gint fd, short what, void *arg)
 		rspamd_worker_error_handler,
 		rspamd_worker_finish_handler,
 		0,
-		RSPAMD_HTTP_SERVER);
+		RSPAMD_HTTP_SERVER,
+		ctx->keys_cache);
 	new_task->ev_base = ctx->ev_base;
 	ctx->tasks++;
 	rspamd_mempool_add_destructor (new_task->task_pool,
@@ -242,6 +255,10 @@ accept_socket (gint fd, short what, void *arg)
 			rspamd_task_restore, rspamd_task_free_hard, new_task);
 
 	new_task->classify_pool = ctx->classify_pool;
+
+	if (ctx->key) {
+		rspamd_http_connection_set_key (new_task->http_conn, ctx->key);
+	}
 
 	rspamd_http_connection_read_message (new_task->http_conn,
 		new_task,
@@ -295,6 +312,12 @@ init_worker (struct rspamd_config *cfg)
 		G_STRUCT_OFFSET (struct rspamd_worker_ctx,
 		classify_threads), RSPAMD_CL_FLAG_INT_32);
 
+
+	rspamd_rcl_register_worker_option (cfg, type, "keypair",
+		rspamd_rcl_parse_struct_keypair, ctx,
+		G_STRUCT_OFFSET (struct rspamd_worker_ctx,
+		key), 0);
+
 	return ctx;
 }
 
@@ -331,15 +354,26 @@ start_worker (struct rspamd_worker *worker)
 				TRUE,
 				&err);
 		if (err != NULL) {
-			msg_err ("pool create failed: %s", err->message);
+			msg_err ("pool create failed: %e", err);
+			g_error_free (err);
 			ctx->classify_pool = NULL;
 		}
 	}
+
+	/* XXX: stupid default */
+	ctx->keys_cache = rspamd_keypair_cache_new (256);
 
 	event_base_loop (ctx->ev_base, 0);
 
 	g_mime_shutdown ();
 	rspamd_log_close (rspamd_main->logger);
+
+	if (ctx->key) {
+		rspamd_http_connection_key_unref (ctx->key);
+	}
+
+	rspamd_keypair_cache_destroy (ctx->keys_cache);
+
 	exit (EXIT_SUCCESS);
 }
 

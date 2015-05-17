@@ -33,6 +33,7 @@
 /* How much message should be repeated before it is count to be repeated one */
 #define REPEATS_MIN 3
 #define REPEATS_MAX 300
+#define RSPAMD_LOGBUF_SIZE 8192
 
 /**
  * Static structure that store logging parameters
@@ -55,10 +56,10 @@ struct rspamd_logger_s {
 	sig_atomic_t do_reopen_log;
 	enum rspamd_log_type type;
 	pid_t pid;
+	guint32 repeats;
 	GQuark process_type;
 	radix_compressed_t *debug_ip;
-	guint32 last_line_cksum;
-	guint32 repeats;
+	guint64 last_line_cksum;
 	gchar *saved_message;
 	gchar *saved_function;
 	rspamd_mempool_t *pool;
@@ -82,10 +83,10 @@ file_log_function (const gchar * log_domain, const gchar *function,
 /**
  * Calculate checksum for log line (used for repeating logic)
  */
-static inline guint32
+static inline guint64
 rspamd_log_calculate_cksum (const gchar *message, size_t mlen)
 {
-	return XXH32 (message, mlen, 0xdeadbeef);
+	return XXH64 (message, mlen, rspamd_hash_seed ());
 }
 
 /*
@@ -385,7 +386,7 @@ rspamd_common_logv (rspamd_logger_t *rspamd_log,
 	const gchar *fmt,
 	va_list args)
 {
-	static gchar logbuf[BUFSIZ];
+	static gchar logbuf[RSPAMD_LOGBUF_SIZE];
 	u_char *end;
 
 	if (rspamd_log == NULL) {
@@ -696,15 +697,15 @@ file_log_function (const gchar * log_domain,
 			cptype = g_quark_to_string (rspamd_log->process_type);
 
 			if (rspamd_log->cfg->log_color) {
-				if (log_level >= G_LOG_LEVEL_INFO) {
+				if (log_level == G_LOG_LEVEL_INFO) {
 					/* White */
-					r = rspamd_snprintf (tmpbuf, sizeof (tmpbuf), "\033[1;37m");
+					r = rspamd_snprintf (tmpbuf, sizeof (tmpbuf), "\033[0;37m");
 				}
-				else if (log_level >= G_LOG_LEVEL_WARNING) {
+				else if (log_level == G_LOG_LEVEL_WARNING) {
 					/* Magenta */
-					r = rspamd_snprintf (tmpbuf, sizeof (tmpbuf), "\033[2;32m");
+					r = rspamd_snprintf (tmpbuf, sizeof (tmpbuf), "\033[0;32m");
 				}
-				else if (log_level >= G_LOG_LEVEL_CRITICAL) {
+				else if (log_level == G_LOG_LEVEL_CRITICAL) {
 					/* Red */
 					r = rspamd_snprintf (tmpbuf, sizeof (tmpbuf), "\033[1;31m");
 				}

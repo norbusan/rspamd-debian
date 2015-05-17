@@ -882,6 +882,9 @@ rspamd_dkim_key_free (rspamd_dkim_key_t *key)
 	if (key->key_rsa) {
 		RSA_free (key->key_rsa);
 	}
+	if (key->key_evp) {
+		EVP_PKEY_free (key->key_evp);
+	}
 	if (key->key_bio) {
 		BIO_free (key->key_bio);
 	}
@@ -1150,7 +1153,7 @@ rspamd_dkim_canonize_body (rspamd_dkim_context_t *ctx,
 	const gchar *end)
 {
 	const gchar *p;
-	guint remain = ctx->len ? ctx->len : end - start;
+	guint remain = ctx->len ? ctx->len : (guint)(end - start);
 
 	if (start == NULL) {
 		/* Empty body */
@@ -1591,12 +1594,12 @@ rspamd_dkim_check (rspamd_dkim_context_t *ctx,
 
 	g_return_val_if_fail (ctx != NULL,		 DKIM_ERROR);
 	g_return_val_if_fail (key != NULL,		 DKIM_ERROR);
-	g_return_val_if_fail (task->msg != NULL, DKIM_ERROR);
+	g_return_val_if_fail (task->msg.len > 0, DKIM_ERROR);
 
 	/* First of all find place of body */
-	p = task->msg->str;
+	p = task->msg.start;
 
-	end = task->msg->str + task->msg->len;
+	end = task->msg.start + task->msg.len;
 
 	while (p <= end) {
 		/* Search for \r\n\r\n at the end of headers */

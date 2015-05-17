@@ -7,7 +7,7 @@
 %define rspamd_wwwdir   %{_datadir}/rspamd/www
 
 Name:           rspamd
-Version:        0.8.3
+Version:        0.9.1
 Release:        1
 Summary:        Rapid spam filtering system
 Group:          System Environment/Daemons
@@ -21,7 +21,12 @@ License:        BSD2c
 %endif
 URL:            https://rspamd.com
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}
-BuildRequires:  cmake,glib2-devel,gmime-devel,libevent-devel,openssl-devel,lua-devel,pcre-devel,perl
+BuildRequires:  glib2-devel,libevent-devel,openssl-devel,pcre-devel,perl,luajit-devel,hiredis-devel
+%if 0%{?el6}
+BuildRequires:  cmake28,gmime24-devel
+%else
+BuildRequires:  cmake,gmime-devel
+%endif
 %if 0%{?suse_version} || 0%{?el7} || 0%{?fedora}
 BuildRequires:  systemd
 Requires(pre):  systemd
@@ -61,7 +66,12 @@ lua.
 %endif
 
 %build
+%if 0%{?el6}
+%define __cmake /usr/bin/env cmake28
+%endif # el6
+
 %{__cmake} \
+		-DCMAKE_C_OPT_FLAGS="%{optflags}" \
         -DCMAKE_INSTALL_PREFIX=%{_prefix} \
         -DCONFDIR=%{_sysconfdir}/rspamd \
         -DMANDIR=%{_mandir} \
@@ -76,7 +86,7 @@ lua.
         -DLOGDIR=%{_localstatedir}/log/rspamd \
         -DEXAMPLESDIR=%{_datadir}/examples/rspamd \
         -DPLUGINSDIR=%{_datadir}/rspamd \
-        -DLIBDIR=%{_libdir} \
+        -DLIBDIR=%{_libdir}/rspamd/ \
         -DINCLUDEDIR=%{_includedir} \
         -DNO_SHARED=ON \
         -DDEBIAN_BUILD=1 \
@@ -194,6 +204,7 @@ fi
 %dir %{rspamd_pluginsdir}/lua
 %dir %{rspamd_pluginsdir}
 %dir %{rspamd_wwwdir}
+%dir %{_libdir}/rspamd
 %config(noreplace) %{rspamd_confdir}/2tld.inc
 %config(noreplace) %{rspamd_confdir}/surbl-whitelist.inc
 %{rspamd_pluginsdir}/lua/forged_recipients.lua
@@ -208,6 +219,8 @@ fi
 %{rspamd_pluginsdir}/lua/ip_score.lua
 %{rspamd_pluginsdir}/lua/settings.lua
 %{rspamd_pluginsdir}/lua/fun.lua
+%{rspamd_pluginsdir}/lua/spamassassin.lua
+%{rspamd_pluginsdir}/lua/dmarc.lua
 %{rspamd_confdir}/lua/regexp/drugs.lua
 %{rspamd_confdir}/lua/regexp/fraud.lua
 %{rspamd_confdir}/lua/regexp/headers.lua
@@ -216,8 +229,16 @@ fi
 %{rspamd_confdir}/lua/hfilter.lua
 %{rspamd_confdir}/lua/rspamd.classifiers.lua
 %{rspamd_wwwdir}/*
+%{_libdir}/rspamd/*
+%{_datadir}/rspamd/effective_tld_names.dat
 
 %changelog
+* Sun May 17 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.1-1
+- Update to 0.9.1
+
+* Wed May 13 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.0-1
+- Update to 0.9.0
+
 * Fri Mar 13 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.8.3-1
 - Update to 0.8.3
 

@@ -1,4 +1,4 @@
-MACRO(_AddModulesForced MLIST WLIST)
+MACRO(_AddModulesForced MLIST)
 # Generate unique string for this build
 	STRING(RANDOM LENGTH 8 _MODULES_ID)
 	SET(MODULES_ID ${_MODULES_ID} CACHE INTERNAL "Modules ID" FORCE)
@@ -8,9 +8,7 @@ MACRO(_AddModulesForced MLIST WLIST)
 	
 	# Handle even old cmake
 	LIST(LENGTH ${MLIST} MLIST_COUNT)
-	LIST(LENGTH ${WLIST} WLIST_COUNT)
 	MATH(EXPR MLIST_MAX ${MLIST_COUNT}-1)
-	MATH(EXPR WLIST_MAX ${WLIST_COUNT}-1)
 	
 	FOREACH(MOD_IDX RANGE ${MLIST_MAX})
 		LIST(GET ${MLIST} ${MOD_IDX} MOD)
@@ -25,23 +23,33 @@ MACRO(_AddModulesForced MLIST WLIST)
 	ENDFOREACH(MOD_IDX RANGE ${MLIST_MAX})
 	
 	FILE(APPEND "${MODULES_C}" "NULL\n};\n")
+ENDMACRO(_AddModulesForced MLIST)
+
+MACRO(_AddWorkersForced WLIST)
+	SET(WORKERS_C "${CMAKE_CURRENT_BINARY_DIR}/workers.c")
+	FILE(WRITE "${WORKERS_C}"
+		"#include \"config.h\"\n")
 	
+	# Handle even old cmake
+	LIST(LENGTH ${WLIST} WLIST_COUNT)
+	MATH(EXPR WLIST_MAX ${WLIST_COUNT}-1)
 	FOREACH(MOD_IDX RANGE ${WLIST_MAX})
 		LIST(GET ${WLIST} ${MOD_IDX} WRK)
-		FILE(APPEND "${MODULES_C}" "extern worker_t ${WRK}_worker;\n")
+		FILE(APPEND "${WORKERS_C}" "extern worker_t ${WRK}_worker;\n")
 	ENDFOREACH(MOD_IDX RANGE ${WLIST_MAX})
 	 
-	FILE(APPEND "${MODULES_C}" "\n\nworker_t *workers[] = {\n")
+	FILE(APPEND "${WORKERS_C}" "\n\nworker_t *workers[] = {\n")
 	
 	FOREACH(MOD_IDX RANGE ${WLIST_MAX})
 		LIST(GET ${WLIST} ${MOD_IDX} WRK)
-		FILE(APPEND "${MODULES_C}" "&${WRK}_worker,\n")
+		FILE(APPEND "${WORKERS_C}" "&${WRK}_worker,\n")
 	ENDFOREACH(MOD_IDX RANGE ${WLIST_MAX})
-	FILE(APPEND "${MODULES_C}" "NULL\n};\n")
-ENDMACRO(_AddModulesForced MLIST WLIST)
+	FILE(APPEND "${WORKERS_C}" "NULL\n};\n")
+ENDMACRO(_AddWorkersForced WLIST)
 
 MACRO(AddModules MLIST WLIST)
-	_AddModulesForced(${MLIST} ${WLIST})
+	_AddModulesForced(${MLIST})
+	_AddWorkersForced(${WLIST})
 	#IF(NOT EXISTS "modules.c")
 	#	_AddModulesForced(${MLIST} ${WLIST})
 	#ELSE(NOT EXISTS "modules.c")
@@ -54,27 +62,22 @@ MACRO(AddModules MLIST WLIST)
 	#ENDIF(NOT EXISTS "modules.c")
 ENDMACRO(AddModules MLIST WLIST)
 
-# Contrib software
-ADD_SUBDIRECTORY(cdb)
-ADD_SUBDIRECTORY(ucl/cmake)
-SET(SLAVE_BUILD 1)
-ADD_SUBDIRECTORY(rdns)
-UNSET(SLAVE_BUILD)
-
 # Rspamd core components
 ADD_SUBDIRECTORY(lua)
+ADD_SUBDIRECTORY(libcryptobox)
 ADD_SUBDIRECTORY(libutil)
 ADD_SUBDIRECTORY(libserver)
 ADD_SUBDIRECTORY(libmime)
+ADD_SUBDIRECTORY(libstat)
 ADD_SUBDIRECTORY(client)
 				
-SET(RSPAMDSRC	${CMAKE_CURRENT_BINARY_DIR}/modules.c
-				controller.c
+SET(RSPAMDSRC	controller.c
 				fuzzy_storage.c
 				lua_worker.c
 				main.c
 				smtp_proxy.c
-				worker.c)
+				worker.c
+				http_proxy.c)
 
 SET(PLUGINSSRC	plugins/surbl.c
 				plugins/regexp.c
@@ -84,54 +87,29 @@ SET(PLUGINSSRC	plugins/surbl.c
 				plugins/dkim_check.c)
 				
 SET(MODULES_LIST surbl regexp chartable fuzzy_check spf dkim)
-SET(WORKERS_LIST normal controller smtp_proxy fuzzy lua)
+SET(WORKERS_LIST normal controller smtp_proxy fuzzy lua http_proxy)
 
 AddModules(MODULES_LIST WORKERS_LIST)
 LIST(LENGTH PLUGINSSRC RSPAMD_MODULES_NUM)
 ######################### LINK SECTION ###############################
 
-ADD_EXECUTABLE(rspamd ${RSPAMDSRC} ${PLUGINSSRC})
+ADD_LIBRARY(rspamd-server STATIC ${RSPAMD_UTIL} ${RSPAMD_LUA} ${RSPAMD_SERVER}
+		${RSPAMD_STAT} ${RSPAMD_MIME} ${RSPAMD_CRYPTOBOX} 
+		${CMAKE_CURRENT_BINARY_DIR}/modules.c ${PLUGINSSRC})
+TARGET_LINK_LIBRARIES(rspamd-server rspamd-http-parser)
+TARGET_LINK_LIBRARIES(rspamd-server rspamd-cdb)
+
+ADD_EXECUTABLE(rspamd ${RSPAMDSRC} ${CMAKE_CURRENT_BINARY_DIR}/workers.c)
 SET_TARGET_PROPERTIES(rspamd PROPERTIES LINKER_LANGUAGE C)
 SET_TARGET_PROPERTIES(rspamd PROPERTIES COMPILE_FLAGS "-DRSPAMD_MAIN")
 IF(NOT DEBIAN_BUILD)
 	SET_TARGET_PROPERTIES(rspamd PROPERTIES VERSION ${RSPAMD_VERSION})
 ENDIF(NOT DEBIAN_BUILD)
 
-TARGET_LINK_LIBRARIES(rspamd rspamd-mime)
 TARGET_LINK_LIBRARIES(rspamd rspamd-server)
-TARGET_LINK_LIBRARIES(rspamd rspamd-util)
-TARGET_LINK_LIBRARIES(rspamd rspamd-lua)
 TARGET_LINK_LIBRARIES(rspamd stemmer)
+TARGET_LINK_LIBRARIES(rspamd rspamd-actrie)
 
-TARGET_LINK_LIBRARIES(rspamd event)
-IF(HAVE_LIBEVENT2)
-	TARGET_LINK_LIBRARIES(rspamd event_pthreads)
-ENDIF(HAVE_LIBEVENT2)
-IF(WITH_DB)
-	TARGET_LINK_LIBRARIES(rspamd db)
-ENDIF(WITH_DB)
-
-IF(OPENSSL_FOUND)
-	TARGET_LINK_LIBRARIES(rspamd ${OPENSSL_LIBRARIES})
-ENDIF(OPENSSL_FOUND)
-IF(HAVE_FETCH_H)
-	TARGET_LINK_LIBRARIES(rspamd fetch)
-ENDIF(HAVE_FETCH_H)
 TARGET_LINK_LIBRARIES(rspamd ${RSPAMD_REQUIRED_LIBRARIES})
-
-IF(ENABLE_LUAJIT MATCHES "ON")
-	TARGET_LINK_LIBRARIES(rspamd "${LUAJIT_LIBRARY}")
-ELSE(ENABLE_LUAJIT MATCHES "ON")
-	TARGET_LINK_LIBRARIES(rspamd "${LUA_LIBRARY}")
-ENDIF(ENABLE_LUAJIT MATCHES "ON")
-
-IF(ENABLE_GPERF_TOOLS MATCHES "ON")
-	TARGET_LINK_LIBRARIES(rspamd profiler)
-ENDIF(ENABLE_GPERF_TOOLS MATCHES "ON")
-TARGET_LINK_LIBRARIES(rspamd hiredis)
-IF(GLIB_COMPAT)
-	TARGET_LINK_LIBRARIES(rspamd glibadditions)
-ENDIF(GLIB_COMPAT)
-
 
 INSTALL(TARGETS rspamd RUNTIME DESTINATION bin)

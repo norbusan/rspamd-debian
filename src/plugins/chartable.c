@@ -33,7 +33,6 @@
 
 #include "config.h"
 #include "libmime/message.h"
-#include "libmime/expressions.h"
 #include "main.h"
 
 #define DEFAULT_SYMBOL "R_CHARSET_MIXED"
@@ -53,7 +52,7 @@ module_t chartable_module = {
 };
 
 struct chartable_ctx {
-	gint (*filter) (struct rspamd_task * task);
+	struct module_ctx ctx;
 	const gchar *symbol;
 	double threshold;
 
@@ -70,7 +69,6 @@ chartable_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 {
 	chartable_module_ctx = g_malloc (sizeof (struct chartable_ctx));
 
-	chartable_module_ctx->filter = chartable_mime_filter;
 	chartable_module_ctx->chartable_pool = rspamd_mempool_new (
 		rspamd_mempool_suggest_size ());
 
@@ -135,7 +133,7 @@ check_part (struct mime_text_part *part, gboolean raw_mode)
 
 	p = part->content->data;
 
-	if (part->is_raw || raw_mode) {
+	if (IS_PART_UTF (part) || raw_mode) {
 		while (remain > 1) {
 			if ((g_ascii_isalpha (*p) &&
 				(*(p + 1) & 0x80)) ||
@@ -215,17 +213,10 @@ chartable_symbol_callback (struct rspamd_task *task, void *unused)
 	cur = g_list_first (task->text_parts);
 	while (cur) {
 		part = cur->data;
-		if (!part->is_empty && check_part (part, task->cfg->raw_mode)) {
+		if (!IS_PART_EMPTY (part) && check_part (part, task->cfg->raw_mode)) {
 			rspamd_task_insert_result (task, chartable_module_ctx->symbol, 1, NULL);
 		}
 		cur = g_list_next (cur);
 	}
 
-}
-
-static gint
-chartable_mime_filter (struct rspamd_task *task)
-{
-	/* XXX: remove it */
-	return 0;
 }

@@ -3,7 +3,6 @@
 
 #include "config.h"
 #include "mem_pool.h"
-#include "statfile.h"
 #include "printf.h"
 #include "fstring.h"
 #include "ucl.h"
@@ -12,8 +11,6 @@
 struct rspamd_config;
 struct rspamd_main;
 struct workq;
-struct rspamd_statfile_config;
-struct rspamd_classifier_config;
 
 /**
  * Create generic socket
@@ -159,19 +156,10 @@ gchar * resolve_stat_filename (rspamd_mempool_t *pool,
 	gchar *pattern,
 	gchar *rcpt,
 	gchar *from);
-#ifdef HAVE_CLOCK_GETTIME
-/*
- * Calculate check time with specified resolution of timer
- */
-const gchar * calculate_check_time (struct timeval *tv,
-	struct timespec *begin,
-	gint resolution,
-	guint32 *scan_ms);
-#else
-const gchar * calculate_check_time (struct timeval *begin,
-	gint resolution,
-	guint32 *scan_ms);
-#endif
+
+const gchar *
+calculate_check_time (gdouble start_real, gdouble start_virtual, gint resolution,
+	guint32 *scan_time);
 
 /*
  * File locking functions
@@ -195,8 +183,8 @@ gboolean rspamd_str_equal (gconstpointer v, gconstpointer v2);
 /*
  * Hash table utility functions for hashing fixed strings
  */
-guint rspamd_fstring_hash (gconstpointer key);
-gboolean rspamd_fstring_equal (gconstpointer v, gconstpointer v2);
+guint rspamd_fstring_icase_hash (gconstpointer key);
+gboolean rspamd_fstring_icase_equal (gconstpointer v, gconstpointer v2);
 
 /*
  * Google perf-tools initialization function
@@ -248,11 +236,13 @@ gsize rspamd_strlcpy_tolower (gchar *dst, const gchar *src, gsize siz);
 #define ts_to_usec(ts) ((ts)->tv_sec * 1000000LLU +							\
 	(ts)->tv_nsec / 1000LLU)
 
-/* Compare two emails for building emails tree */
-gint rspamd_emails_cmp (gconstpointer a, gconstpointer b);
+guint rspamd_url_hash (gconstpointer u);
 
-/* Compare two urls for building emails tree */
-gint rspamd_urls_cmp (gconstpointer a, gconstpointer b);
+/* Compare two emails for building emails hash */
+gboolean rspamd_emails_cmp (gconstpointer a, gconstpointer b);
+
+/* Compare two urls for building emails hash */
+gboolean rspamd_urls_cmp (gconstpointer a, gconstpointer b);
 
 /*
  * Find string find in string s ignoring case
@@ -428,6 +418,49 @@ void rspamd_ucl_emit_gstring (ucl_object_t *obj,
  * @param inlen input length
  * @return freshly allocated base32 encoding of a specified string
  */
-gchar * rspamd_encode_base32 (guchar *in, gsize inlen);
+gchar * rspamd_encode_base32 (const guchar *in, gsize inlen);
+
+/**
+ * Decode string using base32 encoding
+ * @param in input
+ * @param inlen input length
+ * @return freshly allocated base32 decoded value or NULL if input is invalid
+ */
+guchar* rspamd_decode_base32 (const gchar *in, gsize inlen, gsize *outlen);
+
+/**
+ * Portably return the current clock ticks as seconds
+ * @return
+ */
+gdouble rspamd_get_ticks (void);
+
+/**
+ * Portably return the current virtual clock ticks as seconds
+ * @return
+ */
+gdouble rspamd_get_virtual_ticks (void);
+
+/**
+ * Special utility to help array freeing in rspamd_mempool
+ * @param p
+ */
+void rspamd_ptr_array_free_hard (gpointer p);
+
+/**
+ * Special utility to help array freeing in rspamd_mempool
+ * @param p
+ */
+void rspamd_array_free_hard (gpointer p);
+
+/**
+ * Initialize rspamd libraries
+ */
+void rspamd_init_libs (void);
+
+/**
+ * Returns some statically initialized random hash seed
+ * @return hash seed
+ */
+guint64 rspamd_hash_seed (void);
 
 #endif

@@ -12,8 +12,6 @@ struct rspamd_url {
 	gchar *string;
 	gint protocol;
 
-	gint ip_family;
-
 	gchar *user;
 	gchar *password;
 	gchar *host;
@@ -21,8 +19,8 @@ struct rspamd_url {
 	gchar *data;
 	gchar *query;
 	gchar *fragment;
-	gchar *post;
 	gchar *surbl;
+	gchar *tld;
 
 	struct rspamd_url *phished_url;
 
@@ -30,15 +28,13 @@ struct rspamd_url {
 	guint userlen;
 	guint passwordlen;
 	guint hostlen;
-	guint portlen;
 	guint datalen;
 	guint querylen;
 	guint fragmentlen;
 	guint surbllen;
+	guint tldlen;
+	guint urllen;
 
-	/* Flags */
-	gboolean ipv6;  /* URI contains IPv6 host */
-	gboolean form;  /* URI originated from form */
 	gboolean is_phished; /* URI maybe phishing */
 };
 
@@ -61,6 +57,12 @@ enum rspamd_url_protocol {
 };
 
 #define struri(uri) ((uri)->string)
+
+/**
+ * Initialize url library
+ * @param cfg
+ */
+void rspamd_url_init (const gchar *tld_file);
 
 /*
  * Parse urls inside text
@@ -98,14 +100,25 @@ enum uri_errno rspamd_url_parse (struct rspamd_url *uri,
 gboolean rspamd_url_find (rspamd_mempool_t *pool,
 	const gchar *begin,
 	gsize len,
-	gchar **start,
-	gchar **end,
+	const gchar **start,
+	const gchar **end,
 	gchar **url_str,
-	gboolean is_html);
-
+	gboolean is_html,
+	gint *statep);
 /*
  * Return text representation of url parsing error
  */
 const gchar * rspamd_url_strerror (enum uri_errno err);
+
+/**
+ * Convenience routine to extract urls from an arbitrarty text
+ * @param pool
+ * @param start
+ * @param pos
+ * @return url or NULL
+ */
+struct rspamd_url *
+rspamd_url_get_next (rspamd_mempool_t *pool,
+		const gchar *start, gchar const **pos, gint *statep);
 
 #endif

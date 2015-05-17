@@ -27,15 +27,17 @@
 #include "util.h"
 #include "cfg_file.h"
 #include "main.h"
-#include "statfile.h"
 #include "filter.h"
 #include "message.h"
 
 #include "xxhash.h"
+#include "ottery.h"
+#include "cryptobox.h"
 
 #ifdef HAVE_OPENSSL
 #include <openssl/rand.h>
 #include <openssl/err.h>
+#include <openssl/evp.h>
 #endif
 
 #ifdef HAVE_TERMIOS_H
@@ -43,6 +45,10 @@
 #endif
 #ifdef HAVE_READPASSPHRASE_H
 #include <readpassphrase.h>
+#endif
+
+#ifdef __APPLE__
+#include <mach/mach_time.h>
 #endif
 
 /* Check log messages intensity once per minute */
@@ -129,7 +135,7 @@ static gint
 rspamd_inet_socket_create (gint type, struct addrinfo *addr, gboolean is_server,
 	gboolean async, GList **list)
 {
-	gint fd, r, optlen, on = 1, s_error;
+	gint fd = -1, r, optlen, on = 1, s_error;
 	struct addrinfo *cur;
 
 	cur = addr;
@@ -425,7 +431,7 @@ rspamd_sockets_list (const gchar *credits, guint16 port,
 	struct sockaddr_un un;
 	struct stat st;
 	struct addrinfo hints, *res;
-	gint r, fd, serrno;
+	gint r, fd = -1, serrno;
 	gchar portbuf[8], **strv, **cur;
 	GList *result = NULL, *rcur;
 
@@ -486,9 +492,14 @@ rspamd_sockets_list (const gchar *credits, guint16 port,
 
 			rspamd_snprintf (portbuf, sizeof (portbuf), "%d", (int)port);
 			if ((r = getaddrinfo (credits, portbuf, &hints, &res)) == 0) {
-				r = rspamd_inet_socket_create (type, res, is_server, async, &result);
+				fd = rspamd_inet_socket_create (type, res, is_server, async, &result);
 				freeaddrinfo (res);
+
 				if (result == NULL) {
+					if (fd != -1) {
+						close (fd);
+					}
+
 					goto err;
 				}
 			}
@@ -499,6 +510,7 @@ rspamd_sockets_list (const gchar *credits, guint16 port,
 				goto err;
 			}
 		}
+
 		cur++;
 	}
 
@@ -648,13 +660,70 @@ rspamd_pass_signal (GHashTable * workers, gint signo)
 	g_hash_table_foreach (workers, pass_signal_cb, GINT_TO_POINTER (signo));
 }
 
+static const guchar lc_map[256] = {
+		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+		0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+		0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+		0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+		0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+		0x40, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
+		0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f,
+		0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77,
+		0x78, 0x79, 0x7a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
+		0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
+		0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f,
+		0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77,
+		0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f,
+		0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+		0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
+		0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97,
+		0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f,
+		0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+		0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+		0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
+		0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+		0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+		0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+		0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7,
+		0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf,
+		0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7,
+		0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef,
+		0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+		0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff
+};
+
 void
 rspamd_str_lc (gchar *str, guint size)
 {
-	while (size--) {
-		*str = g_ascii_tolower (*str);
-		str++;
+	guint leftover = size % 4;
+	guint fp, i;
+	const uint8_t* s = (const uint8_t*) str;
+	gchar *dest = str;
+	guchar c1, c2, c3, c4;
+
+	fp = size - leftover;
+
+	for (i = 0; i != fp; i += 4) {
+		c1 = s[i], c2 = s[i + 1], c3 = s[i + 2], c4 = s[i + 3];
+		dest[0] = lc_map[c1];
+		dest[1] = lc_map[c2];
+		dest[2] = lc_map[c3];
+		dest[3] = lc_map[c4];
+		dest += 4;
 	}
+
+	switch (leftover) {
+	case 3:
+		*dest++ = lc_map[(guchar)str[i++]];
+	case 2:
+		*dest++ = lc_map[(guchar)str[i++]];
+	case 1:
+		*dest++ = lc_map[(guchar)str[i]];
+	}
+
 }
 
 /*
@@ -666,27 +735,37 @@ void
 rspamd_str_lc_utf8 (gchar *str, guint size)
 {
 	const gchar *s = str, *p;
-	gchar *d = str;
-	guint remain = size;
+	gchar *d = str, tst[6];
+	gint remain = size;
 	gint r;
 	gunichar uc;
 
 	while (remain > 0) {
-		uc = g_utf8_get_char_validated (s, remain);
+		uc = g_utf8_get_char (s);
 		uc = g_unichar_tolower (uc);
 		p = g_utf8_next_char (s);
 
-		if (p - s == 0) {
-			return;
+		if (p - s > remain) {
+			break;
 		}
 
-		r = g_unichar_to_utf8 (uc, d);
-		g_assert (r > 0);
+		if (remain >= 6) {
+			r = g_unichar_to_utf8 (uc, d);
+		}
+		else {
+			/* We must be cautious here to avoid broken unicode being append */
+			r = g_unichar_to_utf8 (uc, tst);
+			if (r > remain) {
+				break;
+			}
+			else {
+				memcpy (d, tst, r);
+			}
+		}
 		remain -= r;
 		s = p;
 		d += r;
 	}
-	*d = '\0';
 }
 
 #ifndef HAVE_SETPROCTITLE
@@ -1112,47 +1191,18 @@ resolve_stat_filename (rspamd_mempool_t * pool,
 	return new;
 }
 
-#ifdef HAVE_CLOCK_GETTIME
 const gchar *
-calculate_check_time (struct timeval *tv,
-	struct timespec *begin,
-	gint resolution,
+calculate_check_time (gdouble start_real, gdouble start_virtual, gint resolution,
 	guint32 *scan_time)
-#else
-const gchar *
-calculate_check_time (struct timeval *begin, gint resolution,
-	guint32 *scan_time)
-#endif
 {
-	double vdiff, diff;
+	double vdiff, diff, end_real, end_virtual;
 	static gchar res[64];
 	static gchar fmt[sizeof ("%.10f ms real, %.10f ms virtual")];
-	struct timeval tv_now;
 
-	if (gettimeofday (&tv_now, NULL) == -1) {
-		msg_warn ("gettimeofday failed: %s", strerror (errno));
-	}
-#ifdef HAVE_CLOCK_GETTIME
-	struct timespec ts;
-
-	diff = (tv_now.tv_sec - tv->tv_sec) * 1000. +   /* Seconds */
-		(tv_now.tv_usec - tv->tv_usec) / 1000.; /* Microseconds */
-#ifdef HAVE_CLOCK_PROCESS_CPUTIME_ID
-	clock_gettime (CLOCK_PROCESS_CPUTIME_ID, &ts);
-#elif defined(HAVE_CLOCK_VIRTUAL)
-	clock_gettime (CLOCK_VIRTUAL,			 &ts);
-#else
-	clock_gettime (CLOCK_REALTIME,			 &ts);
-#endif
-
-	vdiff = (ts.tv_sec - begin->tv_sec) * 1000. +   /* Seconds */
-		(ts.tv_nsec - begin->tv_nsec) / 1000000.;   /* Nanoseconds */
-#else
-	diff = (tv_now.tv_sec - begin->tv_sec) * 1000. +    /* Seconds */
-		(tv_now.tv_usec - begin->tv_usec) / 1000.;  /* Microseconds */
-
-	vdiff = diff;
-#endif
+	end_real = rspamd_get_ticks ();
+	end_virtual = rspamd_get_virtual_ticks ();
+	vdiff = (end_virtual - start_virtual) * 1000;
+	diff = (end_real - start_real) * 1000;
 
 	*scan_time = diff;
 
@@ -1177,31 +1227,56 @@ rspamd_strcase_equal (gconstpointer v, gconstpointer v2)
 	return FALSE;
 }
 
+static guint
+rspamd_icase_hash (const gchar *in, gsize len)
+{
+	guint leftover = len % 4;
+	guint fp, i;
+	const uint8_t* s = (const uint8_t*) in;
+	union {
+		struct {
+			guchar c1, c2, c3, c4;
+		} c;
+		guint32 pp;
+	} u;
+	XXH64_state_t st;
+
+	fp = len - leftover;
+	XXH64_reset (&st, rspamd_hash_seed ());
+
+	for (i = 0; i != fp; i += 4) {
+		u.c.c1 = s[i], u.c.c2 = s[i + 1], u.c.c3 = s[i + 2], u.c.c4 = s[i + 3];
+		u.c.c1 = lc_map[u.c.c1];
+		u.c.c2 = lc_map[u.c.c2];
+		u.c.c3 = lc_map[u.c.c3];
+		u.c.c4 = lc_map[u.c.c4];
+		XXH64_update (&st, &u.pp, sizeof (u));
+	}
+
+	u.pp = 0;
+	switch (leftover) {
+	case 3:
+		u.c.c3 = lc_map[(guchar)s[i++]];
+	case 2:
+		u.c.c2 = lc_map[(guchar)s[i++]];
+	case 1:
+		u.c.c1 = lc_map[(guchar)s[i]];
+		XXH64_update (&st, &u.pp, leftover);
+		break;
+	}
+
+	return XXH64_digest (&st);
+}
 
 guint
 rspamd_strcase_hash (gconstpointer key)
 {
 	const gchar *p = key;
-	gchar buf[256];
-	guint i = 0;
-	gpointer xxh;
+	gsize len;
 
-	xxh = XXH32_init (0);
-	while (*p != '\0') {
-		buf[i] = g_ascii_tolower (*p);
-		i++;
-		p++;
-		if (i == sizeof (buf)) {
-			XXH32_update (xxh, buf, i);
-			i = 0;
-		}
-	}
+	len = strlen (p);
 
-	if (i > 0) {
-		XXH32_update (xxh, buf, i);
-	}
-
-	return XXH32_digest (xxh);
+	return rspamd_icase_hash (p, len);
 }
 
 guint
@@ -1211,7 +1286,7 @@ rspamd_str_hash (gconstpointer key)
 
 	len = strlen ((const gchar *)key);
 
-	return XXH32 (key, len, 0);
+	return XXH64 (key, len, rspamd_hash_seed ());
 }
 
 gboolean
@@ -1221,7 +1296,7 @@ rspamd_str_equal (gconstpointer v, gconstpointer v2)
 }
 
 gboolean
-rspamd_fstring_equal (gconstpointer v, gconstpointer v2)
+rspamd_fstring_icase_equal (gconstpointer v, gconstpointer v2)
 {
 	const rspamd_fstring_t *f1 = v, *f2 = v2;
 	if (f1->len == f2->len &&
@@ -1234,31 +1309,11 @@ rspamd_fstring_equal (gconstpointer v, gconstpointer v2)
 
 
 guint
-rspamd_fstring_hash (gconstpointer key)
+rspamd_fstring_icase_hash (gconstpointer key)
 {
 	const rspamd_fstring_t *f = key;
-	const gchar *p;
-	guint i = 0;
-	gchar buf[256];
-	gpointer xxh;
 
-	xxh = XXH32_init (0);
-	p = f->begin;
-	while (p - f->begin < (gint)f->len) {
-		buf[i] = g_ascii_tolower (*p);
-		i++;
-		p++;
-		if (i == sizeof (buf)) {
-			XXH32_update (xxh, buf, i);
-			i = 0;
-		}
-	}
-
-	if (i > 0) {
-		XXH32_update (xxh, buf, i);
-	}
-
-	return XXH32_digest (xxh);
+	return rspamd_icase_hash (f->begin, f->len);
 }
 
 void
@@ -1408,6 +1463,20 @@ g_queue_clear (GQueue *queue)
 	queue->length = 0;
 }
 #endif
+#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION < 30))
+GPtrArray*
+g_ptr_array_new_full (guint reserved_size,
+		GDestroyNotify element_free_func)
+{
+	GPtrArray *array;
+
+	array = g_ptr_array_sized_new (reserved_size);
+	g_ptr_array_set_free_func (array, element_free_func);
+
+	return array;
+}
+#endif
+
 
 gsize
 rspamd_strlcpy (gchar *dst, const gchar *src, gsize siz)
@@ -1455,51 +1524,70 @@ rspamd_strlcpy_tolower (gchar *dst, const gchar *src, gsize siz)
 	return (s - src - 1);    /* count does not include NUL */
 }
 
+guint
+rspamd_url_hash (gconstpointer u)
+{
+	const struct rspamd_url *url = u;
+	XXH64_state_t st;
+
+	XXH64_reset (&st, rspamd_hash_seed ());
+
+	if (url->hostlen > 0) {
+		XXH64_update (&st, url->host, url->hostlen);
+	}
+	if (url->userlen > 0) {
+		XXH64_update (&st, url->user, url->userlen);
+	}
+	XXH64_update (&st, &url->is_phished, sizeof (url->is_phished));
+
+	return XXH64_digest (&st);
+}
+
 /* Compare two emails for building emails tree */
-gint
+gboolean
 rspamd_emails_cmp (gconstpointer a, gconstpointer b)
 {
 	const struct rspamd_url *u1 = a, *u2 = b;
 	gint r;
 
 	if (u1->hostlen != u2->hostlen || u1->hostlen == 0) {
-		return u1->hostlen - u2->hostlen;
+		return FALSE;
 	}
 	else {
 		if ((r = g_ascii_strncasecmp (u1->host, u2->host, u1->hostlen)) == 0) {
 			if (u1->userlen != u2->userlen || u1->userlen == 0) {
-				return u1->userlen - u2->userlen;
+				return FALSE;
 			}
 			else {
-				return g_ascii_strncasecmp (u1->user, u2->user, u1->userlen);
+				return g_ascii_strncasecmp (u1->user, u2->user, u1->userlen) == 0;
 			}
 		}
 		else {
-			return r;
+			return r == 0;
 		}
 	}
 
-	return 0;
+	return FALSE;
 }
 
-gint
+gboolean
 rspamd_urls_cmp (gconstpointer a, gconstpointer b)
 {
 	const struct rspamd_url *u1 = a, *u2 = b;
 	int r;
 
 	if (u1->hostlen != u2->hostlen || u1->hostlen == 0) {
-		return u1->hostlen - u2->hostlen;
+		return FALSE;
 	}
 	else {
 		r = g_ascii_strncasecmp (u1->host, u2->host, u1->hostlen);
 		if (r == 0 && u1->is_phished != u2->is_phished) {
 			/* Always insert phished urls to the tree */
-			return -1;
+			return FALSE;
 		}
 	}
 
-	return r;
+	return r == 0;
 }
 
 /*
@@ -2091,15 +2179,15 @@ rspamd_ucl_emit_gstring (ucl_object_t *obj,
  */
 
 gchar *
-rspamd_encode_base32 (guchar *in, gsize inlen)
+rspamd_encode_base32 (const guchar *in, gsize inlen)
 {
-	gint remain = -1, r, x;
-	gsize i;
-	gsize outlen = inlen * 8 / 5 + 1;
+	gint remain = -1, x;
+	gsize i, r;
+	gsize allocated_len = inlen * 8 / 5 + 2;
 	gchar *out;
 	static const char b32[]="ybndrfg8ejkmcpqxot1uwisza345h769";
 
-	out = g_malloc (outlen);
+	out = g_malloc (allocated_len);
 	for (i = 0, r = 0; i < inlen; i++) {
 		switch (i % 5) {
 		case 0:
@@ -2141,10 +2229,210 @@ rspamd_encode_base32 (guchar *in, gsize inlen)
 		}
 
 	}
-	if (remain >= 0)
+	if (remain >= 0) {
 		out[r++] = b32[remain];
+	}
 
 	out[r] = 0;
+	g_assert (r < allocated_len);
 
 	return out;
+}
+
+static const guchar b32_dec[] = {
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0x12, 0xff, 0x19, 0x1a, 0x1b, 0x1e, 0x1d,
+	0x07, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0x18, 0x01, 0x0c, 0x03, 0x08, 0x05, 0x06,
+	0x1c, 0x15, 0x09, 0x0a, 0xff, 0x0b, 0x02, 0x10,
+	0x0d, 0x0e, 0x04, 0x16, 0x11, 0x13, 0xff, 0x14,
+	0x0f, 0x00, 0x17, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0x18, 0x01, 0x0c, 0x03, 0x08, 0x05, 0x06,
+	0x1c, 0x15, 0x09, 0x0a, 0xff, 0x0b, 0x02, 0x10,
+	0x0d, 0x0e, 0x04, 0x16, 0x11, 0x13, 0xff, 0x14,
+	0x0f, 0x00, 0x17, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+
+guchar*
+rspamd_decode_base32 (const gchar *in, gsize inlen, gsize *outlen)
+{
+	guchar *res, decoded;
+	guchar c;
+	guint acc = 0U;
+	guint processed_bits = 0;
+	gsize olen = 0, i, allocated_len = inlen * 5 / 8 + 2;
+
+	res = g_malloc (allocated_len);
+
+	for (i = 0; i < inlen; i ++) {
+		c = (guchar)in[i];
+
+		if (processed_bits >= 8) {
+			processed_bits -= 8;
+			res[olen++] = acc & 0xFF;
+			acc >>= 8;
+		}
+
+		decoded = b32_dec[c];
+		if (decoded == 0xff) {
+			g_free (res);
+			return NULL;
+		}
+
+		acc = (decoded << processed_bits) | acc;
+		processed_bits += 5;
+	}
+
+	if (processed_bits > 0) {
+		res[olen++] = (acc & 0xFF);
+	}
+
+	g_assert (olen <= allocated_len);
+
+	*outlen = olen;
+
+	return res;
+}
+
+gdouble
+rspamd_get_ticks (void)
+{
+	gdouble res;
+
+#ifdef HAVE_CLOCK_GETTIME
+	struct timespec ts;
+	clock_gettime (CLOCK_MONOTONIC, &ts);
+
+	res = (double)ts.tv_sec + ts.tv_nsec / 1000000000.;
+#elif defined(__APPLE__)
+	res = mach_absolute_time () / 1000000000.;
+#else
+	struct timeval tv;
+
+	(void)gettimeofday (&tv, NULL);
+	res = (double)tv.tv_sec + tv.tv_nsec / 1000000.;
+#endif
+
+	return res;
+}
+
+gdouble
+rspamd_get_virtual_ticks (void)
+{
+	gdouble res;
+
+#ifdef HAVE_CLOCK_GETTIME
+	struct timespec ts;
+# ifdef CLOCK_PROCESS_CPUTIME_ID
+	clock_gettime (CLOCK_PROCESS_CPUTIME_ID, &ts);
+# elif defined(CLOCK_PROF)
+	clock_gettime (CLOCK_PROF, &ts);
+# elif defined(CLOCK_VIRTUAL)
+	clock_gettime (CLOCK_VIRTUAL, &ts);
+# else
+	clock_gettime (CLOCK_REALTIME, &ts);
+# endif
+
+	res = (double)ts.tv_sec + ts.tv_nsec / 1000000000.;
+#else
+	res = clock () / (double)CLOCKS_PER_SEC;
+#endif
+
+	return res;
+}
+
+/* Required for tweetnacl */
+void
+randombytes (guchar *buf, guint64 len)
+{
+	ottery_rand_bytes (buf, (size_t)len);
+}
+
+
+void
+rspamd_ptr_array_free_hard (gpointer p)
+{
+	GPtrArray *ar = (GPtrArray *)p;
+
+	g_ptr_array_free (ar, TRUE);
+}
+
+void
+rspamd_array_free_hard (gpointer p)
+{
+	GArray *ar = (GArray *)p;
+
+	g_array_free (ar, TRUE);
+}
+
+
+void
+rspamd_init_libs (void)
+{
+	struct rlimit rlim;
+
+	ottery_init (NULL);
+
+	rspamd_cryptobox_init ();
+#ifdef HAVE_SETLOCALE
+	/* Set locale setting to C locale to avoid problems in future */
+	setlocale (LC_ALL, "C");
+	setlocale (LC_CTYPE, "C");
+	setlocale (LC_MESSAGES, "C");
+	setlocale (LC_TIME, "C");
+#endif
+
+#ifdef HAVE_OPENSSL
+	ERR_load_crypto_strings ();
+
+	OpenSSL_add_all_algorithms ();
+	OpenSSL_add_all_digests ();
+	OpenSSL_add_all_ciphers ();
+#endif
+	g_random_set_seed (ottery_rand_uint32 ());
+
+	/* Set stack size for pcre */
+	getrlimit (RLIMIT_STACK, &rlim);
+	rlim.rlim_cur = 100 * 1024 * 1024;
+	setrlimit (RLIMIT_STACK, &rlim);
+
+	event_init ();
+#ifdef GMIME_ENABLE_RFC2047_WORKAROUNDS
+	g_mime_init (GMIME_ENABLE_RFC2047_WORKAROUNDS);
+#else
+	g_mime_init (0);
+#endif
+}
+
+guint64
+rspamd_hash_seed (void)
+{
+	static guint64 seed;
+
+	if (seed == 0) {
+		seed = ottery_rand_uint64 ();
+	}
+
+	return seed;
 }

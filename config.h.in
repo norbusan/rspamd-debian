@@ -221,6 +221,14 @@
 #cmakedefine HAVE_SCHED_YEILD    1
 #cmakedefine HAVE_PTHREAD_PROCESS_SHARED 1
 
+#cmakedefine HAVE_MEMSET_S       1
+#cmakedefine HAVE_EXPLICIT_BZERO 1
+#cmakedefine HAVE_WEAK_SYMBOLS   1
+#cmakedefine HAVE_PCRE_JIT       1
+#cmakedefine HAVE_PCRE_JIT_FAST  1
+#cmakedefine HAVE_GET_CPUID      1
+#cmakedefine HAVE_CPUID_H        1
+
 /* Configure allocator */
 #define uthash_malloc(sz) g_slice_alloc(sz)
 #define uthash_free(ptr,sz) g_slice_free1(sz, ptr)
@@ -239,6 +247,8 @@
 #define RSPAMD_MASTER_SITE_URL "${RSPAMD_MASTER_SITE_URL}"
 
 #define MODULES_NUM        ${RSPAMD_MODULES_NUM}
+
+#define BUILDROOT "${CMAKE_BINARY_DIR}"
 
 /* sys/types */
 #ifdef HAVE_SYS_TYPES_H
@@ -466,6 +476,14 @@ typedef off_t goffset;
 
 #ifndef NO_GMIME
 #include <gmime/gmime.h>
+#endif
+
+#ifndef ALIGN
+#if defined(_MSC_VER)
+# define ALIGN(x) __declspec(align(x))
+#else
+# define ALIGN(x) __attribute__((aligned(x)))
+#endif
 #endif
 
 /* Forwarded declaration */

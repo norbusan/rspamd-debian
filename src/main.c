@@ -34,6 +34,9 @@
 #include "ottery.h"
 #include "xxhash.h"
 #include "utlist.h"
+#include "libstat/stat_api.h"
+#include "cryptobox.h"
+#include "regexp.h"
 #ifdef HAVE_OPENSSL
 #include <openssl/rand.h>
 #include <openssl/err.h>
@@ -57,7 +60,6 @@ static struct rspamd_worker * fork_worker (struct rspamd_main *,
 static gboolean load_rspamd_config (struct rspamd_config *cfg,
 	gboolean init_modules);
 static void init_cfg_cache (struct rspamd_config *cfg);
-static void rspamd_init_cfg (struct rspamd_config *cfg);
 
 sig_atomic_t do_restart = 0;
 sig_atomic_t do_reopen_log = 0;
@@ -81,6 +83,8 @@ static gchar *rspamd_pidfile = NULL;
 static gboolean dump_cache = FALSE;
 static gboolean is_debug = FALSE;
 static gboolean is_insecure = FALSE;
+static gboolean gen_keypair = FALSE;
+static gboolean encrypt_password = FALSE;
 /* List of workers that are pending to start */
 static GList *workers_pending = NULL;
 
@@ -124,9 +128,14 @@ static GOptionEntry entries[] =
 	  "Specify config file(s) to sign", NULL },
 	{ "private-key", 0, 0, G_OPTION_ARG_FILENAME, &privkey,
 	  "Specify private key to sign", NULL },
+	{ "gen-keypair", 0, 0, G_OPTION_ARG_NONE, &gen_keypair, "Generate new encryption "
+			"keypair", NULL},
+	{ "encrypt-password", 0, 0, G_OPTION_ARG_NONE, &encrypt_password, "Encrypt "
+			"controller password to store in the configuration file", NULL },
 	{ NULL, 0, 0, G_OPTION_ARG_NONE, NULL, NULL, NULL }
 };
 
+extern const struct rspamd_controller_pbkdf pbkdf_list[];
 
 #ifndef HAVE_SA_SIGINFO
 static void
@@ -331,16 +340,16 @@ drop_priv (struct rspamd_main *rspamd)
 }
 
 static void
-config_logger (struct rspamd_config *cfg, gpointer ud)
+config_logger (rspamd_mempool_t *pool, gpointer ud)
 {
 	struct rspamd_main *rm = ud;
 
 	if (config_test) {
 		/* Explicitly set logger type to console in case of config testing */
-		cfg->log_type = RSPAMD_LOG_CONSOLE;
+		rm->cfg->log_type = RSPAMD_LOG_CONSOLE;
 	}
 
-	rspamd_set_logger (cfg, g_quark_try_string ("main"), rm);
+	rspamd_set_logger (rm->cfg, g_quark_try_string ("main"), rm);
 	if (rspamd_log_open_priv (rm->logger, rm->workers_uid, rm->workers_gid) == -1) {
 		fprintf (stderr, "Fatal error, cannot open logfile, exiting\n");
 		exit (EXIT_FAILURE);
@@ -348,65 +357,16 @@ config_logger (struct rspamd_config *cfg, gpointer ud)
 }
 
 static void
-parse_filters_str (struct rspamd_config *cfg, const gchar *str)
-{
-	gchar **strvec, **p;
-	struct filter *cur;
-	module_t **pmodule;
-
-	if (str == NULL) {
-		return;
-	}
-
-	strvec = g_strsplit_set (str, ",", 0);
-	if (strvec == NULL) {
-		return;
-	}
-
-	p = strvec;
-	while (*p) {
-		cur = NULL;
-		/* Search modules from known C modules */
-		pmodule = &modules[0];
-		while (*pmodule) {
-			g_strstrip (*p);
-			if ((*pmodule)->name != NULL &&
-				g_ascii_strcasecmp ((*pmodule)->name, *p) == 0) {
-				cur = rspamd_mempool_alloc (cfg->cfg_pool,
-						sizeof (struct filter));
-				cur->type = C_FILTER;
-				msg_debug ("found C filter %s", *p);
-				cur->func_name = rspamd_mempool_strdup (cfg->cfg_pool, *p);
-				cur->module = (*pmodule);
-				cfg->filters = g_list_prepend (cfg->filters, cur);
-
-				break;
-			}
-			pmodule++;
-		}
-		if (cur != NULL) {
-			/* Go to next iteration */
-			p++;
-			continue;
-		}
-		p++;
-	}
-
-	g_strfreev (strvec);
-}
-
-static void
 reread_config (struct rspamd_main *rspamd)
 {
 	struct rspamd_config *tmp_cfg;
 	gchar *cfg_file;
-	GList *l;
-	struct filter *filt;
 
 	tmp_cfg = (struct rspamd_config *)g_malloc0 (sizeof (struct rspamd_config));
 	if (tmp_cfg) {
 
-		rspamd_init_cfg (tmp_cfg);
+		rspamd_init_cfg (tmp_cfg, FALSE);
+		tmp_cfg->lua_state = rspamd->cfg->lua_state;
 		cfg_file = rspamd_mempool_strdup (tmp_cfg->cfg_pool,
 				rspamd->cfg->cfg_name);
 		/* Save some variables */
@@ -430,18 +390,8 @@ reread_config (struct rspamd_main *rspamd)
 			if (is_debug) {
 				rspamd->cfg->log_level = G_LOG_LEVEL_DEBUG;
 			}
-			/* Perform modules configuring */
-			l = g_list_first (rspamd->cfg->filters);
 
-			while (l) {
-				filt = l->data;
-				if (filt->module) {
-					(void)filt->module->module_reconfig_func (rspamd->cfg);
-					msg_debug ("reconfig of %s", filt->module->name);
-				}
-				l = g_list_next (l);
-			}
-			rspamd_init_lua_filters (rspamd->cfg);
+			rspamd_init_filters (rspamd->cfg, TRUE);
 			init_cfg_cache (rspamd->cfg);
 			msg_info ("config rereaded successfully");
 		}
@@ -495,8 +445,7 @@ fork_worker (struct rspamd_main *rspamd, struct rspamd_worker_conf *cf)
 		case 0:
 			/* Update pid for logging */
 			rspamd_log_update_pid (cf->type, rspamd->logger);
-			/* Lock statfile pool if possible */
-			statfile_pool_lockall (rspamd->statfile_pool);
+			/* Lock statfile pool if possible XXX */
 			/* Init PRNG after fork */
 			ottery_init (NULL);
 			g_random_set_seed (ottery_rand_uint32 ());
@@ -564,26 +513,17 @@ delay_fork (struct rspamd_worker_conf *cf)
 	set_alarm (SOFT_FORK_TIME);
 }
 
-static int
-af_cmp_workaround (const void *a, const void *b)
-{
-	rspamd_inet_addr_t *a1 = (rspamd_inet_addr_t *)a,
-			*a2 = (rspamd_inet_addr_t *)b;
-
-	return a2->af - a1->af;
-}
-
 static GList *
-create_listen_socket (rspamd_inet_addr_t *addrs, guint cnt, gint listen_type)
+create_listen_socket (GPtrArray *addrs, guint cnt, gint listen_type)
 {
 	GList *result = NULL;
 	gint fd;
 	guint i;
 
-	/* Fuck morons that have invented ipv6/v4 sockets */
-	qsort (addrs, cnt, sizeof (*addrs), af_cmp_workaround);
+	g_ptr_array_sort (addrs, rspamd_inet_address_compare_ptr);
 	for (i = 0; i < cnt; i ++) {
-		fd = rspamd_inet_address_listen (&addrs[i], listen_type, TRUE);
+		fd = rspamd_inet_address_listen (g_ptr_array_index (addrs, i),
+				listen_type, TRUE);
 		if (fd != -1) {
 			result = g_list_prepend (result, GINT_TO_POINTER (fd));
 		}
@@ -657,22 +597,30 @@ fork_delayed (struct rspamd_main *rspamd)
 static inline uintptr_t
 make_listen_key (struct rspamd_worker_bind_conf *cf)
 {
-	gpointer xxh;
-	guint i;
+	XXH64_state_t st;
+	guint i, keylen;
+	guint8 *key;
+	rspamd_inet_addr_t *addr;
+	guint16 port;
 
-	xxh = XXH32_init (0xdeadbeef);
+	XXH64_reset (&st, rspamd_hash_seed ());
 	if (cf->is_systemd) {
-		XXH32_update (xxh, "systemd", sizeof ("systemd"));
-		XXH32_update (xxh, &cf->cnt, sizeof (cf->cnt));
+		XXH64_update (&st, "systemd", sizeof ("systemd"));
+		XXH64_update (&st, &cf->cnt, sizeof (cf->cnt));
 	}
 	else {
-		XXH32_update (xxh, cf->name, strlen (cf->name));
+		XXH64_update (&st, cf->name, strlen (cf->name));
 		for (i = 0; i < cf->cnt; i ++) {
-			XXH32_update (xxh, &cf->addrs[i].addr, cf->addrs[i].slen);
+			addr = g_ptr_array_index (cf->addrs, i);
+			key = rspamd_inet_address_get_radix_key (
+					addr, &keylen);
+			XXH64_update (&st, key, keylen);
+			port = rspamd_inet_address_get_port (addr);
+			XXH64_update (&st, &port, sizeof (port));
 		}
 	}
 
-	return XXH32_digest (xxh);
+	return XXH64_digest (&st);
 }
 
 static void
@@ -684,11 +632,13 @@ spawn_workers (struct rspamd_main *rspamd)
 	gpointer p;
 	guintptr key;
 	struct rspamd_worker_bind_conf *bcf;
+	gboolean listen_ok = FALSE;
 
 	cur = rspamd->cfg->workers;
 
 	while (cur) {
 		cf = cur->data;
+		listen_ok = FALSE;
 
 		if (cf->worker == NULL) {
 			msg_err ("type of worker is unspecified, skip spawning");
@@ -712,13 +662,16 @@ spawn_workers (struct rspamd_main *rspamd)
 							msg_err ("cannot listen on socket %s: %s",
 								bcf->name,
 								strerror (errno));
-							exit (-errno);
 						}
-						g_hash_table_insert (listen_sockets, (gpointer)key, ls);
+						else {
+							g_hash_table_insert (listen_sockets, (gpointer)key, ls);
+							listen_ok = TRUE;
+						}
 					}
 					else {
 						/* We had socket for this type of worker */
 						ls = p;
+						listen_ok = TRUE;
 					}
 					/* Do not add existing lists as it causes loops */
 					if (g_list_position (cf->listen_socks, ls) == -1) {
@@ -727,20 +680,30 @@ spawn_workers (struct rspamd_main *rspamd)
 				}
 			}
 
-			if (cf->worker->unique) {
-				if (cf->count > 1) {
-					msg_err ("cannot spawn more than 1 %s worker, so spawn one",
-						cf->worker->name);
+			if (listen_ok) {
+				if (cf->worker->unique) {
+					if (cf->count > 1) {
+						msg_err ("cannot spawn more than 1 %s worker, so spawn one",
+								cf->worker->name);
+					}
+					else {
+						fork_worker (rspamd, cf);
+					}
 				}
-				fork_worker (rspamd, cf);
-			}
-			else if (cf->worker->threaded) {
-				fork_worker (rspamd, cf);
-			}
-			else {
-				for (i = 0; i < cf->count; i++) {
+				else if (cf->worker->threaded) {
 					fork_worker (rspamd, cf);
 				}
+				else {
+					for (i = 0; i < cf->count; i++) {
+						fork_worker (rspamd, cf);
+					}
+				}
+			}
+			else {
+				msg_err ("cannot create listen socket for %s at %s",
+						g_quark_to_string (cf->type), cf->bind_conf->name);
+
+				exit (EXIT_FAILURE);
 			}
 		}
 
@@ -803,43 +766,9 @@ reopen_log_handler (gpointer key, gpointer value, gpointer unused)
 	}
 }
 
-static void
-preload_statfiles (struct rspamd_main *rspamd)
-{
-	struct rspamd_classifier_config *cf;
-	struct rspamd_statfile_config *st;
-	stat_file_t *stf;
-	GList *cur_cl, *cur_st;
-
-	cur_cl = rspamd->cfg->classifiers;
-	while (cur_cl) {
-		/* Open all statfiles */
-		cf = cur_cl->data;
-
-		cur_st = cf->statfiles;
-		while (cur_st) {
-			st = cur_st->data;
-			stf = statfile_pool_open (rspamd->statfile_pool,
-					st->path,
-					st->size,
-					FALSE);
-			if (stf == NULL) {
-				msg_warn ("preload of %s from %s failed", st->symbol, st->path);
-			}
-			cur_st = g_list_next (cur_st);
-		}
-
-		cur_cl = g_list_next (cur_cl);
-	}
-}
-
 static gboolean
 load_rspamd_config (struct rspamd_config *cfg, gboolean init_modules)
 {
-	GList *l;
-	struct filter *filt;
-	struct module_ctx *cur_module = NULL;
-
 	if (!rspamd_config_read (cfg, cfg->cfg_name, NULL,
 		config_logger, rspamd_main)) {
 		return FALSE;
@@ -859,24 +788,9 @@ load_rspamd_config (struct rspamd_config *cfg, gboolean init_modules)
 
 	/* Do post-load actions */
 	rspamd_config_post_load (cfg);
-	parse_filters_str (cfg, cfg->filters_str);
 
 	if (init_modules) {
-		/* Init C modules */
-		l = g_list_first (cfg->filters);
-
-		while (l) {
-			filt = l->data;
-			if (filt->module) {
-				cur_module = g_slice_alloc0 (sizeof (struct module_ctx));
-				if (filt->module->module_init_func (cfg, &cur_module) == 0) {
-					g_hash_table_insert (cfg->c_modules,
-						(gpointer) filt->module->name,
-						cur_module);
-				}
-			}
-			l = g_list_next (l);
-		}
+		rspamd_init_filters (cfg, FALSE);
 	}
 
 	return TRUE;
@@ -1134,24 +1048,40 @@ perform_configs_sign (void)
 }
 
 static void
-rspamd_init_cfg (struct rspamd_config *cfg)
+do_encrypt_password (void)
 {
-	cfg->cfg_pool = rspamd_mempool_new (
-			rspamd_mempool_suggest_size ());
-	rspamd_config_defaults (cfg);
+	const struct rspamd_controller_pbkdf *pbkdf;
+	guchar *salt, *key;
+	gchar *encoded_salt, *encoded_key;
+	gchar password[BUFSIZ];
+	gsize plen;
 
-	cfg->lua_state = rspamd_lua_init (cfg);
-	rspamd_mempool_add_destructor (cfg->cfg_pool,
-		(rspamd_mempool_destruct_t)lua_close, cfg->lua_state);
+	pbkdf = &pbkdf_list[0];
+	g_assert (pbkdf != NULL);
 
-	/* Pre-init of cache */
-	cfg->cache = g_new0 (struct symbols_cache, 1);
-	cfg->cache->static_pool = rspamd_mempool_new (
-		rspamd_mempool_suggest_size ());
-	cfg->cache->cfg = cfg;
-	cfg->cache->items_by_symbol = g_hash_table_new (
-		rspamd_str_hash,
-		rspamd_str_equal);
+	plen = rspamd_read_passphrase (password, sizeof (password), 0, NULL);
+
+	if (plen == 0) {
+		fprintf (stderr, "Invalid password\n");
+		exit (EXIT_FAILURE);
+	}
+
+	salt = g_alloca (pbkdf->salt_len);
+	key = g_alloca (pbkdf->key_len);
+	ottery_rand_bytes (salt, pbkdf->salt_len);
+	/* Derive key */
+	rspamd_cryptobox_pbkdf (password, strlen (password),
+			salt, pbkdf->salt_len, key, pbkdf->key_len, pbkdf->rounds);
+
+	encoded_salt = rspamd_encode_base32 (salt, pbkdf->salt_len);
+	encoded_key = rspamd_encode_base32 (key, pbkdf->key_len);
+
+	rspamd_printf ("$%d$%s$%s\n", pbkdf->id, encoded_salt,
+			encoded_key);
+
+	g_free (encoded_salt);
+	g_free (encoded_key);
+	rspamd_explicit_memzero (password, sizeof (password));
 }
 
 static void
@@ -1165,53 +1095,17 @@ rspamd_init_main (struct rspamd_main *rspamd)
 	rspamd_main->history = rspamd_roll_history_new (rspamd_main->server_pool);
 }
 
-static void
-rspamd_init_libs ()
-{
-	struct rlimit rlim;
-
-	ottery_init (NULL);
-#ifdef HAVE_SETLOCALE
-	/* Set locale setting to C locale to avoid problems in future */
-	setlocale (LC_ALL, "C");
-	setlocale (LC_CTYPE, "C");
-	setlocale (LC_MESSAGES, "C");
-	setlocale (LC_TIME, "C");
-#endif
-
-#ifdef HAVE_OPENSSL
-	ERR_load_crypto_strings ();
-
-	OpenSSL_add_all_algorithms ();
-	OpenSSL_add_all_digests ();
-	OpenSSL_add_all_ciphers ();
-#endif
-	g_random_set_seed (ottery_rand_uint32 ());
-
-	/* Set stack size for pcre */
-	getrlimit (RLIMIT_STACK, &rlim);
-	rlim.rlim_cur = 100 * 1024 * 1024;
-	setrlimit (RLIMIT_STACK, &rlim);
-
-	event_init ();
-#ifdef GMIME_ENABLE_RFC2047_WORKAROUNDS
-	g_mime_init (GMIME_ENABLE_RFC2047_WORKAROUNDS);
-#else
-	g_mime_init (0);
-#endif
-}
-
 gint
 main (gint argc, gchar **argv, gchar **env)
 {
 	gint res = 0, i;
 	struct sigaction signals;
 	struct rspamd_worker *cur;
-	struct filter *filt;
 	pid_t wrk;
-	GList *l;
 	worker_t **pworker;
 	GQuark type;
+	gpointer keypair;
+	GString *keypair_out;
 
 #ifdef HAVE_SA_SIGINFO
 	signals_info = g_queue_new ();
@@ -1235,7 +1129,7 @@ main (gint argc, gchar **argv, gchar **env)
 
 	rspamd_init_libs ();
 	rspamd_init_main (rspamd_main);
-	rspamd_init_cfg (rspamd_main->cfg);
+	rspamd_init_cfg (rspamd_main->cfg, TRUE);
 
 	memset (&signals, 0, sizeof (struct sigaction));
 
@@ -1280,6 +1174,50 @@ main (gint argc, gchar **argv, gchar **env)
 		exit (perform_configs_sign ());
 	}
 
+	/* Same for keypair creation */
+	if (gen_keypair) {
+		keypair = rspamd_http_connection_gen_key ();
+		if (keypair == NULL) {
+			exit (EXIT_FAILURE);
+		}
+		keypair_out = rspamd_http_connection_print_key (keypair,
+				RSPAMD_KEYPAIR_PUBKEY|RSPAMD_KEYPAIR_PRIVKEY|RSPAMD_KEYPAIR_ID|
+				RSPAMD_KEYPAIR_BASE32|RSPAMD_KEYPAIR_HUMAN);
+		rspamd_printf ("%V", keypair_out);
+		exit (EXIT_SUCCESS);
+	}
+
+	if (encrypt_password) {
+		do_encrypt_password ();
+		exit (EXIT_SUCCESS);
+	}
+
+	if (rspamd_main->cfg->config_test || dump_cache) {
+		if (!load_rspamd_config (rspamd_main->cfg, FALSE)) {
+			exit (EXIT_FAILURE);
+		}
+
+		res = TRUE;
+
+		if (!rspamd_init_filters (rspamd_main->cfg, FALSE)) {
+			res = FALSE;
+		}
+
+		/* Insert classifiers symbols */
+		(void)rspamd_config_insert_classify_symbols (rspamd_main->cfg);
+
+		if (!validate_cache (rspamd_main->cfg->cache, rspamd_main->cfg,
+			FALSE)) {
+			res = FALSE;
+		}
+		if (dump_cache) {
+			print_symbols_cache (rspamd_main->cfg);
+			exit (EXIT_SUCCESS);
+		}
+		fprintf (stderr, "syntax %s\n", res ? "OK" : "BAD");
+		return res ? EXIT_SUCCESS : EXIT_FAILURE;
+	}
+
 	/* Load config */
 	if (!load_rspamd_config (rspamd_main->cfg, TRUE)) {
 		exit (EXIT_FAILURE);
@@ -1295,39 +1233,7 @@ main (gint argc, gchar **argv, gchar **env)
 		rspamd_main->cfg->log_level = G_LOG_LEVEL_DEBUG;
 	}
 
-	if (rspamd_main->cfg->config_test || dump_cache) {
-		/* Init events to test modules */
-		event_init ();
-		res = TRUE;
-		if (!rspamd_init_lua_filters (rspamd_main->cfg)) {
-			res = FALSE;
-		}
-		/* Perform modules configuring */
-		l = g_list_first (rspamd_main->cfg->filters);
-
-		while (l) {
-			filt = l->data;
-			if (filt->module) {
-				if (!filt->module->module_config_func (rspamd_main->cfg)) {
-					res = FALSE;
-				}
-			}
-			l = g_list_next (l);
-		}
-		/* Insert classifiers symbols */
-		(void)rspamd_config_insert_classify_symbols (rspamd_main->cfg);
-
-		if (!validate_cache (rspamd_main->cfg->cache, rspamd_main->cfg,
-			FALSE)) {
-			res = FALSE;
-		}
-		if (dump_cache) {
-			print_symbols_cache (rspamd_main->cfg);
-			exit (EXIT_SUCCESS);
-		}
-		fprintf (stderr, "syntax %s\n", res ? "OK" : "BAD");
-		return res ? EXIT_SUCCESS : EXIT_FAILURE;
-	}
+	gperf_profiler_init (rspamd_main->cfg, "main");
 
 	msg_info ("rspamd " RVERSION " is starting, build id: " RID);
 	rspamd_main->cfg->cfg_name = rspamd_mempool_strdup (
@@ -1358,32 +1264,6 @@ main (gint argc, gchar **argv, gchar **env)
 
 	setproctitle ("main process");
 
-	/* Init statfile pool */
-	rspamd_main->statfile_pool = statfile_pool_new (rspamd_main->server_pool,
-			rspamd_main->cfg->mlock_statfile_pool);
-
-	/* Init lua filters */
-	if (!rspamd_init_lua_filters (rspamd_main->cfg)) {
-		msg_err ("error loading lua plugins");
-		exit (EXIT_FAILURE);
-	}
-
-	/* Insert classifiers symbols */
-	(void)rspamd_config_insert_classify_symbols (rspamd_main->cfg);
-
-	/* Perform modules configuring */
-	l = g_list_first (rspamd_main->cfg->filters);
-
-	while (l) {
-		filt = l->data;
-		if (filt->module) {
-			if (!filt->module->module_config_func (rspamd_main->cfg)) {
-				res = FALSE;
-			}
-		}
-		l = g_list_next (l);
-	}
-
 	/* Init config cache */
 	init_cfg_cache (rspamd_main->cfg);
 
@@ -1393,15 +1273,15 @@ main (gint argc, gchar **argv, gchar **env)
 	/* Flush log */
 	rspamd_log_flush (rspamd_main->logger);
 
-	/* Preload all statfiles */
-	preload_statfiles (rspamd_main);
-
 	/* Maybe read roll history */
 	if (rspamd_main->cfg->history_file) {
 		rspamd_roll_history_load (rspamd_main->history,
 			rspamd_main->cfg->history_file);
 	}
 
+#if defined(WITH_GPERF_TOOLS)
+	ProfilerStop ();
+#endif
 	/* Spawn workers */
 	rspamd_main->workers = g_hash_table_new (g_direct_hash, g_direct_equal);
 	spawn_workers (rspamd_main);
@@ -1506,7 +1386,14 @@ main (gint argc, gchar **argv, gchar **env)
 	sigaction (SIGINT,	&signals, NULL);
 	sigprocmask (SIG_UNBLOCK, &signals.sa_mask, NULL);
 	/* Set alarm for hard termination */
-	set_alarm (HARD_TERMINATION_TIME);
+	if (getenv ("G_SLICE") != NULL) {
+		/* Special case if we are likely running with valgrind */
+		set_alarm (HARD_TERMINATION_TIME * 10);
+	}
+	else {
+		set_alarm (HARD_TERMINATION_TIME);
+	}
+
 	/* Wait for workers termination */
 	g_hash_table_foreach_remove (rspamd_main->workers, wait_for_workers, NULL);
 
@@ -1517,8 +1404,6 @@ main (gint argc, gchar **argv, gchar **env)
 	}
 
 	msg_info ("terminating...");
-
-	statfile_pool_delete (rspamd_main->statfile_pool);
 
 	rspamd_log_close (rspamd_main->logger);
 

@@ -24,19 +24,34 @@
 #include "lua_common.h"
 #include "dns.h"
 
-#ifndef WITH_SYSTEM_HIREDIS
 #include "hiredis.h"
 #include "async.h"
 #include "adapters/libevent.h"
-#else
-#include <hiredis/hiredis.h>
-#include <hiredis/async.h>
-#include <hiredis/adapters/libevent.h>
-#endif
 
+#define REDIS_DEFAULT_TIMEOUT 1.0
 
-/**
- * Redis access API for lua from task object
+/***
+ * @module rspamd_redis
+ * This module implements redis asynchronous client for rspamd LUA API.
+ * Here is an example of using of this module:
+ * @example
+local rspamd_redis = require "rspamd_redis"
+local rspamd_logger = require "rspamd_logger"
+
+local function symbol_callback(task)
+	local redis_key = 'some_key'
+	local function redis_cb(task, err, data)
+		if not err then
+			rspamd_logger.infox('redis returned %1=%2', redis_key, data)
+		end
+	end
+
+	rspamd_redis.make_request(task, "127.0.0.1:6379", redis_cb,
+		'GET', {redis_key})
+	-- or in table form:
+	-- rspamd_redis.make_request({task=task, host="127.0.0.1:6379,
+	--	callback=redis_cb, timeout=2.0, cmd='GET', args={redis_key}})
+end
  */
 
 LUA_FUNCTION_DEF (redis, make_request);
@@ -54,26 +69,28 @@ struct lua_redis_userdata {
 	redisAsyncContext *ctx;
 	lua_State *L;
 	struct rspamd_task *task;
-	gint cbref;
+	struct event timeout;
 	gchar *server;
-	struct in_addr ina;
 	gchar *reqline;
+	gchar **args;
+	gint cbref;
+	guint nargs;
 	guint16 port;
-	rspamd_fstring_t *args;
-	guint args_num;
+	guint16 terminated;
 };
 
-/**
- * Utility function to extract worker task from lua arguments
- * @param L lua stack
- * @return worker task object
- */
-static struct rspamd_task *
-lua_check_task (lua_State * L)
+static void
+lua_redis_free_args (struct lua_redis_userdata *ud)
 {
-	void *ud = luaL_checkudata (L, 1, "rspamd{task}");
-	luaL_argcheck (L, ud != NULL, 1, "'task' expected");
-	return ud ? *((struct rspamd_task **)ud) : NULL;
+	guint i;
+
+	if (ud->args) {
+		for (i = 0; i < ud->nargs; i ++) {
+			g_free (ud->args[i]);
+		}
+
+		g_free (ud->args);
+	}
 }
 
 static void
@@ -82,7 +99,10 @@ lua_redis_fin (void *arg)
 	struct lua_redis_userdata *ud = arg;
 
 	if (ud->ctx) {
+		ud->terminated = 1;
 		redisAsyncFree (ud->ctx);
+		lua_redis_free_args (ud);
+		event_del (&ud->timeout);
 		luaL_unref (ud->L, LUA_REGISTRYINDEX, ud->cbref);
 	}
 }
@@ -116,7 +136,36 @@ lua_redis_push_error (const gchar *err,
 	if (connected) {
 		remove_normal_event (ud->task->s, lua_redis_fin, ud);
 	}
+}
 
+static void
+lua_redis_push_reply (lua_State *L, const redisReply *r)
+{
+	guint i;
+
+	switch (r->type) {
+	case REDIS_REPLY_INTEGER:
+		lua_pushinteger (L, r->integer);
+		break;
+	case REDIS_REPLY_NIL:
+		/* XXX: not the best approach */
+		lua_newuserdata (L, sizeof (gpointer));
+		break;
+	case REDIS_REPLY_STRING:
+	case REDIS_REPLY_STATUS:
+		lua_pushlstring (L, r->str, r->len);
+		break;
+	case REDIS_REPLY_ARRAY:
+		lua_createtable (L, r->elements, 0);
+		for (i = 0; i < r->elements; ++i) {
+			lua_redis_push_reply (L, r->element[i]);
+			lua_rawseti (L, -2, i + 1); /* Store sub-reply */
+		}
+		break;
+	default: /* should not happen */
+		msg_info ("unknown reply type: %d", r->type);
+		break;
+	}
 }
 
 /**
@@ -138,22 +187,7 @@ lua_redis_push_data (const redisReply *r, struct lua_redis_userdata *ud)
 	/* Error is nil */
 	lua_pushnil (ud->L);
 	/* Data */
-	if (r->type == REDIS_REPLY_STRING) {
-		lua_pushlstring (ud->L, r->str, r->len);
-	}
-	else if (r->type == REDIS_REPLY_INTEGER) {
-		lua_pushnumber (ud->L, r->integer);
-	}
-	else if (r->type == REDIS_REPLY_STATUS) {
-		lua_pushlstring (ud->L, r->str, r->len);
-	}
-	else if (r->type == REDIS_REPLY_NIL) {
-		lua_pushnil (ud->L);
-	}
-	else {
-		msg_info ("bad type is passed: %d", r->type);
-		lua_pushnil (ud->L);
-	}
+	lua_redis_push_reply (ud->L, r);
 
 	if (lua_pcall (ud->L, 3, 0, 0) != 0) {
 		msg_info ("call to callback failed: %s", lua_tostring (ud->L, -1));
@@ -174,6 +208,11 @@ lua_redis_callback (redisAsyncContext *c, gpointer r, gpointer priv)
 	redisReply *reply = r;
 	struct lua_redis_userdata *ud = priv;
 
+	if (ud->terminated) {
+		/* We are already at the termination stage, just go out */
+		return;
+	}
+
 	if (c->err == 0) {
 		if (r != NULL) {
 			if (reply->type != REDIS_REPLY_ERROR) {
@@ -184,7 +223,7 @@ lua_redis_callback (redisAsyncContext *c, gpointer r, gpointer priv)
 			}
 		}
 		else {
-			lua_redis_push_error ("received no data from server", ud, FALSE);
+			lua_redis_push_error ("received no data from server", ud, TRUE);
 		}
 	}
 	else {
@@ -196,172 +235,229 @@ lua_redis_callback (redisAsyncContext *c, gpointer r, gpointer priv)
 		}
 	}
 }
-/**
- * Make a real request to redis server and attach it to libevent cycle
- * @param ud userdata object
- * @return
- */
-static gboolean
-lua_redis_make_request_real (struct lua_redis_userdata *ud)
-{
-	ud->ctx = redisAsyncConnect (inet_ntoa (ud->ina), ud->port);
-	if (ud->ctx == NULL || ud->ctx->err) {
-		lua_redis_push_error (ud->ctx ? ud->ctx->errstr : "unknown error",
-			ud,
-			FALSE);
-		return FALSE;
-	}
-	else {
-		register_async_event (ud->task->s,
-			lua_redis_fin,
-			ud,
-			g_quark_from_static_string ("lua redis"));
-	}
-	redisLibeventAttach (ud->ctx, ud->task->ev_base);
-	/* Make a request now */
-	switch (ud->args_num) {
-	case 0:
-		redisAsyncCommand (ud->ctx, lua_redis_callback, ud, ud->reqline);
-		break;
-	case 1:
-		redisAsyncCommand (ud->ctx,
-			lua_redis_callback,
-			ud,
-			ud->reqline,
-			ud->args[0].begin,
-			ud->args[0].len);
-		break;
-	case 2:
-		redisAsyncCommand (ud->ctx,
-			lua_redis_callback,
-			ud,
-			ud->reqline,
-			ud->args[0].begin,
-			ud->args[0].len,
-			ud->args[1].begin,
-			ud->args[1].len);
-		break;
-	default:
-		/* XXX: cannot handle more than 3 arguments */
-		redisAsyncCommand (ud->ctx,
-			lua_redis_callback,
-			ud,
-			ud->reqline,
-			ud->args[0].begin,
-			ud->args[0].len,
-			ud->args[1].begin,
-			ud->args[1].len,
-			ud->args[2].begin,
-			ud->args[2].len);
-		break;
-	}
 
-	return TRUE;
-}
-
-/**
- * Get result of dns error
- * @param reply dns reply object
- * @param arg user data
- */
 static void
-lua_redis_dns_callback (struct rdns_reply *reply, gpointer arg)
+lua_redis_timeout (int fd, short what, gpointer u)
 {
-	struct lua_redis_userdata *ud = arg;
-	struct rdns_reply_entry *elt;
+	struct lua_redis_userdata *ud = u;
 
-
-	if (reply->code != RDNS_RC_NOERROR) {
-		lua_redis_push_error (rdns_strerror (reply->code), ud, FALSE);
-		return;
-	}
-	else {
-		elt = reply->entries;
-		memcpy (&ud->ina, &elt->content.a.addr, sizeof (struct in_addr));
-		/* Make real request */
-		lua_redis_make_request_real (ud);
-	}
+	msg_info ("timeout while querying redis server");
+	lua_redis_push_error ("timeout while connecting the server", ud, TRUE);
 }
 
-/**
- * Make request to redis server
- * @param task worker task object
- * @param server server to check
- * @param port port of redis server
- * @param callback callback to be called
- * @param request request line
- * @param args list of arguments
- * @return
+
+static void
+lua_redis_parse_args (lua_State *L, gint idx, const gchar *cmd,
+		struct lua_redis_userdata *ud)
+{
+	gchar **args = NULL;
+	gint top;
+
+	if (idx != 0 && lua_type (L, idx) == LUA_TTABLE) {
+		/* Get all arguments */
+		lua_pushvalue (L, 5);
+		lua_pushnil (L);
+		top = 0;
+
+		while (lua_next (L, -2) != 0) {
+			if (lua_isstring (L, -1)) {
+				top ++;
+			}
+			lua_pop (L, 1);
+		}
+
+		args = g_malloc ((top + 1) * sizeof (gchar *));
+		lua_pushnil (L);
+		args[0] = g_strdup (cmd);
+		top = 1;
+
+		while (lua_next (L, -2) != 0) {
+			args[top++] = g_strdup (lua_tostring (L, -1));
+			lua_pop (L, 1);
+		}
+
+		lua_pop (L, 1);
+	}
+	else {
+		/* Use merely cmd */
+		args = g_malloc (sizeof (gchar *));
+		args[0] = g_strdup (cmd);
+		top = 1;
+	}
+
+	ud->nargs = top;
+	ud->args = args;
+}
+
+static void
+lua_redis_connect_cb (const struct redisAsyncContext *c, int status)
+{
+	/*
+	 * Workaround to prevent double close:
+	 * https://groups.google.com/forum/#!topic/redis-db/mQm46XkIPOY
+	 */
+#if defined(HIREDIS_MAJOR) && HIREDIS_MAJOR == 0 && HIREDIS_MINOR <= 11
+	struct redisAsyncContext *nc = (struct redisAsyncContext *)c;
+	if (status == REDIS_ERR) {
+		nc->c.fd = -1;
+	}
+#endif
+}
+
+/***
+ * @function rspamd_redis.make_request({params})
+ * Make request to redis server, params is a table of key=value arguments in any order
+ * @param {task} task worker task object
+ * @param {ip} host server address
+ * @param {function} callback callback to be called in form `function (task, err, data)`
+ * @param {string} cmd command to be sent to redis
+ * @param {table} args numeric array of strings used as redis arguments
+ * @param {number} timeout timeout in seconds for request (1.0 by default)
+ * @return {boolean} `true` if a request has been scheduled
  */
 static int
 lua_redis_make_request (lua_State *L)
 {
-	struct rspamd_task *task;
 	struct lua_redis_userdata *ud;
-	const gchar *server, *tmp;
-	guint port, i;
+	struct rspamd_lua_ip *addr = NULL;
+	struct rspamd_task *task = NULL;
+	const gchar *cmd = NULL;
+	gint top, cbref = -1;
+	struct timeval tv;
+	gboolean ret = FALSE;
+	gdouble timeout = REDIS_DEFAULT_TIMEOUT;
 
-	if ((task = lua_check_task (L)) != NULL) {
-		server = luaL_checkstring (L, 2);
-		port = luaL_checkint (L, 3);
+	if (lua_istable (L, 1)) {
+		/* Table version */
+		lua_pushstring (L, "task");
+		lua_gettable (L, -2);
+		if (lua_type (L, -1) == LUA_TUSERDATA) {
+			task = lua_check_task (L, -1);
+		}
+		lua_pop (L, 1);
+
+		lua_pushstring (L, "callback");
+		lua_gettable (L, -2);
+		if (lua_type (L, -1) == LUA_TFUNCTION) {
+			/* This also pops function from the stack */
+			cbref = luaL_ref (L, LUA_REGISTRYINDEX);
+		}
+		else {
+			msg_err ("bad callback argument for lua redis");
+			lua_pop (L, 1);
+		}
+
+		lua_pushstring (L, "cmd");
+		lua_gettable (L, -2);
+		cmd = lua_tostring (L, -1);
+		lua_pop (L, 1);
+
+		lua_pushstring (L, "host");
+		lua_gettable (L, -2);
+		if (lua_type (L, -1) == LUA_TUSERDATA) {
+			addr = lua_check_ip (L, -1);
+		}
+		lua_pop (L, 1);
+
+		lua_pushstring (L, "timeout");
+		lua_gettable (L, -2);
+		timeout = lua_tonumber (L, -1);
+		lua_pop (L, 1);
+
+		if (task != NULL && addr != NULL && cbref != -1 && cmd != NULL) {
+			ud =
+					rspamd_mempool_alloc (task->task_pool,
+							sizeof (struct lua_redis_userdata));
+			ud->task = task;
+			ud->L = L;
+			ud->cbref = cbref;
+			lua_pushstring (L, "args");
+			lua_redis_parse_args (L, -1, cmd, ud);
+			ret = TRUE;
+		}
+		else {
+			if (cbref != -1) {
+				luaL_unref (L, LUA_REGISTRYINDEX, cbref);
+			}
+
+			msg_err ("incorrect function invocation");
+		}
+	}
+	else if ((task = lua_check_task (L, 1)) != NULL) {
+		addr = lua_check_ip (L, 2);
+		top = lua_gettop (L);
 		/* Now get callback */
-		if (lua_isfunction (L,
-			4) && server != NULL && port > 0 && port < G_MAXUINT16) {
+		if (lua_isfunction (L, 3) && addr != NULL && addr->addr && top >= 4) {
 			/* Create userdata */
 			ud =
 				rspamd_mempool_alloc (task->task_pool,
 					sizeof (struct lua_redis_userdata));
-			ud->server = rspamd_mempool_strdup (task->task_pool, server);
-			ud->port = port;
 			ud->task = task;
 			ud->L = L;
-			ud->ctx = NULL;
+
 			/* Pop other arguments */
-			lua_pushvalue (L, 4);
+			lua_pushvalue (L, 3);
 			/* Get a reference */
 			ud->cbref = luaL_ref (L, LUA_REGISTRYINDEX);
-			ud->reqline = rspamd_mempool_strdup (task->task_pool,
-					luaL_checkstring (L, 5));
-			/* Now get remaining args */
-			ud->args_num = lua_gettop (L) - 5;
-			ud->args = rspamd_mempool_alloc (task->task_pool,
-					ud->args_num * sizeof (rspamd_fstring_t));
-			for (i = 0; i < ud->args_num; i++) {
-				tmp = lua_tolstring (L, i + 6, &ud->args[i].len);
-				/* Make a copy of argument */
-				ud->args[i].begin = rspamd_mempool_alloc (task->task_pool,
-						ud->args[i].len);
-				memcpy (ud->args[i].begin, tmp, ud->args[i].len);
-			}
-			/* Now check whether we need to perform DNS request */
-			if (inet_aton (ud->server, &ud->ina) == 0) {
-				/* Need to make dns request */
-				/* Resolve hostname */
-				if (make_dns_request (task->resolver, task->s, task->task_pool,
-					lua_redis_dns_callback, ud,
-					RDNS_REQUEST_A, ud->server)) {
-					task->dns_requests++;
-					lua_pushboolean (L, TRUE);
-				}
-				else {
-					msg_info ("failed to resolve %s", ud->server);
-					lua_pushboolean (L, FALSE);
-				}
+
+			cmd = luaL_checkstring (L, 4);
+			if (top > 4) {
+				lua_redis_parse_args (L, 5, cmd, ud);
 			}
 			else {
-				if (!lua_redis_make_request_real (ud)) {
-					lua_pushboolean (L, FALSE);
-				}
-				else {
-					lua_pushboolean (L, TRUE);
-				}
+				lua_redis_parse_args (L, 0, cmd, ud);
 			}
+
+			ret = TRUE;
 		}
 		else {
-			msg_info ("function required as 4-th argument");
-			lua_pushboolean (L, FALSE);
+			msg_err ("incorrect function invocation");
 		}
 	}
+
+	if (ret) {
+		ud->terminated = 0;
+		ud->ctx = redisAsyncConnect (rspamd_inet_address_to_string (addr->addr),
+				rspamd_inet_address_get_port (addr->addr));
+		redisAsyncSetConnectCallback (ud->ctx, lua_redis_connect_cb);
+
+		if (ud->ctx == NULL || ud->ctx->err) {
+			ud->terminated = 1;
+			redisAsyncFree (ud->ctx);
+			lua_redis_free_args (ud);
+			luaL_unref (ud->L, LUA_REGISTRYINDEX, ud->cbref);
+			lua_pushboolean (L, FALSE);
+
+			return 1;
+		}
+		redisLibeventAttach (ud->ctx, ud->task->ev_base);
+		ret = redisAsyncCommandArgv (ud->ctx,
+					lua_redis_callback,
+					ud,
+					ud->nargs,
+					(const gchar **)ud->args,
+					NULL);
+		if (ret == REDIS_OK) {
+			register_async_event (ud->task->s,
+					lua_redis_fin,
+					ud,
+					g_quark_from_static_string ("lua redis"));
+
+			double_to_tv (timeout, &tv);
+			event_set (&ud->timeout, -1, EV_TIMEOUT, lua_redis_timeout, ud);
+			event_base_set (ud->task->ev_base, &ud->timeout);
+			event_add (&ud->timeout, &tv);
+		}
+		else {
+			msg_info ("call to redis failed: %s", ud->ctx->errstr);
+			ud->terminated = 1;
+			lua_redis_free_args (ud);
+			redisAsyncFree (ud->ctx);
+			luaL_unref (ud->L, LUA_REGISTRYINDEX, ud->cbref);
+		}
+	}
+
+	lua_pushboolean (L, ret);
 
 	return 1;
 }

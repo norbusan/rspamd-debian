@@ -39,24 +39,13 @@
 #include "map.h"
 #include "fuzzy_storage.h"
 #include "fuzzy_backend.h"
+#include "ottery.h"
 
-/* This number is used as limit while comparing two fuzzy hashes, this value can vary from 0 to 100 */
-#define LEV_LIMIT 99
-/* This number is used as limit while we are making decision to write new hash file or not */
-#define DEFAULT_MOD_LIMIT 10000
 /* This number is used as expire time in seconds for cache items  (2 days) */
 #define DEFAULT_EXPIRE 172800L
 /* Resync value in seconds */
-#define SYNC_TIMEOUT 60
-/* Number of hash buckets */
-#define BUCKETS 1024
-/* Number of insuccessfull bind retries */
-#define MAX_RETRIES 40
-/* Weight of hash to consider it frequent */
-#define DEFAULT_FREQUENT_SCORE 100
+#define DEFAULT_SYNC_TIMEOUT 60.0
 
-/* Current version of fuzzy hash file format */
-#define CURRENT_FUZZY_VERSION 1
 
 #define INVALID_NODE_TIME (guint64) - 1
 
@@ -83,8 +72,7 @@ static struct rspamd_stat *server_stat;
 struct rspamd_fuzzy_storage_ctx {
 	char *hashfile;
 	gdouble expire;
-	guint32 frequent_score;
-	guint32 max_mods;
+	gdouble sync_timeout;
 	radix_compressed_t *update_ips;
 	gchar *update_map;
 	struct event_base *ev_base;
@@ -105,45 +93,16 @@ struct fuzzy_session {
 	gint fd;
 	guint64 time;
 	gboolean legacy;
-	rspamd_inet_addr_t addr;
+	rspamd_inet_addr_t *addr;
 	struct rspamd_fuzzy_storage_ctx *ctx;
 };
-
-extern sig_atomic_t wanna_die;
-
-static GQuark
-rspamd_fuzzy_quark(void)
-{
-	return g_quark_from_static_string ("fuzzy-storage");
-}
-
-static void
-sigterm_handler (void *arg)
-{
-	struct rspamd_worker *worker = (struct rspamd_worker *)arg;
-	struct rspamd_fuzzy_storage_ctx *ctx;
-
-	ctx = worker->ctx;
-}
-
-/*
- * Config reload is designed by sending sigusr to active workers and pending shutdown of them
- */
-static void
-sigusr2_handler (void *arg)
-{
-	struct rspamd_worker *worker = (struct rspamd_worker *)arg;
-	struct rspamd_fuzzy_storage_ctx *ctx;
-
-	ctx = worker->ctx;
-}
 
 static gboolean
 rspamd_fuzzy_check_client (struct fuzzy_session *session)
 {
 	if (session->ctx->update_ips != NULL) {
 		if (radix_find_compressed_addr (session->ctx->update_ips,
-				&session->addr) == RADIX_NO_VALUE) {
+				session->addr) == RADIX_NO_VALUE) {
 			return FALSE;
 		}
 	}
@@ -171,12 +130,11 @@ rspamd_fuzzy_write_reply (struct fuzzy_session *session,
 		else {
 			r = rspamd_snprintf (buf, sizeof (buf), "ERR" CRLF);
 		}
-		r = sendto (session->fd, buf, r, 0, &session->addr.addr.sa,
-			session->addr.slen);
+		r = rspamd_inet_address_sendto (session->fd, buf, r, 0, session->addr);
 	}
 	else {
-		r = sendto (session->fd, rep, sizeof (*rep), 0, &session->addr.addr.sa,
-				session->addr.slen);
+		r = rspamd_inet_address_sendto (session->fd, rep, sizeof (*rep), 0,
+				session->addr);
 	}
 
 	if (r == -1) {
@@ -190,7 +148,8 @@ rspamd_fuzzy_write_reply (struct fuzzy_session *session,
 }
 
 static void
-rspamd_fuzzy_process_command (struct fuzzy_session *session)
+rspamd_fuzzy_process_command (struct fuzzy_session *session,
+		enum rspamd_fuzzy_epoch epoch)
 {
 	struct rspamd_fuzzy_reply rep = {0, 0, 0, 0.0};
 	gboolean res = FALSE;
@@ -198,6 +157,12 @@ rspamd_fuzzy_process_command (struct fuzzy_session *session)
 	if (session->cmd->cmd == FUZZY_CHECK) {
 		rep = rspamd_fuzzy_backend_check (session->ctx->backend, session->cmd,
 				session->ctx->expire);
+		/* XXX: actually, these updates are not atomic, but we don't care */
+		server_stat->fuzzy_hashes_checked[epoch] ++;
+
+		if (rep.prob > 0.5) {
+			server_stat->fuzzy_hashes_found[epoch] ++;
+		}
 	}
 	else {
 		rep.flag = session->cmd->flag;
@@ -231,21 +196,39 @@ rspamd_fuzzy_process_command (struct fuzzy_session *session)
 }
 
 
-static gboolean
+static enum rspamd_fuzzy_epoch
 rspamd_fuzzy_command_valid (struct rspamd_fuzzy_cmd *cmd, gint r)
 {
+	enum rspamd_fuzzy_epoch ret = RSPAMD_FUZZY_EPOCH_MAX;
+
 	if (cmd->version == RSPAMD_FUZZY_VERSION) {
 		if (cmd->shingles_count > 0) {
 			if (r == sizeof (struct rspamd_fuzzy_shingle_cmd)) {
-				return TRUE;
+				ret = RSPAMD_FUZZY_EPOCH9;
 			}
 		}
 		else {
-			return (r == sizeof (*cmd));
+			if (r == sizeof (*cmd)) {
+				ret = RSPAMD_FUZZY_EPOCH9;
+			}
+		}
+	}
+	else if (cmd->version == 2) {
+		/*
+		 * rspamd 0.8 has slightly different tokenizer then it might be not
+		 * 100% compatible
+		 */
+		if (cmd->shingles_count > 0) {
+			if (r == sizeof (struct rspamd_fuzzy_shingle_cmd)) {
+				ret = RSPAMD_FUZZY_EPOCH8;
+			}
+		}
+		else {
+			ret = RSPAMD_FUZZY_EPOCH8;
 		}
 	}
 
-	return FALSE;
+	return ret;
 }
 /*
  * Accept new connection and construct task
@@ -254,24 +237,22 @@ static void
 accept_fuzzy_socket (gint fd, short what, void *arg)
 {
 	struct rspamd_worker *worker = (struct rspamd_worker *)arg;
-	struct rspamd_fuzzy_storage_ctx *ctx;
 	struct fuzzy_session session;
 	gint r;
 	guint8 buf[2048];
 	struct rspamd_fuzzy_cmd *cmd = NULL, lcmd;
 	struct legacy_fuzzy_cmd *l;
+	enum rspamd_fuzzy_epoch epoch = RSPAMD_FUZZY_EPOCH_MAX;
 
-	ctx = worker->ctx;
 	session.worker = worker;
 	session.fd = fd;
-	session.addr.slen = sizeof (session.addr.addr);
 	session.ctx = worker->ctx;
 	session.time = (guint64)time (NULL);
 
 	/* Got some data */
 	if (what == EV_READ) {
-		while ((r = recvfrom (fd, buf, sizeof (buf), 0,
-			&session.addr.addr.sa, &session.addr.slen)) == -1) {
+		while ((r = rspamd_inet_address_recvfrom (fd, buf, sizeof (buf), 0,
+			&session.addr)) == -1) {
 			if (errno == EINTR) {
 				continue;
 			}
@@ -280,7 +261,7 @@ accept_fuzzy_socket (gint fd, short what, void *arg)
 				strerror (errno));
 			return;
 		}
-		session.addr.af = session.addr.addr.sa.sa_family;
+
 		if ((guint)r == sizeof (struct legacy_fuzzy_cmd)) {
 			session.legacy = TRUE;
 			l = (struct legacy_fuzzy_cmd *)buf;
@@ -292,14 +273,17 @@ accept_fuzzy_socket (gint fd, short what, void *arg)
 			lcmd.value = l->value;
 			lcmd.tag = 0;
 			cmd = &lcmd;
+			epoch = RSPAMD_FUZZY_EPOCH6;
 		}
 		else if ((guint)r >= sizeof (struct rspamd_fuzzy_cmd)) {
 			/* Check shingles count sanity */
 			session.legacy = FALSE;
 			cmd = (struct rspamd_fuzzy_cmd *)buf;
-			if (!rspamd_fuzzy_command_valid (cmd, r)) {
+			epoch = rspamd_fuzzy_command_valid (cmd, r);
+			if (epoch == RSPAMD_FUZZY_EPOCH_MAX) {
 				/* Bad input */
 				msg_debug ("invalid fuzzy command of size %d received", r);
+				cmd = NULL;
 			}
 		}
 		else {
@@ -308,8 +292,10 @@ accept_fuzzy_socket (gint fd, short what, void *arg)
 		}
 		if (cmd != NULL) {
 			session.cmd = cmd;
-			rspamd_fuzzy_process_command (&session);
+			rspamd_fuzzy_process_command (&session, epoch);
 		}
+
+		rspamd_inet_address_destroy (session.addr);
 	}
 }
 
@@ -318,14 +304,16 @@ sync_callback (gint fd, short what, void *arg)
 {
 	struct rspamd_worker *worker = (struct rspamd_worker *)arg;
 	struct rspamd_fuzzy_storage_ctx *ctx;
+	gdouble next_check;
 
 	ctx = worker->ctx;
 	/* Timer event */
 	evtimer_set (&tev, sync_callback, worker);
 	event_base_set (ctx->ev_base, &tev);
 	/* Plan event with jitter */
-	tmv.tv_sec = SYNC_TIMEOUT + SYNC_TIMEOUT * g_random_double ();
-	tmv.tv_usec = 0;
+	next_check = ctx->sync_timeout * (1. + ((gdouble)ottery_rand_uint32 ()) /
+			G_MAXUINT32);
+	double_to_tv (next_check, &tmv);
 	evtimer_add (&tev, &tmv);
 
 	/* Call backend sync */
@@ -344,8 +332,7 @@ init_fuzzy (struct rspamd_config *cfg)
 
 	ctx = g_malloc0 (sizeof (struct rspamd_fuzzy_storage_ctx));
 
-	ctx->max_mods = DEFAULT_MOD_LIMIT;
-	ctx->expire = DEFAULT_EXPIRE;
+	ctx->sync_timeout = DEFAULT_SYNC_TIMEOUT;
 
 	rspamd_rcl_register_worker_option (cfg, type, "hashfile",
 		rspamd_rcl_parse_struct_string, ctx,
@@ -363,22 +350,15 @@ init_fuzzy (struct rspamd_config *cfg)
 		rspamd_rcl_parse_struct_string, ctx,
 		G_STRUCT_OFFSET (struct rspamd_fuzzy_storage_ctx, hashfile), 0);
 
-	/* Legacy options */
-	rspamd_rcl_register_worker_option (cfg, type, "max_mods",
-		rspamd_rcl_parse_struct_integer, ctx,
+	rspamd_rcl_register_worker_option (cfg, type, "sync",
+		rspamd_rcl_parse_struct_time, ctx,
 		G_STRUCT_OFFSET (struct rspamd_fuzzy_storage_ctx,
-		max_mods), RSPAMD_CL_FLAG_INT_32);
-
-	rspamd_rcl_register_worker_option (cfg, type, "frequent_score",
-		rspamd_rcl_parse_struct_integer, ctx,
-		G_STRUCT_OFFSET (struct rspamd_fuzzy_storage_ctx,
-		frequent_score), RSPAMD_CL_FLAG_INT_32);
+		sync_timeout), RSPAMD_CL_FLAG_TIME_FLOAT);
 
 	rspamd_rcl_register_worker_option (cfg, type, "expire",
 		rspamd_rcl_parse_struct_time, ctx,
 		G_STRUCT_OFFSET (struct rspamd_fuzzy_storage_ctx,
 		expire), RSPAMD_CL_FLAG_TIME_FLOAT);
-
 
 	rspamd_rcl_register_worker_option (cfg, type, "allow_update",
 		rspamd_rcl_parse_struct_string, ctx,
@@ -396,31 +376,16 @@ start_fuzzy (struct rspamd_worker *worker)
 {
 	struct rspamd_fuzzy_storage_ctx *ctx = worker->ctx;
 	GError *err = NULL;
-	struct rspamd_worker_signal_handler *sigh;
+	gdouble next_check;
 
 	ctx->ev_base = rspamd_prepare_worker (worker,
 			"fuzzy",
 			accept_fuzzy_socket);
 	server_stat = worker->srv->stat;
 
-	/* Custom SIGUSR2 handler */
-	sigh = g_hash_table_lookup (worker->signal_events, GINT_TO_POINTER (SIGUSR2));
-	sigh->post_handler = sigusr2_handler;
-	sigh->handler_data = worker;
-
-	/* Sync on termination */
-	sigh = g_hash_table_lookup (worker->signal_events, GINT_TO_POINTER (SIGTERM));
-	sigh->post_handler = sigterm_handler;
-	sigh->handler_data = worker;
-	sigh = g_hash_table_lookup (worker->signal_events, GINT_TO_POINTER (SIGINT));
-	sigh->post_handler = sigterm_handler;
-	sigh->handler_data = worker;
-	sigh = g_hash_table_lookup (worker->signal_events, GINT_TO_POINTER (SIGHUP));
-	sigh->post_handler = sigterm_handler;
-	sigh->handler_data = worker;
 
 	if ((ctx->backend = rspamd_fuzzy_backend_open (ctx->hashfile, &err)) == NULL) {
-		msg_err (err->message);
+		msg_err ("cannot open backend: %e", err);
 		g_error_free (err);
 		exit (EXIT_FAILURE);
 	}
@@ -431,8 +396,9 @@ start_fuzzy (struct rspamd_worker *worker)
 	evtimer_set (&tev, sync_callback, worker);
 	event_base_set (ctx->ev_base, &tev);
 	/* Plan event with jitter */
-	tmv.tv_sec = SYNC_TIMEOUT + SYNC_TIMEOUT * g_random_double ();
-	tmv.tv_usec = 0;
+	next_check = ctx->sync_timeout * (1. + ((gdouble)ottery_rand_uint32 ()) /
+			G_MAXUINT32);
+	double_to_tv (next_check, &tmv);
 	evtimer_add (&tev, &tmv);
 
 	/* Create radix tree */

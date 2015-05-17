@@ -51,6 +51,21 @@ enum rspamd_metric_action {
 	METRIC_ACTION_MAX
 };
 
+#define RSPAMD_TASK_FLAG_MIME (1 << 0)
+#define RSPAMD_TASK_FLAG_JSON (1 << 1)
+#define RSPAMD_TASK_FLAG_SKIP_EXTRA (1 << 2)
+#define RSPAMD_TASK_FLAG_SKIP (1 << 3)
+#define RSPAMD_TASK_FLAG_EXT_URLS (1 << 4)
+#define RSPAMD_TASK_FLAG_SPAMC (1 << 5)
+#define RSPAMD_TASK_FLAG_PASS_ALL (1 << 6)
+#define RSPAMD_TASK_FLAG_NO_LOG (1 << 7)
+#define RSPAMD_TASK_FLAG_NO_IP (1 << 8)
+#define RSPAMD_TASK_FLAG_HAS_CONTROL (1 << 9)
+
+#define RSPAMD_TASK_IS_SKIPPED(task) (((task)->flags & RSPAMD_TASK_FLAG_SKIP))
+#define RSPAMD_TASK_IS_JSON(task) (((task)->flags & RSPAMD_TASK_FLAG_JSON))
+#define RSPAMD_TASK_IS_SPAMC(task) (((task)->flags & RSPAMD_TASK_FLAG_SPAMC))
+
 typedef gint (*protocol_reply_func)(struct rspamd_task *task);
 
 struct custom_command {
@@ -63,6 +78,7 @@ struct custom_command {
  */
 struct rspamd_task {
 	struct rspamd_worker *worker;                               /**< pointer to worker object						*/
+	struct custom_command *custom_cmd;                          /**< custom command if any							*/
 	enum {
 		READ_MESSAGE,
 		WAIT_PRE_FILTER,
@@ -73,29 +89,26 @@ struct rspamd_task {
 		CLOSING_CONNECTION
 	} state;                                                    /**< current session state							*/
 	enum rspamd_command cmd;                                    /**< command										*/
-	struct custom_command *custom_cmd;                          /**< custom command if any							*/
 	gint sock;                                                  /**< socket descriptor								*/
-	/* TODO: all these fields should be converted to flags */
-	gboolean is_mime;                                           /**< if this task is mime task                      */
-	gboolean is_json;                                           /**< output is JSON									*/
-	gboolean skip_extra_filters;                                /**< skip pre and post filters						*/
-	gboolean is_skipped;                                        /**< whether message was skipped by configuration   */
-	gboolean extended_urls;										/**< output URLs in details							*/
-	gboolean is_spamc;											/**< need legacy spamc output						*/
+	guint flags;												/**< Bit flags										*/
+	guint message_len;											/**< Message length									*/
 
-	gchar *helo;                                                    /**< helo header value								*/
-	gchar *queue_id;                                                /**< queue id if specified							*/
-	const gchar *message_id;                                        /**< message id										*/
+	gchar *helo;                                                /**< helo header value								*/
+	gchar *queue_id;                                            /**< queue id if specified							*/
+	const gchar *message_id;                                    /**< message id										*/
 
-	rspamd_inet_addr_t from_addr;                               /**< from addr for a task							*/
-	rspamd_inet_addr_t client_addr;                             /**< address of connected socket					*/
+	rspamd_inet_addr_t *from_addr;                              /**< from addr for a task							*/
+	rspamd_inet_addr_t *client_addr;                            /**< address of connected socket					*/
 	gchar *deliver_to;                                          /**< address to deliver								*/
-	gchar *user;                                                    /**< user to deliver								*/
+	gchar *user;                                                /**< user to deliver								*/
 	gchar *subject;                                             /**< subject (for non-mime)							*/
 	gchar *hostname;                                            /**< hostname reported by MTA						*/
 	GHashTable *request_headers;                                /**< HTTP headers in a request						*/
 	GHashTable *reply_headers;                                  /**< Custom reply headers							*/
-	GString *msg;                                               /**< message buffer									*/
+	struct {
+		const gchar *start;
+		gsize len;
+	} msg;                                                      /**< message buffer									*/
 	struct rspamd_http_connection *http_conn;                   /**< HTTP server connection							*/
 	struct rspamd_async_session * s;                             /**< async session object							*/
 	gint parts_count;                                           /**< mime parts count								*/
@@ -103,10 +116,10 @@ struct rspamd_task {
 	GMimeObject *parser_parent_part;                            /**< current parent part							*/
 	GList *parts;                                               /**< list of parsed parts							*/
 	GList *text_parts;                                          /**< list of text parts								*/
-	gchar *raw_headers_str;                                         /**< list of raw headers							*/
+	gchar *raw_headers_str;                                     /**< list of raw headers							*/
 	GList *received;                                            /**< list of received headers						*/
-	GTree *urls;                                                /**< list of parsed urls							*/
-	GTree *emails;                                              /**< list of parsed emails							*/
+	GHashTable *urls;                                           /**< list of parsed urls							*/
+	GHashTable *emails;                                         /**< list of parsed emails							*/
 	GList *images;                                              /**< list of images									*/
 	GHashTable *raw_headers;                                    /**< list of raw headers							*/
 	GHashTable *results;                                        /**< hash table of metric_result indexed by
@@ -125,15 +138,12 @@ struct rspamd_task {
 	gchar *last_error;                                          /**< last error										*/
 	gint error_code;                                                /**< code of last error								*/
 	rspamd_mempool_t *task_pool;                                    /**< memory pool for task							*/
-#ifdef HAVE_CLOCK_GETTIME
-	struct timespec ts;                                         /**< time of connection								*/
-#endif
-	struct timeval tv;                                          /**< time of connection								*/
+	double time_real;
+	double time_virtual;
+	struct timeval tv;
 	guint32 scan_milliseconds;                                  /**< how much milliseconds passed					*/
-	gboolean pass_all_filters;                                  /**< pass task throught every rule					*/
-	gboolean no_log;                                            /**< do not log or write this task to the history	*/
 	guint32 parser_recursion;                                   /**< for avoiding recursion stack overflow			*/
-	gboolean (*fin_callback)(void *arg);                        /**< calback for filters finalizing					*/
+	gboolean (*fin_callback)(struct rspamd_task *task, void *arg); /**< calback for filters finalizing					*/
 	void *fin_arg;                                              /**< argument for fin callback						*/
 
 	guint32 dns_requests;                                       /**< number of DNS requests per this task			*/
@@ -142,6 +152,7 @@ struct rspamd_task {
 	struct event_base *ev_base;                                 /**< Event base										*/
 
 	GThreadPool *classify_pool;                                 /**< A pool of classify threads                     */
+	gpointer classify_data;										/**< Opaque classifiers data						*/
 
 	struct {
 		enum rspamd_metric_action action;                       /**< Action of pre filters							*/
@@ -182,7 +193,8 @@ gboolean rspamd_task_fin (void *arg);
  * @return task has been successfully parsed and processed
  */
 gboolean rspamd_task_process (struct rspamd_task *task,
-	struct rspamd_http_message *msg, GThreadPool *classify_pool,
+	struct rspamd_http_message *msg, const gchar *start, gsize len,
+	GThreadPool *classify_pool,
 	gboolean process_extra_filters);
 
 /**
@@ -191,5 +203,40 @@ gboolean rspamd_task_process (struct rspamd_task *task,
  * @return
  */
 const gchar *rspamd_task_get_sender (struct rspamd_task *task);
+
+/**
+ * Add a recipient for a task
+ * @param task task object
+ * @param rcpt string representation of recipient address
+ * @return TRUE if an address has been parsed and added
+ */
+gboolean rspamd_task_add_recipient (struct rspamd_task *task, const gchar *rcpt);
+/**
+ * Add a sender for a task
+ * @param task task object
+ * @param sender string representation of sender's address
+ * @return TRUE if an address has been parsed and added
+ */
+gboolean rspamd_task_add_sender (struct rspamd_task *task, const gchar *sender);
+
+#define RSPAMD_TASK_CACHE_NO_VALUE ((guint)-1)
+
+/**
+ * Add or replace the value to the task cache of regular expressions results
+ * @param task task object
+ * @param re text value of regexp
+ * @param value value to add
+ * @return previous value of element or RSPAMD_TASK_CACHE_NO_VALUE
+ */
+guint rspamd_task_re_cache_add (struct rspamd_task *task, const gchar *re,
+		guint value);
+
+/**
+ * Check for cached result of re inside cache
+ * @param task task object
+ * @param re text value of regexp
+ * @return the current value of element or RSPAMD_TASK_CACHE_NO_VALUE
+ */
+guint rspamd_task_re_cache_check (struct rspamd_task *task, const gchar *re);
 
 #endif /* TASK_H_ */

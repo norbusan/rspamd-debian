@@ -25,7 +25,6 @@
 
 #include "lua_common.h"
 #include "cfg_file.h"
-#include "classifiers/classifiers.h"
 
 /* Classifier methods */
 LUA_FUNCTION_DEF (classifier, register_pre_callback);
@@ -45,16 +44,12 @@ static const struct luaL_reg classifierlib_m[] = {
 
 LUA_FUNCTION_DEF (statfile, get_symbol);
 LUA_FUNCTION_DEF (statfile, get_label);
-LUA_FUNCTION_DEF (statfile, get_path);
-LUA_FUNCTION_DEF (statfile, get_size);
 LUA_FUNCTION_DEF (statfile, is_spam);
 LUA_FUNCTION_DEF (statfile, get_param);
 
 static const struct luaL_reg statfilelib_m[] = {
 	LUA_INTERFACE_DEF (statfile, get_symbol),
 	LUA_INTERFACE_DEF (statfile, get_label),
-	LUA_INTERFACE_DEF (statfile, get_path),
-	LUA_INTERFACE_DEF (statfile, get_size),
 	LUA_INTERFACE_DEF (statfile, is_spam),
 	LUA_INTERFACE_DEF (statfile, get_param),
 	{"__tostring", rspamd_lua_class_tostring},
@@ -151,7 +146,7 @@ rspamd_lua_call_cls_pre_callbacks (struct rspamd_classifier_config *ccf,
 		/* Check function from global table 'classifiers' */
 		lua_getglobal (L, "classifiers");
 		if (lua_istable (L, -1)) {
-			lua_pushstring (L, ccf->classifier->name);
+			lua_pushstring (L, ccf->name);
 			lua_gettable (L, -2);
 			/* Function is now on top */
 			if (lua_isfunction (L, -1)) {
@@ -343,36 +338,6 @@ lua_statfile_get_label (lua_State *L)
 
 	if (st != NULL && st->label != NULL) {
 		lua_pushstring (L, st->label);
-	}
-	else {
-		lua_pushnil (L);
-	}
-
-	return 1;
-}
-
-static gint
-lua_statfile_get_path (lua_State *L)
-{
-	struct rspamd_statfile_config *st = lua_check_statfile (L);
-
-	if (st != NULL) {
-		lua_pushstring (L, st->path);
-	}
-	else {
-		lua_pushnil (L);
-	}
-
-	return 1;
-}
-
-static gint
-lua_statfile_get_size (lua_State *L)
-{
-	struct rspamd_statfile_config *st = lua_check_statfile (L);
-
-	if (st != NULL) {
-		lua_pushinteger (L, st->size);
 	}
 	else {
 		lua_pushnil (L);

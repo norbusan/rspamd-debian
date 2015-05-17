@@ -72,7 +72,7 @@ rspamd_upstream_test_func (void)
 	gdouble p;
 	struct event ev;
 	struct timeval tv;
-	rspamd_inet_addr_t *addr, *next_addr, paddr;
+	rspamd_inet_addr_t *addr, *next_addr, *paddr;
 
 	cfg = (struct rspamd_config *)g_malloc (sizeof (struct rspamd_config));
 	bzero (cfg, sizeof (struct rspamd_config));
@@ -98,11 +98,11 @@ rspamd_upstream_test_func (void)
 
 	/* Test round-robin rotation */
 	rspamd_upstream_test_method (ls, RSPAMD_UPSTREAM_ROUND_ROBIN, "kernel.org");
+	rspamd_upstream_test_method (ls, RSPAMD_UPSTREAM_ROUND_ROBIN, "kernel.org");
 	rspamd_upstream_test_method (ls, RSPAMD_UPSTREAM_ROUND_ROBIN, "google.com");
 	rspamd_upstream_test_method (ls, RSPAMD_UPSTREAM_ROUND_ROBIN, "kernel.org");
+	rspamd_upstream_test_method (ls, RSPAMD_UPSTREAM_ROUND_ROBIN, "google.com");
 	rspamd_upstream_test_method (ls, RSPAMD_UPSTREAM_ROUND_ROBIN, "microsoft.com");
-	rspamd_upstream_test_method (ls, RSPAMD_UPSTREAM_ROUND_ROBIN, "google.com");
-	rspamd_upstream_test_method (ls, RSPAMD_UPSTREAM_ROUND_ROBIN, "kernel.org");
 
 	/* Test stable hashing */
 	nls = rspamd_upstreams_create ();
@@ -138,17 +138,16 @@ rspamd_upstream_test_func (void)
 	nls = rspamd_upstreams_create ();
 	g_assert (rspamd_upstreams_add_upstream (nls, "127.0.0.1", 0, NULL));
 	up = rspamd_upstream_get (nls, RSPAMD_UPSTREAM_RANDOM);
-	addr = g_malloc (sizeof (*addr));
 	rspamd_parse_inet_address(&paddr, "127.0.0.2");
-	g_assert (rspamd_upstream_add_addr (up, &paddr));
+	g_assert (rspamd_upstream_add_addr (up, paddr));
 	rspamd_parse_inet_address(&paddr, "::1");
-	g_assert (rspamd_upstream_add_addr (up, &paddr));
+	g_assert (rspamd_upstream_add_addr (up, paddr));
 	addr = rspamd_upstream_addr (up);
 	for (i = 0; i < 256; i ++) {
 		next_addr = rspamd_upstream_addr (up);
-		g_assert (addr->af == AF_INET);
-		g_assert (next_addr->af == AF_INET);
-		g_assert (addr != next_addr);
+		g_assert (rspamd_inet_address_get_af (addr) == AF_INET);
+		g_assert (rspamd_inet_address_get_af (next_addr) == AF_INET);
+		g_assert (rspamd_inet_address_compare (addr, next_addr) != 0);
 		addr = next_addr;
 	}
 	rspamd_upstreams_destroy (nls);
@@ -158,7 +157,9 @@ rspamd_upstream_test_func (void)
 	event_base_set (ev_base, &ev);
 
 	up = rspamd_upstream_get (ls, RSPAMD_UPSTREAM_MASTER_SLAVE);
-	rspamd_upstream_fail (up);
+	for (i = 0; i < 100; i ++) {
+		rspamd_upstream_fail (up);
+	}
 	g_assert (rspamd_upstreams_alive (ls) == 2);
 
 	tv.tv_sec = 2;

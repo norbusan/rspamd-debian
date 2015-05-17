@@ -193,7 +193,7 @@ http_map_read (struct rspamd_http_connection *conn,
 	gchar *pos;
 	struct rspamd_map *map;
 
-	if (msg->code != 200) {
+	if (msg->code != 200 || len == 0) {
 		/* Ignore not full replies */
 		return 0;
 	}
@@ -237,7 +237,7 @@ read_map_file (struct rspamd_map *map, struct file_map_data *data)
 	struct map_cb_data cbdata;
 	gchar buf[BUFSIZ], *remain;
 	ssize_t r;
-	gint fd, rlen;
+	gint fd, rlen, tlen;
 
 	if (map->read_callback == NULL || map->fin_callback == NULL) {
 		msg_err ("bad callback for reading map file");
@@ -256,8 +256,10 @@ read_map_file (struct rspamd_map *map, struct file_map_data *data)
 	cbdata.map = map;
 
 	rlen = 0;
+	tlen = 0;
 	while ((r = read (fd, buf + rlen, sizeof (buf) - rlen - 1)) > 0) {
 		r += rlen;
+		tlen += r;
 		buf[r] = '\0';
 		remain = map->read_callback (map->pool, buf, r, &cbdata);
 		if (remain != NULL) {
@@ -269,8 +271,10 @@ read_map_file (struct rspamd_map *map, struct file_map_data *data)
 
 	close (fd);
 
-	map->fin_callback (map->pool, &cbdata);
-	*map->user_data = cbdata.cur_data;
+	if (tlen > 0) {
+		map->fin_callback (map->pool, &cbdata);
+		*map->user_data = cbdata.cur_data;
+	}
 }
 
 static void
@@ -588,7 +592,7 @@ rspamd_map_add (struct rspamd_config *cfg,
 		hdata->conn = rspamd_http_connection_new (http_map_read, http_map_error,
 			http_map_finish,
 			RSPAMD_HTTP_BODY_PARTIAL | RSPAMD_HTTP_CLIENT_SIMPLE,
-			RSPAMD_HTTP_CLIENT);
+			RSPAMD_HTTP_CLIENT, NULL);
 		new_map->map_data = hdata;
 	}
 	/* Temp pool */
@@ -825,6 +829,9 @@ rspamd_hosts_fin (rspamd_mempool_t * pool, struct map_cb_data *data)
 	if (data->prev_data) {
 		g_hash_table_destroy (data->prev_data);
 	}
+	if (data->cur_data) {
+		msg_info ("read hash of %z elements", g_hash_table_size (data->cur_data));
+	}
 }
 
 gchar *
@@ -850,6 +857,9 @@ rspamd_kv_list_fin (rspamd_mempool_t * pool, struct map_cb_data *data)
 	if (data->prev_data) {
 		g_hash_table_destroy (data->prev_data);
 	}
+	if (data->cur_data) {
+		msg_info ("read hash of %z elements", g_hash_table_size (data->cur_data));
+	}
 }
 
 gchar *
@@ -873,5 +883,8 @@ rspamd_radix_fin (rspamd_mempool_t * pool, struct map_cb_data *data)
 {
 	if (data->prev_data) {
 		radix_destroy_compressed (data->prev_data);
+	}
+	if (data->cur_data) {
+		msg_info ("read radix trie of %z elements", radix_get_size (data->cur_data));
 	}
 }
