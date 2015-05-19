@@ -11,7 +11,7 @@ ENABLE_LANGUAGE(ASM)
 
 SET(RSPAMD_VERSION_MAJOR 0)
 SET(RSPAMD_VERSION_MINOR 9)
-SET(RSPAMD_VERSION_PATCH 1)
+SET(RSPAMD_VERSION_PATCH 3)
 
 SET(RSPAMD_VERSION         "${RSPAMD_VERSION_MAJOR}.${RSPAMD_VERSION_MINOR}.${RSPAMD_VERSION_PATCH}")
 SET(RSPAMD_MASTER_SITE_URL "https://rspamd.com")
@@ -161,6 +161,34 @@ MACRO(FindLua _major _minor)
 		  	PATHS ${RSPAMD_DEFAULT_LIBRARY_PATHS}
 		 	DOC "Lua library"
 		)
+		
+		IF(NOT LUA_LIBRARY OR NOT LUA_INCLUDE_DIR)
+			MESSAGE(STATUS "Fallback from luajit to plain lua")
+			SET(ENABLE_LUAJIT "OFF")
+			MESSAGE(STATUS "Check for lua ${_major}.${_minor}")
+			FIND_PATH(LUA_INCLUDE_DIR lua.h
+			  HINTS
+			  "${RSPAMD_SEARCH_PATH}"
+			  $ENV{LUA_DIR}
+			  PATH_SUFFIXES "include/lua${_major}${_minor}" 
+			  				"include/lua${_major}.${_minor}" 
+			  				"include/lua-${_major}.${_minor}"
+			  				include/lua include
+			  PATHS ${RSPAMD_DEFAULT_INCLUDE_PATHS}
+			)
+			FIND_LIBRARY(LUA_LIBRARY 
+			 	NAMES lua 
+			  		"lua${_major}${_minor}"
+			  		"lua${_major}.${_minor}" 
+			  		"lua-${_major}.${_minor}"
+				HINTS
+					"${RSPAMD_SEARCH_PATH}"
+			  		$ENV{LUA_DIR}
+			  	PATH_SUFFIXES lib64 lib
+			  	PATHS ${RSPAMD_DEFAULT_LIBRARY_PATHS}
+			 	DOC "Lua library"
+			)
+		ENDIF()
 	ELSE(ENABLE_LUAJIT MATCHES "ON")
 		MESSAGE(STATUS "Check for lua ${_major}.${_minor}")
 		FIND_PATH(LUA_INCLUDE_DIR lua.h
@@ -510,11 +538,11 @@ ENDIF(CMAKE_SYSTEM_NAME STREQUAL "SunOS")
 # Now find libraries and headers
 
 IF(ENABLE_LUAJIT MATCHES "ON")
-	ProcessPackage(LUAJIT luajit)
+	#ProcessPackage(LUAJIT luajit)
 	SET(WITH_LUA 1)
 	FindLua(5 1)
 	IF(NOT LUA_FOUND)
-        MESSAGE(FATAL_ERROR "Lua not found, lua support is required for working")
+        MESSAGE(FATAL_ERROR "Lua not found, lua support is required")
 	ELSE(NOT LUA_FOUND)
     	SET(WITH_LUA 1)
     	INCLUDE_DIRECTORIES("${LUA_INCLUDE_DIR}")
@@ -525,7 +553,7 @@ ELSE(ENABLE_LUAJIT MATCHES "ON")
         	FindLua(5 1)
 	ENDIF(NOT LUA_FOUND)
 	IF(NOT LUA_FOUND)
-        	MESSAGE(FATAL_ERROR "Lua not found, lua support is required for working")
+        	MESSAGE(FATAL_ERROR "Lua not found, lua support is required")
 	ELSE(NOT LUA_FOUND)
     		SET(WITH_LUA 1)
     		INCLUDE_DIRECTORIES("${LUA_INCLUDE_DIR}")
@@ -540,7 +568,6 @@ ENDIF(OPENSSL_FOUND)
 
 ProcessPackage(GLIB2 glib-2.0>=2.28)
 ProcessPackage(GTHREAD gthread-2.0)
-ProcessPackage(HIREDIS hiredis libhiredis)
 ProcessPackage(PCRE pcre libpcre pcre3 libpcre3)
 ProcessPackage(GMIME2 gmime-2.6 gmime-2.4 gmime-2.0)
 ProcessPackage(LIBEVENT event libevent)
@@ -555,15 +582,20 @@ ELSE(PCRE_LIBRARY)
 	SET(CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES};-lpcre")
 ENDIF(PCRE_LIBRARY)
 # Libhiredis pc file is so special
-FIND_PATH(LIBHIREDIS_INCLUDE hiredis.h 
+IF(ENABLE_HIREDIS MATCHES "ON")
+	ProcessPackage(HIREDIS hiredis libhiredis)
+	SET(WITH_HIREDIS 1)
+	FIND_PATH(LIBHIREDIS_INCLUDE hiredis.h 
 		HINTS "${RSPAMD_SEARCH_PATH}"
 		PATH_SUFFIXES "include" "include/hiredis"
 		PATHS	${RSPAMD_DEFAULT_INCLUDE_PATHS}
 		DOC "Path where the hiredis header files can be found")
 
-IF(LIBHIREDIS_INCLUDE)
-       INCLUDE_DIRECTORIES("${LIBHIREDIS_INCLUDE}")
-ENDIF(LIBHIREDIS_INCLUDE)
+	IF(LIBHIREDIS_INCLUDE)
+	       INCLUDE_DIRECTORIES("${LIBHIREDIS_INCLUDE}")
+	ENDIF(LIBHIREDIS_INCLUDE)
+ENDIF(ENABLE_HIREDIS MATCHES "ON")
+
 
 # Google performance tools
 
@@ -1020,7 +1052,9 @@ IF(ENABLE_GPERF_TOOLS MATCHES "ON")
 	LIST(APPEND RSPAMD_REQUIRED_LIBRARIES profiler)
 ENDIF(ENABLE_GPERF_TOOLS MATCHES "ON")
 
-LIST(APPEND RSPAMD_REQUIRED_LIBRARIES hiredis)
+IF(ENABLE_HIREDIS MATCHES "ON")
+	LIST(APPEND RSPAMD_REQUIRED_LIBRARIES hiredis)
+ENDIF(ENABLE_HIREDIS MATCHES "ON")
 IF(GLIB_COMPAT)
 	LIST(APPEND RSPAMD_REQUIRED_LIBRARIES glibadditions)
 ENDIF(GLIB_COMPAT)

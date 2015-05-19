@@ -215,6 +215,7 @@ parse_mime_types (const gchar *str)
 							sizeof (struct fuzzy_mime_type));
 			type->type = g_pattern_spec_new (strvec[i]);
 			type->subtype = NULL;
+			res = g_list_prepend (res, type);
 		}
 	}
 
@@ -496,9 +497,12 @@ fuzzy_check_module_config (struct rspamd_config *cfg)
 gint
 fuzzy_check_module_reconfig (struct rspamd_config *cfg)
 {
-	rspamd_mempool_delete (fuzzy_module_ctx->fuzzy_pool);
+	struct module_ctx saved_ctx;
 
+	saved_ctx = fuzzy_module_ctx->ctx;
+	rspamd_mempool_delete (fuzzy_module_ctx->fuzzy_pool);
 	memset (fuzzy_module_ctx, 0, sizeof (*fuzzy_module_ctx));
+	fuzzy_module_ctx->ctx = saved_ctx;
 	fuzzy_module_ctx->fuzzy_pool = rspamd_mempool_new (
 		rspamd_mempool_suggest_size ());
 	fuzzy_module_ctx->cfg = cfg;

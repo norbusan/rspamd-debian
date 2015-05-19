@@ -421,7 +421,7 @@ rspamd_regexp_search (rspamd_regexp_t *re, const gchar *text, gsize len,
 		rc = pcre_exec (r, ext, mt, remain, 0, match_flags, ovec,
 				G_N_ELEMENTS (ovec));
 	}
-	if (rc > 0) {
+	if (rc >= 0) {
 		if (start) {
 			*start = mt + ovec[0];
 		}
