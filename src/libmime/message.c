@@ -1184,6 +1184,7 @@ rspamd_normalize_text_part (struct rspamd_task *task,
 	struct sb_stemmer *stem = NULL;
 	rspamd_fstring_t *w;
 	const guchar *r;
+	gchar *temp_word;
 	guint i, nlen;
 	GArray *tmp;
 
@@ -1207,18 +1208,25 @@ rspamd_normalize_text_part (struct rspamd_task *task,
 				r = sb_stemmer_stem (stem, w->begin, w->len);
 			}
 
-			if (stem != NULL && r != NULL) {
-				nlen = strlen (r);
-				nlen = MIN (nlen, w->len);
-				memcpy (w->begin, r, nlen);
-				w->len = nlen;
-			}
-			else {
-				if (IS_PART_UTF (part)) {
-					rspamd_str_lc_utf8 (w->begin, w->len);
+			if (w->len > 0 && !(w->len == 6 && memcmp (w->begin, "!!EX!!", 6) == 0)) {
+				if (stem != NULL && r != NULL) {
+					nlen = strlen (r);
+					nlen = MIN (nlen, w->len);
+					w->begin = rspamd_mempool_alloc (task->task_pool, nlen);
+					memcpy (w->begin, r, nlen);
+					w->len = nlen;
 				}
 				else {
-					rspamd_str_lc (w->begin, w->len);
+					temp_word = w->begin;
+					w->begin = rspamd_mempool_alloc (task->task_pool, w->len);
+					memcpy (w->begin, temp_word, w->len);
+
+					if (IS_PART_UTF (part)) {
+						rspamd_str_lc_utf8 (w->begin, w->len);
+					}
+					else {
+						rspamd_str_lc (w->begin, w->len);
+					}
 				}
 			}
 		}
@@ -1337,7 +1345,7 @@ process_text_part (struct rspamd_task *task,
 	detect_text_language (text_part);
 	text_part->words = rspamd_tokenize_text (text_part->content->data,
 			text_part->content->len, IS_PART_UTF (text_part), task->cfg->min_word_len,
-			text_part->urls_offset, TRUE);
+			text_part->urls_offset, FALSE);
 	rspamd_normalize_text_part (task, text_part);
 
 	/* Calculate number of lines */

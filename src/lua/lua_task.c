@@ -180,6 +180,21 @@ LUA_FUNCTION_DEF (task, get_text_parts);
  * @return {table rspamd_mime_part} list of mime parts
  */
 LUA_FUNCTION_DEF (task, get_parts);
+
+/***
+ * @method task:get_request_header(name)
+ * Get value of a HTTP request header.
+ * @param {string} name name of header to get
+ * @return {rspamd_text} value of an HTTP header
+ */
+LUA_FUNCTION_DEF (task, get_request_header);
+/***
+ * @method task:set_request_header(name, value)
+ * Set value of a HTTP request header. If value is omitted, then a header is removed
+ * @param {string} name name of header to get
+ * @param {rspamd_text/string} value new header's value
+ */
+LUA_FUNCTION_DEF (task, set_request_header);
 /***
  * @method task:get_header(name[, case_sensitive])
  * Get decoded value of a header specified with optional case_sensitive flag.
@@ -472,6 +487,8 @@ static const struct luaL_reg tasklib_m[] = {
 	LUA_INTERFACE_DEF (task, get_emails),
 	LUA_INTERFACE_DEF (task, get_text_parts),
 	LUA_INTERFACE_DEF (task, get_parts),
+	LUA_INTERFACE_DEF (task, get_request_header),
+	LUA_INTERFACE_DEF (task, set_request_header),
 	LUA_INTERFACE_DEF (task, get_header),
 	LUA_INTERFACE_DEF (task, get_header_raw),
 	LUA_INTERFACE_DEF (task, get_header_full),
@@ -529,12 +546,14 @@ static const struct luaL_reg imagelib_m[] = {
 LUA_FUNCTION_DEF (text, len);
 LUA_FUNCTION_DEF (text, str);
 LUA_FUNCTION_DEF (text, ptr);
+LUA_FUNCTION_DEF (text, gc);
 
 static const struct luaL_reg textlib_m[] = {
 	LUA_INTERFACE_DEF (text, len),
 	LUA_INTERFACE_DEF (text, str),
 	LUA_INTERFACE_DEF (text, ptr),
 	{"__tostring", lua_text_str},
+	{"__gc", lua_text_gc},
 	{NULL, NULL}
 };
 
@@ -836,6 +855,7 @@ lua_task_get_content (lua_State * L)
 		rspamd_lua_setclass (L, "rspamd{text}", -1);
 		t->len = task->msg.len;
 		t->start = task->msg.start;
+		t->own = FALSE;
 
 		return 1;
 	}
@@ -914,6 +934,85 @@ lua_task_get_parts (lua_State * L)
 	return 1;
 }
 
+static gint
+lua_task_get_request_header (lua_State *L)
+{
+	GString *hdr, srch;
+	struct rspamd_task *task = lua_check_task (L, 1);
+	const gchar *s;
+	struct rspamd_lua_text *t;
+	gsize len;
+
+	s = luaL_checklstring (L, 2, &len);
+
+	if (s) {
+		srch.str = (gchar *)s;
+		srch.len = len;
+
+		hdr = g_hash_table_lookup (task->request_headers, &srch);
+
+		if (hdr) {
+			t = lua_newuserdata (L, sizeof (*t));
+			rspamd_lua_setclass (L, "rspamd{text}", -1);
+			t->start = hdr->str;
+			t->len = hdr->len;
+			t->own = FALSE;
+
+			return 1;
+		}
+	}
+
+	lua_pushnil (L);
+	return 1;
+}
+
+static gint
+lua_task_set_request_header (lua_State *L)
+{
+	struct rspamd_task *task = lua_check_task (L, 1);
+	const gchar *s, *v = NULL;
+	struct rspamd_lua_text *t;
+	GString *hdr, srch, *new_name;
+	gsize len, vlen;
+
+	s = luaL_checklstring (L, 2, &len);
+
+	if (s) {
+		if (lua_type (L, 3) == LUA_TSTRING) {
+			v = luaL_checklstring (L, 2, &vlen);
+		}
+		else if (lua_type (L, 3) == LUA_TUSERDATA) {
+			t = lua_check_text (L, 3);
+
+			if (t != NULL) {
+				v = t->start;
+				vlen = t->len;
+			}
+		}
+
+		if (v != NULL) {
+			srch.str = (gchar *)s;
+			srch.len = len;
+
+			hdr = g_hash_table_lookup (task->request_headers, &srch);
+
+			if (hdr) {
+				new_name = &srch;
+			}
+			else {
+				/* Not found, need to allocate */
+				new_name = g_string_new_len (srch.str, srch.len);
+			}
+			hdr = g_string_new_len (v, vlen);
+
+			/* This does not destroy key if it exists */
+			g_hash_table_insert (task->request_headers, new_name, hdr);
+		}
+
+	}
+
+	return 0;
+}
 
 gint
 rspamd_lua_push_header (lua_State * L,
@@ -1040,6 +1139,7 @@ lua_task_get_raw_headers (lua_State *L)
 		rspamd_lua_setclass (L, "rspamd{text}", -1);
 		t->start = task->raw_headers_str;
 		t->len = strlen (t->start);
+		t->own = FALSE;
 	}
 	else {
 		lua_pushnil (L);
@@ -2020,6 +2120,18 @@ lua_text_ptr (lua_State *L)
 	}
 
 	return 1;
+}
+
+static gint
+lua_text_gc (lua_State *L)
+{
+	struct rspamd_lua_text *t = lua_check_text (L, 1);
+
+	if (t != NULL && t->own) {
+		g_free ((gpointer)t->start);
+	}
+
+	return 0;
 }
 
 /* Init part */

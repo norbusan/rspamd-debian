@@ -1316,6 +1316,27 @@ rspamd_fstring_icase_hash (gconstpointer key)
 	return rspamd_icase_hash (f->begin, f->len);
 }
 
+gboolean
+rspamd_gstring_icase_equal (gconstpointer v, gconstpointer v2)
+{
+	const GString *f1 = v, *f2 = v2;
+	if (f1->len == f2->len &&
+		g_ascii_strncasecmp (f1->str, f2->str, f1->len) == 0) {
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+
+guint
+rspamd_gstring_icase_hash (gconstpointer key)
+{
+	const GString *f = key;
+
+	return rspamd_icase_hash (f->str, f->len);
+}
+
 void
 gperf_profiler_init (struct rspamd_config *cfg, const gchar *descr)
 {
@@ -2313,6 +2334,150 @@ rspamd_decode_base32 (const gchar *in, gsize inlen, gsize *outlen)
 	*outlen = olen;
 
 	return res;
+}
+
+
+gchar *
+rspamd_encode_base64 (const guchar *in, gsize inlen, gint str_len, gsize *outlen)
+{
+#define CHECK_SPLIT \
+	do { if (str_len > 0 && cols >= str_len) { \
+				*o++ = '\r'; \
+				*o++ = '\n'; \
+				cols = 0; \
+	} } \
+while (0)
+
+	gsize allocated_len = (inlen / 3) * 4 + 4;
+	gchar *out, *o;
+	guint64 n;
+	guint32 rem, t, carry;
+	gint cols, shift;
+	static const char b64_enc[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		"abcdefghijklmnopqrstuvwxyz"
+		"0123456789+/";
+
+	if (str_len > 0) {
+		g_assert (str_len > 8);
+		allocated_len += (allocated_len / str_len + 1) * 2 + 1;
+	}
+
+	out = g_malloc (allocated_len);
+	o = out;
+	cols = 0;
+
+	while (inlen > 6) {
+		n = *(guint64 *)in;
+		n = GUINT64_TO_BE (n);
+
+		if (str_len <= 0 || cols <= str_len - 8) {
+			*o++ = b64_enc[(n >> 58) & 0x3F];
+			*o++ = b64_enc[(n >> 52) & 0x3F];
+			*o++ = b64_enc[(n >> 46) & 0x3F];
+			*o++ = b64_enc[(n >> 40) & 0x3F];
+			*o++ = b64_enc[(n >> 34) & 0x3F];
+			*o++ = b64_enc[(n >> 28) & 0x3F];
+			*o++ = b64_enc[(n >> 22) & 0x3F];
+			*o++ = b64_enc[(n >> 16) & 0x3F];
+			cols += 8;
+		}
+		else {
+			cols = str_len - cols;
+			shift = 58;
+			while (cols) {
+				*o++ = b64_enc[(n >> shift) & 0x3F];
+				shift -= 6;
+				cols --;
+			}
+
+			*o++ = '\r';
+			*o++ = '\n';
+
+			/* Remaining bytes */
+			while (shift >= 16) {
+				*o++ = b64_enc[(n >> shift) & 0x3F];
+				shift -= 6;
+				cols ++;
+			}
+		}
+
+		in += 6;
+		inlen -= 6;
+	}
+
+	CHECK_SPLIT;
+
+	rem = 0;
+	carry = 0;
+
+	for (;;) {
+		/* Padding + remaining data (0 - 2 bytes) */
+		switch (rem) {
+		case 0:
+			if (inlen-- == 0) {
+				goto end;
+			}
+			t = *in++;
+			*o++ = b64_enc[t >> 2];
+			carry = (t << 4) & 0x30;
+			rem = 1;
+			cols ++;
+		case 1:
+			if (inlen-- == 0) {
+				goto end;
+			}
+			CHECK_SPLIT;
+			t = *in++;
+			*o++ = b64_enc[carry | (t >> 4)];
+			carry = (t << 2) & 0x3C;
+			rem = 2;
+			cols ++;
+		default:
+			if (inlen-- == 0) {
+				goto end;
+			}
+			CHECK_SPLIT;
+			t = *in ++;
+			*o++ = b64_enc[carry | (t >> 6)];
+			cols ++;
+			CHECK_SPLIT;
+			*o++ = b64_enc[t & 0x3F];
+			cols ++;
+			CHECK_SPLIT;
+			rem = 0;
+		}
+	}
+
+end:
+	if (rem == 1) {
+		*o++ = b64_enc[carry];
+		cols ++;
+		CHECK_SPLIT;
+		*o++ = '=';
+		cols ++;
+		CHECK_SPLIT;
+		*o++ = '=';
+		cols ++;
+		CHECK_SPLIT;
+	}
+	else if (rem == 2) {
+		*o++ = b64_enc[carry];
+		cols ++;
+		CHECK_SPLIT;
+		*o++ = '=';
+		cols ++;
+	}
+
+	CHECK_SPLIT;
+
+	*o = '\0';
+
+	if (outlen != NULL) {
+		*outlen = o - out;
+	}
+
+	return out;
 }
 
 gdouble

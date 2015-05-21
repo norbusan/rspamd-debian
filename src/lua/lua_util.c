@@ -25,6 +25,7 @@
 #include "task.h"
 #include "main.h"
 #include "cfg_rcl.h"
+#include "tokenizers/tokenizers.h"
 
 /***
  * @function util.create_event_base()
@@ -44,6 +45,22 @@ LUA_FUNCTION_DEF (util, load_rspamd_config);
  * @return {confg} new configuration object suitable for access
  */
 LUA_FUNCTION_DEF (util, config_from_ucl);
+/***
+ * @function util.encode_base64(input[, str_len])
+ * Encodes data in base64 breaking lines if needed
+ * @param {text or string} input input data
+ * @param {number} str_len optional size of lines or 0 if split is not needed
+ * @return {rspamd_text} encoded data chunk
+ */
+LUA_FUNCTION_DEF (util, encode_base64);
+/***
+ * @function util.tokenize_text(input[, exceptions])
+ * Create tokens from a text using optional exceptions list
+ * @param {text/string} input input data
+ * @param {table} exceptions, a table of pairs containing <start_pos,lenght> of exceptions in the input
+ * @return {table/strings} list of strings representing words in the text
+ */
+LUA_FUNCTION_DEF (util, tokenize_text);
 LUA_FUNCTION_DEF (util, process_message);
 
 static const struct luaL_reg utillib_f[] = {
@@ -51,6 +68,8 @@ static const struct luaL_reg utillib_f[] = {
 	LUA_INTERFACE_DEF (util, load_rspamd_config),
 	LUA_INTERFACE_DEF (util, config_from_ucl),
 	LUA_INTERFACE_DEF (util, process_message),
+	LUA_INTERFACE_DEF (util, encode_base64),
+	LUA_INTERFACE_DEF (util, tokenize_text),
 	{NULL, NULL}
 };
 
@@ -190,6 +209,143 @@ lua_util_process_message (lua_State *L)
 	else {
 		lua_pushnil (L);
 	}
+
+	return 1;
+}
+
+static gint
+lua_util_encode_base64 (lua_State *L)
+{
+	struct rspamd_lua_text *t;
+	const gchar *s = NULL;
+	gchar *out;
+	gsize inlen, outlen;
+	guint str_lim = 0;
+
+	if (lua_type (L, 1) == LUA_TSTRING) {
+		s = luaL_checklstring (L, 1, &inlen);
+	}
+	else if (lua_type (L, 1) == LUA_TUSERDATA) {
+		t = lua_check_text (L, 1);
+
+		if (t != NULL) {
+			s = t->start;
+			inlen = t->len;
+		}
+	}
+
+	if (lua_gettop (L) > 1) {
+		str_lim = luaL_checknumber (L, 2);
+	}
+
+	if (s == NULL) {
+		lua_pushnil (L);
+	}
+	else {
+		out = rspamd_encode_base64 (s, inlen, str_lim, &outlen);
+
+		if (out != NULL) {
+			t = lua_newuserdata (L, sizeof (*t));
+			rspamd_lua_setclass (L, "rspamd{text}", -1);
+			t->start = out;
+			t->len = outlen;
+			/* Need destruction */
+			t->own = TRUE;
+		}
+		else {
+			lua_pushnil (L);
+		}
+	}
+
+	return 1;
+}
+
+static gint
+lua_util_tokenize_text (lua_State *L)
+{
+	const gchar *in = NULL;
+	gsize len, pos, ex_len, i;
+	GList *exceptions = NULL, *cur;
+	struct rspamd_lua_text *t;
+	struct process_exception *ex;
+	GArray *res;
+	rspamd_fstring_t *w;
+	gboolean compat = FALSE;
+
+	if (lua_type (L, 1) == LUA_TSTRING) {
+		in = luaL_checklstring (L, 1, &len);
+	}
+	else if (lua_type (L, 1) == LUA_TTABLE) {
+		t = lua_check_text (L, 1);
+
+		if (t) {
+			in = t->start;
+			len = t->len;
+		}
+	}
+
+	if (in == NULL) {
+		lua_pushnil (L);
+		return 1;
+	}
+
+	if (lua_gettop (L) > 1 && lua_type (L, 2) == LUA_TTABLE) {
+		lua_pushvalue (L, 2);
+		lua_pushnil (L);
+
+		while (lua_next (L, -2) != 0) {
+			if (lua_type (L, -1) == LUA_TTABLE) {
+				lua_rawgeti (L, -1, 1);
+				pos = luaL_checknumber (L, -1);
+				lua_pop (L, 1);
+				lua_rawgeti (L, -1, 2);
+				ex_len = luaL_checknumber (L, -1);
+				lua_pop (L, 1);
+
+				if (ex_len > 0) {
+					ex = g_slice_alloc (sizeof (*ex));
+					ex->pos = pos;
+					ex->len = ex_len;
+					exceptions = g_list_prepend (exceptions, ex);
+				}
+			}
+			lua_pop (L, 1);
+		}
+
+		lua_pop (L, 1);
+	}
+
+	if (lua_gettop (L) > 2 && lua_type (L, 3) == LUA_TBOOLEAN) {
+		compat = lua_toboolean (L, 3);
+	}
+
+	if (exceptions) {
+		exceptions = g_list_reverse (exceptions);
+	}
+
+	res = rspamd_tokenize_text ((gchar *)in, len, TRUE, 0, exceptions, compat);
+
+	if (res == NULL) {
+		lua_pushnil (L);
+	}
+	else {
+		lua_newtable (L);
+
+		for (i = 0; i < res->len; i ++) {
+			w = &g_array_index (res, rspamd_fstring_t, i);
+			lua_pushlstring (L, w->begin, w->len);
+			lua_rawseti (L, -2, i + 1);
+		}
+	}
+
+	cur = exceptions;
+	while (cur) {
+		ex = cur->data;
+		g_slice_free1 (sizeof (*ex), ex);
+		cur = g_list_next (cur);
+	}
+
+	g_list_free (exceptions);
 
 	return 1;
 }
