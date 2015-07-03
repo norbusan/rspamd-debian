@@ -7,7 +7,7 @@
 %define rspamd_wwwdir   %{_datadir}/rspamd/www
 
 Name:           rspamd
-Version:        0.9.4
+Version:        0.9.9
 Release:        1
 Summary:        Rapid spam filtering system
 Group:          System Environment/Daemons
@@ -82,6 +82,9 @@ lua.
 %else
         -DWANT_SYSTEMD_UNITS=ON \
         -DSYSTEMDDIR=%{_unitdir} \
+%endif
+%if 0%{?suse_version}
+        -DCMAKE_SKIP_INSTALL_RPATH=ON \
 %endif
         -DLOGDIR=%{_localstatedir}/log/rspamd \
         -DEXAMPLESDIR=%{_datadir}/examples/rspamd \
@@ -233,6 +236,18 @@ fi
 %{_datadir}/rspamd/effective_tld_names.dat
 
 %changelog
+* Fri Jul 03 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.9-1
+- Update to 0.9.9
+
+* Thu Jun 25 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.8-1
+- Update to 0.9.8
+
+* Tue Jun 23 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.7-1
+- Update to 0.9.7
+
+* Tue Jun 16 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.6-1
+- Update to 0.9.6
+
 * Thu May 21 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.4-1
 - Update to 0.9.4
 

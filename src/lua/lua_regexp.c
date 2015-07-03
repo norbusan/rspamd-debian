@@ -274,33 +274,68 @@ lua_regexp_set_limit (lua_State *L)
 }
 
 /***
- * @method re:search(line)
+ * @method re:search(line[, raw[, capture]])
  * Search line in regular expression object. If line matches then this
  * function returns the table of captured strings. Otherwise, nil is returned.
+ * If `raw` is specified, then input is treated as raw data not encoded in `utf-8`.
+ * If `capture` is true, then this function saves all captures to the table of
+ * values, so the first element is the whole matched string and the
+ * subsequent elements are ordered captures defined within pattern.
  *
  * @param {string} line match the specified line against regexp object
- * @return {table or nil} table of strings matched or nil
+ * @param {bool} match raw regexp instead of utf8 one
+ * @param {bool} capture perform subpatterns capturing
+ * @return {table or nil} table of strings or tables (if `capture` is true) or nil if not matched
  * @example
  * local re = regexp.create_cached('/^\s*([0-9]+)\s*$/')
  * -- returns nil
  * local m1 = re:search('blah')
  * local m2 = re:search('   190   ')
- * -- prints '190'
+ * -- prints '   190    '
  * print(m2[1])
+ *
+ * local m3 = re:search('   100500 ')
+ * -- prints '   100500 '
+ * print(m3[1][1])
+ * -- prints '100500' capture
+ * print(m3[1][2])
  */
 static int
 lua_regexp_search (lua_State *L)
 {
 	struct rspamd_lua_regexp *re = lua_check_regexp (L);
-	const gchar *data;
+	const gchar *data = NULL;
+	struct rspamd_lua_text *t;
 	const gchar *start = NULL, *end = NULL;
 	gint i;
-	gsize len;
-	gboolean matched = FALSE;
+	gsize len, capn;
+	gboolean matched = FALSE, capture = FALSE, raw = FALSE;
+	GArray *captures = NULL;
+	struct rspamd_re_capture *cap;
 
 	if (re && !IS_DESTROYED (re)) {
-		data = luaL_checklstring (L, 2, &len);
+		if (lua_type (L, 2) == LUA_TSTRING) {
+			data = luaL_checklstring (L, 2, &len);
+		}
+		else if (lua_type (L, 2) == LUA_TUSERDATA) {
+			t = lua_check_text (L, 2);
+			if (t != NULL) {
+				data = t->start;
+				len = t->len;
+			}
+		}
+
+		if (lua_gettop (L) >= 3) {
+			raw = lua_toboolean (L, 3);
+		}
+
 		if (data) {
+			if (lua_gettop (L) >= 4) {
+				capture = TRUE;
+				captures = g_array_new (FALSE, TRUE,
+						sizeof (struct rspamd_re_capture));
+			}
+
 			lua_newtable (L);
 			i = 0;
 
@@ -308,15 +343,38 @@ lua_regexp_search (lua_State *L)
 				len = MIN (len, re->match_limit);
 			}
 
-			while (rspamd_regexp_search (re->re, data, len, &start, &end, FALSE)) {
-				lua_pushlstring (L, start, end - start);
-				lua_rawseti (L, -2, ++i);
+			while (rspamd_regexp_search (re->re, data, len, &start, &end, raw,
+					captures)) {
+
+				if (capture) {
+					lua_newtable (L);
+
+					for (capn = 0; capn < captures->len; capn ++) {
+						cap = &g_array_index (captures, struct rspamd_re_capture,
+								capn);
+						lua_pushlstring (L, cap->p, cap->len);
+						lua_rawseti (L, -2, capn + 1);
+					}
+
+					lua_rawseti (L, -2, ++i);
+				}
+				else {
+					lua_pushlstring (L, start, end - start);
+					lua_rawseti (L, -2, ++i);
+				}
+
 				matched = TRUE;
 			}
+
 			if (!matched) {
 				lua_pop (L, 1);
 				lua_pushnil (L);
 			}
+
+			if (capture) {
+				g_array_free (captures, TRUE);
+			}
+
 			return 1;
 		}
 	}
@@ -365,7 +423,7 @@ lua_regexp_match (lua_State *L)
 				len = MIN (len, re->match_limit);
 			}
 
-			if (rspamd_regexp_search (re->re, data, len, NULL, NULL, raw)) {
+			if (rspamd_regexp_search (re->re, data, len, NULL, NULL, raw, NULL)) {
 				lua_pushboolean (L, TRUE);
 			}
 			else {
@@ -428,7 +486,8 @@ lua_regexp_matchn (lua_State *L)
 			}
 
 			for (;;) {
-				if (rspamd_regexp_search (re->re, data, len, &start, &end, raw)) {
+				if (rspamd_regexp_search (re->re, data, len, &start, &end, raw,
+						NULL)) {
 					matches ++;
 				}
 				else {
@@ -459,21 +518,30 @@ lua_regexp_matchn (lua_State *L)
  * of the substrings will also be returned. If the pattern does not match
  * anywhere in the string, then the whole string is returned as the first
  * token.
- * @param {string} line line to split
- * @return {table} table of split line portions
+ * @param {string/text} line line to split
+ * @return {table} table of split line portions (if text was the input, then text is used for return parts)
  */
 static int
 lua_regexp_split (lua_State *L)
 {
 	struct rspamd_lua_regexp *re = lua_check_regexp (L);
-	const gchar *data;
-	gboolean matched = FALSE;
-	gsize len;
+	const gchar *data = NULL;
+	struct rspamd_lua_text *t;
+	gboolean matched = FALSE, is_text = FALSE;
+	gsize len = 0;
 	const gchar *start = NULL, *end = NULL, *old_start;
 	gint i;
 
 	if (re && !IS_DESTROYED (re)) {
-		data = luaL_checklstring (L, 2, &len);
+		if (lua_type (L, 2) == LUA_TSTRING) {
+			data = luaL_checklstring (L, 2, &len);
+		}
+		else if (lua_type (L, 2) == LUA_TUSERDATA) {
+			t = lua_check_text (L, 2);
+			data = t->start;
+			len = t->len;
+			is_text = TRUE;
+		}
 
 		if (re->match_limit > 0) {
 			len = MIN (len, re->match_limit);
@@ -483,9 +551,20 @@ lua_regexp_split (lua_State *L)
 			lua_newtable (L);
 			i = 0;
 			old_start = data;
-			while (rspamd_regexp_search (re->re, data, len, &start, &end, FALSE)) {
+			while (rspamd_regexp_search (re->re, data, len, &start, &end, FALSE,
+					NULL)) {
 				if (start - old_start > 0) {
-					lua_pushlstring (L, old_start, start - old_start);
+					if (!is_text) {
+						lua_pushlstring (L, old_start, start - old_start);
+					}
+					else {
+						t = lua_newuserdata (L, sizeof (*t));
+						rspamd_lua_setclass (L, "rspamd{text}", -1);
+						t->start = old_start;
+						t->len = start - old_start;
+						t->own = FALSE;
+					}
+
 					lua_rawseti (L, -2, ++i);
 					matched = TRUE;
 				}
@@ -497,7 +576,17 @@ lua_regexp_split (lua_State *L)
 					end = data;
 				}
 
-				lua_pushlstring (L, end, (data + len) - end);
+				if (!is_text) {
+					lua_pushlstring (L, end, (data + len) - end);
+				}
+				else {
+					t = lua_newuserdata (L, sizeof (*t));
+					rspamd_lua_setclass (L, "rspamd{text}", -1);
+					t->start = end;
+					t->len = (data + len) - end;
+					t->own = FALSE;
+				}
+
 				lua_rawseti (L, -2, ++i);
 				matched = TRUE;
 			}

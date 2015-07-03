@@ -194,7 +194,7 @@
 				xhr.setRequestHeader('Password', getPassword());
 				},
 			error: function() {
-				alertMessage('alert-error', 'Cannot receive maps data');
+				alertMessage('alert-modal alert-error', data.statusText);
 			},
 			success: function(data) {
 				$('#listMaps').empty();
@@ -517,7 +517,11 @@
 												'<code>' +  item.symbol + '</code><small class="symbol-description">' + item.description + '</small>' +
 											'</label>' +
 											'<div class="span4 spin-cell">' + 
-												'<input class="numeric" autocomplete="off" "type="number" class="input-mini" min="' + min + '" max="' + max + '" step="' + decimalStep(item.weight) + '" tabindex="1" value="' + item.weight + '" id="' + item.symbol + '">' +
+												'<input class="numeric" data-role="numerictextbox" autocomplete="off" "type="number" class="input-mini" min="' + 
+													min + '" max="' + 
+													max + '" step="' + decimalStep(item.weight) + 
+													'" tabindex="1" value="' + Number(item.weight).toFixed(2) +
+													 '" id="' + item.symbol + '">' +
 											'</div>' +
 										'</div>');
 						});
@@ -531,7 +535,7 @@
 					html: items.join('') }).appendTo('#modalBody');
 			},
 			error:  function(data) {
-				alertMessage('alert-error', 'Cannot receive data');
+				alertMessage('alert-modal alert-error', data.statusText);
 			}
 		 });
 	}
@@ -905,6 +909,9 @@
 			},
 			success: function() {
 				alertMessage('alert-success', 'Actions successfully saved');
+			},
+			error: function() {
+				alertMessage('alert-modal alert-error', data.statusText);
 			}
 		 });
 		getMapById('update');
@@ -957,8 +964,8 @@
 					xhr.setRequestHeader('Map', id);
 					xhr.setRequestHeader('Debug', true);
 				},
-				error: function() {
-					alertMessage('alert-error', 'Cannot save map data');
+				error: function(data) {
+					alertMessage('alert-modal alert-error', data.statusText);
 				},
 				success: function(data) {
 					alertMessage('alert-modal alert-success', 'Map data successfully saved');
@@ -989,17 +996,11 @@
 				alertMessage('alert-modal alert-success', 'Symbols successfully saved');
 			},
 			error:  function(data) {
-				alertMessage('alert-modal alert-error', 'Oops, password is incorrect');
-			},
-			statusCode: {
-				404: function() {
-					alertMessage('alert-modal alert-error', 'Cannot auth, host not found');
-					}
-				}
-			});
+				alertMessage('alert-modal alert-error', data.statusText);
+			}});
 			$('#modalDialog').modal('hide');
 			return false;
-		}
+	}
 
 	// @connect to server
 	function connectRSPAMD() {
@@ -1044,12 +1045,7 @@
 						}
 					},
 					error:  function(data) {
-						alertMessage('alert-modal alert-error', 'Oops, password is incorrect');
-					},
-					statusCode: {
-						404: function() {
-							alertMessage('alert-modal alert-error', 'Cannot auth, host not found');
-						}
+						alertMessage('alert-modal alert-error', data.statusText);
 					}
 				});
 			});

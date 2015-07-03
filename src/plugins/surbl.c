@@ -652,14 +652,14 @@ format_surbl_request (rspamd_mempool_t * pool,
 	len = hostname->len + slen + 2;
 
 	p = hostname->begin;
+	is_numeric = url->is_numeric;
+
 	while (p - hostname->begin < (gint)hostname->len && dots_num < MAX_LEVELS) {
 		if (*p == '.') {
 			dots[dots_num] = p;
 			dots_num++;
 		}
-		else if (!g_ascii_isdigit (*p)) {
-			is_numeric = FALSE;
-		}
+
 		p++;
 	}
 
@@ -1069,6 +1069,7 @@ surbl_tree_url_callback (gpointer key, gpointer value, void *data)
 	rspamd_regexp_t *re;
 	gint idx = 0, state = 0;
 	ac_trie_pat_t *pat;
+	gboolean found = FALSE;
 
 	task = param->task;
 	debug_task ("check url %s", struri (url));
@@ -1080,8 +1081,8 @@ surbl_tree_url_callback (gpointer key, gpointer value, void *data)
 	if (surbl_module_ctx->use_redirector) {
 		/* Search in trie */
 		if (surbl_module_ctx->redirector_trie) {
-			idx = acism_lookup (surbl_module_ctx->redirector_trie, url->host,
-					url->hostlen, surbl_redirector_trie_cb, url, &state, true);
+			idx = acism_lookup (surbl_module_ctx->redirector_trie, url->tld,
+					url->tldlen, surbl_redirector_trie_cb, url, &state, true);
 			if (idx > 0) {
 				pat = &g_array_index (surbl_module_ctx->redirector_ptrs,
 						ac_trie_pat_t, idx - 1);
@@ -1089,8 +1090,19 @@ surbl_tree_url_callback (gpointer key, gpointer value, void *data)
 				re = g_hash_table_lookup (
 						surbl_module_ctx->redirector_hosts,
 						pat->ptr);
-				if (re == NULL || rspamd_regexp_search (re, url->string, 0,
-						NULL, NULL, TRUE)) {
+				if (re == NULL) {
+					/* Perform exact match */
+					if (pat->len == url->tldlen && memcmp (pat->ptr,
+							url->tld, pat->len) == 0) {
+						found = TRUE;
+					}
+				}
+				else if (rspamd_regexp_search (re, url->string, 0,
+						NULL, NULL, TRUE, NULL)) {
+					found = TRUE;
+				}
+
+				if (found) {
 					if (surbl_module_ctx->redirector_symbol != NULL) {
 						rspamd_task_insert_result (param->task,
 								surbl_module_ctx->redirector_symbol,

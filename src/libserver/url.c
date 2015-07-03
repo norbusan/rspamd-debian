@@ -451,9 +451,13 @@ rspamd_mailto_parse (struct http_parser_url *u, const gchar *str, gsize len,
 				st = parse_prefix_question;
 				p ++;
 			}
-			else {
+			else if (t != '/') {
 				c = p;
 				st = parse_user;
+			}
+			else {
+				/* Skip multiple slashes */
+				p ++;
 			}
 			break;
 		case parse_prefix_question:
@@ -608,14 +612,21 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 			p ++;
 			break;
 		case parse_slash_slash:
-			c = p;
-			st = parse_domain;
-			slash = p;
 
-			if (*p == '[') {
-				st = parse_ipv6;
-				p ++;
+			if (t != '/') {
 				c = p;
+				st = parse_domain;
+				slash = p;
+
+				if (*p == '[') {
+					st = parse_ipv6;
+					p ++;
+					c = p;
+				}
+			}
+			else {
+				/* Skip multiple slashes */
+				p ++;
 			}
 			break;
 		case parse_ipv6:
@@ -637,6 +648,9 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 				else if (p != last) {
 					goto out;
 				}
+			}
+			else if (!g_ascii_isxdigit (t) && t != ':' && t != '.') {
+				goto out;
 			}
 			p ++;
 			break;
@@ -692,13 +706,18 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 			}
 			break;
 		case parse_domain:
-			if (t == '/' || t == ':') {
+			if (t == '/' || t == ':' || t == '?') {
 				if (p - c == 0) {
 					goto out;
 				}
 				if (t == '/') {
 					SET_U (u, UF_HOST);
 					st = parse_suffix_slash;
+				}
+				else if (t == '?') {
+					SET_U (u, UF_HOST);
+					st = parse_query;
+					c = p + 1;
 				}
 				else if (!user_seen) {
 					/*
@@ -718,7 +737,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 				p ++;
 			}
 			else {
-				if (*p != '.' && *p != '-' && *p != '_') {
+				if (*p != '.' && *p != '-' && *p != '_' && *p != '%') {
 					uc = g_utf8_get_char_validated (p, last - p);
 
 					if (uc == (gunichar)-1) {
@@ -771,6 +790,18 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					u->port = pt;
 				}
 				st = parse_suffix_slash;
+			}
+			else if (t == '?') {
+				pt = strtoul (c, NULL, 10);
+				if (pt == 0 || pt > 65535) {
+					goto out;
+				}
+				if (u != NULL) {
+					u->port = pt;
+				}
+
+				c = p + 1;
+				st = parse_query;
 			}
 			else if (!g_ascii_isdigit (t)) {
 				if (strict || !g_ascii_isspace (t)) {
@@ -973,12 +1004,136 @@ rspamd_tld_trie_callback (int strnum, int textpos, void *context)
 	return 1;
 }
 
+static gboolean
+rspamd_url_is_ip (struct rspamd_url *uri, rspamd_mempool_t *pool)
+{
+	const gchar *p, *end, *c;
+	gchar buf[INET6_ADDRSTRLEN + 1], *errstr;
+	struct in_addr in4;
+	struct in6_addr in6;
+	gboolean ret = FALSE, check_num = TRUE;
+	guint32 n, dots, t, i, shift, nshift;
+
+	p = uri->host;
+	end = p + uri->hostlen;
+
+	if (*p == '[' && *(end - 1) == ']') {
+		p ++;
+		end --;
+	}
+
+	while (*(end - 1) == '.' && end > p) {
+		end --;
+	}
+
+	if (end - p > (gint)sizeof (buf) - 1) {
+		return FALSE;
+	}
+
+	rspamd_strlcpy (buf, p, end - p + 1);
+
+	if (inet_pton (AF_INET, buf, &in4) == 1) {
+		uri->host = rspamd_mempool_alloc (pool, INET_ADDRSTRLEN + 1);
+		memset (uri->host, 0, INET_ADDRSTRLEN + 1);
+		inet_ntop (AF_INET, &in4, uri->host, INET_ADDRSTRLEN);
+		uri->hostlen = strlen (uri->host);
+		uri->tld = uri->host;
+		uri->tldlen = uri->hostlen;
+		uri->is_numeric = TRUE;
+		ret = TRUE;
+	}
+	else if (inet_pton (AF_INET6, buf, &in6) == 1) {
+		uri->host = rspamd_mempool_alloc (pool, INET6_ADDRSTRLEN + 1);
+		memset (uri->host, 0, INET6_ADDRSTRLEN + 1);
+		inet_ntop (AF_INET6, &in6, uri->host, INET6_ADDRSTRLEN);
+		uri->hostlen = strlen (uri->host);
+		uri->tld = uri->host;
+		uri->tldlen = uri->hostlen;
+		uri->is_numeric = TRUE;
+		ret = TRUE;
+	}
+	else {
+		/* Try also numeric notation */
+		c = p;
+		n = 0;
+		dots = 0;
+		shift = 0;
+
+		while (p <= end && check_num) {
+			if (shift < 32 && ((*p == '.' && dots < 3) || (p == end && dots <= 3))) {
+				g_assert (p - c + 1 < (gint)sizeof (buf));
+				rspamd_strlcpy (buf, c, p - c + 1);
+				c = p + 1;
+				dots ++;
+				t = strtoul (buf, &errstr, 0);
+
+				if (errstr == NULL || *errstr == '\0') {
+
+					nshift = (t == 0 ? shift + 8 : shift);
+
+					for (i = 0; i < 4; i ++) {
+						if ((t >> 8 * i) > 0) {
+							nshift += 8;
+						}
+						else {
+							break;
+						}
+					}
+					/*
+					 * Here we need to find the proper shift of the previous
+					 * components, so we check possible cases:
+					 * 1) 1 octet
+					 * 2) 2 octets
+					 * 3) 3 octets
+					 * 4) 4 octets
+					 */
+					switch (i) {
+					case 4:
+						n |= (GUINT32_FROM_BE (t)) << shift;
+						break;
+					case 3:
+						n |= (GUINT32_FROM_BE (t)) << (shift - 8);
+						break;
+					case 2:
+						n |= (GUINT16_FROM_BE (t)) << shift;
+						break;
+					default:
+						n |= t << shift;
+						break;
+					}
+
+					shift = nshift;
+				}
+				else {
+					check_num = FALSE;
+				}
+			}
+
+			p ++;
+		}
+
+		if (check_num && dots <= 3) {
+			memcpy (&in4, &n, sizeof (in4));
+			uri->host = rspamd_mempool_alloc (pool, INET_ADDRSTRLEN + 1);
+			memset (uri->host, 0, INET_ADDRSTRLEN + 1);
+			inet_ntop (AF_INET, &in4, uri->host, INET_ADDRSTRLEN);
+			uri->hostlen = strlen (uri->host);
+			uri->tld = uri->host;
+			uri->tldlen = uri->hostlen;
+			uri->is_numeric = TRUE;
+			ret = TRUE;
+		}
+	}
+
+	return ret;
+}
+
 enum uri_errno
 rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 		rspamd_mempool_t *pool)
 {
 	struct http_parser_url u;
-	gchar *p, *comp, t;
+	gchar *p, *comp;
 	const gchar *end;
 	guint i, complen, ret;
 	gint state = 0;
@@ -1087,6 +1242,8 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 		}
 	}
 
+	uri->port = u.port;
+
 	if (!uri->hostlen) {
 		return URI_ERRNO_BAD_FORMAT;
 	}
@@ -1094,7 +1251,25 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 	/* Now decode url symbols */
 	uri->string = p;
 	uri->urllen = len;
-	rspamd_unescape_uri (uri->string, uri->string, len);
+
+	if (uri->userlen == 0) {
+		rspamd_unescape_uri (uri->string, uri->string, len);
+	}
+	else {
+		rspamd_unescape_uri (uri->string, uri->string, uri->protocollen);
+		rspamd_unescape_uri (uri->host, uri->host, uri->hostlen);
+
+		if (uri->datalen) {
+			rspamd_unescape_uri (uri->data, uri->data, uri->datalen);
+		}
+		if (uri->querylen) {
+			rspamd_unescape_uri (uri->query, uri->query, uri->querylen);
+		}
+		if (uri->fragmentlen) {
+			rspamd_unescape_uri (uri->fragment, uri->fragment, uri->fragmentlen);
+		}
+	}
+
 	rspamd_str_lc (uri->string, uri->protocollen);
 	rspamd_str_lc_utf8 (uri->host,   uri->hostlen);
 
@@ -1113,12 +1288,8 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 	if (acism_lookup (url_scanner->search_trie, uri->host, uri->hostlen,
 			rspamd_tld_trie_callback, uri, &state, true) == 0) {
 		/* Ignore URL's without TLD if it is not a numeric URL */
-		for (i = 0; i < uri->hostlen; i ++) {
-			t = uri->host[i];
-
-			if (g_ascii_isalpha (t)) {
-				return URI_ERRNO_BAD_FORMAT;
-			}
+		if (!rspamd_url_is_ip (uri, pool)) {
+			return URI_ERRNO_BAD_FORMAT;
 		}
 	}
 
@@ -1139,13 +1310,11 @@ static const gchar url_braces[] = {
 };
 
 static gboolean
-is_open_brace (gchar c)
+is_url_start (gchar c)
 {
 	if (c == '(' ||
 		c == '{' ||
-		c == '[' ||
 		c == '<' ||
-		c == '|' ||
 		c == '\'') {
 		return TRUE;
 	}
@@ -1210,11 +1379,18 @@ url_tld_start (const gchar *begin,
 	while (p >= begin) {
 		if ((!is_domain (*p) && *p != '.' &&
 			*p != '/') || g_ascii_isspace (*p)) {
+
+			if (!is_url_start (*p) && !g_ascii_isspace (*p)) {
+				return FALSE;
+			}
+
 			p++;
+
 			if (!g_ascii_isalnum (*p)) {
 				/* Urls cannot start with strange symbols */
 				return FALSE;
 			}
+
 			match->m_begin = p;
 			return TRUE;
 		}
@@ -1292,16 +1468,19 @@ url_web_start (const gchar *begin,
 {
 	/* Check what we have found */
 	if (pos > begin &&
-		(g_ascii_strncasecmp (pos, "www",
-		3) == 0 || g_ascii_strncasecmp (pos, "ftp", 3) == 0)) {
-		if (!is_open_brace (*(pos - 1)) && !g_ascii_isspace (*(pos - 1))) {
+		(g_ascii_strncasecmp (pos, "www",3) == 0 ||
+		 g_ascii_strncasecmp (pos, "ftp", 3) == 0)) {
+
+		if (!is_url_start (*(pos - 1)) && !g_ascii_isspace (*(pos - 1))) {
 			return FALSE;
 		}
 	}
+
 	if (*pos == '.') {
 		/* Urls cannot start with . */
 		return FALSE;
 	}
+
 	match->m_begin = pos;
 
 	return TRUE;

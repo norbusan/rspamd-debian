@@ -32,6 +32,33 @@ context("Regexp unit tests", function()
     end
   end)
   
+  test("Regexp capture", function()
+    local cases = {
+      {'Body=(\\S+)(?: Fuz1=(\\S+))?(?: Fuz2=(\\S+))?', 
+        'mc-filter4 1120; Body=1 Fuz1=2 Fuz2=3', 
+        {'Body=1 Fuz1=2 Fuz2=3', '1', '2', '3'}},
+      {'Body=(\\S+)(?: Fuz1=(\\S+))?(?: Fuz2=(\\S+))?', 
+      'mc-filter4 1120; Body=1 Fuz1=2', {'Body=1 Fuz1=2', '1', '2'}},
+      {'Body=(\\S+)(?: Fuz1=(\\S+))?(?: Fuz2=(\\S+))?', 
+      'mc-filter4 1120; Body=1 Fuz1=2 mc-filter4 1120; Body=1 Fuz1=2 Fuz2=3', 
+      {'Body=1 Fuz1=2', '1', '2'}, {'Body=1 Fuz1=2 Fuz2=3', '1', '2', '3'}},
+    }
+    for _,c in ipairs(cases) do
+      local r = re.create_cached(c[1])
+      assert_not_nil(r, "cannot parse " .. c[1])
+      local res = r:search(c[2], false, true)
+      
+      assert_not_nil(res, "cannot find pattern")
+      
+      for k = 3, table.maxn(c) do
+        for n,m in ipairs(c[k]) do
+          assert_equal(res[k - 2][n], c[k][n], string.format("'%s' doesn't match with '%s'",
+            c[k][n], res[k - 2][n]))
+        end
+      end
+    end
+  end)
+  
   test("Regexp split", function()
     local cases = {
       {'\\s', 'one', {'one'}}, -- one arg

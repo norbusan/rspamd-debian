@@ -500,7 +500,7 @@ local function calculate_score(sym, rule)
     return 0.0
   end
   
-  if rule['nice'] or (r['score'] and r['score'] < 0.0) then
+  if rule['nice'] or (rule['score'] and rule['score'] < 0.0) then
     return -1.0
   end
   
@@ -524,6 +524,9 @@ end
 
 local function sa_regexp_match(data, re, raw, rule)
   local res = 0
+  if not re then
+    return 0
+  end
   if rule['multiple'] then
     local lim = -1
     if rule['maxhits'] then
@@ -628,6 +631,7 @@ _.each(function(r)
       local nre = rspamd_regexp.create_cached(nexpr)
       if not nre then
         rspamd_logger.errx('cannot apply replacement for rule %1', r)
+        rule['re'] = nil
       else
         rspamd_logger.debugx('replace %1 -> %2', r, nexpr)
         rule['re'] = nre
