@@ -1,346 +1,236 @@
-/*
- * Copyright (c) 2009-2012, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "fstring.h"
+#include "str_util.h"
 
-/*
- * Search first occurence of character in string
- */
-ssize_t
-rspamd_fstrchr (rspamd_fstring_t * src, gchar c)
-{
-	register size_t cur = 0;
+static const gsize default_initial_size = 48;
 
-	while (cur < src->len) {
-		if (*(src->begin + cur) == c) {
-			return cur;
-		}
-		cur++;
-	}
+#define fstravail(s) ((s)->allocated - (s)->len)
 
-	return -1;
-}
-
-/*
- * Search last occurence of character in string
- */
-ssize_t
-rspamd_fstrrchr (rspamd_fstring_t * src, gchar c)
-{
-	register ssize_t cur = src->len;
-
-	while (cur > 0) {
-		if (*(src->begin + cur) == c) {
-			return cur;
-		}
-		cur--;
-	}
-
-	return -1;
-}
-
-/*
- * Search for pattern in orig
- */
-ssize_t
-rspamd_fstrstr (rspamd_fstring_t * orig, rspamd_fstring_t * pattern)
-{
-	register size_t cur = 0, pcur = 0;
-
-	if (pattern->len > orig->len) {
-		return -1;
-	}
-
-	while (cur < orig->len) {
-		if (*(orig->begin + cur) == *pattern->begin) {
-			pcur = 0;
-			while (cur < orig->len && pcur < pattern->len) {
-				if (*(orig->begin + cur) != *(pattern->begin + pcur)) {
-					pcur = 0;
-					break;
-				}
-				cur++;
-				pcur++;
-			}
-			return cur - pattern->len;
-		}
-		cur++;
-	}
-
-	return -1;
-
-}
-
-/*
- * Search for pattern in orig ignoring case
- */
-ssize_t
-rspamd_fstrstri (rspamd_fstring_t * orig, rspamd_fstring_t * pattern)
-{
-	register size_t cur = 0, pcur = 0;
-
-	if (pattern->len > orig->len) {
-		return -1;
-	}
-
-	while (cur < orig->len) {
-		if (g_ascii_tolower (*(orig->begin + cur)) ==
-			g_ascii_tolower (*pattern->begin)) {
-			pcur = 0;
-			while (cur < orig->len && pcur < pattern->len) {
-				if (g_ascii_tolower (*(orig->begin + cur)) !=
-					g_ascii_tolower (*(pattern->begin + pcur))) {
-					pcur = 0;
-					break;
-				}
-				cur++;
-				pcur++;
-			}
-			return cur - pattern->len;
-		}
-		cur++;
-	}
-
-	return -1;
-
-}
-
-/*
- * Split string by tokens
- * word contains parsed word
- *
- * Return: -1 - no new words can be extracted
- *          1 - word was extracted and there are more words
- *          0 - last word extracted
- */
-gint
-rspamd_fstrtok (rspamd_fstring_t * text, const gchar *sep, rspamd_fstring_token_t * state)
-{
-	register size_t cur;
-	const gchar *csep = sep;
-
-	if (state->pos >= text->len) {
-		return -1;
-	}
-
-	cur = state->pos;
-
-	while (cur < text->len) {
-		while (*csep) {
-			if (*(text->begin + cur) == *csep) {
-				state->word.begin = (text->begin + state->pos);
-				state->word.len = cur - state->pos;
-				state->pos = cur + 1;
-				return 1;
-			}
-			csep++;
-		}
-		csep = sep;
-		cur++;
-	}
-
-	/* Last word */
-	state->word.begin = (text->begin + state->pos);
-	state->word.len = cur - state->pos;
-	state->pos = cur;
-
-	return 0;
-}
-
-/*
- * Copy one string into other
- */
-size_t
-rspamd_fstrcpy (rspamd_fstring_t * dest, rspamd_fstring_t * src)
-{
-	register size_t cur = 0;
-
-	if (dest->size < src->len) {
-		return 0;
-	}
-
-	while (cur < src->len && cur < dest->size) {
-		*(dest->begin + cur) = *(src->begin + cur);
-		cur++;
-	}
-
-	return cur;
-}
-
-/*
- * Concatenate two strings
- */
-size_t
-rspamd_fstrcat (rspamd_fstring_t * dest, rspamd_fstring_t * src)
-{
-	register size_t cur = 0;
-	gchar *p = dest->begin + dest->len;
-
-	if (dest->size < src->len + dest->len) {
-		return 0;
-	}
-
-	while (cur < src->len) {
-		*p = *(src->begin + cur);
-		p++;
-		cur++;
-	}
-
-	dest->len += src->len;
-
-	return cur;
-
-}
-
-/*
- * Make copy of string to 0-terminated string
- */
-gchar *
-rspamd_fstr_c_str (rspamd_fstring_t * str, rspamd_mempool_t * pool)
-{
-	gchar *res;
-	res = rspamd_mempool_alloc (pool, str->len + 1);
-
-	/* Do not allow multiply \0 characters */
-	memccpy (res, str->begin, '\0', str->len);
-	res[str->len] = 0;
-
-	return res;
-}
-
-/*
- * Push one character to fstr
- */
-gint
-rspamd_fstrappend_c (rspamd_fstring_t * dest, gchar c)
-{
-	if (dest->size < dest->len) {
-		/* Need to reallocate string */
-		return 0;
-	}
-
-	*(dest->begin + dest->len) = c;
-	dest->len++;
-	return 1;
-}
-
-/*
- * Push one character to fstr
- */
-gint
-rspamd_fstrappend_u (rspamd_fstring_t * dest, gunichar c)
-{
-	int l;
-	if (dest->size < dest->len) {
-		/* Need to reallocate string */
-		return 0;
-	}
-
-	l = g_unichar_to_utf8 (c, dest->begin + dest->len);
-	dest->len += l;
-	return l;
-}
-
-/*
- * Allocate memory for f_str_t
- */
 rspamd_fstring_t *
-rspamd_fstralloc (rspamd_mempool_t * pool, size_t len)
+rspamd_fstring_new (void)
 {
-	rspamd_fstring_t *res = rspamd_mempool_alloc (pool, sizeof (rspamd_fstring_t));
+	rspamd_fstring_t *s;
 
-	res->begin = rspamd_mempool_alloc (pool, len);
+	if ((s = malloc (default_initial_size + sizeof (*s))) == NULL) {
+		g_error ("%s: failed to allocate %"G_GSIZE_FORMAT" bytes",
+				G_STRLOC, default_initial_size + sizeof (*s));
 
-	res->size = len;
-	res->len = 0;
-	return res;
-}
-
-/*
- * Allocate memory for f_str_t from temporary pool
- */
-rspamd_fstring_t *
-rspamd_fstralloc_tmp (rspamd_mempool_t * pool, size_t len)
-{
-	rspamd_fstring_t *res = rspamd_mempool_alloc_tmp (pool, sizeof (rspamd_fstring_t));
-
-	res->begin = rspamd_mempool_alloc_tmp (pool, len);
-
-	res->size = len;
-	res->len = 0;
-	return res;
-}
-
-/*
- * Truncate string to its len
- */
-rspamd_fstring_t *
-rspamd_fstrtruncate (rspamd_mempool_t * pool, rspamd_fstring_t * orig)
-{
-	rspamd_fstring_t *res;
-
-	if (orig == NULL || orig->len == 0 || orig->size <= orig->len) {
-		return orig;
-	}
-
-	res = rspamd_fstralloc (pool, orig->len);
-	if (res == NULL) {
 		return NULL;
 	}
-	rspamd_fstrcpy (res, orig);
 
-	return res;
+	s->len = 0;
+	s->allocated = default_initial_size;
+
+	return s;
 }
 
-/*
- * Enlarge string to new size
- */
 rspamd_fstring_t *
-rspamd_fstrgrow (rspamd_mempool_t * pool, rspamd_fstring_t * orig, size_t newlen)
+rspamd_fstring_sized_new (gsize initial_size)
 {
-	rspamd_fstring_t *res;
+	rspamd_fstring_t *s;
+	gsize real_size = MAX (default_initial_size, initial_size);
 
-	if (orig == NULL || orig->len == 0 || orig->size >= newlen) {
-		return orig;
-	}
+	if ((s = malloc (real_size + sizeof (*s))) == NULL) {
+		g_error ("%s: failed to allocate %"G_GSIZE_FORMAT" bytes",
+				G_STRLOC, real_size + sizeof (*s));
 
-	res = rspamd_fstralloc (pool, newlen);
-	if (res == NULL) {
 		return NULL;
 	}
-	rspamd_fstrcpy (res, orig);
+	s->len = 0;
+	s->allocated = real_size;
 
-	return res;
+	return s;
 }
 
+rspamd_fstring_t *
+rspamd_fstring_new_init (const gchar *init, gsize len)
+{
+	rspamd_fstring_t *s;
+	gsize real_size = MAX (default_initial_size, len);
+
+	if ((s = malloc (real_size + sizeof (*s))) == NULL) {
+		g_error ("%s: failed to allocate %"G_GSIZE_FORMAT" bytes",
+				G_STRLOC, real_size + sizeof (*s));
+
+		return NULL;
+	}
+
+	s->len = len;
+	s->allocated = real_size;
+	memcpy (s->str, init, len);
+
+	return s;
+}
+
+rspamd_fstring_t *
+rspamd_fstring_assign (rspamd_fstring_t *str, const gchar *init, gsize len)
+{
+	gsize avail;
+
+	if (str == NULL) {
+		return rspamd_fstring_new_init (init, len);
+	}
+
+	avail = fstravail (str);
+
+	if (avail < len) {
+		str = rspamd_fstring_grow (str, len);
+	}
+
+	if (len > 0) {
+		memcpy (str->str, init, len);
+	}
+
+	str->len = len;
+
+	return str;
+}
+
+void
+rspamd_fstring_free (rspamd_fstring_t *str)
+{
+	free (str);
+}
+
+inline gsize
+rspamd_fstring_suggest_size (gsize len, gsize allocated, gsize needed_len)
+{
+	gsize newlen;
+	/* Maximum size when we double the size of new string */
+	static const gsize max_grow = 1024 * 1024;
+
+	newlen = allocated;
+
+	/*
+	 * Stop exponential grow at some point, since it might be slow for the
+	 * vast majority of cases
+	 */
+	if (newlen < max_grow) {
+		newlen *= 2;
+	}
+	else {
+		newlen += max_grow;
+	}
+
+	/*
+	 * Check for overflow
+	 */
+	if (newlen <= len + needed_len) {
+		newlen = len + needed_len;
+
+		if (newlen < max_grow) {
+			newlen *= 2;
+		}
+		else {
+			newlen += max_grow;
+		}
+	}
+
+	return newlen;
+}
+
+rspamd_fstring_t *
+rspamd_fstring_grow (rspamd_fstring_t *str, gsize needed_len)
+{
+	gsize newlen;
+	gpointer nptr;
+
+	newlen = rspamd_fstring_suggest_size (str->len, str->allocated, needed_len);
+
+	nptr = realloc (str, newlen + sizeof (*str));
+
+	if (nptr == NULL) {
+		/* Avoid memory leak */
+		free (str);
+		g_error ("%s: failed to re-allocate %"G_GSIZE_FORMAT" bytes",
+				G_STRLOC, newlen + sizeof (*str));
+
+		return NULL;
+	}
+
+	str = nptr;
+	str->allocated = newlen;
+
+	return str;
+}
+
+rspamd_fstring_t *
+rspamd_fstring_append (rspamd_fstring_t *str, const char *in, gsize len)
+{
+	gsize avail = fstravail (str);
+
+	if (avail < len) {
+		str = rspamd_fstring_grow (str, len);
+	}
+
+	memcpy (str->str + str->len, in, len);
+	str->len += len;
+
+	return str;
+}
+
+rspamd_fstring_t *
+rspamd_fstring_append_chars (rspamd_fstring_t *str,
+		char c, gsize len)
+{
+	gsize avail = fstravail (str);
+
+	if (avail < len) {
+		str = rspamd_fstring_grow (str, len);
+	}
+
+	memset (str->str + str->len, c, len);
+	str->len += len;
+
+	return str;
+}
+
+void
+rspamd_fstring_erase (rspamd_fstring_t *str, gsize pos, gsize len)
+{
+	if (pos < str->len) {
+		if (pos + len > str->len) {
+			len = str->len - pos;
+		}
+
+		if (len == str->len - pos) {
+			/* Fast path */
+			str->len = pos;
+		}
+		else {
+			memmove (str->str + pos, str->str + pos + len, str->len - pos);
+			str->len -= pos;
+		}
+	}
+	else {
+		/* Do nothing */
+	}
+}
+
+char *rspamd_fstring_cstr (const rspamd_fstring_t *str);
+
+/* Compat code */
 static guint32
 fstrhash_c (gchar c, guint32 hval)
 {
 	guint32 tmp;
 	/*
 	 * xor in the current byte against each byte of hval
-	 * (which alone gaurantees that every bit of input will have
+	 * (which alone guarantees that every bit of input will have
 	 * an effect on the output)
 	 */
 	tmp = c & 0xFF;
@@ -362,33 +252,12 @@ fstrhash_c (gchar c, guint32 hval)
 	return (hval << 3) + (hval >> 29);
 }
 
-/*
- * Return hash value for a string
- */
-guint32
-rspamd_fstrhash (rspamd_fstring_t * str)
-{
-	size_t i;
-	guint32 hval;
-	gchar *c;
-
-	if (str == NULL) {
-		return 0;
-	}
-	c = str->begin;
-	hval = str->len;
-
-	for (i = 0; i < str->len; i++, c++) {
-		hval = fstrhash_c (*c, hval);
-	}
-	return hval;
-}
 
 /*
  * Return hash value for a string
  */
 guint32
-rspamd_fstrhash_lc (rspamd_fstring_t * str, gboolean is_utf)
+rspamd_fstrhash_lc (const rspamd_ftok_t * str, gboolean is_utf)
 {
 	gsize i;
 	guint32 j, hval;
@@ -431,38 +300,171 @@ rspamd_fstrhash_lc (rspamd_fstring_t * str, gboolean is_utf)
 	return hval;
 }
 
-void
-rspamd_fstrstrip (rspamd_fstring_t * str)
+gboolean
+rspamd_fstring_equal (const rspamd_fstring_t *s1,
+		const rspamd_fstring_t *s2)
 {
-	gchar *p = str->begin;
-	guint r = 0;
+	g_assert (s1 != NULL && s2 != NULL);
 
-	while (r < str->len) {
-		if (g_ascii_isspace (*p)) {
-			p++;
-			r++;
-		}
-		else {
-			break;
-		}
+	if (s1->len == s2->len) {
+		return (memcmp (s1->str, s2->str, s1->len) == 0);
 	}
 
-	if (r > 0) {
-		memmove (str->begin, p, str->len - r);
-		str->len -= r;
+	return FALSE;
+}
+
+gint
+rspamd_fstring_casecmp (const rspamd_fstring_t *s1,
+		const rspamd_fstring_t *s2)
+{
+	gint ret = 0;
+
+	g_assert (s1 != NULL && s2 != NULL);
+
+	if (s1->len == s2->len) {
+		ret = rspamd_lc_cmp (s1->str, s2->str, s1->len);
+	}
+	else {
+		ret = s1->len - s2->len;
 	}
 
-	r = str->len;
-	p = str->begin + str->len;
-	while (r > 0) {
-		if (g_ascii_isspace (*p)) {
-			p--;
-			r--;
-		}
-		else {
-			break;
-		}
+	return ret;
+}
+
+gint
+rspamd_fstring_cmp (const rspamd_fstring_t *s1,
+		const rspamd_fstring_t *s2)
+{
+	g_assert (s1 != NULL && s2 != NULL);
+
+	if (s1->len == s2->len) {
+		return memcmp (s1->str, s2->str, s1->len);
 	}
 
-	str->len = r;
+	return s1->len - s2->len;
+}
+
+gint
+rspamd_ftok_casecmp (const rspamd_ftok_t *s1,
+		const rspamd_ftok_t *s2)
+{
+	gint ret = 0;
+
+	g_assert (s1 != NULL && s2 != NULL);
+
+	if (s1->len == s2->len) {
+		ret = rspamd_lc_cmp (s1->begin, s2->begin, s1->len);
+	}
+	else {
+		ret = s1->len - s2->len;
+	}
+
+	return ret;
+}
+
+gint
+rspamd_ftok_cmp (const rspamd_ftok_t *s1,
+		const rspamd_ftok_t *s2)
+{
+	g_assert (s1 != NULL && s2 != NULL);
+
+	if (s1->len == s2->len) {
+		return memcmp (s1->begin, s2->begin, s1->len);
+	}
+
+	return s1->len - s2->len;
+}
+
+void
+rspamd_fstring_mapped_ftok_free (gpointer p)
+{
+	rspamd_ftok_t *tok = p;
+	rspamd_fstring_t *storage;
+
+	storage = (rspamd_fstring_t *) (tok->begin - 2 * sizeof (gsize));
+	rspamd_fstring_free (storage);
+	g_slice_free1 (sizeof (*tok), tok);
+}
+
+rspamd_ftok_t *
+rspamd_ftok_map (const rspamd_fstring_t *s)
+{
+	rspamd_ftok_t *tok;
+
+	g_assert (s != NULL);
+
+	tok = g_slice_alloc (sizeof (*tok));
+	tok->begin = s->str;
+	tok->len = s->len;
+
+	return tok;
+}
+
+char *
+rspamd_fstring_cstr (const rspamd_fstring_t *s)
+{
+	char *result;
+
+	if (s == NULL) {
+		return NULL;
+	}
+
+	result = g_malloc (s->len + 1);
+	memcpy (result, s->str, s->len);
+	result[s->len] = '\0';
+
+	return result;
+}
+
+gboolean
+rspamd_ftok_cstr_equal (const rspamd_ftok_t *s, const gchar *pat,
+		gboolean icase)
+{
+	gsize slen;
+	rspamd_ftok_t srch;
+
+	g_assert (s != NULL);
+	g_assert (pat != NULL);
+
+	slen = strlen (pat);
+	srch.begin = pat;
+	srch.len = slen;
+
+	if (icase) {
+		return (rspamd_ftok_casecmp (s, &srch) == 0);
+	}
+
+	return (rspamd_ftok_cmp (s, &srch) == 0);
+}
+
+gchar *
+rspamd_ftokdup (const rspamd_ftok_t *src)
+{
+	gchar *newstr;
+
+	if (src == NULL) {
+		return NULL;
+	}
+
+	newstr = g_malloc (src->len + 1);
+	memcpy (newstr, src->begin, src->len);
+	newstr[src->len] = '\0';
+
+	return newstr;
+}
+
+gchar *
+rspamd_fstringdup (const rspamd_fstring_t *src)
+{
+	gchar *newstr;
+
+	if (src == NULL) {
+		return NULL;
+	}
+
+	newstr = g_malloc (src->len + 1);
+	memcpy (newstr, src->str, src->len);
+	newstr[src->len] = '\0';
+
+	return newstr;
 }

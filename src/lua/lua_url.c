@@ -1,27 +1,20 @@
-/* Copyright (c) 2015, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "lua_common.h"
+#include "contrib/uthash/utlist.h"
 
 /***
  * @module rspamd_url
@@ -57,8 +50,17 @@ LUA_FUNCTION_DEF (url, get_text);
 LUA_FUNCTION_DEF (url, get_tld);
 LUA_FUNCTION_DEF (url, to_table);
 LUA_FUNCTION_DEF (url, is_phished);
+LUA_FUNCTION_DEF (url, is_redirected);
+LUA_FUNCTION_DEF (url, is_obscured);
+LUA_FUNCTION_DEF (url, is_html_displayed);
+LUA_FUNCTION_DEF (url, is_subject);
 LUA_FUNCTION_DEF (url, get_phished);
+LUA_FUNCTION_DEF (url, get_tag);
+LUA_FUNCTION_DEF (url, get_count);
+LUA_FUNCTION_DEF (url, get_tags);
+LUA_FUNCTION_DEF (url, add_tag);
 LUA_FUNCTION_DEF (url, create);
+LUA_FUNCTION_DEF (url, init);
 LUA_FUNCTION_DEF (url, all);
 
 static const struct luaL_reg urllib_m[] = {
@@ -73,12 +75,22 @@ static const struct luaL_reg urllib_m[] = {
 	LUA_INTERFACE_DEF (url, get_tld),
 	LUA_INTERFACE_DEF (url, to_table),
 	LUA_INTERFACE_DEF (url, is_phished),
+	LUA_INTERFACE_DEF (url, is_redirected),
+	LUA_INTERFACE_DEF (url, is_obscured),
+	LUA_INTERFACE_DEF (url, is_html_displayed),
+	LUA_INTERFACE_DEF (url, is_subject),
 	LUA_INTERFACE_DEF (url, get_phished),
+	LUA_INTERFACE_DEF (url, get_tag),
+	LUA_INTERFACE_DEF (url, get_tags),
+	LUA_INTERFACE_DEF (url, add_tag),
+	LUA_INTERFACE_DEF (url, get_count),
+	{"get_redirected", lua_url_get_phished},
 	{"__tostring", lua_url_get_text},
 	{NULL, NULL}
 };
 
 static const struct luaL_reg urllib_f[] = {
+	LUA_INTERFACE_DEF (url, init),
 	LUA_INTERFACE_DEF (url, create),
 	LUA_INTERFACE_DEF (url, all),
 	{NULL, NULL}
@@ -87,7 +99,7 @@ static const struct luaL_reg urllib_f[] = {
 static struct rspamd_lua_url *
 lua_check_url (lua_State * L, gint pos)
 {
-	void *ud = luaL_checkudata (L, pos, "rspamd{url}");
+	void *ud = rspamd_lua_check_udata (L, pos, "rspamd{url}");
 	luaL_argcheck (L, ud != NULL, pos, "'url' expected");
 	return ud ? ((struct rspamd_lua_url *)ud) : NULL;
 }
@@ -104,7 +116,7 @@ lua_url_get_length (lua_State *L)
 	struct rspamd_lua_url *url = lua_check_url (L, 1);
 
 	if (url != NULL) {
-		lua_pushinteger (L, url->url->urllen);
+		lua_pushnumber (L, url->url->urllen);
 	}
 	else {
 		lua_pushnil (L);
@@ -261,13 +273,214 @@ lua_url_is_phished (lua_State *L)
 	struct rspamd_lua_url *url = lua_check_url (L, 1);
 
 	if (url != NULL) {
-		lua_pushboolean (L, url->url->is_phished);
+		lua_pushboolean (L, url->url->flags & RSPAMD_URL_FLAG_PHISHED);
 	}
 	else {
 		lua_pushnil (L);
 	}
 
 	return 1;
+}
+
+/***
+ * @method url:is_redirected()
+ * Check whether URL was redirected
+ * @return {boolean} `true` if URL is redirected
+ */
+static gint
+lua_url_is_redirected (lua_State *L)
+{
+	struct rspamd_lua_url *url = lua_check_url (L, 1);
+
+	if (url != NULL) {
+		lua_pushboolean (L, url->url->flags & RSPAMD_URL_FLAG_REDIRECTED);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+/***
+ * @method url:is_obscured()
+ * Check whether URL is treated as obscured or obfusicated (e.g. numbers in IP address or other hacks)
+ * @return {boolean} `true` if URL is obscured
+ */
+static gint
+lua_url_is_obscured (lua_State *L)
+{
+	struct rspamd_lua_url *url = lua_check_url (L, 1);
+
+	if (url != NULL) {
+		lua_pushboolean (L, url->url->flags & RSPAMD_URL_FLAG_OBSCURED);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+
+/***
+ * @method url:is_html_displayed()
+ * Check whether URL is just displayed in HTML (e.g. NOT a real href)
+ * @return {boolean} `true` if URL is displayed only
+ */
+static gint
+lua_url_is_html_displayed (lua_State *L)
+{
+	struct rspamd_lua_url *url = lua_check_url (L, 1);
+
+	if (url != NULL) {
+		lua_pushboolean (L, url->url->flags & RSPAMD_URL_FLAG_HTML_DISPLAYED);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+/***
+ * @method url:is_subject()
+ * Check whether URL is found in subject
+ * @return {boolean} `true` if URL is found in subject
+ */
+static gint
+lua_url_is_subject (lua_State *L)
+{
+	struct rspamd_lua_url *url = lua_check_url (L, 1);
+
+	if (url != NULL) {
+		lua_pushboolean (L, url->url->flags & RSPAMD_URL_FLAG_SUBJECT);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+/***
+ * @method url:get_tag(tag)
+ * Returns list of string for a specific tagname for an url
+ * @return {table/strings} list of tags for an url
+ */
+static gint
+lua_url_get_tag (lua_State *L)
+{
+	struct rspamd_lua_url *url = lua_check_url (L, 1);
+	guint i;
+	const gchar *tag = luaL_checkstring (L, 2);
+	struct rspamd_url_tag *tval, *cur;
+
+	if (url != NULL && tag != NULL) {
+
+		if (url->url->tags == NULL) {
+			lua_createtable (L, 0, 0);
+		}
+		else {
+			tval = g_hash_table_lookup (url->url->tags, tag);
+
+			if (tval) {
+				lua_newtable (L);
+				i = 1;
+
+				DL_FOREACH (tval, cur) {
+					lua_pushstring (L, cur->data);
+					lua_rawseti (L, -2, i ++);
+				}
+
+				lua_settable (L, -3);
+			}
+			else {
+				lua_createtable (L, 0, 0);
+			}
+		}
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+
+/***
+ * @method url:get_tags()
+ * Returns list of string tags for an url
+ * @return {table/strings} list of tags for an url
+ */
+static gint
+lua_url_get_tags (lua_State *L)
+{
+	struct rspamd_lua_url *url = lua_check_url (L, 1);
+	guint i;
+	GHashTableIter it;
+	struct rspamd_url_tag *tval, *cur;
+	gpointer k, v;
+
+	if (url != NULL) {
+		if (url->url->tags == NULL) {
+			lua_createtable (L, 0, 0);
+		}
+		else {
+			lua_createtable (L, 0, g_hash_table_size (url->url->tags));
+			g_hash_table_iter_init (&it, url->url->tags);
+
+			while (g_hash_table_iter_next (&it, &k, &v)) {
+				tval = v;
+				lua_pushstring (L, (const gchar *)k);
+				lua_newtable (L);
+				i = 1;
+
+				DL_FOREACH (tval, cur) {
+					lua_pushstring (L, cur->data);
+					lua_rawseti (L, -2, i ++);
+				}
+
+				lua_settable (L, -3);
+			}
+		}
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+/***
+ * @method url:add_tag(tag, mempool)
+ * Adds a new tag for url
+ * @param {string} tag new tag to add
+ * @param {mempool} mempool memory pool (e.g. `task:get_pool()`)
+ */
+static gint
+lua_url_add_tag (lua_State *L)
+{
+	struct rspamd_lua_url *url = lua_check_url (L, 1);
+	rspamd_mempool_t *mempool = rspamd_lua_check_mempool (L, 4);
+	const gchar *tag = luaL_checkstring (L, 2);
+	const gchar *value;
+
+	if (lua_type (L, 3) == LUA_TSTRING) {
+		value = lua_tostring (L, 3);
+	}
+	else {
+		value = "1"; /* Some stupid placeholder */
+	}
+
+	if (url != NULL && mempool != NULL && tag != NULL) {
+		rspamd_url_add_tag (url->url, tag, value, mempool);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 0;
 }
 
 /***
@@ -281,12 +494,15 @@ lua_url_get_phished (lua_State *L)
 	struct rspamd_lua_url *purl, *url = lua_check_url (L, 1);
 
 	if (url) {
-		if (url->url->is_phished && url->url->phished_url != NULL) {
-			purl = lua_newuserdata (L, sizeof (struct rspamd_lua_url));
-			rspamd_lua_setclass (L, "rspamd{url}", -1);
-			purl->url = url->url->phished_url;
+		if (url->url->phished_url != NULL) {
+			if (url->url->flags &
+					(RSPAMD_URL_FLAG_PHISHED|RSPAMD_URL_FLAG_REDIRECTED)) {
+				purl = lua_newuserdata (L, sizeof (struct rspamd_lua_url));
+				rspamd_lua_setclass (L, "rspamd{url}", -1);
+				purl->url = url->url->phished_url;
 
-			return 1;
+				return 1;
+			}
 		}
 	}
 
@@ -296,8 +512,8 @@ lua_url_get_phished (lua_State *L)
 
 /***
  * @method url:get_tld()
- * Get top level domain part of the url host
- * @return {string} top level part of the url host
+ * Get effective second level domain part (eSLD) of the url host
+ * @return {string} effective second level domain part (eSLD) of the url host
  */
 static gint
 lua_url_get_tld (lua_State *L)
@@ -306,6 +522,26 @@ lua_url_get_tld (lua_State *L)
 
 	if (url != NULL && url->url->tldlen > 0) {
 		lua_pushlstring (L, url->url->tld, url->url->tldlen);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+/***
+ * @method url:get_count()
+ * Return number of occurrencies for this particular URL
+ * @return {number} number of occurrencies
+ */
+static gint
+lua_url_get_count (lua_State *L)
+{
+	struct rspamd_lua_url *url = lua_check_url (L, 1);
+
+	if (url != NULL && url->url != NULL) {
+		lua_pushnumber (L, url->url->count);
 	}
 	else {
 		lua_pushnil (L);
@@ -334,7 +570,7 @@ lua_url_to_table (lua_State *L)
 
 	if (url != NULL) {
 		u = url->url;
-		lua_newtable (L);
+		lua_createtable (L, 0, 12);
 		lua_pushstring (L, "url");
 		lua_pushlstring (L, u->string, u->urllen);
 		lua_settable (L, -3);
@@ -414,8 +650,21 @@ lua_url_to_table (lua_State *L)
 	return 1;
 }
 
+static void
+lua_url_single_inserter (struct rspamd_url *url, gsize start_offset,
+		gsize end_offset, gpointer ud)
+{
+	lua_State *L = ud;
+	struct rspamd_lua_url *lua_url;
+
+	lua_url = lua_newuserdata (L, sizeof (struct rspamd_lua_url));
+	rspamd_lua_setclass (L, "rspamd{url}", -1);
+	lua_url->url = url;
+}
+
+
 /***
- * @function url.create(mempool, str)
+ * @function url.create([mempool,] str)
  * @param {rspamd_mempool} memory pool for URL, e.g. `task:get_mempool()`
  * @param {string} text that contains URL (can also contain other stuff)
  * @return {url} new url object that exists as long as the corresponding mempool exists
@@ -423,48 +672,87 @@ lua_url_to_table (lua_State *L)
 static gint
 lua_url_create (lua_State *L)
 {
-	struct rspamd_url *url;
-	struct rspamd_lua_url *lua_url;
-	rspamd_mempool_t *pool = rspamd_lua_check_mempool (L, 1);
+	rspamd_mempool_t *pool;
 	const gchar *text;
+	size_t length;
+	gboolean own_pool = FALSE;
 
-	if (pool == NULL) {
-		lua_pushnil (L);
+	if (lua_type (L, 1) == LUA_TUSERDATA) {
+		pool = rspamd_lua_check_mempool (L, 1);
+		text = luaL_checklstring (L, 2, &length);
 	}
 	else {
-		text = luaL_checkstring (L, 2);
+		own_pool = TRUE;
+		pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), "url");
+		text = luaL_checklstring (L, 1, &length);
+	}
 
-		if (text != NULL) {
-			url = rspamd_url_get_next (pool, text, NULL, NULL);
-
-			if (url == NULL) {
-				lua_pushnil (L);
-			}
-			else {
-				lua_url = lua_newuserdata (L, sizeof (struct rspamd_lua_url));
-				rspamd_lua_setclass (L, "rspamd{url}", -1);
-				lua_url->url = url;
-			}
+	if (pool == NULL || text == NULL) {
+		if (own_pool && pool) {
+			rspamd_mempool_delete (pool);
 		}
-		else {
+
+		return luaL_error (L, "invalid arguments");
+	}
+	else {
+		rspamd_url_find_single (pool, text, length, FALSE,
+				lua_url_single_inserter, L);
+
+		if (lua_type (L, -1) != LUA_TUSERDATA) {
+			/* URL is actually not found */
 			lua_pushnil (L);
 		}
 	}
 
+	if (own_pool && pool) {
+		rspamd_mempool_delete (pool);
+	}
 
 	return 1;
 }
 
+/***
+ * @function url.create(tld_file)
+ * Initialize url library if not initialized yet by Rspamd
+ * @param {string} tld_file for url library
+ * @return nothing
+ */
+static gint
+lua_url_init (lua_State *L)
+{
+	const gchar *tld_path;
+
+	tld_path = luaL_checkstring (L, 1);
+
+	rspamd_url_init (tld_path);
+
+	return 0;
+}
+
+static void
+lua_url_table_inserter (struct rspamd_url *url, gsize start_offset,
+		gsize end_offset, gpointer ud)
+{
+	lua_State *L = ud;
+	struct rspamd_lua_url *lua_url;
+	gint n;
+
+	n = rspamd_lua_table_size (L, -1);
+	lua_url = lua_newuserdata (L, sizeof (struct rspamd_lua_url));
+	rspamd_lua_setclass (L, "rspamd{url}", -1);
+	lua_url->url = url;
+	lua_pushnumber (L, n + 1);
+	lua_pushlstring (L, url->string, url->urllen);
+	lua_settable (L, -3);
+}
+
+
 static gint
 lua_url_all (lua_State *L)
 {
-	struct rspamd_url *url;
-	struct rspamd_lua_url *lua_url;
 	rspamd_mempool_t *pool = rspamd_lua_check_mempool (L, 1);
-	const gchar *text,*end;
-	gint i = 1;
+	const gchar *text;
 	size_t length;
-	const gchar *pos;
 
 	if (pool == NULL) {
 		lua_pushnil (L);
@@ -473,25 +761,9 @@ lua_url_all (lua_State *L)
 		text = luaL_checklstring (L, 2, &length);
 
 		if (text != NULL) {
-			pos = text;
-			end = text + length;
 			lua_newtable (L);
-			
-			while (pos <= end) {
-				url = rspamd_url_get_next (pool, text, &pos, NULL);
-
-				if (url != NULL) {
-					lua_url = lua_newuserdata (L, sizeof (struct rspamd_lua_url));
-					rspamd_lua_setclass (L, "rspamd{url}", -1);
-					lua_url->url = url;
-					lua_pushinteger (L, i++);
-					lua_pushlstring (L, url->string, url->urllen);
-					lua_settable (L, -3);
-				}
-				else{
-					break;
-				}
-			}
+			rspamd_url_find_multiple (pool, text, length, FALSE, NULL,
+					lua_url_table_inserter, L);
 
 		}
 		else {
@@ -499,9 +771,7 @@ lua_url_all (lua_State *L)
 		}
 	}
 
-
 	return 1;
-
 }
 
 

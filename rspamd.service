@@ -1,7 +1,17 @@
 [Unit]
 Description=rapid spam filtering system
 After=nss-lookup.target
+Documentation=https://rspamd.com/doc/
 
 [Service]
+LimitNOFILE=1048576
+NonBlocking=true
 ExecStart=/usr/bin/rspamd -c /etc/rspamd/rspamd.conf -f
+ExecReload=/bin/kill -HUP $MAINPID
 User=_rspamd
+RuntimeDirectory=rspamd
+RuntimeDirectoryMode=0755
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

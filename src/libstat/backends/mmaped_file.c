@@ -1,43 +1,26 @@
-/*
- * Copyright (c) 2009-2012, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "config.h"
 #include "stat_internal.h"
-#include "main.h"
+#include "unix-std.h"
 
 #define CHAIN_LENGTH 128
 
 /* Section types */
 #define STATFILE_SECTION_COMMON 1
-#define STATFILE_SECTION_HEADERS 2
-#define STATFILE_SECTION_URLS 3
-#define STATFILE_SECTION_REGEXP 4
-
-#define DEFAULT_STATFILE_INVALIDATE_TIME 30
-#define DEFAULT_STATFILE_INVALIDATE_JITTER 30
-
-#define MMAPED_BACKEND_TYPE "mmap"
 
 /**
  * Common statfile header
@@ -90,7 +73,8 @@ typedef struct {
 #else
 	gchar filename[MAXPATHLEN];             /**< name of file						*/
 #endif
-	gint fd;                                    /**< descriptor							*/
+	rspamd_mempool_t *pool;
+	gint fd;                                /**< descriptor							*/
 	void *map;                              /**< mmaped area						*/
 	off_t seek_pos;                         /**< current seek position				*/
 	struct stat_file_section cur_section;   /**< current section					*/
@@ -98,33 +82,25 @@ typedef struct {
 	struct rspamd_statfile_config *cf;
 } rspamd_mmaped_file_t;
 
-/**
- * Statfiles pool
- */
-typedef struct  {
-	GHashTable *files;                     /**< hash table of opened files indexed by name	*/
-	rspamd_mempool_t *pool;                 /**< memory pool object					*/
-	rspamd_mempool_mutex_t *lock;               /**< mutex								*/
-	gboolean mlock_ok;                      /**< whether it is possible to use mlock (2) to avoid statfiles unloading */
-} rspamd_mmaped_file_ctx;
 
 #define RSPAMD_STATFILE_VERSION {'1', '2'}
 #define BACKUP_SUFFIX ".old"
 
-static void rspamd_mmaped_file_set_block_common (
-	rspamd_mmaped_file_ctx * pool, rspamd_mmaped_file_t * file,
-	guint32 h1, guint32 h2, double value);
+static void rspamd_mmaped_file_set_block_common (rspamd_mempool_t *pool,
+	   rspamd_mmaped_file_t *file,
+	   guint32 h1, guint32 h2, double value);
 
-rspamd_mmaped_file_t * rspamd_mmaped_file_is_open (
-		rspamd_mmaped_file_ctx * pool, struct rspamd_statfile_config *stcf);
-rspamd_mmaped_file_t * rspamd_mmaped_file_open (rspamd_mmaped_file_ctx * pool,
-		const gchar *filename, size_t size, struct rspamd_statfile_config *stcf);
-gint rspamd_mmaped_file_create (rspamd_mmaped_file_ctx * pool,
-		const gchar *filename, size_t size, struct rspamd_statfile_config *stcf);
+rspamd_mmaped_file_t * rspamd_mmaped_file_open (rspamd_mempool_t *pool,
+		const gchar *filename, size_t size,
+		struct rspamd_statfile_config *stcf);
+gint rspamd_mmaped_file_create (const gchar *filename, size_t size,
+		struct rspamd_statfile_config *stcf,
+		rspamd_mempool_t *pool);
+gint rspamd_mmaped_file_close_file (rspamd_mempool_t *pool,
+		rspamd_mmaped_file_t * file);
 
 double
-rspamd_mmaped_file_get_block (rspamd_mmaped_file_ctx * pool,
-	rspamd_mmaped_file_t * file,
+rspamd_mmaped_file_get_block (rspamd_mmaped_file_t * file,
 	guint32 h1,
 	guint32 h2)
 {
@@ -157,11 +133,9 @@ rspamd_mmaped_file_get_block (rspamd_mmaped_file_ctx * pool,
 }
 
 static void
-rspamd_mmaped_file_set_block_common (rspamd_mmaped_file_ctx * pool,
-		rspamd_mmaped_file_t * file,
-	guint32 h1,
-	guint32 h2,
-	double value)
+rspamd_mmaped_file_set_block_common (rspamd_mempool_t *pool,
+		rspamd_mmaped_file_t *file,
+		guint32 h1, guint32 h2, double value)
 {
 	struct stat_file_block *block, *to_expire = NULL;
 	struct stat_file_header *header;
@@ -182,14 +156,14 @@ rspamd_mmaped_file_set_block_common (rspamd_mmaped_file_ctx * pool,
 	for (i = 0; i < CHAIN_LENGTH; i++) {
 		if (i + blocknum >= file->cur_section.length) {
 			/* Need to expire some block in chain */
-			msg_info ("chain %ud is full in statfile %s, starting expire",
+			msg_info_pool ("chain %ud is full in statfile %s, starting expire",
 				blocknum,
 				file->filename);
 			break;
 		}
 		/* First try to find block in chain */
 		if (block->hash1 == h1 && block->hash2 == h2) {
-			msg_debug ("%s found existing block %ud in chain %ud, value %.2f",
+			msg_debug_pool ("%s found existing block %ud in chain %ud, value %.2f",
 					file->filename,
 					i,
 					blocknum,
@@ -200,7 +174,7 @@ rspamd_mmaped_file_set_block_common (rspamd_mmaped_file_ctx * pool,
 		/* Check whether we have a free block in chain */
 		if (block->hash1 == 0 && block->hash2 == 0) {
 			/* Write new block here */
-			msg_debug ("%s found free block %ud in chain %ud, set h1=%ud, h2=%ud",
+			msg_debug_pool ("%s found free block %ud in chain %ud, set h1=%ud, h2=%ud",
 				file->filename,
 				i,
 				blocknum,
@@ -240,23 +214,14 @@ rspamd_mmaped_file_set_block_common (rspamd_mmaped_file_ctx * pool,
 }
 
 void
-rspamd_mmaped_file_set_block (rspamd_mmaped_file_ctx * pool,
-	rspamd_mmaped_file_t * file,
-	guint32 h1,
-	guint32 h2,
-	double value)
+rspamd_mmaped_file_set_block (rspamd_mempool_t *pool,
+		rspamd_mmaped_file_t * file,
+		guint32 h1,
+		guint32 h2,
+		double value)
 {
 	rspamd_mmaped_file_set_block_common (pool, file, h1, h2, value);
 }
-
-rspamd_mmaped_file_t *
-rspamd_mmaped_file_is_open (rspamd_mmaped_file_ctx * pool,
-		struct rspamd_statfile_config *stcf)
-{
-	return g_hash_table_lookup (pool->files, stcf);
-}
-
-
 
 gboolean
 rspamd_mmaped_file_set_revision (rspamd_mmaped_file_t *file, guint64 rev, time_t time)
@@ -364,7 +329,7 @@ rspamd_mmaped_file_get_total (rspamd_mmaped_file_t *file)
 
 /* Check whether specified file is statistic file and calculate its len in blocks */
 static gint
-rspamd_mmaped_file_check (rspamd_mmaped_file_t * file)
+rspamd_mmaped_file_check (rspamd_mempool_t *pool, rspamd_mmaped_file_t * file)
 {
 	struct stat_file *f;
 	gchar *c;
@@ -376,26 +341,28 @@ rspamd_mmaped_file_check (rspamd_mmaped_file_t * file)
 	}
 
 	if (file->len < sizeof (struct stat_file)) {
-		msg_info ("file %s is too short to be stat file: %z",
+		msg_info_pool ("file %s is too short to be stat file: %z",
 			file->filename,
 			file->len);
 		return -1;
 	}
 
 	f = (struct stat_file *)file->map;
-	c = f->header.magic;
+	c = &f->header.magic[0];
 	/* Check magic and version */
 	if (*c++ != 'r' || *c++ != 's' || *c++ != 'd') {
-		msg_info ("file %s is invalid stat file", file->filename);
+		msg_info_pool ("file %s is invalid stat file", file->filename);
 		return -1;
 	}
+
+	c = &f->header.version[0];
 	/* Now check version and convert old version to new one (that can be used for sync */
 	if (*c == 1 && *(c + 1) == 0) {
 		return -1;
 	}
 	else if (memcmp (c, valid_version, sizeof (valid_version)) != 0) {
 		/* Unknown version */
-		msg_info ("file %s has invalid version %c.%c",
+		msg_info_pool ("file %s has invalid version %c.%c",
 			file->filename,
 			'0' + *c,
 			'0' + *(c + 1));
@@ -407,7 +374,7 @@ rspamd_mmaped_file_check (rspamd_mmaped_file_t * file)
 	file->cur_section.length = f->section.length;
 	if (file->cur_section.length * sizeof (struct stat_file_block) >
 		file->len) {
-		msg_info ("file %s is truncated: %z, must be %z",
+		msg_info_pool ("file %s is truncated: %z, must be %z",
 			file->filename,
 			file->len,
 			file->cur_section.length * sizeof (struct stat_file_block));
@@ -421,83 +388,137 @@ rspamd_mmaped_file_check (rspamd_mmaped_file_t * file)
 
 
 static rspamd_mmaped_file_t *
-rspamd_mmaped_file_reindex (rspamd_mmaped_file_ctx * pool,
-	const gchar *filename,
-	size_t old_size,
-	size_t size,
-	struct rspamd_statfile_config *stcf)
+rspamd_mmaped_file_reindex (rspamd_mempool_t *pool,
+		const gchar *filename,
+		size_t old_size,
+		size_t size,
+		struct rspamd_statfile_config *stcf)
 {
-	gchar *backup;
-	gint fd;
-	rspamd_mmaped_file_t *new;
+	gchar *backup, *lock;
+	gint fd, lock_fd;
+	rspamd_mmaped_file_t *new, *old = NULL;
 	u_char *map, *pos;
 	struct stat_file_block *block;
-	struct stat_file_header *header;
+	struct stat_file_header *header, *nh;
+	struct timespec sleep_ts = {
+			.tv_sec = 0,
+			.tv_nsec = 1000000
+	};
 
 	if (size <
 		sizeof (struct stat_file_header) + sizeof (struct stat_file_section) +
 		sizeof (block)) {
-		msg_err ("file %s is too small to carry any statistic: %z",
+		msg_err_pool ("file %s is too small to carry any statistic: %z",
 			filename,
 			size);
 		return NULL;
 	}
 
+	lock = g_strconcat (filename, ".lock", NULL);
+	lock_fd = open (lock, O_WRONLY|O_CREAT|O_EXCL, 00600);
+
+	while (lock_fd == -1) {
+		/* Wait for lock */
+		lock_fd = open (lock, O_WRONLY|O_CREAT|O_EXCL, 00600);
+		if (lock_fd != -1) {
+			unlink (lock);
+			close (lock_fd);
+			g_free (lock);
+
+			return rspamd_mmaped_file_open (pool, filename, size, stcf);
+		}
+		else {
+			nanosleep (&sleep_ts, NULL);
+		}
+	}
+
 	backup = g_strconcat (filename, ".old", NULL);
 	if (rename (filename, backup) == -1) {
-		msg_err ("cannot rename %s to %s: %s", filename, backup, strerror (
+		msg_err_pool ("cannot rename %s to %s: %s", filename, backup, strerror (
 				errno));
 		g_free (backup);
+		unlink (lock);
+		g_free (lock);
+		close (lock_fd);
+
 		return NULL;
 	}
+
+	old = rspamd_mmaped_file_open (pool, backup, old_size, stcf);
+
+	if (old == NULL) {
+		msg_warn_pool ("old file %s is invalid mmapped file, just move it",
+				backup);
+	}
+
+	/* We need to release our lock here */
+	unlink (lock);
+	close (lock_fd);
+	g_free (lock);
 
 	/* Now create new file with required size */
-	if (rspamd_mmaped_file_create (pool, filename, size, stcf) != 0) {
-		msg_err ("cannot create new file");
+	if (rspamd_mmaped_file_create (filename, size, stcf, pool) != 0) {
+		msg_err_pool ("cannot create new file");
+		rspamd_mmaped_file_close (old);
 		g_free (backup);
+
 		return NULL;
 	}
-	/* Now open new file and start copying */
-	fd = open (backup, O_RDONLY);
+
 	new = rspamd_mmaped_file_open (pool, filename, size, stcf);
 
-	if (fd == -1 || new == NULL) {
-		if (fd != -1) {
+	if (old) {
+		/* Now open new file and start copying */
+		fd = open (backup, O_RDONLY);
+		if (fd == -1 || new == NULL) {
+			if (fd != -1) {
+				close (fd);
+			}
+
+			msg_err_pool ("cannot open file: %s", strerror (errno));
+			rspamd_mmaped_file_close (old);
+			g_free (backup);
+			return NULL;
+		}
+
+
+
+		/* Now start reading blocks from old statfile */
+		if ((map =
+				mmap (NULL, old_size, PROT_READ, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+			msg_err_pool ("cannot mmap file: %s", strerror (errno));
 			close (fd);
+			rspamd_mmaped_file_close (old);
+			g_free (backup);
+			return NULL;
 		}
 
-		msg_err ("cannot open file: %s", strerror (errno));
-		g_free (backup);
-		return NULL;
-	}
+		pos = map + (sizeof (struct stat_file) - sizeof (struct stat_file_block));
 
-	/* Now start reading blocks from old statfile */
-	if ((map =
-		mmap (NULL, old_size, PROT_READ, MAP_SHARED, fd, 0)) == MAP_FAILED) {
-		msg_err ("cannot mmap file: %s", strerror (errno));
+		if (pos - map < (gssize)old_size) {
+			while ((gssize)old_size - (pos - map) >= (gssize)sizeof (struct stat_file_block)) {
+				block = (struct stat_file_block *)pos;
+				if (block->hash1 != 0 && block->value != 0) {
+					rspamd_mmaped_file_set_block_common (pool,
+							new, block->hash1,
+							block->hash2, block->value);
+				}
+				pos += sizeof (block);
+			}
+		}
+
+		header = (struct stat_file_header *)map;
+		rspamd_mmaped_file_set_revision (new, header->revision, header->rev_time);
+		nh = new->map;
+		/* Copy tokenizer configuration */
+		memcpy (nh->unused, header->unused, sizeof (header->unused));
+		nh->tokenizer_conf_len = header->tokenizer_conf_len;
+
+		munmap (map, old_size);
 		close (fd);
-		g_free (backup);
-		return NULL;
+		rspamd_mmaped_file_close_file (pool, old);
 	}
 
-	pos = map + (sizeof (struct stat_file) - sizeof (struct stat_file_block));
-	while (old_size - (pos - map) >= sizeof (struct stat_file_block)) {
-		block = (struct stat_file_block *)pos;
-		if (block->hash1 != 0 && block->value != 0) {
-			rspamd_mmaped_file_set_block_common (pool,
-				new,
-				block->hash1,
-				block->hash2,
-				block->value);
-		}
-		pos += sizeof (block);
-	}
-
-	header = (struct stat_file_header *)map;
-	rspamd_mmaped_file_set_revision (new, header->revision, header->rev_time);
-
-	munmap (map, old_size);
-	close (fd);
 	unlink (backup);
 	g_free (backup);
 
@@ -537,39 +558,48 @@ rspamd_mmaped_file_preload (rspamd_mmaped_file_t *file)
 }
 
 rspamd_mmaped_file_t *
-rspamd_mmaped_file_open (rspamd_mmaped_file_ctx * pool,
+rspamd_mmaped_file_open (rspamd_mempool_t *pool,
 		const gchar *filename, size_t size,
 		struct rspamd_statfile_config *stcf)
 {
 	struct stat st;
 	rspamd_mmaped_file_t *new_file;
-	struct rspamd_stat_tokenizer *tokenizer;
-	struct stat_file_header *header;
+	gchar *lock;
+	gint lock_fd;
 
-	if ((new_file = rspamd_mmaped_file_is_open (pool, stcf)) != NULL) {
-		return new_file;
+	lock = g_strconcat (filename, ".lock", NULL);
+	lock_fd = open (lock, O_WRONLY|O_CREAT|O_EXCL, 00600);
+
+	if (lock_fd == -1) {
+		msg_info_pool ("cannot open file %s, it is locked by another process",
+				filename);
+		return NULL;
 	}
 
+	close (lock_fd);
+	unlink (lock);
+	g_free (lock);
+
 	if (stat (filename, &st) == -1) {
-		msg_info ("cannot stat file %s, error %s, %d", filename, strerror (
+		msg_info_pool ("cannot stat file %s, error %s, %d", filename, strerror (
 				errno), errno);
 		return NULL;
 	}
 
-	if (labs (size - st.st_size) > (long)sizeof (struct stat_file) * 2
+	if (labs ((glong)size - st.st_size) > (long)sizeof (struct stat_file) * 2
 		&& size > sizeof (struct stat_file)) {
-		msg_warn ("need to reindex statfile old size: %Hz, new size: %Hz",
+		msg_warn_pool ("need to reindex statfile old size: %Hz, new size: %Hz",
 			(size_t)st.st_size, size);
 		return rspamd_mmaped_file_reindex (pool, filename, st.st_size, size, stcf);
 	}
 	else if (size < sizeof (struct stat_file)) {
-		msg_err ("requested to shrink statfile to %Hz but it is too small",
+		msg_err_pool ("requested to shrink statfile to %Hz but it is too small",
 			size);
 	}
 
 	new_file = g_slice_alloc0 (sizeof (rspamd_mmaped_file_t));
 	if ((new_file->fd = open (filename, O_RDWR)) == -1) {
-		msg_info ("cannot open file %s, error %d, %s",
+		msg_info_pool ("cannot open file %s, error %d, %s",
 			filename,
 			errno,
 			strerror (errno));
@@ -581,7 +611,7 @@ rspamd_mmaped_file_open (rspamd_mmaped_file_ctx * pool,
 		mmap (NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED,
 		new_file->fd, 0)) == MAP_FAILED) {
 		close (new_file->fd);
-		msg_info ("cannot mmap file %s, error %d, %s",
+		msg_info_pool ("cannot mmap file %s, error %d, %s",
 			filename,
 			errno,
 			strerror (errno));
@@ -593,63 +623,45 @@ rspamd_mmaped_file_open (rspamd_mmaped_file_ctx * pool,
 	rspamd_strlcpy (new_file->filename, filename, sizeof (new_file->filename));
 	new_file->len = st.st_size;
 	/* Try to lock pages in RAM */
-	if (pool->mlock_ok) {
-		if (mlock (new_file->map, new_file->len) == -1) {
-			msg_warn (
-				"mlock of statfile failed, maybe you need to increase RLIMIT_MEMLOCK limit for a process: %s",
-				strerror (errno));
-			pool->mlock_ok = FALSE;
-		}
-	}
+
 	/* Acquire lock for this operation */
-	rspamd_file_lock (new_file->fd, FALSE);
-	if (rspamd_mmaped_file_check (new_file) == -1) {
+	if (!rspamd_file_lock (new_file->fd, FALSE)) {
+		close (new_file->fd);
+		munmap (new_file->map, st.st_size);
+		msg_info_pool ("cannot lock file %s, error %d, %s",
+				filename,
+				errno,
+				strerror (errno));
+		g_slice_free1 (sizeof (*new_file), new_file);
+		return NULL;
+	}
+
+	if (rspamd_mmaped_file_check (pool, new_file) == -1) {
+		close (new_file->fd);
 		rspamd_file_unlock (new_file->fd, FALSE);
 		munmap (new_file->map, st.st_size);
 		g_slice_free1 (sizeof (*new_file), new_file);
 		return NULL;
 	}
+
 	rspamd_file_unlock (new_file->fd, FALSE);
-
 	new_file->cf = stcf;
-
+	new_file->pool = pool;
 	rspamd_mmaped_file_preload (new_file);
 
-	/* Check tokenizer compatibility */
-	header = new_file->map;
 	g_assert (stcf->clcf != NULL);
-	g_assert (stcf->clcf->tokenizer != NULL);
-	tokenizer = rspamd_stat_get_tokenizer (stcf->clcf->tokenizer->name);
-	g_assert (tokenizer != NULL);
 
-	if (!tokenizer->compatible_config (stcf->clcf->tokenizer, header->unused,
-			header->tokenizer_conf_len)) {
-		msg_err ("mmapped statfile %s is not compatible with the tokenizer "
-				"defined", new_file->filename);
-		munmap (new_file->map, st.st_size);
-		g_slice_free1 (sizeof (*new_file), new_file);
-
-		return NULL;
-	}
-
-	g_hash_table_insert (pool->files, stcf, new_file);
+	msg_debug_pool ("opened statfile %s of size %l", filename, (long)size);
 
 	return new_file;
 }
 
 gint
-rspamd_mmaped_file_close (rspamd_mmaped_file_ctx * pool,
+rspamd_mmaped_file_close_file (rspamd_mempool_t *pool,
 	rspamd_mmaped_file_t * file)
 {
-	rspamd_mmaped_file_t *pos;
-
-	if ((pos = rspamd_mmaped_file_is_open (pool, file->cf)) == NULL) {
-		msg_info ("file %s is not opened", file->filename);
-		return -1;
-	}
-
 	if (file->map) {
-		msg_info ("syncing statfile %s", file->filename);
+		msg_info_pool ("syncing statfile %s", file->filename);
 		msync (file->map, file->len, MS_ASYNC);
 		munmap (file->map, file->len);
 	}
@@ -657,16 +669,16 @@ rspamd_mmaped_file_close (rspamd_mmaped_file_ctx * pool,
 		close (file->fd);
 	}
 
-	g_hash_table_remove (pool->files, file->cf);
-
 	g_slice_free1 (sizeof (*file), file);
 
 	return 0;
 }
 
 gint
-rspamd_mmaped_file_create (rspamd_mmaped_file_ctx * pool, const gchar *filename,
-		size_t size, struct rspamd_statfile_config *stcf)
+rspamd_mmaped_file_create (const gchar *filename,
+		size_t size,
+		struct rspamd_statfile_config *stcf,
+		rspamd_mempool_t *pool)
 {
 	struct stat_file_header header = {
 		.magic = {'r', 's', 'd'},
@@ -681,26 +693,53 @@ rspamd_mmaped_file_create (rspamd_mmaped_file_ctx * pool, const gchar *filename,
 	};
 	struct stat_file_block block = { 0, 0, 0 };
 	struct rspamd_stat_tokenizer *tokenizer;
-	gint fd;
+	gint fd, lock_fd;
 	guint buflen = 0, nblocks;
-	gchar *buf = NULL;
+	gchar *buf = NULL, *lock;
+	struct stat sb;
 	gpointer tok_conf;
 	gsize tok_conf_len;
-
-	if (rspamd_mmaped_file_is_open (pool, stcf) != NULL) {
-		msg_info ("file %s is already opened", filename);
-		return 0;
-	}
+	struct timespec sleep_ts = {
+			.tv_sec = 0,
+			.tv_nsec = 1000000
+	};
 
 	if (size <
 		sizeof (struct stat_file_header) + sizeof (struct stat_file_section) +
 		sizeof (block)) {
-		msg_err ("file %s is too small to carry any statistic: %z",
+		msg_err_pool ("file %s is too small to carry any statistic: %z",
 			filename,
 			size);
 		return -1;
 	}
 
+	lock = g_strconcat (filename, ".lock", NULL);
+	lock_fd = open (lock, O_WRONLY|O_CREAT|O_EXCL, 00600);
+
+	while (lock_fd == -1) {
+		/* Wait for lock */
+		lock_fd = open (lock, O_WRONLY|O_CREAT|O_EXCL, 00600);
+		if (lock_fd != -1) {
+			if (stat (filename, &sb) != -1) {
+				/* File has been created by some other process */
+				unlink (lock);
+				close (lock_fd);
+				g_free (lock);
+
+				return 0;
+			}
+
+			/* We still need to create it */
+			goto create;
+		}
+		else {
+			nanosleep (&sleep_ts, NULL);
+		}
+	}
+
+create:
+
+	msg_debug_pool ("create statfile %s of size %l", filename, (long)size);
 	nblocks =
 		(size - sizeof (struct stat_file_header) -
 		sizeof (struct stat_file_section)) / sizeof (struct stat_file_block);
@@ -708,10 +747,14 @@ rspamd_mmaped_file_create (rspamd_mmaped_file_ctx * pool, const gchar *filename,
 
 	if ((fd =
 		open (filename, O_RDWR | O_TRUNC | O_CREAT, S_IWUSR | S_IRUSR)) == -1) {
-		msg_info ("cannot create file %s, error %d, %s",
+		msg_info_pool ("cannot create file %s, error %d, %s",
 			filename,
 			errno,
 			strerror (errno));
+		unlink (lock);
+		close (lock_fd);
+		g_free (lock);
+
 		return -1;
 	}
 
@@ -724,28 +767,34 @@ rspamd_mmaped_file_create (rspamd_mmaped_file_ctx * pool, const gchar *filename,
 	g_assert (stcf->clcf->tokenizer != NULL);
 	tokenizer = rspamd_stat_get_tokenizer (stcf->clcf->tokenizer->name);
 	g_assert (tokenizer != NULL);
-	tok_conf = tokenizer->get_config (stcf->clcf->tokenizer, &tok_conf_len);
+	tok_conf = tokenizer->get_config (pool, stcf->clcf->tokenizer, &tok_conf_len);
 	header.tokenizer_conf_len = tok_conf_len;
 	g_assert (tok_conf_len < sizeof (header.unused) - sizeof (guint64));
 	memcpy (header.unused, tok_conf, tok_conf_len);
 
 	if (write (fd, &header, sizeof (header)) == -1) {
-		msg_info ("cannot write header to file %s, error %d, %s",
+		msg_info_pool ("cannot write header to file %s, error %d, %s",
 			filename,
 			errno,
 			strerror (errno));
 		close (fd);
+		unlink (lock);
+		close (lock_fd);
+		g_free (lock);
 
 		return -1;
 	}
 
 	section.length = (guint64) nblocks;
 	if (write (fd, &section, sizeof (section)) == -1) {
-		msg_info ("cannot write section header to file %s, error %d, %s",
+		msg_info_pool ("cannot write section header to file %s, error %d, %s",
 			filename,
 			errno,
 			strerror (errno));
 		close (fd);
+		unlink (lock);
+		close (lock_fd);
+		g_free (lock);
 
 		return -1;
 	}
@@ -760,12 +809,15 @@ rspamd_mmaped_file_create (rspamd_mmaped_file_ctx * pool, const gchar *filename,
 		if (nblocks > 256) {
 			/* Just write buffer */
 			if (write (fd, buf, buflen) == -1) {
-				msg_info ("cannot write blocks buffer to file %s, error %d, %s",
+				msg_info_pool ("cannot write blocks buffer to file %s, error %d, %s",
 					filename,
 					errno,
 					strerror (errno));
 				close (fd);
 				g_free (buf);
+				unlink (lock);
+				close (lock_fd);
+				g_free (lock);
 
 				return -1;
 			}
@@ -773,7 +825,7 @@ rspamd_mmaped_file_create (rspamd_mmaped_file_ctx * pool, const gchar *filename,
 		}
 		else {
 			if (write (fd, &block, sizeof (block)) == -1) {
-				msg_info ("cannot write block to file %s, error %d, %s",
+				msg_info_pool ("cannot write block to file %s, error %d, %s",
 					filename,
 					errno,
 					strerror (errno));
@@ -781,6 +833,10 @@ rspamd_mmaped_file_create (rspamd_mmaped_file_ctx * pool, const gchar *filename,
 				if (buf) {
 					g_free (buf);
 				}
+
+				unlink (lock);
+				close (lock_fd);
+				g_free (lock);
 
 				return -1;
 			}
@@ -794,93 +850,91 @@ rspamd_mmaped_file_create (rspamd_mmaped_file_ctx * pool, const gchar *filename,
 		g_free (buf);
 	}
 
+	unlink (lock);
+	close (lock_fd);
+	g_free (lock);
+	msg_debug_pool ("created statfile %s of size %l", filename, (long)size);
+
 	return 0;
 }
 
-void
-rspamd_mmaped_file_destroy (rspamd_mmaped_file_ctx * pool)
-{
-	GHashTableIter it;
-	gpointer k, v;
-	rspamd_mmaped_file_t *f;
-
-	g_hash_table_iter_init (&it, pool->files);
-	while (g_hash_table_iter_next (&it, &k, &v)) {
-		f = (rspamd_mmaped_file_t *)v;
-		rspamd_mmaped_file_close (pool, f);
-	}
-
-	g_hash_table_destroy (pool->files);
-	rspamd_mempool_delete (pool->pool);
-}
-
 gpointer
-rspamd_mmaped_file_init (struct rspamd_stat_ctx *ctx, struct rspamd_config *cfg)
+rspamd_mmaped_file_init (struct rspamd_stat_ctx *ctx,
+		struct rspamd_config *cfg, struct rspamd_statfile *st)
 {
-	rspamd_mmaped_file_ctx *new;
-	struct rspamd_classifier_config *clf;
-	struct rspamd_statfile_config *stf;
-	GList *cur, *curst;
+	struct rspamd_statfile_config *stf = st->stcf;
+	rspamd_mmaped_file_t *mf;
 	const ucl_object_t *filenameo, *sizeo;
 	const gchar *filename;
 	gsize size;
 
-	new = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (rspamd_mmaped_file_ctx));
-	new->lock = rspamd_mempool_get_mutex (new->pool);
-	new->mlock_ok = cfg->mlock_statfile_pool;
-	new->files = g_hash_table_new (g_direct_hash, g_direct_equal);
+	filenameo = ucl_object_lookup (stf->opts, "filename");
 
-	/* Iterate over all classifiers and load matching statfiles */
-	cur = cfg->classifiers;
+	if (filenameo == NULL || ucl_object_type (filenameo) != UCL_STRING) {
+		filenameo = ucl_object_lookup (stf->opts, "path");
 
-	while (cur) {
-		clf = cur->data;
-
-		curst = clf->statfiles;
-		while (curst) {
-			stf = curst->data;
-
-			/*
-			 * By default, all statfiles are treated as mmaped files
-			 */
-			if (stf->backend == NULL ||
-					strcmp (stf->backend, MMAPED_BACKEND_TYPE)) {
-				/*
-				 * Check configuration sanity
-				 */
-				filenameo = ucl_object_find_key (stf->opts, "filename");
-				if (filenameo == NULL || ucl_object_type (filenameo) != UCL_STRING) {
-					filenameo = ucl_object_find_key (stf->opts, "path");
-					if (filenameo == NULL || ucl_object_type (filenameo) != UCL_STRING) {
-						msg_err ("statfile %s has no filename defined", stf->symbol);
-						curst = curst->next;
-						continue;
-					}
-				}
-
-				filename = ucl_object_tostring (filenameo);
-
-				sizeo = ucl_object_find_key (stf->opts, "size");
-				if (sizeo == NULL || ucl_object_type (sizeo) != UCL_INT) {
-					msg_err ("statfile %s has no size defined", stf->symbol);
-					curst = curst->next;
-					continue;
-				}
-
-				size = ucl_object_toint (sizeo);
-
-				rspamd_mmaped_file_open (new, filename, size, stf);
-
-				ctx->statfiles ++;
-			}
-
-			curst = curst->next;
+		if (filenameo == NULL || ucl_object_type (filenameo) != UCL_STRING) {
+			msg_err_config ("statfile %s has no filename defined", stf->symbol);
+			return NULL;
 		}
-
-		cur = g_list_next (cur);
 	}
 
-	return (gpointer)new;
+	filename = ucl_object_tostring (filenameo);
+
+	sizeo = ucl_object_lookup (stf->opts, "size");
+
+	if (sizeo == NULL || ucl_object_type (sizeo) != UCL_INT) {
+		msg_err_config ("statfile %s has no size defined", stf->symbol);
+		return NULL;
+	}
+
+	size = ucl_object_toint (sizeo);
+	mf = rspamd_mmaped_file_open (cfg->cfg_pool, filename, size, stf);
+
+	if (mf != NULL) {
+		mf->pool = cfg->cfg_pool;
+	} else {
+		/* Create file here */
+
+		filenameo = ucl_object_find_key (stf->opts, "filename");
+		if (filenameo == NULL || ucl_object_type (filenameo) != UCL_STRING) {
+			filenameo = ucl_object_find_key (stf->opts, "path");
+			if (filenameo == NULL || ucl_object_type (filenameo) != UCL_STRING) {
+				msg_err_config ("statfile %s has no filename defined", stf->symbol);
+				return NULL;
+			}
+		}
+
+		filename = ucl_object_tostring (filenameo);
+
+		sizeo = ucl_object_find_key (stf->opts, "size");
+		if (sizeo == NULL || ucl_object_type (sizeo) != UCL_INT) {
+			msg_err_config ("statfile %s has no size defined", stf->symbol);
+			return NULL;
+		}
+
+		size = ucl_object_toint (sizeo);
+
+		if (rspamd_mmaped_file_create (filename, size, stf, cfg->cfg_pool) != 0) {
+			msg_err_config ("cannot create new file");
+		}
+
+		mf = rspamd_mmaped_file_open (cfg->cfg_pool, filename, size, stf);
+	}
+
+	return (gpointer)mf;
+}
+
+void
+rspamd_mmaped_file_close (gpointer p)
+{
+	rspamd_mmaped_file_t *mf = p;
+
+
+	if (mf) {
+		rspamd_mmaped_file_close_file (mf->pool, mf);
+	}
+
 }
 
 gpointer
@@ -889,114 +943,67 @@ rspamd_mmaped_file_runtime (struct rspamd_task *task,
 		gboolean learn,
 		gpointer p)
 {
-	rspamd_mmaped_file_ctx *ctx = (rspamd_mmaped_file_ctx *)p;
-	rspamd_mmaped_file_t *mf;
-	const ucl_object_t *filenameo, *sizeo;
-	const gchar *filename;
-	gsize size;
-
-	g_assert (ctx != NULL);
-
-	mf = rspamd_mmaped_file_is_open (ctx, stcf);
-
-	if (mf == NULL) {
-		/* Create file here */
-
-		filenameo = ucl_object_find_key (stcf->opts, "filename");
-		if (filenameo == NULL || ucl_object_type (filenameo) != UCL_STRING) {
-			filenameo = ucl_object_find_key (stcf->opts, "path");
-			if (filenameo == NULL || ucl_object_type (filenameo) != UCL_STRING) {
-				msg_err ("statfile %s has no filename defined", stcf->symbol);
-				return NULL;
-			}
-		}
-
-		filename = ucl_object_tostring (filenameo);
-
-		sizeo = ucl_object_find_key (stcf->opts, "size");
-		if (sizeo == NULL || ucl_object_type (sizeo) != UCL_INT) {
-			msg_err ("statfile %s has no size defined", stcf->symbol);
-			return NULL;
-		}
-
-		size = ucl_object_toint (sizeo);
-
-		if (learn) {
-			rspamd_mmaped_file_create (ctx, filename, size, stcf);
-		}
-
-		mf = rspamd_mmaped_file_open (ctx, filename, size, stcf);
-	}
+	rspamd_mmaped_file_t *mf = p;
 
 	return (gpointer)mf;
 }
 
 gboolean
-rspamd_mmaped_file_process_token (rspamd_token_t *tok,
-		struct rspamd_token_result *res,
+rspamd_mmaped_file_process_tokens (struct rspamd_task *task, GPtrArray *tokens,
+		gint id,
 		gpointer p)
 {
-	rspamd_mmaped_file_ctx *ctx = (rspamd_mmaped_file_ctx *)p;
-	rspamd_mmaped_file_t *mf;
+	rspamd_mmaped_file_t *mf = p;
 	guint32 h1, h2;
+	rspamd_token_t *tok;
+	guint i;
 
-	g_assert (res != NULL);
+	g_assert (tokens != NULL);
 	g_assert (p != NULL);
-	g_assert (res->st_runtime != NULL);
-	g_assert (tok != NULL);
-	g_assert (tok->datalen >= sizeof (guint32) * 2);
 
-	mf = (rspamd_mmaped_file_t *)res->st_runtime->backend_runtime;
-
-	if (mf == NULL) {
-		/* Statfile is does not exist, so all values are zero */
-		res->value = 0.0;
-		return FALSE;
+	for (i = 0; i < tokens->len; i++) {
+		tok = g_ptr_array_index (tokens, i);
+		memcpy (&h1, (guchar *)&tok->data, sizeof (h1));
+		memcpy (&h2, ((guchar *)&tok->data) + sizeof (h1), sizeof (h2));
+		tok->values[id] = rspamd_mmaped_file_get_block (mf, h1, h2);
 	}
 
-	memcpy (&h1, tok->data, sizeof (h1));
-	memcpy (&h2, tok->data + sizeof (h1), sizeof (h2));
-	res->value = rspamd_mmaped_file_get_block (ctx, mf, h1, h2);
-
-	if (res->value > 0.0) {
-		return TRUE;
+	if (mf->cf->is_spam) {
+		task->flags |= RSPAMD_TASK_FLAG_HAS_SPAM_TOKENS;
+	}
+	else {
+		task->flags |= RSPAMD_TASK_FLAG_HAS_HAM_TOKENS;
 	}
 
-	return FALSE;
+	return TRUE;
 }
 
 gboolean
-rspamd_mmaped_file_learn_token (rspamd_token_t *tok,
-		struct rspamd_token_result *res,
+rspamd_mmaped_file_learn_tokens (struct rspamd_task *task, GPtrArray *tokens,
+		gint id,
 		gpointer p)
 {
-	rspamd_mmaped_file_ctx *ctx = (rspamd_mmaped_file_ctx *)p;
-	rspamd_mmaped_file_t *mf;
+	rspamd_mmaped_file_t *mf = p;
 	guint32 h1, h2;
+	rspamd_token_t *tok;
+	guint i;
 
-	g_assert (res != NULL);
+	g_assert (tokens != NULL);
 	g_assert (p != NULL);
-	g_assert (res->st_runtime != NULL);
-	g_assert (tok != NULL);
-	g_assert (tok->datalen >= sizeof (guint32) * 2);
 
-	mf = (rspamd_mmaped_file_t *)res->st_runtime->backend_runtime;
-
-	if (mf == NULL) {
-		/* Statfile is does not exist, so all values are zero */
-		res->value = 0.0;
-		return FALSE;
+	for (i = 0; i < tokens->len; i++) {
+		tok = g_ptr_array_index (tokens, i);
+		memcpy (&h1, (guchar *)&tok->data, sizeof (h1));
+		memcpy (&h2, ((guchar *)&tok->data) + sizeof (h1), sizeof (h2));
+		rspamd_mmaped_file_set_block (task->task_pool, mf, h1, h2,
+				tok->values[id]);
 	}
-
-	memcpy (&h1, tok->data, sizeof (h1));
-	memcpy (&h2, tok->data + sizeof (h1), sizeof (h2));
-	rspamd_mmaped_file_set_block (ctx, mf, h1, h2, res->value);
 
 	return TRUE;
 }
 
 gulong
-rspamd_mmaped_file_total_learns (struct rspamd_statfile_runtime *runtime,
+rspamd_mmaped_file_total_learns (struct rspamd_task *task, gpointer runtime,
 		gpointer ctx)
 {
 	rspamd_mmaped_file_t *mf = (rspamd_mmaped_file_t *)runtime;
@@ -1011,7 +1018,7 @@ rspamd_mmaped_file_total_learns (struct rspamd_statfile_runtime *runtime,
 }
 
 gulong
-rspamd_mmaped_file_inc_learns (struct rspamd_statfile_runtime *runtime,
+rspamd_mmaped_file_inc_learns (struct rspamd_task *task, gpointer runtime,
 		gpointer ctx)
 {
 	rspamd_mmaped_file_t *mf = (rspamd_mmaped_file_t *)runtime;
@@ -1027,7 +1034,7 @@ rspamd_mmaped_file_inc_learns (struct rspamd_statfile_runtime *runtime,
 }
 
 gulong
-rspamd_mmaped_file_dec_learns (struct rspamd_statfile_runtime *runtime,
+rspamd_mmaped_file_dec_learns (struct rspamd_task *task, gpointer runtime,
 		gpointer ctx)
 {
 	rspamd_mmaped_file_t *mf = (rspamd_mmaped_file_t *)runtime;
@@ -1044,7 +1051,7 @@ rspamd_mmaped_file_dec_learns (struct rspamd_statfile_runtime *runtime,
 
 
 ucl_object_t *
-rspamd_mmaped_file_get_stat (struct rspamd_statfile_runtime *runtime,
+rspamd_mmaped_file_get_stat (gpointer runtime,
 		gpointer ctx)
 {
 	ucl_object_t *res = NULL;
@@ -1064,6 +1071,12 @@ rspamd_mmaped_file_get_stat (struct rspamd_statfile_runtime *runtime,
 				rspamd_mmaped_file_get_used (mf)), "used", 0, false);
 		ucl_object_insert_key (res, ucl_object_fromstring (mf->cf->symbol),
 				"symbol", 0, false);
+		ucl_object_insert_key (res, ucl_object_fromstring ("mmap"),
+				"type", 0, false);
+		ucl_object_insert_key (res, ucl_object_fromint (0),
+				"languages", 0, false);
+		ucl_object_insert_key (res, ucl_object_fromint (0),
+				"users", 0, false);
 
 		if (mf->cf->label) {
 			ucl_object_insert_key (res, ucl_object_fromstring (mf->cf->label),
@@ -1075,7 +1088,7 @@ rspamd_mmaped_file_get_stat (struct rspamd_statfile_runtime *runtime,
 }
 
 void
-rspamd_mmaped_file_finalize_learn (struct rspamd_statfile_runtime *runtime,
+rspamd_mmaped_file_finalize_learn (struct rspamd_task *task, gpointer runtime,
 		gpointer ctx)
 {
 	rspamd_mmaped_file_t *mf = (rspamd_mmaped_file_t *)runtime;
@@ -1083,4 +1096,27 @@ rspamd_mmaped_file_finalize_learn (struct rspamd_statfile_runtime *runtime,
 	if (mf != NULL) {
 		msync (mf->map, mf->len, MS_INVALIDATE | MS_ASYNC);
 	}
+}
+
+void
+rspamd_mmaped_file_finalize_process (struct rspamd_task *task, gpointer runtime,
+		gpointer ctx)
+{
+}
+
+gpointer
+rspamd_mmaped_file_load_tokenizer_config (gpointer runtime,
+		gsize *len)
+{
+	rspamd_mmaped_file_t *mf = runtime;
+	struct stat_file_header *header;
+
+	g_assert (mf != NULL);
+	header = mf->map;
+
+	if (len) {
+		*len = header->tokenizer_conf_len;
+	}
+
+	return header->unused;
 }

@@ -1,97 +1,109 @@
 --[[
 Copyright (c) 2011-2015, Vsevolod Stakhov <vsevolod@highsecure.ru>
-All rights reserved.
 
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-1. Redistributions of source code must retain the above copyright notice, this
-list of conditions and the following disclaimer.
+    http://www.apache.org/licenses/LICENSE-2.0
 
-2. Redistributions in binary form must reproduce the above copyright notice,
-this list of conditions and the following disclaimer in the documentation
-and/or other materials provided with the distribution.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 ]]--
 
 -- Plugin for comparing smtp dialog recipients and sender with recipients and sender
 -- in mime headers
 
-local logger = require "rspamd_logger"
+if confighelp then
+  return
+end
+
 local symbol_rcpt = 'FORGED_RECIPIENTS'
 local symbol_sender = 'FORGED_SENDER'
 
-local function check_forged_headers(task)
-	local smtp_rcpt = task:get_recipients(1)
-	local res = false
-	
-	if smtp_rcpt then
-		local mime_rcpt = task:get_recipients(2)
-		local count = 0
-		if mime_rcpt then 
-			count = table.maxn(mime_rcpt)
-		end
-		if count < table.maxn(smtp_rcpt) then
-			task:insert_result(symbol_rcpt, 1)
-		else
-			-- Find pair for each smtp recipient recipient in To or Cc headers
-			for _,sr in ipairs(smtp_rcpt) do
-				if mime_rcpt then
-					for _,mr in ipairs(mime_rcpt) do
-						if string.lower(mr['addr']) == string.lower(sr['addr']) then
-							res = true
-							break
-						end
-					end
-				end
-				if not res then
-					task:insert_result(symbol_rcpt, 1)
-					break
-				end
-			end
-		end
-	end
-	-- Check sender
-	local smtp_from = task:get_from(1)
-	if smtp_from and smtp_from[1] and smtp_from[1]['addr'] ~= '' then
-		local mime_from = task:get_from(2)
-		if not mime_from or not mime_from[1] or 
-		  not (string.lower(mime_from[1]['addr']) == string.lower(smtp_from[1]['addr'])) then
-			task:insert_result(symbol_sender, 1)
-		end
-	end
-end
+local E = {}
 
--- Registration
-if type(rspamd_config.get_api_version) ~= 'nil' then
-	if rspamd_config:get_api_version() >= 1 then
-		rspamd_config:register_module_option('forged_recipients', 'symbol_rcpt', 'string')
-		rspamd_config:register_module_option('forged_recipients', 'symbol_sender', 'string')
-	end
+local function check_forged_headers(task)
+  local auser = task:get_user()
+  local smtp_rcpt = task:get_recipients(1)
+  local smtp_from = task:get_from(1)
+  local res
+  local score = 1.0
+
+  if not smtp_rcpt then return end
+  if #smtp_rcpt == 0 then return end
+  local mime_rcpt = task:get_recipients(2)
+  if not mime_rcpt then
+    return
+  elseif #mime_rcpt == 0 then
+    task:insert_result(symbol_rcpt, score)
+    return
+  end
+  -- Find pair for each smtp recipient recipient in To or Cc headers
+  for _,sr in ipairs(smtp_rcpt) do
+    res = false
+    for _,mr in ipairs(mime_rcpt) do
+      if mr['addr'] and sr['addr'] and
+        string.lower(mr['addr']) == string.lower(sr['addr']) then
+        res = true
+        break
+      elseif auser and auser == sr['addr'] then
+        -- allow user to BCC themselves
+        res = true
+        break
+      elseif ((smtp_from or E)[1] or E).addr and
+          smtp_from[1]['addr'] == sr['addr'] then
+        -- allow sender to BCC themselves
+        res = true
+        break
+      elseif mr['user'] and sr['user'] and
+        string.lower(mr['user']) == string.lower(sr['user']) then
+        -- If we have the same username but for another domain, then
+        -- lower the overall score
+        score = score / 2
+      end
+    end
+    if not res then
+      task:insert_result(symbol_rcpt, score)
+      break
+    end
+  end
+  -- Check sender
+  if smtp_from and smtp_from[1] and smtp_from[1]['addr'] ~= '' then
+    local mime_from = task:get_from(2)
+    if not mime_from or not mime_from[1] or
+      not (string.lower(mime_from[1]['addr']) == string.lower(smtp_from[1]['addr'])) then
+      task:insert_result(symbol_sender, 1)
+    end
+  end
 end
 
 -- Configuration
 local opts =  rspamd_config:get_all_opt('forged_recipients')
 if opts then
-	if opts['symbol_rcpt'] or opts['symbol_sender'] then
-		if opts['symbol_rcpt'] then
-			symbol_rcpt = opts['symbol_rcpt']
-			rspamd_config:register_virtual_symbol(symbol_rcpt, 1.0, check_forged_headers)
-		end
-		if opts['symbol_sender'] then
-			symbol_sender = opts['symbol_sender']
-			rspamd_config:register_virtual_symbol(symbol_sender, 1.0)
-		end
-		rspamd_config:register_callback_symbol('FORGED_RECIPIENTS', 1.0, check_forged_headers)
-	end
+  if opts['symbol_rcpt'] or opts['symbol_sender'] then
+    local id = rspamd_config:register_symbol({
+      callback = check_forged_headers,
+      type = 'callback',
+    })
+    if opts['symbol_rcpt'] then
+      symbol_rcpt = opts['symbol_rcpt']
+      rspamd_config:register_symbol({
+        name = symbol_rcpt,
+        type = 'virtual',
+        parent = id,
+      })
+    end
+    if opts['symbol_sender'] then
+      symbol_sender = opts['symbol_sender']
+       rspamd_config:register_symbol({
+        name = symbol_sender,
+        type = 'virtual',
+        parent = id,
+      })
+    end
+  end
 end

@@ -1,6 +1,12 @@
 #include "config.h"
 #include "mem_pool.h"
 #include "tests.h"
+#include "unix-std.h"
+#include <math.h>
+
+#ifdef HAVE_SYS_WAIT_H
+#include <sys/wait.h>
+#endif
 
 #define TEST_BUF "test bufffer"
 #define TEST2_BUF "test bufffertest bufffer"
@@ -14,7 +20,7 @@ rspamd_mem_pool_test_func ()
 	pid_t pid;
 	int ret;
 
-	pool = rspamd_mempool_new (sizeof (TEST_BUF));
+	pool = rspamd_mempool_new (sizeof (TEST_BUF), NULL);
 	tmp = rspamd_mempool_alloc (pool, sizeof (TEST_BUF));
 	tmp2 = rspamd_mempool_alloc (pool, sizeof (TEST_BUF) * 2);
 	tmp3 = rspamd_mempool_alloc_shared (pool, sizeof (TEST_BUF));
@@ -26,20 +32,6 @@ rspamd_mem_pool_test_func ()
 	g_assert (strncmp (tmp, TEST_BUF, sizeof (TEST_BUF)) == 0);
 	g_assert (strncmp (tmp2, TEST2_BUF, sizeof (TEST2_BUF)) == 0);
 	g_assert (strncmp (tmp3, TEST_BUF, sizeof (TEST_BUF)) == 0);
-	rspamd_mempool_lock_shared (pool, tmp3);
-	if ((pid = fork ()) == 0) {
-		rspamd_mempool_lock_shared (pool, tmp3);
-		g_assert (*tmp3 == 's');
-		*tmp3 = 't';
-		rspamd_mempool_unlock_shared (pool, tmp3);
-		exit (EXIT_SUCCESS);
-	}
-	else {
-		*tmp3 = 's';
-		rspamd_mempool_unlock_shared (pool, tmp3);
-	}
-	wait (&ret);
-	g_assert (*tmp3 == 't');
 	
 	rspamd_mempool_delete (pool);
 	rspamd_mempool_stat (&st);

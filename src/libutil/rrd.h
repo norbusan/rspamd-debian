@@ -1,27 +1,18 @@
-/* Copyright (c) 2010-2012, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
-
 #ifndef RRD_H_
 #define RRD_H_
 
@@ -56,6 +47,7 @@ struct rrd_file_head {
 };
 
 enum rrd_dst_type {
+	RRD_DST_INVALID = -1,
 	RRD_DST_COUNTER = 0,  /* data source types available */
 	RRD_DST_ABSOLUTE,
 	RRD_DST_GAUGE,
@@ -87,29 +79,11 @@ struct rrd_ds_def {
 /* RRA definition */
 
 enum rrd_cf_type {
+	RRD_CF_INVALID = -1,
 	RRD_CF_AVERAGE = 0,    /* data consolidation functions */
 	RRD_CF_MINIMUM,
 	RRD_CF_MAXIMUM,
 	RRD_CF_LAST,
-	RRD_CF_HWPREDICT,
-	/* An array of predictions using the seasonal
-	 * Holt-Winters algorithm. Requires an RRA of type
-	 * CF_SEASONAL for this data source. */
-	RRD_CF_SEASONAL,
-	/* An array of seasonal effects. Requires an RRA of
-	 * type CF_HWPREDICT for this data source. */
-	RRD_CF_DEVPREDICT,
-	/* An array of deviation predictions based upon
-	 * smoothed seasonal deviations. Requires an RRA of
-	 * type CF_DEVSEASONAL for this data source. */
-	RRD_CF_DEVSEASONAL,
-	/* An array of smoothed seasonal deviations. Requires
-	 * an RRA of type CF_HWPREDICT for this data source.
-	 * */
-	RRD_CF_FAILURES,
-	/* HWPREDICT that follows a moving baseline */
-	RRD_CF_MHWPREDICT
-	/* new entries must come last !!! */
 };
 
 
@@ -119,50 +93,6 @@ enum rrd_rra_param {
 	RRA_cdp_xff_val = 0,  /* what part of the consolidated
 	                       * datapoint must be known, to produce a
 	                       * valid entry in the rra */
-	/* CF_HWPREDICT: */
-	RRA_hw_alpha = 1,
-	/* exponential smoothing parameter for the intercept in
-	 * the Holt-Winters prediction algorithm. */
-	RRA_hw_beta = 2,
-	/* exponential smoothing parameter for the slope in
-	 * the Holt-Winters prediction algorithm. */
-
-	RRA_dependent_rra_idx = 3,
-	/* For CF_HWPREDICT: index of the RRA with the seasonal
-	 * effects of the Holt-Winters algorithm (of type
-	 * CF_SEASONAL).
-	 * For CF_DEVPREDICT: index of the RRA with the seasonal
-	 * deviation predictions (of type CF_DEVSEASONAL).
-	 * For CF_SEASONAL: index of the RRA with the Holt-Winters
-	 * intercept and slope coefficient (of type CF_HWPREDICT).
-	 * For CF_DEVSEASONAL: index of the RRA with the
-	 * Holt-Winters prediction (of type CF_HWPREDICT).
-	 * For CF_FAILURES: index of the CF_DEVSEASONAL array.
-	 * */
-
-	/* CF_SEASONAL and CF_DEVSEASONAL: */
-	RRA_seasonal_gamma = 1,
-	/* exponential smoothing parameter for seasonal effects. */
-
-	RRA_seasonal_smoothing_window = 2,
-	/* fraction of the season to include in the running average
-	 * smoother */
-
-	/* RRA_dependent_rra_idx = 3, */
-
-	RRA_seasonal_smooth_idx = 4,
-	/* an integer between 0 and row_count - 1 which
-	 * is index in the seasonal cycle for applying
-	 * the period smoother. */
-
-	/* CF_FAILURES: */
-	RRA_delta_pos = 1,  /* confidence bound scaling parameters */
-	RRA_delta_neg = 2,
-	/* RRA_dependent_rra_idx = 3, */
-	RRA_window_len = 4,
-	RRA_failure_threshold = 5
-	    /* For CF_FAILURES, number of violations within the last
-	     * window required to mark a failure. */
 };
 
 
@@ -273,6 +203,8 @@ struct rspamd_rrd_file {
 	guint8 * map; /* mmapped area */
 	gsize size; /* its size */
 	gboolean finalized;
+	gchar *id;
+	gint fd;
 };
 
 
@@ -295,11 +227,12 @@ struct rspamd_rrd_file * rspamd_rrd_open (const gchar *filename, GError **err);
  * @param err error pointer
  * @return TRUE if file has been created
  */
-struct rspamd_rrd_file * rspamd_rrd_create (const gchar *filename,
-	gulong ds_count,
-	gulong rra_count,
-	gulong pdp_step,
-	GError **err);
+struct rspamd_rrd_file *rspamd_rrd_create (const gchar *filename,
+		gulong ds_count,
+		gulong rra_count,
+		gulong pdp_step,
+		gdouble initial_ticks,
+		GError **err);
 
 /**
  * Add data sources to rrd file
@@ -338,9 +271,10 @@ gboolean rspamd_rrd_finalize (struct rspamd_rrd_file *file, GError **err);
  * @param err error pointer
  * @return TRUE if a row has been added
  */
-gboolean rspamd_rrd_add_record (struct rspamd_rrd_file * file,
-	GArray *points,
-	GError **err);
+gboolean rspamd_rrd_add_record (struct rspamd_rrd_file *file,
+		GArray *points,
+		gdouble ticks,
+		GError **err);
 
 /**
  * Close rrd file
@@ -384,6 +318,34 @@ void rrd_make_default_rra (const gchar *cf_name,
  * Create default DS
  */
 void rrd_make_default_ds (const gchar *name,
-	gulong pdp_step,
-	struct rrd_ds_def *ds);
+		const gchar *type,
+		gulong pdp_step,
+		struct rrd_ds_def *ds);
+
+/**
+ * Open or create the default rspamd rrd file
+ */
+struct rspamd_rrd_file *rspamd_rrd_file_default (const gchar *path,
+		GError **err);
+
+/**
+ * Returned by querying rrd database
+ */
+struct rspamd_rrd_query_result {
+	gulong rra_rows;
+	gulong pdp_per_cdp;
+	gulong ds_count;
+	gdouble last_update;
+	gulong cur_row;
+	const gdouble *data;
+};
+
+/**
+ * Return RRA data
+ * @param file rrd file
+ * @param rra_num number of rra to return data for
+ * @return query result structure, that should be freed (using g_slice_free1) after usage
+ */
+struct rspamd_rrd_query_result * rspamd_rrd_query (struct rspamd_rrd_file *file,
+	gulong rra_num);
 #endif /* RRD_H_ */

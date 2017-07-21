@@ -4,11 +4,12 @@
 %define rspamd_logdir    %{_localstatedir}/log/rspamd
 %define rspamd_confdir   %{_sysconfdir}/rspamd
 %define rspamd_pluginsdir   %{_datadir}/rspamd
+%define rspamd_rulesdir   %{_datadir}/rspamd/rules
 %define rspamd_wwwdir   %{_datadir}/rspamd/www
 
 Name:           rspamd
-Version:        0.9.9
-Release:        1
+Version:        1.1.0
+Release: 1
 Summary:        Rapid spam filtering system
 Group:          System Environment/Daemons
 
@@ -21,11 +22,12 @@ License:        BSD2c
 %endif
 URL:            https://rspamd.com
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}
-BuildRequires:  glib2-devel,libevent-devel,openssl-devel,pcre-devel,perl,luajit-devel,hiredis-devel
+BuildRequires:  glib2-devel,libevent-devel,openssl-devel,pcre-devel
+BuildRequires:  cmake,gmime-devel,file-devel,ragel
 %if 0%{?el6}
-BuildRequires:  cmake28,gmime24-devel
+BuildRequires:	perl
 %else
-BuildRequires:  cmake,gmime-devel
+BuildRequires:	perl-Digest-MD5
 %endif
 %if 0%{?suse_version} || 0%{?el7} || 0%{?fedora}
 BuildRequires:  systemd
@@ -41,18 +43,22 @@ Requires(pre):  shadow
 BuildRequires:  sqlite-devel
 Requires(pre):  shadow-utils
 %endif
-Requires:       lua
-%if 0%{?el6}
+%if 0%{?fedora_version} >= 22 || 0%{?suse_version} >= 1320
+BuildRequires:  luajit-devel
+%else
+BuildRequires:  lua-devel
+%endif
 Requires:       logrotate
+%if 0%{?el6}
 Requires(post): chkconfig
 Requires(preun): chkconfig, initscripts
 Requires(postun): initscripts
 Source1:        %{name}.init
-Source2:        %{name}.logrotate
 %endif
+Source2:        %{name}.logrotate
 
 Source0:        https://rspamd.com/downloads/%{name}-%{version}.tar.xz
-Patch0:         %{name}.service.patch
+Source3:	80-rspamd.preset
 
 %description
 Rspamd is a rapid, modular and lightweight spam filter. It is designed to work
@@ -61,15 +67,8 @@ lua.
 
 %prep
 %setup -q
-%if 0%{?el7}
-%patch0 -p0
-%endif
 
 %build
-%if 0%{?el6}
-%define __cmake /usr/bin/env cmake28
-%endif # el6
-
 %{__cmake} \
 		-DCMAKE_C_OPT_FLAGS="%{optflags}" \
         -DCMAKE_INSTALL_PREFIX=%{_prefix} \
@@ -86,6 +85,12 @@ lua.
 %if 0%{?suse_version}
         -DCMAKE_SKIP_INSTALL_RPATH=ON \
 %endif
+%if 0%{?fedora_version} >= 22 || 0%{?suse_version} >= 1320
+		-DENABLE_LUAJIT=ON \
+%else
+		-DENABLE_LUAJIT=OFF \
+%endif
+		-DENABLE_HIREDIS=ON \
         -DLOGDIR=%{_localstatedir}/log/rspamd \
         -DEXAMPLESDIR=%{_datadir}/examples/rspamd \
         -DPLUGINSDIR=%{_datadir}/rspamd \
@@ -100,15 +105,21 @@ lua.
 
 %install
 %{__make} install DESTDIR=%{buildroot} INSTALLDIRS=vendor
+%{__install} -p -D -m 0644 %{SOURCE3} %{buildroot}%{_presetdir}/80-rspamd.preset
 
 %if 0%{?el6}
 %{__install} -p -D -m 0755 %{SOURCE1} %{buildroot}%{_initrddir}/%{name}
 %{__install} -d -p -m 0755 %{buildroot}%{_localstatedir}/run/rspamd
 %{__install} -p -D -m 0644 %{SOURCE2} %{buildroot}%{_sysconfdir}/logrotate.d/%{name}
 %{__install} -d -p -m 0755 %{buildroot}%{rspamd_logdir}
+%else
+%{__install} -p -D -m 0644 %{SOURCE2} %{buildroot}%{_sysconfdir}/logrotate.d/%{name}
+%{__install} -d -p -m 0755 %{buildroot}%{rspamd_logdir}
 %endif
 
 %{__install} -d -p -m 0755 %{buildroot}%{rspamd_home}
+%{__install} -p -D -d -m 0755 %{buildroot}%{_sysconfdir}/%{name}/local.d/
+%{__install} -p -D -d -m 0755 %{buildroot}%{_sysconfdir}/%{name}/override.d/
 
 %clean
 rm -rf %{buildroot}
@@ -119,7 +130,6 @@ rm -rf %{buildroot}
 
 %if 0%{?suse_version}
 %service_add_pre %{name}.service
-%service_add_pre %{name}.socket
 %endif
 
 %post
@@ -127,24 +137,24 @@ rm -rf %{buildroot}
 %{__chown} -R %{rspamd_user}:%{rspamd_group} %{rspamd_home}
 %if 0%{?suse_version}
 %service_add_post %{name}.service
-%service_add_post %{name}.socket
 %endif
 %if 0%{?fedora} || 0%{?el7}
-%systemd_post %{name}.service
-%systemd_post %{name}.socket
+#Macro is not used as we want to do this on upgrade
+#%systemd_post %{name}.service
+systemctl --no-reload preset %{name}.service >/dev/null 2>&1 || :
 %endif
 %if 0%{?el6}
 /sbin/chkconfig --add %{name}
+%else
+%{__chown} %{rspamd_user}:%{rspamd_group} %{buildroot}%{rspamd_logdir}
 %endif
 
 %preun
 %if 0%{?suse_version}
 %service_del_preun %{name}.service
-%service_del_preun %{name}.socket
 %endif
 %if 0%{?fedora} || 0%{?el7}
 %systemd_preun %{name}.service
-%systemd_preun %{name}.socket
 %endif
 %if 0%{?el6}
 if [ $1 = 0 ]; then
@@ -156,11 +166,9 @@ fi
 %postun
 %if 0%{?suse_version}
 %service_del_postun %{name}.service
-%service_del_postun %{name}.socket
 %endif
 %if 0%{?fedora} || 0%{?el7}
 %systemd_postun_with_restart %{name}.service
-%systemd_postun %{name}.socket
 %endif
 %if 0%{?el6}
 if [ $1 -ge 1 ]; then
@@ -173,80 +181,63 @@ fi
 %defattr(-,root,root,-)
 %if 0%{?suse_version} || 0%{?fedora} || 0%{?el7}
 %{_unitdir}/%{name}.service
-%{_unitdir}/%{name}.socket
+%{_presetdir}/80-rspamd.preset
 %endif
 %if 0%{?el6}
 %{_initrddir}/%{name}
 %dir %{_localstatedir}/run/rspamd
 %endif
+%config(noreplace) %{_sysconfdir}/logrotate.d/%{name}
+%dir %{rspamd_logdir}
 %{_mandir}/man8/%{name}.*
 %{_mandir}/man1/rspamc.*
+%{_mandir}/man1/rspamadm.*
 %{_bindir}/rspamd
+%{_bindir}/rspamd_stats
 %{_bindir}/rspamc
+%{_bindir}/rspamadm
 %config(noreplace) %{rspamd_confdir}/%{name}.conf
-%config(noreplace) %{rspamd_confdir}/%{name}.sysvinit.conf
 %config(noreplace) %{rspamd_confdir}/composites.conf
 %config(noreplace) %{rspamd_confdir}/metrics.conf
+%config(noreplace) %{rspamd_confdir}/mime_types.inc
 %config(noreplace) %{rspamd_confdir}/modules.conf
 %config(noreplace) %{rspamd_confdir}/statistic.conf
 %config(noreplace) %{rspamd_confdir}/common.conf
 %config(noreplace) %{rspamd_confdir}/logging.inc
 %config(noreplace) %{rspamd_confdir}/options.inc
+%config(noreplace) %{rspamd_confdir}/redirectors.inc
 %config(noreplace) %{rspamd_confdir}/worker-controller.inc
+%config(noreplace) %{rspamd_confdir}/worker-fuzzy.inc
 %config(noreplace) %{rspamd_confdir}/worker-normal.inc
-%if 0%{?el6}
-%config(noreplace) %{_sysconfdir}/logrotate.d/%{name}
-%endif
-%if 0%{?el6}
-%dir %{rspamd_logdir}
-%endif
+%config(noreplace) %{rspamd_confdir}/modules.d/*
 %attr(-, _rspamd, _rspamd) %dir %{rspamd_home}
-%dir %{rspamd_confdir}/lua/regexp
-%dir %{rspamd_confdir}/lua
+%dir %{rspamd_rulesdir}/regexp
+%dir %{rspamd_rulesdir}
 %dir %{rspamd_confdir}
+%dir %{rspamd_confdir}/modules.d
+%dir %{rspamd_confdir}/local.d
+%dir %{rspamd_confdir}/override.d
 %dir %{rspamd_pluginsdir}/lua
 %dir %{rspamd_pluginsdir}
 %dir %{rspamd_wwwdir}
 %dir %{_libdir}/rspamd
 %config(noreplace) %{rspamd_confdir}/2tld.inc
 %config(noreplace) %{rspamd_confdir}/surbl-whitelist.inc
-%{rspamd_pluginsdir}/lua/forged_recipients.lua
-%{rspamd_pluginsdir}/lua/maillist.lua
-%{rspamd_pluginsdir}/lua/multimap.lua
-%{rspamd_pluginsdir}/lua/once_received.lua
-%{rspamd_pluginsdir}/lua/rbl.lua
-%{rspamd_pluginsdir}/lua/ratelimit.lua
-%{rspamd_pluginsdir}/lua/phishing.lua
-%{rspamd_pluginsdir}/lua/trie.lua
-%{rspamd_pluginsdir}/lua/emails.lua
-%{rspamd_pluginsdir}/lua/ip_score.lua
-%{rspamd_pluginsdir}/lua/settings.lua
-%{rspamd_pluginsdir}/lua/fun.lua
-%{rspamd_pluginsdir}/lua/spamassassin.lua
-%{rspamd_pluginsdir}/lua/dmarc.lua
-%{rspamd_confdir}/lua/regexp/drugs.lua
-%{rspamd_confdir}/lua/regexp/fraud.lua
-%{rspamd_confdir}/lua/regexp/headers.lua
-%{rspamd_confdir}/lua/regexp/lotto.lua
-%{rspamd_confdir}/lua/rspamd.lua
-%{rspamd_confdir}/lua/hfilter.lua
-%{rspamd_confdir}/lua/rspamd.classifiers.lua
+%config(noreplace) %{rspamd_confdir}/spf_dkim_whitelist.inc
+%config(noreplace) %{rspamd_confdir}/dmarc_whitelist.inc
+%{rspamd_pluginsdir}/lua/*.lua
+%{rspamd_rulesdir}/regexp/*.lua
+%{rspamd_rulesdir}/*.lua
 %{rspamd_wwwdir}/*
 %{_libdir}/rspamd/*
 %{_datadir}/rspamd/effective_tld_names.dat
 
 %changelog
-* Fri Jul 03 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.9-1
+* Thu Sep 17 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 1.0.0-1
+- Update to 1.0.0
+
+* Fri May 29 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.9-1
 - Update to 0.9.9
-
-* Thu Jun 25 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.8-1
-- Update to 0.9.8
-
-* Tue Jun 23 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.7-1
-- Update to 0.9.7
-
-* Tue Jun 16 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.6-1
-- Update to 0.9.6
 
 * Thu May 21 2015 Vsevolod Stakhov <vsevolod-at-highsecure.ru> 0.9.4-1
 - Update to 0.9.4

@@ -89,7 +89,7 @@ chacha_is_aligned (const void *p)
 	return ((size_t) p & (sizeof(size_t) - 1)) == 0;
 }
 
-void
+const char *
 chacha_load (void)
 {
 	guint i;
@@ -102,6 +102,8 @@ chacha_load (void)
 			}
 		}
 	}
+
+	return chacha_impl->desc;
 }
 
 void chacha_init (chacha_state *S, const chacha_key *key,
@@ -115,7 +117,7 @@ void chacha_init (chacha_state *S, const chacha_key *key,
 	state->leftover = 0;
 }
 
-/* processes inlen bytes (can do partial blocks), handling input/ouput alignment */
+/* processes inlen bytes (can do partial blocks), handling input/output alignment */
 static void
 chacha_consume (chacha_state_internal *state,
 		const unsigned char *in, unsigned char *out, size_t inlen)

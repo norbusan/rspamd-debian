@@ -1,37 +1,27 @@
-/*
- * Copyright (c) 2009-2012, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "config.h"
 #include "util.h"
 #include "cfg_file.h"
-#include "main.h"
+#include "rspamd.h"
 #include "message.h"
-#include "fuzzy.h"
 #include "mime_expressions.h"
 #include "html.h"
 #include "lua/lua_common.h"
-#include "diff.h"
+#include "utlist.h"
 
 gboolean rspamd_compare_encoding (struct rspamd_task *task,
 	GArray * args,
@@ -87,6 +77,9 @@ static gboolean rspamd_has_content_part (struct rspamd_task *task,
 static gboolean rspamd_has_content_part_len (struct rspamd_task *task,
 	GArray * args,
 	void *unused);
+static gboolean rspamd_is_empty_body (struct rspamd_task *task,
+		GArray * args,
+		void *unused);
 
 static rspamd_expression_atom_t * rspamd_mime_expr_parse (const gchar *line, gsize len,
 		rspamd_mempool_t *pool, gpointer ud, GError **err);
@@ -95,22 +88,10 @@ static gint rspamd_mime_expr_priority (rspamd_expression_atom_t *atom);
 static void rspamd_mime_expr_destroy (rspamd_expression_atom_t *atom);
 
 /**
- * Regexp type: /H - header, /M - mime, /U - url /X - raw header
- */
-enum rspamd_regexp_type {
-	REGEXP_NONE = 0,
-	REGEXP_HEADER,
-	REGEXP_MIME,
-	REGEXP_MESSAGE,
-	REGEXP_URL,
-	REGEXP_RAW_HEADER
-};
-
-/**
  * Regexp structure
  */
 struct rspamd_regexp_atom {
-	enum rspamd_regexp_type type;                   /**< regexp type										*/
+	enum rspamd_re_type type;                       /**< regexp type										*/
 	gchar *regexp_text;                             /**< regexp text representation							*/
 	rspamd_regexp_t *regexp;                        /**< regexp structure									*/
 	gchar *header;                                  /**< header name for header regexps						*/
@@ -127,6 +108,12 @@ struct rspamd_function_atom {
 	GArray *args;	/**< its args										*/
 };
 
+enum rspamd_mime_atom_type {
+	MIME_ATOM_REGEXP = 0,
+	MIME_ATOM_INTERNAL_FUNCTION,
+	MIME_ATOM_LUA_FUNCTION
+};
+
 struct rspamd_mime_atom {
 	gchar *str;
 	union {
@@ -134,11 +121,7 @@ struct rspamd_mime_atom {
 		struct rspamd_function_atom *func;
 		const gchar *lua_function;
 	} d;
-	enum {
-		MIME_ATOM_REGEXP = 0,
-		MIME_ATOM_INTERNAL_FUNCTION,
-		MIME_ATOM_LUA_FUNCTION
-	} type;
+	enum rspamd_mime_atom_type type;
 };
 
 /*
@@ -165,6 +148,7 @@ static struct _fl {
 	{"has_html_tag", rspamd_has_html_tag, NULL},
 	{"has_only_html_part", rspamd_has_only_html_part, NULL},
 	{"header_exists", rspamd_header_exists, NULL},
+	{"is_empty_body", rspamd_is_empty_body, NULL},
 	{"is_html_balanced", rspamd_is_html_balanced, NULL},
 	{"is_recipients_sorted", rspamd_is_recipients_sorted, NULL},
 	{"raw_header_exists", rspamd_raw_header_exists, NULL}
@@ -181,7 +165,6 @@ static struct _fl *list_ptr = &rspamd_functions_list[0];
 static guint32 functions_number = sizeof (rspamd_functions_list) /
 	sizeof (struct _fl);
 static gboolean list_allocated = FALSE;
-static guint max_re_data = 0;
 
 /* Bsearch routine */
 static gint
@@ -198,26 +181,81 @@ rspamd_mime_expr_quark (void)
 	return g_quark_from_static_string ("mime-expressions");
 }
 
+#define TYPE_CHECK(str, type, len) (sizeof(type) - 1 == (len) && rspamd_lc_cmp((str), (type), (len)) == 0)
+static gboolean
+rspamd_parse_long_option (const gchar *start, gsize len,
+		struct rspamd_regexp_atom *a)
+{
+	gboolean ret = FALSE;
+
+	if (TYPE_CHECK (start, "body", len)) {
+		ret = TRUE;
+		a->type = RSPAMD_RE_BODY;
+	}
+	else if (TYPE_CHECK (start, "part", len) ||
+			TYPE_CHECK (start, "mime", len)) {
+		ret = TRUE;
+		a->type = RSPAMD_RE_MIME;
+	}
+	else if (TYPE_CHECK (start, "raw_part", len) ||
+			TYPE_CHECK (start, "raw_mime", len) ||
+			TYPE_CHECK (start, "mime_raw", len)) {
+		ret = TRUE;
+		a->type = RSPAMD_RE_RAWMIME;
+	}
+	else if (TYPE_CHECK (start, "header", len)) {
+		ret = TRUE;
+		a->type = RSPAMD_RE_HEADER;
+	}
+	else if (TYPE_CHECK (start, "mime_header", len) ||
+			TYPE_CHECK (start, "header_mime", len)) {
+		ret = TRUE;
+		a->type = RSPAMD_RE_MIMEHEADER;
+	}
+	else if (TYPE_CHECK (start, "raw_header", len) ||
+			TYPE_CHECK (start, "header_raw", len)) {
+		ret = TRUE;
+		a->type = RSPAMD_RE_RAWHEADER;
+	}
+	else if (TYPE_CHECK (start, "all_header", len) ||
+			TYPE_CHECK (start, "header_all", len) ||
+			TYPE_CHECK (start, "all_headers", len)) {
+		ret = TRUE;
+		a->type = RSPAMD_RE_ALLHEADER;
+	}
+	else if (TYPE_CHECK (start, "url", len)) {
+		ret = TRUE;
+		a->type = RSPAMD_RE_URL;
+	}
+	else if (TYPE_CHECK (start, "sa_body", len)) {
+		ret = TRUE;
+		a->type = RSPAMD_RE_SABODY;
+	}
+	else if (TYPE_CHECK (start, "sa_raw_body", len) ||
+			TYPE_CHECK (start, "sa_body_raw", len)) {
+		ret = TRUE;
+		a->type = RSPAMD_RE_SARAWBODY;
+	}
+
+	return ret;
+}
+
 /*
  * Rspamd regexp utility functions
  */
 static struct rspamd_regexp_atom *
-rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line)
+rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line,
+		struct rspamd_config *cfg)
 {
-	const gchar *begin, *end, *p, *src, *start;
+	const gchar *begin, *end, *p, *src, *start, *brace;
 	gchar *dbegin, *dend;
 	struct rspamd_regexp_atom *result;
-	rspamd_regexp_t *re;
 	GError *err = NULL;
 	GString *re_flags;
 
 	if (line == NULL) {
-		msg_err ("cannot parse NULL line");
+		msg_err_pool ("cannot parse NULL line");
 		return NULL;
-	}
-
-	if ((re = rspamd_regexp_cache_query (NULL, line, NULL)) != NULL) {
-		return ((struct rspamd_regexp_atom *)rspamd_regexp_get_ud (re));
 	}
 
 	src = line;
@@ -227,7 +265,7 @@ rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line)
 		line++;
 	}
 	if (*line == '\0') {
-		msg_warn ("got empty regexp");
+		msg_warn_pool ("got empty regexp");
 		return NULL;
 	}
 	start = line;
@@ -246,13 +284,13 @@ rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line)
 		if (end) {
 			result->header = rspamd_mempool_alloc (pool, end - line + 1);
 			rspamd_strlcpy (result->header, line, end - line + 1);
-			result->type = REGEXP_HEADER;
+			result->type = RSPAMD_RE_HEADER;
 			line = end;
 		}
 	}
 	else {
 		result->header = rspamd_mempool_strdup (pool, line);
-		result->type = REGEXP_HEADER;
+		result->type = RSPAMD_RE_MAX;
 		line = start;
 	}
 	/* Find begin of regexp */
@@ -265,12 +303,12 @@ rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line)
 	else if (result->header == NULL) {
 		/* Assume that line without // is just a header name */
 		result->header = rspamd_mempool_strdup (pool, line);
-		result->type = REGEXP_HEADER;
+		result->type = RSPAMD_RE_HEADER;
 		return result;
 	}
 	else {
 		/* We got header name earlier but have not found // expression, so it is invalid regexp */
-		msg_warn (
+		msg_warn_pool (
 			"got no header name (eg. header=) but without corresponding regexp, %s",
 			src);
 		return NULL;
@@ -281,12 +319,13 @@ rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line)
 		end++;
 	}
 	if (end == begin || *end != '/') {
-		msg_warn ("no trailing / in regexp %s", src);
+		msg_warn_pool ("no trailing / in regexp %s", src);
 		return NULL;
 	}
 	/* Parse flags */
 	p = end + 1;
 	re_flags = g_string_sized_new (32);
+
 	while (p != NULL) {
 		switch (*p) {
 		case 'i':
@@ -304,35 +343,62 @@ rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line)
 			break;
 		/* Type flags */
 		case 'H':
-			if (result->type == REGEXP_NONE) {
-				result->type = REGEXP_HEADER;
-			}
+			result->type = RSPAMD_RE_HEADER;
+			p++;
+			break;
+		case 'R':
+			result->type = RSPAMD_RE_RAWHEADER;
+			p++;
+			break;
+		case 'B':
+			result->type = RSPAMD_RE_MIMEHEADER;
+			p++;
+			break;
+		case 'C':
+			result->type = RSPAMD_RE_SABODY;
+			p++;
+			break;
+		case 'D':
+			result->type = RSPAMD_RE_SARAWBODY;
 			p++;
 			break;
 		case 'M':
-			if (result->type == REGEXP_NONE) {
-				result->type = REGEXP_MESSAGE;
-			}
+			result->type = RSPAMD_RE_BODY;
 			p++;
 			break;
 		case 'P':
-			if (result->type == REGEXP_NONE) {
-				result->type = REGEXP_MIME;
-			}
+			result->type = RSPAMD_RE_MIME;
+			p++;
+			break;
+		case 'Q':
+			result->type = RSPAMD_RE_RAWMIME;
 			p++;
 			break;
 		case 'U':
-			if (result->type == REGEXP_NONE) {
-				result->type = REGEXP_URL;
-			}
+			result->type = RSPAMD_RE_URL;
 			p++;
 			break;
 		case 'X':
-			if (result->type == REGEXP_NONE || result->type == REGEXP_HEADER) {
-				result->type = REGEXP_RAW_HEADER;
-			}
+			result->type = RSPAMD_RE_RAWHEADER;
 			p++;
 			break;
+		case '{':
+			/* Long definition */
+			if ((brace = strchr (p + 1, '}')) != NULL) {
+				if (!rspamd_parse_long_option (p + 1, brace - (p + 1), result)) {
+					msg_warn_pool ("invalid long regexp type: %*s in '%s'",
+							(int)(brace - (p + 1)), p + 1, src);
+					p = NULL;
+				}
+				else {
+					p = brace + 1;
+				}
+			}
+			else {
+				p = NULL;
+			}
+			break;
+		/* Other flags */
 		case 'T':
 			result->is_test = TRUE;
 			p++;
@@ -352,6 +418,20 @@ rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line)
 		}
 	}
 
+	if (result->type >= RSPAMD_RE_MAX) {
+		msg_err_pool ("could not read regexp: %s, unknown type", src);
+		return NULL;
+	}
+
+	if ((result->type == RSPAMD_RE_HEADER ||
+			result->type == RSPAMD_RE_RAWHEADER ||
+			result->type == RSPAMD_RE_MIMEHEADER) &&
+			result->header == NULL) {
+		msg_err_pool ("header regexp: '%s' has no header part", src);
+		return NULL;
+	}
+
+
 	result->regexp_text = rspamd_mempool_strdup (pool, start);
 	dbegin = result->regexp_text + (begin - start);
 	dend = result->regexp_text + (end - start);
@@ -363,19 +443,24 @@ rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line)
 	g_string_free (re_flags, TRUE);
 
 	if (result->regexp == NULL || err != NULL) {
-		msg_warn ("could not read regexp: %s while reading regexp %s",
-				err ? err->message : "unknown error",
-						src);
+		msg_warn_pool ("could not read regexp: %s while reading regexp %e",
+				src, err);
+
+		if (err) {
+			g_error_free (err);
+		}
+
 		return NULL;
 	}
 
-	rspamd_mempool_add_destructor (pool,
-		(rspamd_mempool_destruct_t) rspamd_regexp_unref,
-		(void *)result->regexp);
+	if (result->is_multiple) {
+		rspamd_regexp_set_maxhits (result->regexp, 0);
+	}
+	else {
+		rspamd_regexp_set_maxhits (result->regexp, 1);
+	}
 
 	rspamd_regexp_set_ud (result->regexp, result);
-
-	rspamd_regexp_cache_insert (NULL, line, NULL, result->regexp);
 
 	*dend = '/';
 
@@ -383,7 +468,7 @@ rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line)
 }
 
 struct rspamd_function_atom *
-rspamd_mime_expr_parse_function_atom (const gchar *input)
+rspamd_mime_expr_parse_function_atom (rspamd_mempool_t *pool, const gchar *input)
 {
 	const gchar *obrace, *ebrace, *p, *c;
 	gchar t, *databuf;
@@ -404,8 +489,8 @@ rspamd_mime_expr_parse_function_atom (const gchar *input)
 
 	g_assert (obrace != NULL && ebrace != NULL);
 
-	res = g_slice_alloc0 (sizeof (*res));
-	res->name = g_malloc (obrace - input + 1);
+	res = rspamd_mempool_alloc0 (pool, sizeof (*res));
+	res->name = rspamd_mempool_alloc (pool, obrace - input + 1);
 	rspamd_strlcpy (res->name, input, obrace - input + 1);
 	res->args = g_array_new (FALSE, FALSE, sizeof (struct expression_argument));
 
@@ -441,7 +526,7 @@ rspamd_mime_expr_parse_function_atom (const gchar *input)
 			}
 			else if (t == ',' || p == ebrace) {
 				len = p - c + 1;
-				databuf = g_malloc (len);
+				databuf = rspamd_mempool_alloc (pool, len);
 				rspamd_strlcpy (databuf, c, len);
 				arg.type = EXPRESSION_ARGUMENT_REGEXP;
 				arg.data = rspamd_regexp_cache_create (NULL, databuf, NULL, &err);
@@ -453,9 +538,6 @@ rspamd_mime_expr_parse_function_atom (const gchar *input)
 					g_error_free (err);
 					arg.type = EXPRESSION_ARGUMENT_NORMAL;
 					arg.data = databuf;
-				}
-				else {
-					g_free (databuf);
 				}
 
 				g_array_append_val (res->args, arg);
@@ -476,7 +558,7 @@ rspamd_mime_expr_parse_function_atom (const gchar *input)
 					len = p - c + 1;
 				}
 
-				databuf = g_malloc (len);
+				databuf = rspamd_mempool_alloc (pool, len);
 				rspamd_strlcpy (databuf, c, len);
 				arg.type = EXPRESSION_ARGUMENT_NORMAL;
 				arg.data = databuf;
@@ -506,6 +588,7 @@ rspamd_mime_expr_parse (const gchar *line, gsize len,
 	struct rspamd_mime_atom *mime_atom = NULL;
 	const gchar *p, *end;
 	struct rspamd_config *cfg = ud;
+	rspamd_regexp_t *own_re;
 	gchar t;
 	gint type = MIME_ATOM_REGEXP, obraces = 0, ebraces = 0;
 	enum {
@@ -515,6 +598,7 @@ rspamd_mime_expr_parse (const gchar *line, gsize len,
 		got_backslash,
 		got_second_slash,
 		in_flags,
+		in_flags_brace,
 		got_obrace,
 		in_function,
 		got_ebrace,
@@ -567,12 +651,22 @@ rspamd_mime_expr_parse (const gchar *line, gsize len,
 			state = in_flags;
 			break;
 		case in_flags:
-			if (!g_ascii_isalpha (t)) {
+			if (t == '{') {
+				state = in_flags_brace;
+				p ++;
+			}
+			else if (!g_ascii_isalpha (t)) {
 				state = end_atom;
 			}
 			else {
 				p ++;
 			}
+			break;
+		case in_flags_brace:
+			if (t == '}') {
+				state = in_flags;
+			}
+			p ++;
 			break;
 		case got_backslash:
 			state = prev_state;
@@ -621,18 +715,55 @@ set:
 		return NULL;
 	}
 
-	mime_atom = g_slice_alloc (sizeof (*mime_atom));
+	mime_atom = rspamd_mempool_alloc (pool, sizeof (*mime_atom));
 	mime_atom->type = type;
-	mime_atom->str = g_malloc (p - line + 1);
+	mime_atom->str = rspamd_mempool_alloc (pool, p - line + 1);
 	rspamd_strlcpy (mime_atom->str, line, p - line + 1);
 
 	if (type == MIME_ATOM_REGEXP) {
 		mime_atom->d.re = rspamd_mime_expr_parse_regexp_atom (pool,
-				mime_atom->str);
+				mime_atom->str, cfg);
 		if (mime_atom->d.re == NULL) {
 			g_set_error (err, rspamd_mime_expr_quark(), 200, "cannot parse regexp '%s'",
 					mime_atom->str);
 			goto err;
+		}
+		else {
+			/* Register new item in the cache */
+			if (mime_atom->d.re->type == RSPAMD_RE_HEADER ||
+					mime_atom->d.re->type == RSPAMD_RE_RAWHEADER ||
+					mime_atom->d.re->type == RSPAMD_RE_MIMEHEADER) {
+
+				if (mime_atom->d.re->header != NULL) {
+					own_re = mime_atom->d.re->regexp;
+					mime_atom->d.re->regexp = rspamd_re_cache_add (cfg->re_cache,
+							mime_atom->d.re->regexp,
+							mime_atom->d.re->type,
+							mime_atom->d.re->header,
+							strlen (mime_atom->d.re->header) + 1);
+					/* Pass ownership to the cache */
+					rspamd_regexp_unref (own_re);
+				}
+				else {
+					/* We have header regexp, but no header name is detected */
+					g_set_error (err,
+							rspamd_mime_expr_quark (),
+							200,
+							"no header name in /H regexp: '%s'",
+							mime_atom->str);
+					goto err;
+				}
+			}
+			else {
+				own_re = mime_atom->d.re->regexp;
+				mime_atom->d.re->regexp = rspamd_re_cache_add (cfg->re_cache,
+						mime_atom->d.re->regexp,
+						mime_atom->d.re->type,
+						NULL,
+						0);
+				/* Pass ownership to the cache */
+				rspamd_regexp_unref (own_re);
+			}
 		}
 	}
 	else if (type == MIME_ATOM_LUA_FUNCTION) {
@@ -650,7 +781,8 @@ set:
 		lua_pop (cfg->lua_state, 1);
 	}
 	else {
-		mime_atom->d.func = rspamd_mime_expr_parse_function_atom (mime_atom->str);
+		mime_atom->d.func = rspamd_mime_expr_parse_function_atom (pool,
+				mime_atom->str);
 		if (mime_atom->d.func == NULL) {
 			g_set_error (err, rspamd_mime_expr_quark(), 200, "cannot parse function '%s'",
 					mime_atom->str);
@@ -658,7 +790,7 @@ set:
 		}
 	}
 
-	a = rspamd_mempool_alloc (pool, sizeof (*a));
+	a = rspamd_mempool_alloc0 (pool, sizeof (*a));
 	a->len = p - line;
 	a->priority = 0;
 	a->data = mime_atom;
@@ -666,301 +798,42 @@ set:
 	return a;
 
 err:
-	if (mime_atom != NULL) {
-		g_free (mime_atom->str);
-		g_slice_free1 (sizeof (*mime_atom), mime_atom);
-	}
 
 	return NULL;
-}
-
-static const gchar *
-rspamd_mime_regexp_type_to_string (struct rspamd_regexp_atom *re)
-{
-	const gchar *ret = "unknown";
-
-	switch (re->type) {
-	case REGEXP_NONE:
-		ret = "none";
-		break;
-	case REGEXP_HEADER:
-		ret = "header";
-		break;
-	case REGEXP_RAW_HEADER:
-		ret = "raw header";
-		break;
-	case REGEXP_MIME:
-		ret = "part";
-		break;
-	case REGEXP_MESSAGE:
-		ret = "message";
-		break;
-	case REGEXP_URL:
-		ret = "url";
-		break;
-	}
-
-	return ret;
-}
-
-static gint
-rspamd_mime_regexp_element_process (struct rspamd_task *task,
-		struct rspamd_regexp_atom *re, const gchar *data, gsize len,
-		gboolean raw)
-{
-	guint r = 0;
-	const gchar *start = NULL, *end = NULL;
-
-	if ((r = rspamd_task_re_cache_check (task, re->regexp_text)) !=
-			RSPAMD_TASK_CACHE_NO_VALUE) {
-		debug_task ("%s regexp %s is found in cache, result: %d",
-				rspamd_mime_regexp_type_to_string (re), re->regexp_text, r);
-		return r;
-	}
-
-	/*
-	 * Since we've queried cache for the value
-	 * r could be RSPAMD_TASK_CACHE_NO_VALUE. Hence, we need to reset it here
-	 * to avoid suspicious results
-	 */
-	r = 0;
-	if (len == 0) {
-		len = strlen (data);
-	}
-
-	if (max_re_data > 0 && len > max_re_data) {
-		len = max_re_data;
-	}
-
-	while (rspamd_regexp_search (re->regexp, data, len, &start, &end, raw, NULL)) {
-		r++;
-
-		if (!re->is_multiple) {
-			break;
-		}
-	}
-
-	if (G_UNLIKELY (re->is_test)) {
-		msg_info (
-				"process %s test regexp %s returned %d",
-				rspamd_mime_regexp_type_to_string (re),
-				re->regexp_text,
-				r);
-	}
-
-	return r;
-}
-
-struct url_regexp_param {
-	struct rspamd_task *task;
-	rspamd_regexp_t *regexp;
-	struct rspamd_regexp_atom *re;
-	gint found;
-};
-
-static void
-tree_url_callback (gpointer key, gpointer value, void *data)
-{
-	struct url_regexp_param *param = data;
-	struct rspamd_url *url = value;
-	gint ret;
-
-	if (param->found && ! param->re->is_multiple) {
-		return;
-	}
-
-	ret = rspamd_mime_regexp_element_process (param->task, param->re,
-			struri (url), 0, FALSE);
-
-	param->found = ret;
-
-	if (G_UNLIKELY (param->re->is_test)) {
-		msg_info ("process test regexp %s for url %s returned FALSE",
-			struri (url));
-	}
 }
 
 static gint
 rspamd_mime_expr_process_regexp (struct rspamd_regexp_atom *re,
 		struct rspamd_task *task)
 {
-	guint8 *ct;
-	gsize clen;
-	gboolean raw = FALSE;
-	const gchar *in;
-	gint ret = 0;
-	GList *cur, *headerlist;
-	rspamd_regexp_t *regexp;
-	struct url_regexp_param callback_param = {
-		.task = task,
-		.re = re,
-		.found = FALSE
-	};
-	struct mime_text_part *part;
-	struct raw_header *rh;
+	gint ret;
 
 	if (re == NULL) {
-		msg_info ("invalid regexp passed");
+		msg_info_task ("invalid regexp passed");
 		return 0;
 	}
 
-	callback_param.regexp = re->regexp;
-
-
-	switch (re->type) {
-	case REGEXP_NONE:
-		msg_warn ("bad error detected: %s has invalid regexp type",
-			re->regexp_text);
-		break;
-	case REGEXP_HEADER:
-	case REGEXP_RAW_HEADER:
-		/* Check header's name */
-		if (re->header == NULL) {
-			msg_info ("header regexp without header name: '%s'",
-				re->regexp_text);
-			rspamd_task_re_cache_add (task, re->regexp_text, 0);
-			return 0;
-		}
-		debug_task ("checking %s header regexp: %s = %s",
-			re->type == REGEXP_RAW_HEADER ? "raw" : "decoded",
-			re->header,
-			re->regexp_text);
-
-		/* Get list of specified headers */
-		headerlist = message_get_header (task,
+	if (re->type == RSPAMD_RE_HEADER || re->type == RSPAMD_RE_RAWHEADER) {
+		ret = rspamd_re_cache_process (task,
+				re->regexp,
+				re->type,
 				re->header,
+				strlen (re->header),
 				re->is_strong);
-		if (headerlist == NULL) {
-			/* Header is not found */
-			if (G_UNLIKELY (re->is_test)) {
-				msg_info (
-					"process test regexp %s for header %s returned FALSE: no header found",
-					re->regexp_text,
-					re->header);
-			}
-		}
-		else {
-			/* Check whether we have regexp for it */
-			if (re->regexp == NULL) {
-				debug_task ("regexp contains only header and it is found %s",
-					re->header);
-				rspamd_task_re_cache_add (task, re->regexp_text, 1);
-				ret = 1;
-			}
-			else {
-				/* Iterate through headers */
-				cur = headerlist;
-				while (cur) {
-					rh = cur->data;
-					debug_task ("found header \"%s\" with value \"%s\"",
-							re->header, rh->decoded);
-					regexp = re->regexp;
-
-					if (re->type == REGEXP_RAW_HEADER) {
-						in = rh->value;
-						raw = TRUE;
-					}
-					else {
-						in = rh->decoded;
-						/* Validate input */
-						if (!in || !g_utf8_validate (in, -1, NULL)) {
-							cur = g_list_next (cur);
-							continue;
-						}
-					}
-
-					/* Match re */
-					if (in) {
-						ret += rspamd_mime_regexp_element_process (task, re, in,
-							strlen (in), raw);
-						debug_task ("checking header %s regexp: %s -> %d",
-								re->header, re->regexp_text, ret);
-
-						if (!re->is_multiple && ret) {
-							break;
-						}
-					}
-
-					cur = g_list_next (cur);
-				}
-			}
-		}
-		break;
-	case REGEXP_MIME:
-		/* Iterate throught text parts */
-		cur = g_list_first (task->text_parts);
-		while (cur) {
-			part = (struct mime_text_part *)cur->data;
-			/* Skip empty parts */
-			if (IS_PART_EMPTY (part)) {
-				cur = g_list_next (cur);
-				continue;
-			}
-
-			/* Check raw flags */
-			if (!IS_PART_UTF (part)) {
-				raw = TRUE;
-			}
-			/* Select data for regexp */
-			if (raw) {
-				ct = part->orig->data;
-				clen = part->orig->len;
-			}
-			else {
-				ct = part->content->data;
-				clen = part->content->len;
-			}
-			/* If we have limit, apply regexp so much times as we can */
-			ret = rspamd_mime_regexp_element_process (task, re, ct, clen, raw);
-			debug_task ("checking mime regexp: %s -> %d",
-					re->regexp_text, ret);
-
-			if (!re->is_multiple && ret) {
-				break;
-			}
-
-			cur = g_list_next (cur);
-		}
-
-
-		break;
-	case REGEXP_MESSAGE:
-		raw = TRUE;
-		ct = (guint8 *)task->msg.start;
-		clen = task->msg.len;
-
-		ret = rspamd_mime_regexp_element_process (task, re, ct, clen, raw);
-		break;
-	case REGEXP_URL:
-		debug_task ("checking url regexp: %s", re->regexp_text);
-		regexp = re->regexp;
-		callback_param.task = task;
-		callback_param.regexp = regexp;
-		callback_param.re = re;
-		callback_param.found = 0;
-
-		if (task->urls) {
-			g_hash_table_foreach (task->urls, tree_url_callback, &callback_param);
-		}
-
-		if (task->emails && !callback_param.found) {
-			g_hash_table_foreach (task->emails, tree_url_callback, &callback_param);
-		}
-
-		ret = callback_param.found;
-		break;
-	default:
-		msg_warn ("bad error detected: %p is not a valid regexp object", re);
-		return 0;
-		break;
+	}
+	else {
+		ret = rspamd_re_cache_process (task,
+				re->regexp,
+				re->type,
+				NULL,
+				0,
+				re->is_strong);
 	}
 
-	if (re && re->regexp_text) {
-		if (ret > 1 && !re->is_multiple) {
-			ret = 1;
-		}
-
-		rspamd_task_re_cache_add (task, re->regexp_text, ret);
+	if (re->is_test) {
+		msg_info_task ("test %s regexp '%s' returned %d",
+				rspamd_re_cache_type_to_string (re->type),
+				re->regexp_text, ret);
 	}
 
 	return ret;
@@ -983,14 +856,15 @@ rspamd_mime_expr_priority (rspamd_expression_atom_t *atom)
 		break;
 	case MIME_ATOM_REGEXP:
 		switch (mime_atom->d.re->type) {
-		case REGEXP_HEADER:
-		case REGEXP_RAW_HEADER:
+		case RSPAMD_RE_HEADER:
+		case RSPAMD_RE_RAWHEADER:
 			ret = 100;
 			break;
-		case REGEXP_URL:
+		case RSPAMD_RE_URL:
 			ret = 90;
 			break;
-		case REGEXP_MIME:
+		case RSPAMD_RE_MIME:
+		case RSPAMD_RE_RAWMIME:
 			ret = 10;
 			break;
 		default:
@@ -1007,24 +881,12 @@ static void
 rspamd_mime_expr_destroy (rspamd_expression_atom_t *atom)
 {
 	struct rspamd_mime_atom *mime_atom = atom->data;
-	guint i;
-	struct expression_argument *arg;
 
 	if (mime_atom) {
 		if (mime_atom->type == MIME_ATOM_INTERNAL_FUNCTION) {
 			/* Need to cleanup arguments */
-			for (i = 0; i < mime_atom->d.func->args->len; i ++) {
-				arg = &g_array_index (mime_atom->d.func->args,
-						struct expression_argument, i);
-
-				if (arg->type == EXPRESSION_ARGUMENT_NORMAL) {
-					g_free (arg->data);
-				}
-			}
 			g_array_free (mime_atom->d.func->args, TRUE);
 		}
-		/* XXX: regexp shouldn't be special */
-		g_slice_free1 (sizeof (*mime_atom), mime_atom);
 	}
 }
 
@@ -1072,10 +934,11 @@ rspamd_mime_expr_process (gpointer input, rspamd_expression_atom_t *atom)
 		rspamd_lua_task_push (L, task);
 
 		if (lua_pcall (L, 1, 1, 0) != 0) {
-			msg_info ("lua call to global function '%s' for atom '%s' failed: %s",
+			msg_info_task ("lua call to global function '%s' for atom '%s' failed: %s",
 				mime_atom->d.lua_function,
 				mime_atom->str,
 				lua_tostring (L, -1));
+			lua_pop (L, 1);
 		}
 		else {
 			if (lua_type (L, -1) == LUA_TBOOLEAN) {
@@ -1085,7 +948,7 @@ rspamd_mime_expr_process (gpointer input, rspamd_expression_atom_t *atom)
 				ret = lua_tonumber (L, 1);
 			}
 			else {
-				msg_err ("%s returned wrong return type: %s",
+				msg_err_task ("%s returned wrong return type: %s",
 						mime_atom->str, lua_typename (L, lua_type (L, -1)));
 			}
 			/* Remove result */
@@ -1134,7 +997,7 @@ rspamd_compare_encoding (struct rspamd_task *task, GArray * args, void *unused)
 
 	arg = &g_array_index (args, struct expression_argument, 0);
 	if (!arg || arg->type != EXPRESSION_ARGUMENT_NORMAL) {
-		msg_warn ("invalid argument to function is passed");
+		msg_warn_task ("invalid argument to function is passed");
 		return FALSE;
 	}
 
@@ -1146,7 +1009,7 @@ gboolean
 rspamd_header_exists (struct rspamd_task * task, GArray * args, void *unused)
 {
 	struct expression_argument *arg;
-	GList *headerlist;
+	GPtrArray *headerlist;
 
 	if (args == NULL || task == NULL) {
 		return FALSE;
@@ -1154,19 +1017,24 @@ rspamd_header_exists (struct rspamd_task * task, GArray * args, void *unused)
 
 	arg = &g_array_index (args, struct expression_argument, 0);
 	if (!arg || arg->type != EXPRESSION_ARGUMENT_NORMAL) {
-		msg_warn ("invalid argument to function is passed");
+		msg_warn_task ("invalid argument to function is passed");
 		return FALSE;
 	}
 
-	debug_task ("try to get header %s", (gchar *)arg->data);
-	headerlist = message_get_header (task,
+	headerlist = rspamd_message_get_header_array (task,
 			(gchar *)arg->data,
 			FALSE);
+
+	debug_task ("try to get header %s: %d", (gchar *)arg->data,
+			(headerlist != NULL));
+
 	if (headerlist) {
 		return TRUE;
 	}
+
 	return FALSE;
 }
+
 
 /*
  * This function is designed to find difference between text/html and text/plain parts
@@ -1177,13 +1045,9 @@ rspamd_header_exists (struct rspamd_task * task, GArray * args, void *unused)
 gboolean
 rspamd_parts_distance (struct rspamd_task * task, GArray * args, void *unused)
 {
-	gint threshold, threshold2 = -1, diff;
-	struct mime_text_part *p1, *p2;
-	GList *cur;
+	gint threshold, threshold2 = -1;
 	struct expression_argument *arg;
-	GMimeObject *parent;
-	const GMimeContentType *ct;
-	gint *pdiff;
+	gdouble *pdiff, diff;
 
 	if (args == NULL || args->len == 0) {
 		debug_task ("no threshold is specified, assume it 100");
@@ -1193,27 +1057,27 @@ rspamd_parts_distance (struct rspamd_task * task, GArray * args, void *unused)
 		errno = 0;
 		arg = &g_array_index (args, struct expression_argument, 0);
 		if (!arg || arg->type != EXPRESSION_ARGUMENT_NORMAL) {
-			msg_warn ("invalid argument to function is passed");
+			msg_warn_task ("invalid argument to function is passed");
 			return FALSE;
 		}
 
 		threshold = strtoul ((gchar *)arg->data, NULL, 10);
 		if (errno != 0) {
-			msg_info ("bad numeric value for threshold \"%s\", assume it 100",
+			msg_info_task ("bad numeric value for threshold \"%s\", assume it 100",
 				(gchar *)arg->data);
 			threshold = 100;
 		}
 		if (args->len >= 2) {
 			arg = &g_array_index (args, struct expression_argument, 1);
 			if (!arg || arg->type != EXPRESSION_ARGUMENT_NORMAL) {
-				msg_warn ("invalid argument to function is passed");
+				msg_warn_task ("invalid argument to function is passed");
 				return FALSE;
 			}
 
 			errno = 0;
 			threshold2 = strtoul ((gchar *)arg->data, NULL, 10);
 			if (errno != 0) {
-				msg_info ("bad numeric value for threshold \"%s\", ignore it",
+				msg_info_task ("bad numeric value for threshold \"%s\", ignore it",
 					(gchar *)arg->data);
 				threshold2 = -1;
 			}
@@ -1223,12 +1087,13 @@ rspamd_parts_distance (struct rspamd_task * task, GArray * args, void *unused)
 	if ((pdiff =
 		rspamd_mempool_get_variable (task->task_pool,
 		"parts_distance")) != NULL) {
-		diff = *pdiff;
+		diff = (1.0 - (*pdiff)) * 100.0;
+
 		if (diff != -1) {
 			if (threshold2 > 0) {
-				if (diff >=
-					MIN (threshold,
-					threshold2) && diff < MAX (threshold, threshold2)) {
+				if (diff >= MIN (threshold, threshold2) &&
+					diff < MAX (threshold, threshold2)) {
+
 					return TRUE;
 				}
 			}
@@ -1244,107 +1109,14 @@ rspamd_parts_distance (struct rspamd_task * task, GArray * args, void *unused)
 		}
 	}
 
-	if (g_list_length (task->text_parts) == 2) {
-		cur = g_list_first (task->text_parts);
-		p1 = cur->data;
-		cur = g_list_next (cur);
-		pdiff = rspamd_mempool_alloc (task->task_pool, sizeof (gint));
-		*pdiff = -1;
-
-		if (cur == NULL) {
-			msg_info ("bad parts list");
-			return FALSE;
-		}
-		p2 = cur->data;
-		/* First of all check parent object */
-		if (p1->parent && p1->parent == p2->parent) {
-			parent = p1->parent;
-			ct = g_mime_object_get_content_type (parent);
-#ifndef GMIME24
-			if (ct == NULL ||
-				!g_mime_content_type_is_type (ct, "multipart", "alternative")) {
-#else
-			if (ct == NULL ||
-				!g_mime_content_type_is_type ((GMimeContentType *)ct,
-				"multipart", "alternative")) {
-#endif
-				debug_task (
-					"two parts are not belong to multipart/alternative container, skip check");
-				rspamd_mempool_set_variable (task->task_pool,
-					"parts_distance",
-					pdiff,
-					NULL);
-				return FALSE;
-			}
-		}
-		else {
-			debug_task (
-				"message contains two parts but they are in different multi-parts");
-			rspamd_mempool_set_variable (task->task_pool,
-				"parts_distance",
-				pdiff,
-				NULL);
-			return FALSE;
-		}
-		if (!IS_PART_EMPTY (p1) && !IS_PART_EMPTY (p2)) {
-			if (p1->diff_str != NULL && p2->diff_str != NULL) {
-				diff = rspamd_diff_distance_normalized (p1->diff_str,
-						p2->diff_str);
-			}
-			else {
-				diff = rspamd_fuzzy_compare_parts (p1, p2);
-			}
-			debug_task (
-				"got likeliness between parts of %d%%, threshold is %d%%",
-				diff,
-				threshold);
-			*pdiff = diff;
-			rspamd_mempool_set_variable (task->task_pool,
-				"parts_distance",
-				pdiff,
-				NULL);
-			if (threshold2 > 0) {
-				if (diff >=
-					MIN (threshold,
-					threshold2) && diff < MAX (threshold, threshold2)) {
-					return TRUE;
-				}
-			}
-			else {
-				if (diff <= threshold) {
-					return TRUE;
-				}
-			}
-		}
-		else if ((IS_PART_EMPTY (p1) &&
-			!IS_PART_EMPTY (p2)) || (!IS_PART_EMPTY (p1)&& IS_PART_EMPTY (p2))) {
-			/* Empty and non empty parts are different */
-			*pdiff = 0;
-			rspamd_mempool_set_variable (task->task_pool,
-				"parts_distance",
-				pdiff,
-				NULL);
-			return TRUE;
-		}
-	}
-	else {
-		debug_task (
-			"message has too many text parts, so do not try to compare them with each other");
-		rspamd_mempool_set_variable (task->task_pool,
-			"parts_distance",
-			pdiff,
-			NULL);
-		return FALSE;
-	}
-
-	rspamd_mempool_set_variable (task->task_pool, "parts_distance", pdiff,
-		NULL);
 	return FALSE;
 }
 
 struct addr_list {
 	const gchar *name;
+	guint namelen;
 	const gchar *addr;
+	guint addrlen;
 };
 
 #define COMPARE_RCPT_LEN 3
@@ -1355,20 +1127,19 @@ rspamd_recipients_distance (struct rspamd_task *task, GArray * args,
 	void *unused)
 {
 	struct expression_argument *arg;
-	InternetAddressList *cur;
+	struct rspamd_email_address *cur;
 	double threshold;
 	struct addr_list *ar;
-	gchar *c;
 	gint num, i, j, hits = 0, total = 0;
 
 	if (args == NULL) {
-		msg_warn ("no parameters to function");
+		msg_warn_task ("no parameters to function");
 		return FALSE;
 	}
 
 	arg = &g_array_index (args, struct expression_argument, 0);
 	if (!arg || arg->type != EXPRESSION_ARGUMENT_NORMAL) {
-		msg_warn ("invalid argument to function is passed");
+		msg_warn_task ("invalid argument to function is passed");
 		return FALSE;
 	}
 
@@ -1376,7 +1147,7 @@ rspamd_recipients_distance (struct rspamd_task *task, GArray * args,
 	threshold = strtod ((gchar *)arg->data, NULL);
 
 	if (errno != 0) {
-		msg_warn ("invalid numeric value '%s': %s",
+		msg_warn_task ("invalid numeric value '%s': %s",
 			(gchar *)arg->data,
 			strerror (errno));
 		return FALSE;
@@ -1386,71 +1157,36 @@ rspamd_recipients_distance (struct rspamd_task *task, GArray * args,
 		return FALSE;
 	}
 
-	num = internet_address_list_length (task->rcpt_mime);
+	num = task->rcpt_mime->len;
 
 	if (num < MIN_RCPT_TO_COMPARE) {
 		return FALSE;
 	}
-	ar =
-		rspamd_mempool_alloc0 (task->task_pool, num *
-			sizeof (struct addr_list));
+
+	ar = rspamd_mempool_alloc0 (task->task_pool, num * sizeof (struct addr_list));
 
 	/* Fill array */
-	cur = task->rcpt_mime;
-#ifdef GMIME24
-	for (i = 0; i < num; i++) {
-		InternetAddress *iaelt =
-			internet_address_list_get_address(cur, i);
-		InternetAddressMailbox *iamb =
-			INTERNET_ADDRESS_IS_MAILBOX(iaelt) ?
-			INTERNET_ADDRESS_MAILBOX (iaelt) : NULL;
-		if (iamb) {
-			ar[i].name = internet_address_mailbox_get_addr (iamb);
-			if (ar[i].name != NULL && (c = strchr (ar[i].name, '@')) != NULL) {
-				ar[i].addr = c + 1;
-			}
-		}
+	PTR_ARRAY_FOREACH (task->rcpt_mime, i, cur) {
+		ar[i].name = cur->addr;
+		ar[i].namelen = cur->addr_len;
+		ar[i].addr = cur->domain;
+		ar[i].addrlen = cur->domain_len;
 	}
-#else
-	InternetAddress *addr;
-	i = 0;
-	while (cur) {
-		addr = internet_address_list_get_address (cur);
-		if (addr && internet_address_get_type (addr) == INTERNET_ADDRESS_NAME) {
-			ar[i].name = rspamd_mempool_strdup (task->task_pool,
-					internet_address_get_addr (addr));
-			if (ar[i].name != NULL && (c = strchr (ar[i].name, '@')) != NULL) {
-				*c = '\0';
-				ar[i].addr = c + 1;
-			}
-			cur = internet_address_list_next (cur);
-			i++;
-		}
-		else {
-			cur = internet_address_list_next (cur);
-		}
-	}
-#endif
 
 	/* Cycle all elements in array */
 	for (i = 0; i < num; i++) {
 		for (j = i + 1; j < num; j++) {
-			if (ar[i].name && ar[j].name &&
-				g_ascii_strncasecmp (ar[i].name, ar[j].name,
-				COMPARE_RCPT_LEN) == 0) {
+			if (ar[i].namelen >= COMPARE_RCPT_LEN && ar[j].namelen >= COMPARE_RCPT_LEN &&
+				rspamd_lc_cmp (ar[i].name, ar[j].name, COMPARE_RCPT_LEN) == 0) {
 				/* Common name part */
 				hits++;
 			}
-			else if (ar[i].addr && ar[j].addr &&
-				g_ascii_strcasecmp (ar[i].addr, ar[j].addr) == 0) {
-				/* Common address part, but different name */
-				hits++;
-			}
+
 			total++;
 		}
 	}
 
-	if ((double)(hits * num / 2.) / (double)total >= threshold) {
+	if ((hits * num / 2.) / (double)total >= threshold) {
 		return TRUE;
 	}
 
@@ -1461,78 +1197,52 @@ gboolean
 rspamd_has_only_html_part (struct rspamd_task * task, GArray * args,
 	void *unused)
 {
-	struct mime_text_part *p;
-	GList *cur;
+	struct rspamd_mime_text_part *p;
 	gboolean res = FALSE;
 
-	cur = g_list_first (task->text_parts);
-	while (cur) {
-		p = cur->data;
+	if (task->text_parts->len == 1) {
+		p = g_ptr_array_index (task->text_parts, 0);
+
 		if (IS_PART_HTML (p)) {
 			res = TRUE;
 		}
 		else {
 			res = FALSE;
-			break;
 		}
-		cur = g_list_next (cur);
 	}
 
 	return res;
 }
 
 static gboolean
-is_recipient_list_sorted (const InternetAddressList * ia)
+is_recipient_list_sorted (GPtrArray *ar)
 {
-	const InternetAddressList *cur;
-	InternetAddress *addr;
+	struct rspamd_email_address *addr;
 	gboolean res = TRUE;
-	struct addr_list current = { NULL, NULL }, previous = {
-		NULL, NULL
-	};
-#ifdef GMIME24
-	gint num, i;
-#endif
+	rspamd_ftok_t cur, prev;
+	gint i;
 
 	/* Do not check to short address lists */
-	if (internet_address_list_length ((InternetAddressList *)ia) <
-		MIN_RCPT_TO_COMPARE) {
+	if (ar == NULL || ar->len < MIN_RCPT_TO_COMPARE) {
 		return FALSE;
 	}
-#ifdef GMIME24
-	num = internet_address_list_length ((InternetAddressList *)ia);
-	cur = ia;
-	for (i = 0; i < num; i++) {
-		addr =
-			internet_address_list_get_address ((InternetAddressList *)cur, i);
-		current.addr = (gchar *)internet_address_get_name (addr);
-		if (previous.addr != NULL) {
-			if (current.addr &&
-				g_ascii_strcasecmp (current.addr, previous.addr) < 0) {
+
+	prev.len = 0;
+	prev.begin = NULL;
+
+	PTR_ARRAY_FOREACH (ar, i, addr) {
+		cur.begin = addr->addr;
+		cur.len = addr->addr_len;
+
+		if (prev.len != 0) {
+			if (rspamd_ftok_casecmp (&cur, &prev) <= 0) {
 				res = FALSE;
 				break;
 			}
 		}
-		previous.addr = current.addr;
+
+		prev = cur;
 	}
-#else
-	cur = ia;
-	while (cur) {
-		addr = internet_address_list_get_address (cur);
-		if (internet_address_get_type (addr) == INTERNET_ADDRESS_NAME) {
-			current.addr = internet_address_get_addr (addr);
-			if (previous.addr != NULL) {
-				if (current.addr &&
-					g_ascii_strcasecmp (current.addr, previous.addr) < 0) {
-					res = FALSE;
-					break;
-				}
-			}
-			previous.addr = current.addr;
-		}
-		cur = internet_address_list_next (cur);
-	}
-#endif
 
 	return res;
 }
@@ -1543,17 +1253,9 @@ rspamd_is_recipients_sorted (struct rspamd_task * task,
 	void *unused)
 {
 	/* Check all types of addresses */
-	if (is_recipient_list_sorted (g_mime_message_get_recipients (task->message,
-		GMIME_RECIPIENT_TYPE_TO)) == TRUE) {
-		return TRUE;
-	}
-	if (is_recipient_list_sorted (g_mime_message_get_recipients (task->message,
-		GMIME_RECIPIENT_TYPE_BCC)) == TRUE) {
-		return TRUE;
-	}
-	if (is_recipient_list_sorted (g_mime_message_get_recipients (task->message,
-		GMIME_RECIPIENT_TYPE_CC)) == TRUE) {
-		return TRUE;
+
+	if (task->rcpt_mime) {
+		return is_recipient_list_sorted (task->rcpt_mime);
 	}
 
 	return FALSE;
@@ -1564,66 +1266,35 @@ rspamd_compare_transfer_encoding (struct rspamd_task * task,
 	GArray * args,
 	void *unused)
 {
-	GMimeObject *part;
-#ifndef GMIME24
-	GMimePartEncodingType enc_req, part_enc;
-#else
-	GMimeContentEncoding enc_req, part_enc;
-#endif
 	struct expression_argument *arg;
+	guint i;
+	struct rspamd_mime_part *part;
+	enum rspamd_cte cte;
 
 	if (args == NULL) {
-		msg_warn ("no parameters to function");
+		msg_warn_task ("no parameters to function");
 		return FALSE;
 	}
 
 	arg = &g_array_index (args, struct expression_argument, 0);
 	if (!arg || arg->type != EXPRESSION_ARGUMENT_NORMAL) {
-		msg_warn ("invalid argument to function is passed");
+		msg_warn_task ("invalid argument to function is passed");
 		return FALSE;
 	}
 
-#ifndef GMIME24
-	enc_req = g_mime_part_encoding_from_string (arg->data);
-	if (enc_req == GMIME_PART_ENCODING_DEFAULT) {
-#else
-	enc_req = g_mime_content_encoding_from_string (arg->data);
-	if (enc_req == GMIME_CONTENT_ENCODING_DEFAULT) {
-#endif
-		msg_warn ("bad encoding type: %s", (gchar *)arg->data);
+	cte = rspamd_cte_from_string (arg->data);
+
+	if (cte == RSPAMD_CTE_UNKNOWN) {
+		msg_warn_task ("unknown cte: %s", arg->data);
 		return FALSE;
 	}
 
-	part = g_mime_message_get_mime_part (task->message);
-	if (part) {
-		if (GMIME_IS_PART (part)) {
-#ifndef GMIME24
-			part_enc = g_mime_part_get_encoding (GMIME_PART (part));
-			if (part_enc == GMIME_PART_ENCODING_DEFAULT) {
-				/* Assume 7bit as default transfer encoding */
-				part_enc = GMIME_PART_ENCODING_7BIT;
+	PTR_ARRAY_FOREACH (task->parts, i, part) {
+		if (IS_CT_TEXT (part->ct)) {
+			if (part->cte == cte) {
+				return TRUE;
 			}
-#else
-			part_enc = g_mime_part_get_content_encoding (GMIME_PART (part));
-			if (part_enc == GMIME_CONTENT_ENCODING_DEFAULT) {
-				/* Assume 7bit as default transfer encoding */
-				part_enc = GMIME_CONTENT_ENCODING_7BIT;
-			}
-#endif
-
-
-			debug_task ("got encoding in part: %d and compare with %d",
-				(gint)part_enc,
-				(gint)enc_req);
-#ifndef GMIME24
-			g_object_unref (part);
-#endif
-
-			return part_enc == enc_req;
 		}
-#ifndef GMIME24
-		g_object_unref (part);
-#endif
 	}
 
 	return FALSE;
@@ -1632,15 +1303,15 @@ rspamd_compare_transfer_encoding (struct rspamd_task * task,
 gboolean
 rspamd_is_html_balanced (struct rspamd_task * task, GArray * args, void *unused)
 {
-	struct mime_text_part *p;
-	GList *cur;
+	struct rspamd_mime_text_part *p;
+	guint i;
 	gboolean res = TRUE;
 
-	cur = g_list_first (task->text_parts);
-	while (cur) {
-		p = cur->data;
+	for (i = 0; i < task->text_parts->len; i ++) {
+
+		p = g_ptr_array_index (task->text_parts, i);
 		if (!IS_PART_EMPTY (p) && IS_PART_HTML (p)) {
-			if (p->flags & RSPAMD_MIME_PART_FLAG_BALANCED) {
+			if (p->flags & RSPAMD_MIME_TEXT_PART_FLAG_BALANCED) {
 				res = TRUE;
 			}
 			else {
@@ -1648,78 +1319,41 @@ rspamd_is_html_balanced (struct rspamd_task * task, GArray * args, void *unused)
 				break;
 			}
 		}
-		cur = g_list_next (cur);
 	}
 
 	return res;
 
 }
 
-struct html_callback_data {
-	struct html_tag *tag;
-	gboolean *res;
-};
-
-static gboolean
-search_html_node_callback (GNode * node, gpointer data)
-{
-	struct html_callback_data *cd = data;
-	struct html_node *nd;
-
-	nd = node->data;
-	if (nd) {
-		if (nd->tag == cd->tag) {
-			*cd->res = TRUE;
-			return TRUE;
-		}
-	}
-
-	return FALSE;
-}
-
 gboolean
 rspamd_has_html_tag (struct rspamd_task * task, GArray * args, void *unused)
 {
-	struct mime_text_part *p;
-	GList *cur;
+	struct rspamd_mime_text_part *p;
 	struct expression_argument *arg;
-	struct html_tag *tag;
+	guint i;
 	gboolean res = FALSE;
-	struct html_callback_data cd;
 
 	if (args == NULL) {
-		msg_warn ("no parameters to function");
+		msg_warn_task ("no parameters to function");
 		return FALSE;
 	}
 
 	arg = &g_array_index (args, struct expression_argument, 0);
 	if (!arg || arg->type != EXPRESSION_ARGUMENT_NORMAL) {
-		msg_warn ("invalid argument to function is passed");
+		msg_warn_task ("invalid argument to function is passed");
 		return FALSE;
 	}
 
-	tag = get_tag_by_name (arg->data);
-	if (tag == NULL) {
-		msg_warn ("unknown tag type passed as argument: %s",
-			(gchar *)arg->data);
-		return FALSE;
-	}
+	for (i = 0; i < task->text_parts->len; i ++) {
+		p = g_ptr_array_index (task->text_parts, i);
 
-	cur = g_list_first (task->text_parts);
-	cd.res = &res;
-	cd.tag = tag;
-
-	while (cur && res == FALSE) {
-		p = cur->data;
-		if (!IS_PART_EMPTY (p) && IS_PART_HTML (p) && p->html_nodes) {
-			g_node_traverse (p->html_nodes,
-				G_PRE_ORDER,
-				G_TRAVERSE_ALL,
-				-1,
-				search_html_node_callback,
-				&cd);
+		if (!IS_PART_EMPTY (p) && IS_PART_HTML (p) && p->html) {
+			res = rspamd_html_tag_seen (p->html, arg->data);
 		}
-		cur = g_list_next (cur);
+
+		if (res) {
+			break;
+		}
 	}
 
 	return res;
@@ -1729,18 +1363,20 @@ rspamd_has_html_tag (struct rspamd_task * task, GArray * args, void *unused)
 gboolean
 rspamd_has_fake_html (struct rspamd_task * task, GArray * args, void *unused)
 {
-	struct mime_text_part *p;
-	GList *cur;
+	struct rspamd_mime_text_part *p;
+	guint i;
 	gboolean res = FALSE;
 
-	cur = g_list_first (task->text_parts);
+	for (i = 0; i < task->text_parts->len; i ++) {
+		p = g_ptr_array_index (task->text_parts, i);
 
-	while (cur && res == FALSE) {
-		p = cur->data;
-		if (!IS_PART_EMPTY (p) && IS_PART_HTML (p) && p->html_nodes == NULL) {
+		if (!IS_PART_EMPTY (p) && IS_PART_HTML (p) && p->html->html_tags == NULL) {
 			res = TRUE;
 		}
-		cur = g_list_next (cur);
+
+		if (res) {
+			break;
+		}
 	}
 
 	return res;
@@ -1758,7 +1394,7 @@ rspamd_raw_header_exists (struct rspamd_task *task, GArray * args, void *unused)
 
 	arg = &g_array_index (args, struct expression_argument, 0);
 	if (!arg || arg->type != EXPRESSION_ARGUMENT_NORMAL) {
-		msg_warn ("invalid argument to function is passed");
+		msg_warn_task ("invalid argument to function is passed");
 		return FALSE;
 	}
 
@@ -1768,7 +1404,7 @@ rspamd_raw_header_exists (struct rspamd_task *task, GArray * args, void *unused)
 static gboolean
 match_smtp_data (struct rspamd_task *task,
 	struct expression_argument *arg,
-	const gchar *what)
+	const gchar *what, gsize len)
 {
 	rspamd_regexp_t *re;
 	gint r;
@@ -1777,19 +1413,17 @@ match_smtp_data (struct rspamd_task *task,
 		/* This is a regexp */
 		re = arg->data;
 		if (re == NULL) {
-			msg_warn ("cannot compile regexp for function");
+			msg_warn_task ("cannot compile regexp for function");
 			return FALSE;
 		}
 
-		if ((r = rspamd_task_re_cache_check (task,
-				rspamd_regexp_get_pattern (re))) == -1) {
-			r = rspamd_regexp_search (re, what, 0, NULL, NULL, FALSE, NULL);
-			rspamd_task_re_cache_add (task, rspamd_regexp_get_pattern (re), r);
-		}
+
+		r = rspamd_regexp_search (re, what, len, NULL, NULL, FALSE, NULL);
+
 		return r;
 	}
 	else if (arg->type == EXPRESSION_ARGUMENT_NORMAL &&
-			g_ascii_strcasecmp (arg->data, what) == 0) {
+			g_ascii_strncasecmp (arg->data, what, len) == 0) {
 		return TRUE;
 	}
 
@@ -1800,19 +1434,20 @@ static gboolean
 rspamd_check_smtp_data (struct rspamd_task *task, GArray * args, void *unused)
 {
 	struct expression_argument *arg;
-	InternetAddressList *ia = NULL;
-	const gchar *type, *what = NULL;
-	gint i, ialen;
+	struct rspamd_email_address *addr = NULL;
+	GPtrArray *rcpts = NULL;
+	const gchar *type, *str = NULL;
+	guint i;
 
 	if (args == NULL) {
-		msg_warn ("no parameters to function");
+		msg_warn_task ("no parameters to function");
 		return FALSE;
 	}
 
 	arg = &g_array_index (args, struct expression_argument, 0);
 
 	if (!arg || !arg->data || arg->type != EXPRESSION_ARGUMENT_NORMAL) {
-		msg_warn ("no parameters to function");
+		msg_warn_task ("no parameters to function");
 		return FALSE;
 	}
 	else {
@@ -1821,60 +1456,60 @@ rspamd_check_smtp_data (struct rspamd_task *task, GArray * args, void *unused)
 		case 'f':
 		case 'F':
 			if (g_ascii_strcasecmp (type, "from") == 0) {
-				what = rspamd_task_get_sender (task);
+				addr = rspamd_task_get_sender (task);
 			}
 			else {
-				msg_warn ("bad argument to function: %s", type);
+				msg_warn_task ("bad argument to function: %s", type);
 				return FALSE;
 			}
 			break;
 		case 'h':
 		case 'H':
 			if (g_ascii_strcasecmp (type, "helo") == 0) {
-				what = task->helo;
+				str = task->helo;
 			}
 			else {
-				msg_warn ("bad argument to function: %s", type);
+				msg_warn_task ("bad argument to function: %s", type);
 				return FALSE;
 			}
 			break;
 		case 'u':
 		case 'U':
 			if (g_ascii_strcasecmp (type, "user") == 0) {
-				what = task->user;
+				str = task->user;
 			}
 			else {
-				msg_warn ("bad argument to function: %s", type);
+				msg_warn_task ("bad argument to function: %s", type);
 				return FALSE;
 			}
 			break;
 		case 's':
 		case 'S':
 			if (g_ascii_strcasecmp (type, "subject") == 0) {
-				what = task->subject;
+				str = task->subject;
 			}
 			else {
-				msg_warn ("bad argument to function: %s", type);
+				msg_warn_task ("bad argument to function: %s", type);
 				return FALSE;
 			}
 			break;
 		case 'r':
 		case 'R':
 			if (g_ascii_strcasecmp (type, "rcpt") == 0) {
-				ia = task->rcpt_mime;
+				rcpts = task->rcpt_envelope;
 			}
 			else {
-				msg_warn ("bad argument to function: %s", type);
+				msg_warn_task ("bad argument to function: %s", type);
 				return FALSE;
 			}
 			break;
 		default:
-			msg_warn ("bad argument to function: %s", type);
+			msg_warn_task ("bad argument to function: %s", type);
 			return FALSE;
 		}
 	}
 
-	if (what == NULL && ia == NULL) {
+	if (str == NULL && addr == NULL && rcpts == NULL) {
 		/* Not enough data so regexp would NOT be found anyway */
 		return FALSE;
 	}
@@ -1882,22 +1517,22 @@ rspamd_check_smtp_data (struct rspamd_task *task, GArray * args, void *unused)
 	/* We would process only one more argument, others are ignored */
 	if (args->len >= 2) {
 		arg = &g_array_index (args, struct expression_argument, 1);
+
 		if (arg) {
-			if (what != NULL) {
-				return match_smtp_data (task, arg, what);
+			if (str != NULL) {
+				return match_smtp_data (task, arg, str, strlen (str));
+			}
+			else if (addr != NULL && addr->addr) {
+				return match_smtp_data (task, arg, addr->addr, addr->addr_len);
 			}
 			else {
-				if (ia != NULL) {
-					ialen = internet_address_list_length(ia);
-					for (i = 0; i < ialen; i ++) {
-						InternetAddress *iaelt =
-								internet_address_list_get_address(ia, i);
-						InternetAddressMailbox *iamb =
-							INTERNET_ADDRESS_IS_MAILBOX(iaelt) ?
-							INTERNET_ADDRESS_MAILBOX (iaelt) : NULL;
-						if (iamb &&
+				if (rcpts != NULL) {
+					for (i = 0; i < rcpts->len; i ++) {
+						addr = g_ptr_array_index (rcpts, i);
+
+						if (addr && addr->addr &&
 							match_smtp_data (task, arg,
-								internet_address_mailbox_get_addr(iamb))) {
+								addr->addr, addr->addr_len)) {
 							return TRUE;
 						}
 					}
@@ -1914,19 +1549,18 @@ rspamd_content_type_compare_param (struct rspamd_task * task,
 	GArray * args,
 	void *unused)
 {
-	const gchar *param_name;
-	const gchar *param_data;
 	rspamd_regexp_t *re;
 	struct expression_argument *arg, *arg1, *arg_pattern;
-	GMimeObject *part;
-	GMimeContentType *ct;
-	gint r;
-	gboolean recursive = FALSE, result = FALSE;
-	GList *cur = NULL;
-	struct mime_part *cur_part;
+	gboolean recursive = FALSE;
+	struct rspamd_mime_part *cur_part;
+	guint i;
+	rspamd_ftok_t srch;
+	struct rspamd_content_type_param *found = NULL, *cur;
+	const gchar *param_name;
+	gboolean r = FALSE;
 
 	if (args == NULL || args->len < 2) {
-		msg_warn ("no parameters to function");
+		msg_warn_task ("no parameters to function");
 		return FALSE;
 	}
 
@@ -1935,107 +1569,10 @@ rspamd_content_type_compare_param (struct rspamd_task * task,
 	param_name = arg->data;
 	arg_pattern = &g_array_index (args, struct expression_argument, 1);
 
+	for (i = 0; i < task->parts->len; i ++) {
+		cur_part = g_ptr_array_index (task->parts, i);
 
-	part = g_mime_message_get_mime_part (task->message);
-	if (part) {
-		ct = (GMimeContentType *)g_mime_object_get_content_type (part);
 		if (args->len >= 3) {
-			arg1 = &g_array_index (args, struct expression_argument, 2);
-			if (g_ascii_strncasecmp (arg1->data, "true",
-				sizeof ("true") - 1) == 0) {
-				recursive = TRUE;
-			}
-		}
-		else {
-			/*
-			 * If user did not specify argument, let's assume that he wants
-			 * recursive search if mime part is multipart/mixed
-			 */
-			if (g_mime_content_type_is_type (ct, "multipart", "*")) {
-				recursive = TRUE;
-			}
-		}
-
-		if (recursive) {
-			cur = task->parts;
-		}
-
-#ifndef GMIME24
-		g_object_unref (part);
-#endif
-		for (;; ) {
-			if ((param_data =
-				g_mime_content_type_get_parameter ((GMimeContentType *)ct,
-				param_name)) == NULL) {
-				result = FALSE;
-			}
-			else {
-				if (arg_pattern->type == EXPRESSION_ARGUMENT_REGEXP) {
-					re = arg_pattern->data;
-
-					if ((r = rspamd_task_re_cache_check (task,
-							rspamd_regexp_get_pattern (re))) == -1) {
-						r = rspamd_regexp_search (re, param_data, 0,
-								NULL, NULL, FALSE, NULL);
-						rspamd_task_re_cache_add (task,
-								rspamd_regexp_get_pattern (re), r);
-					}
-				}
-				else {
-					/* Just do strcasecmp */
-					if (g_ascii_strcasecmp (param_data, arg_pattern->data) == 0) {
-						return TRUE;
-					}
-				}
-			}
-			/* Get next part */
-			if (!recursive) {
-				return result;
-			}
-			else if (cur != NULL) {
-				cur_part = cur->data;
-				if (cur_part->type != NULL) {
-					ct = cur_part->type;
-				}
-				cur = g_list_next (cur);
-			}
-			else {
-				/* All is done */
-				return result;
-			}
-		}
-	}
-
-	return FALSE;
-}
-
-static gboolean
-rspamd_content_type_has_param (struct rspamd_task * task,
-	GArray * args,
-	void *unused)
-{
-	gchar *param_name;
-	const gchar *param_data;
-	struct expression_argument *arg, *arg1;
-	GMimeObject *part;
-	GMimeContentType *ct;
-	gboolean recursive = FALSE, result = FALSE;
-	GList *cur = NULL;
-	struct mime_part *cur_part;
-
-	if (args == NULL || args->len < 1) {
-		msg_warn ("no parameters to function");
-		return FALSE;
-	}
-
-	arg = &g_array_index (args, struct expression_argument, 0);
-	g_assert (arg->type == EXPRESSION_ARGUMENT_NORMAL);
-	param_name = arg->data;
-
-	part = g_mime_message_get_mime_part (task->message);
-	if (part) {
-		ct = (GMimeContentType *)g_mime_object_get_content_type (part);
-		if (args->len >= 2) {
 			arg1 = &g_array_index (args, struct expression_argument, 2);
 			if (g_ascii_strncasecmp (arg1->data, "true",
 					sizeof ("true") - 1) == 0) {
@@ -2047,70 +1584,72 @@ rspamd_content_type_has_param (struct rspamd_task * task,
 			 * If user did not specify argument, let's assume that he wants
 			 * recursive search if mime part is multipart/mixed
 			 */
-			if (g_mime_content_type_is_type (ct, "multipart", "*")) {
+			if (IS_CT_MULTIPART (cur_part->ct)) {
 				recursive = TRUE;
 			}
 		}
 
-		if (recursive) {
-			cur = task->parts;
-		}
+		if (cur_part->ct->attrs) {
+			RSPAMD_FTOK_FROM_STR (&srch, param_name);
 
-#ifndef GMIME24
-		g_object_unref (part);
-#endif
-		for (;; ) {
-			if ((param_data =
-				g_mime_content_type_get_parameter ((GMimeContentType *)ct,
-				param_name)) != NULL) {
-				return TRUE;
-			}
-			/* Get next part */
-			if (!recursive) {
-				return result;
-			}
-			else if (cur != NULL) {
-				cur_part = cur->data;
-				if (cur_part->type != NULL) {
-					ct = cur_part->type;
+			found = g_hash_table_lookup (cur_part->ct->attrs, &srch);
+
+			if (found) {
+				DL_FOREACH (found, cur) {
+					if (arg_pattern->type == EXPRESSION_ARGUMENT_REGEXP) {
+						re = arg_pattern->data;
+						r = rspamd_regexp_search (re,
+								cur->value.begin, cur->value.len,
+								NULL, NULL, FALSE, NULL);
+
+						if (r) {
+							return TRUE;
+						}
+					}
+					else {
+						/* Just do strcasecmp */
+						RSPAMD_FTOK_FROM_STR (&srch, arg_pattern->data);
+						if (rspamd_ftok_casecmp (&srch, &cur->value) == 0) {
+							return TRUE;
+						}
+					}
 				}
-				cur = g_list_next (cur);
-			}
-			else {
-				/* All is done */
-				return result;
 			}
 		}
 
+		if (!recursive) {
+			break;
+		}
 	}
 
-	return TRUE;
+	return FALSE;
 }
 
 static gboolean
-rspamd_content_type_check (struct rspamd_task *task,
+rspamd_content_type_has_param (struct rspamd_task * task,
 	GArray * args,
-	gboolean check_subtype)
+	void *unused)
 {
-	const gchar *param_data;
-	rspamd_regexp_t *re;
-	struct expression_argument *arg1, *arg_pattern;
-	GMimeObject *part;
-	GMimeContentType *ct;
-	gint r;
-	gboolean recursive = FALSE, result = FALSE;
-	GList *cur = NULL;
-	struct mime_part *cur_part;
+	struct expression_argument *arg, *arg1;
+	gboolean recursive = FALSE;
+	struct rspamd_mime_part *cur_part;
+	guint i;
+	rspamd_ftok_t srch;
+	struct rspamd_content_type_param *found = NULL;
+	const gchar *param_name;
 
-	if (args == NULL) {
-		msg_warn ("no parameters to function");
+	if (args == NULL || args->len < 1) {
+		msg_warn_task ("no parameters to function");
 		return FALSE;
 	}
-	arg_pattern = &g_array_index (args, struct expression_argument, 0);
 
-	part = g_mime_message_get_mime_part (task->message);
-	if (part) {
-		ct = (GMimeContentType *)g_mime_object_get_content_type (part);
+	arg = &g_array_index (args, struct expression_argument, 0);
+	g_assert (arg->type == EXPRESSION_ARGUMENT_NORMAL);
+	param_name = arg->data;
+
+	for (i = 0; i < task->parts->len; i ++) {
+		cur_part = g_ptr_array_index (task->parts, i);
+
 		if (args->len >= 2) {
 			arg1 = &g_array_index (args, struct expression_argument, 1);
 			if (g_ascii_strncasecmp (arg1->data, "true",
@@ -2123,61 +1662,101 @@ rspamd_content_type_check (struct rspamd_task *task,
 			 * If user did not specify argument, let's assume that he wants
 			 * recursive search if mime part is multipart/mixed
 			 */
-			if (g_mime_content_type_is_type (ct, "multipart", "*")) {
+			if (IS_CT_MULTIPART (cur_part->ct)) {
 				recursive = TRUE;
 			}
 		}
 
-		if (recursive) {
-			cur = task->parts;
-		}
+		if (cur_part->ct->attrs) {
+			RSPAMD_FTOK_FROM_STR (&srch, param_name);
 
-#ifndef GMIME24
-		g_object_unref (part);
-#endif
-		for (;;) {
+			found = g_hash_table_lookup (cur_part->ct->attrs, &srch);
 
-			if (check_subtype) {
-				param_data = ct->subtype;
-			}
-			else {
-				param_data = ct->type;
-			}
-
-			if (arg_pattern->type == EXPRESSION_ARGUMENT_REGEXP) {
-				re = arg_pattern->data;
-
-				if ((r = rspamd_task_re_cache_check (task,
-						rspamd_regexp_get_pattern (re))) == -1) {
-					r = rspamd_regexp_search (re, param_data, 0,
-							NULL, NULL, FALSE, NULL);
-					rspamd_task_re_cache_add (task,
-							rspamd_regexp_get_pattern (re), r);
-				}
-			}
-			else {
-				/* Just do strcasecmp */
-				if (g_ascii_strcasecmp (param_data, arg_pattern->data) == 0) {
-					return TRUE;
-				}
-			}
-			/* Get next part */
-			if (!recursive) {
-				return result;
-			}
-			else if (cur != NULL) {
-				cur_part = cur->data;
-				if (cur_part->type != NULL) {
-					ct = cur_part->type;
-				}
-				cur = g_list_next (cur);
-			}
-			else {
-				/* All is done */
-				return result;
+			if (found) {
+				return TRUE;
 			}
 		}
 
+		if (!recursive) {
+			break;
+		}
+	}
+
+	return FALSE;
+}
+
+static gboolean
+rspamd_content_type_check (struct rspamd_task *task,
+	GArray * args,
+	gboolean check_subtype)
+{
+	rspamd_ftok_t *param_data, srch;
+	rspamd_regexp_t *re;
+	struct expression_argument *arg1, *arg_pattern;
+	struct rspamd_content_type *ct;
+	gint r;
+	guint i;
+	gboolean recursive = FALSE;
+	struct rspamd_mime_part *cur_part;
+
+	if (args == NULL || args->len < 1) {
+		msg_warn_task ("no parameters to function");
+		return FALSE;
+	}
+
+	arg_pattern = &g_array_index (args, struct expression_argument, 0);
+
+	for (i = 0; i < task->parts->len; i ++) {
+		cur_part = g_ptr_array_index (task->parts, i);
+		ct = cur_part->ct;
+
+		if (args->len >= 2) {
+			arg1 = &g_array_index (args, struct expression_argument, 1);
+			if (g_ascii_strncasecmp (arg1->data, "true",
+					sizeof ("true") - 1) == 0) {
+				recursive = TRUE;
+			}
+		}
+		else {
+			/*
+			 * If user did not specify argument, let's assume that he wants
+			 * recursive search if mime part is multipart/mixed
+			 */
+			if (IS_CT_MULTIPART (ct)) {
+				recursive = TRUE;
+			}
+		}
+
+		if (check_subtype) {
+			param_data = &ct->subtype;
+		}
+		else {
+			param_data = &ct->type;
+		}
+
+		if (arg_pattern->type == EXPRESSION_ARGUMENT_REGEXP) {
+			re = arg_pattern->data;
+			r = rspamd_regexp_search (re, param_data->begin, param_data->len,
+					NULL, NULL, FALSE, NULL);
+
+			if (r) {
+				return TRUE;
+			}
+		}
+		else {
+			/* Just do strcasecmp */
+			srch.begin = arg_pattern->data;
+			srch.len = strlen (arg_pattern->data);
+
+			if (rspamd_ftok_casecmp (param_data, &srch) == 0) {
+				return TRUE;
+			}
+		}
+
+		/* Get next part */
+		if (!recursive) {
+			break;
+		}
 	}
 
 	return FALSE;
@@ -2200,30 +1779,28 @@ rspamd_content_type_is_subtype (struct rspamd_task * task,
 }
 
 static gboolean
-compare_subtype (struct rspamd_task *task, GMimeContentType * ct,
+compare_subtype (struct rspamd_task *task, struct rspamd_content_type *ct,
 	struct expression_argument *subtype)
 {
 	rspamd_regexp_t *re;
+	rspamd_ftok_t srch;
 	gint r = 0;
 
 	if (subtype == NULL || ct == NULL) {
-		msg_warn ("invalid parameters passed");
+		msg_warn_task ("invalid parameters passed");
 		return FALSE;
 	}
 	if (subtype->type == EXPRESSION_ARGUMENT_REGEXP) {
 		re = subtype->data;
-
-		if ((r = rspamd_task_re_cache_check (task,
-				rspamd_regexp_get_pattern (re))) == -1) {
-			r = rspamd_regexp_search (re, ct->subtype, 0,
-					NULL, NULL, FALSE, NULL);
-			rspamd_task_re_cache_add (task,
-					rspamd_regexp_get_pattern (re), r);
-		}
+		r = rspamd_regexp_search (re, ct->subtype.begin, ct->subtype.len,
+				NULL, NULL, FALSE, NULL);
 	}
 	else {
+		srch.begin = subtype->data;
+		srch.len = strlen (subtype->data);
+
 		/* Just do strcasecmp */
-		if (ct->subtype && g_ascii_strcasecmp (ct->subtype, subtype->data) == 0) {
+		if (rspamd_ftok_casecmp (&ct->subtype, &srch) == 0) {
 			return TRUE;
 		}
 	}
@@ -2232,20 +1809,20 @@ compare_subtype (struct rspamd_task *task, GMimeContentType * ct,
 }
 
 static gboolean
-compare_len (struct mime_part *part, guint min, guint max)
+compare_len (struct rspamd_mime_part *part, guint min, guint max)
 {
 	if (min == 0 && max == 0) {
 		return TRUE;
 	}
 
 	if (min == 0) {
-		return part->content->len <= max;
+		return part->parsed_data.len <= max;
 	}
 	else if (max == 0) {
-		return part->content->len >= min;
+		return part->parsed_data.len >= min;
 	}
 	else {
-		return part->content->len >= min && part->content->len <= max;
+		return part->parsed_data.len >= min && part->parsed_data.len <= max;
 	}
 }
 
@@ -2257,39 +1834,39 @@ common_has_content_part (struct rspamd_task * task,
 	gint max_len)
 {
 	rspamd_regexp_t *re;
-	struct mime_part *part;
-	GList *cur;
-	GMimeContentType *ct;
+	struct rspamd_mime_part *part;
+	struct rspamd_content_type *ct;
+	rspamd_ftok_t srch;
 	gint r;
+	guint i;
 
-	cur = g_list_first (task->parts);
-	while (cur) {
-		part = cur->data;
-		ct = part->type;
+	for (i = 0; i < task->parts->len; i ++) {
+		part = g_ptr_array_index (task->parts, i);
+		ct = part->ct;
+
 		if (ct == NULL) {
-			cur = g_list_next (cur);
 			continue;
 		}
 
 		if (param_type->type == EXPRESSION_ARGUMENT_REGEXP) {
 			re = param_type->data;
 
-			if ((r = rspamd_task_re_cache_check (task,
-					rspamd_regexp_get_pattern (re))) == -1) {
-				r = rspamd_regexp_search (re, ct->type, 0,
-						NULL, NULL, FALSE, NULL);
-				/* Also check subtype and length of the part */
-				if (r && param_subtype) {
-					r = compare_len (part, min_len, max_len) &&
+			r = rspamd_regexp_search (re, ct->type.begin, ct->type.len,
+					NULL, NULL, FALSE, NULL);
+			/* Also check subtype and length of the part */
+			if (r && param_subtype) {
+				r = compare_len (part, min_len, max_len) &&
 						compare_subtype (task, ct, param_subtype);
-				}
-				rspamd_task_re_cache_add (task,
-						rspamd_regexp_get_pattern (re), r);
+
+				return r;
 			}
 		}
 		else {
 			/* Just do strcasecmp */
-			if (ct->type && g_ascii_strcasecmp (ct->type, param_type->data) == 0) {
+			srch.begin = param_type->data;
+			srch.len = strlen (param_type->data);
+
+			if (rspamd_ftok_casecmp (&ct->type, &srch) == 0) {
 				if (param_subtype) {
 					if (compare_subtype (task, ct, param_subtype)) {
 						if (compare_len (part, min_len, max_len)) {
@@ -2304,7 +1881,6 @@ common_has_content_part (struct rspamd_task * task,
 				}
 			}
 		}
-		cur = g_list_next (cur);
 	}
 
 	return FALSE;
@@ -2316,7 +1892,7 @@ rspamd_has_content_part (struct rspamd_task * task, GArray * args, void *unused)
 	struct expression_argument *param_type = NULL, *param_subtype = NULL;
 
 	if (args == NULL) {
-		msg_warn ("no parameters to function");
+		msg_warn_task ("no parameters to function");
 		return FALSE;
 	}
 
@@ -2338,7 +1914,7 @@ rspamd_has_content_part_len (struct rspamd_task * task,
 	struct expression_argument *arg;
 
 	if (args == NULL) {
-		msg_warn ("no parameters to function");
+		msg_warn_task ("no parameters to function");
 		return FALSE;
 	}
 
@@ -2354,7 +1930,7 @@ rspamd_has_content_part_len (struct rspamd_task * task,
 			g_assert (arg->type == EXPRESSION_ARGUMENT_NORMAL);
 
 			if (errno != 0) {
-				msg_warn ("invalid numeric value '%s': %s",
+				msg_warn_task ("invalid numeric value '%s': %s",
 					(gchar *)arg->data,
 					strerror (errno));
 				return FALSE;
@@ -2366,7 +1942,7 @@ rspamd_has_content_part_len (struct rspamd_task * task,
 				max = strtoul (arg->data, NULL, 10);
 
 				if (errno != 0) {
-					msg_warn ("invalid numeric value '%s': %s",
+					msg_warn_task ("invalid numeric value '%s': %s",
 						(gchar *)arg->data,
 						strerror (errno));
 					return FALSE;
@@ -2378,11 +1954,19 @@ rspamd_has_content_part_len (struct rspamd_task * task,
 	return common_has_content_part (task, param_type, param_subtype, min, max);
 }
 
-guint
-rspamd_mime_expression_set_re_limit (guint limit)
+static gboolean
+rspamd_is_empty_body (struct rspamd_task *task,
+		GArray * args,
+		void *unused)
 {
-	guint ret = max_re_data;
+	struct rspamd_mime_part *part;
+	guint i;
 
-	max_re_data = limit;
-	return ret;
+	PTR_ARRAY_FOREACH (task->parts, i, part) {
+		if (part->parsed_data.len > 0) {
+			return FALSE;
+		}
+	}
+
+	return TRUE;
 }

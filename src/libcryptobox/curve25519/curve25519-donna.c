@@ -47,6 +47,7 @@
 
 #include <string.h>
 #include <stdint.h>
+#include "curve25519.h"
 
 #ifdef _MSC_VER
 #define inline __inline
@@ -891,15 +892,28 @@ static void crecip (limb *out, const limb *z)
 	/* 2^255 - 21 */fmul (out, t1, z11);
 }
 
-int curve25519 (u8 *mypublic, const u8 *secret, const u8 *basepoint)
+int scalarmult_donna (u8 *mypublic, const u8 *secret, const u8 *basepoint)
 {
 	limb bp[10], x[10], z[11], zmone[10];
-	int i;
+	unsigned char e[32];
+
+	memcpy (e, secret, 32);
+	e[0] &= 248;
+	e[31] &= 127;
+	e[31] |= 64;
 
 	fexpand (bp, basepoint);
-	cmult (x, z, secret, bp);
+	cmult (x, z, e, bp);
 	crecip (zmone, z);
 	fmul (z, x, zmone);
 	fcontract (mypublic, z);
+
 	return 0;
+}
+
+int
+scalarmult_base_donna (u8 *mypublic, const u8 *secret)
+{
+	return scalarmult_donna (mypublic, secret,
+			curve25519_basepoint);
 }

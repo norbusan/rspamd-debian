@@ -1,37 +1,38 @@
-/* Copyright (c) 2015, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "config.h"
-#include "main.h"
+#include "rspamd.h"
 #include "util.h"
-#include "http.h"
+#include "libutil/http.h"
+#include "libutil/http_private.h"
 #include "tests.h"
 #include "ottery.h"
 #include "cryptobox.h"
+#include "keypair.h"
+#include "unix-std.h"
+#include <math.h>
 
-static const int file_blocks = 8;
-static const int pconns = 10;
-static const int ntests = 3000;
+#ifdef HAVE_SYS_WAIT_H
+#include <sys/wait.h>
+#endif
+
+static guint file_size = 500;
+static guint pconns = 100;
+static guint ntests = 3000;
+static guint nservers = 1;
 
 static void
 rspamd_server_error (struct rspamd_http_connection_entry *conn_ent,
@@ -55,7 +56,7 @@ rspamd_server_accept (gint fd, short what, void *arg)
 	gint nfd;
 
 	if ((nfd =
-			rspamd_accept_from_socket (fd, &addr)) == -1) {
+			rspamd_accept_from_socket (fd, &addr, NULL)) == -1) {
 		msg_warn ("accept failed: %s", strerror (errno));
 		return;
 	}
@@ -64,32 +65,40 @@ rspamd_server_accept (gint fd, short what, void *arg)
 		return;
 	}
 
-	rspamd_inet_address_destroy (addr);
+	rspamd_inet_address_free (addr);
 	rspamd_http_router_handle_socket (rt, nfd, NULL);
 }
 
 static void
-rspamd_http_server_func (const gchar *path, rspamd_inet_addr_t *addr,
-		rspamd_mempool_mutex_t *mtx, gpointer kp, struct rspamd_keypair_cache *c)
+rspamd_http_term_handler (gint fd, short what, void *arg)
+{
+	struct event_base *ev_base = arg;
+	struct timeval tv = {0, 0};
+
+	event_base_loopexit (ev_base, &tv);
+}
+
+static void
+rspamd_http_server_func (gint fd, const gchar *path, rspamd_inet_addr_t *addr,
+		struct rspamd_cryptobox_keypair *kp, struct rspamd_keypair_cache *c)
 {
 	struct rspamd_http_connection_router *rt;
 	struct event_base *ev_base = event_init ();
-	struct event accept_ev;
-	gint fd;
+	struct event accept_ev, term_ev;
 
 	rt = rspamd_http_router_new (rspamd_server_error, rspamd_server_finish,
 			NULL, ev_base, path, c);
 	g_assert (rt != NULL);
 
 	rspamd_http_router_set_key (rt, kp);
-
-	g_assert ((fd = rspamd_inet_address_listen (addr, SOCK_STREAM, TRUE)) != -1);
 	event_set (&accept_ev, fd, EV_READ | EV_PERSIST, rspamd_server_accept, rt);
 	event_base_set (ev_base, &accept_ev);
 	event_add (&accept_ev, NULL);
 
+	evsignal_set (&term_ev, SIGTERM, rspamd_http_term_handler, ev_base);
+	event_base_set (ev_base, &term_ev);
+	event_add (&term_ev, NULL);
 
-	rspamd_mempool_unlock_mutex (mtx);
 	event_base_loop (ev_base, 0);
 }
 
@@ -124,9 +133,8 @@ rspamd_client_finish (struct rspamd_http_connection *conn,
 	struct rspamd_http_message *msg)
 {
 	struct client_cbdata *cb = conn->ud;
-	struct timespec ts;
 
-	*(cb->lat) = rspamd_get_ticks () * 1000.;
+	*(cb->lat) = rspamd_get_ticks () * 1000. - cb->ts;
 	close (conn->fd);
 	rspamd_http_connection_unref (conn);
 	g_free (cb);
@@ -136,7 +144,9 @@ rspamd_client_finish (struct rspamd_http_connection *conn,
 
 static void
 rspamd_http_client_func (const gchar *path, rspamd_inet_addr_t *addr,
-		gpointer kp, gpointer peer_kp, struct rspamd_keypair_cache *c,
+		struct rspamd_cryptobox_keypair *kp,
+		struct rspamd_cryptobox_pubkey *peer_kp,
+		struct rspamd_keypair_cache *c,
 		struct event_base *ev_base, double *latency)
 {
 	struct rspamd_http_message *msg;
@@ -146,9 +156,13 @@ rspamd_http_client_func (const gchar *path, rspamd_inet_addr_t *addr,
 	gint fd;
 
 	g_assert ((fd = rspamd_inet_address_connect (addr, SOCK_STREAM, TRUE)) != -1);
-	conn = rspamd_http_connection_new (rspamd_client_body, rspamd_client_err,
-			rspamd_client_finish, RSPAMD_HTTP_CLIENT_SIMPLE,
-			RSPAMD_HTTP_CLIENT, c);
+	conn = rspamd_http_connection_new (rspamd_client_body,
+			rspamd_client_err,
+			rspamd_client_finish,
+			RSPAMD_HTTP_CLIENT_SIMPLE,
+			RSPAMD_HTTP_CLIENT,
+			c,
+			NULL);
 	rspamd_snprintf (urlbuf, sizeof (urlbuf), "http://127.0.0.1/%s", path);
 	msg = rspamd_http_message_from_url (urlbuf);
 
@@ -157,11 +171,11 @@ rspamd_http_client_func (const gchar *path, rspamd_inet_addr_t *addr,
 	if (kp != NULL) {
 		g_assert (peer_kp != NULL);
 		rspamd_http_connection_set_key (conn, kp);
-		msg->peer_key = rspamd_http_connection_key_ref (peer_kp);
+		msg->peer_key = rspamd_pubkey_ref (peer_kp);
 	}
 
 	cb = g_malloc (sizeof (*cb));
-	cb->ts = rspamd_get_ticks ();
+	cb->ts = rspamd_get_ticks () * 1000.;
 	cb->lat = latency;
 	rspamd_http_connection_write_message (conn, msg, NULL, NULL, cb,
 			fd, NULL, ev_base);
@@ -178,7 +192,7 @@ cmpd (const void *p1, const void *p2)
 double
 rspamd_http_calculate_mean (double *lats, double *std)
 {
-	gint i;
+	guint i;
 	gdouble mean = 0., dev = 0.;
 
 	qsort (lats, ntests * pconns, sizeof (double), cmpd);
@@ -199,51 +213,107 @@ rspamd_http_calculate_mean (double *lats, double *std)
 	return mean;
 }
 
+static void
+rspamd_http_start_servers (pid_t *sfd, rspamd_inet_addr_t *addr,
+		struct rspamd_cryptobox_keypair *serv_key,
+		struct rspamd_keypair_cache *c)
+{
+	guint i;
+	gint fd;
+
+	g_assert ((fd = rspamd_inet_address_listen (addr, SOCK_STREAM, TRUE)) != -1);
+
+	for (i = 0; i < nservers; i ++) {
+		sfd[i] = fork ();
+		g_assert (sfd[i] != -1);
+
+		if (sfd[i] == 0) {
+			gperf_profiler_init (NULL, "plain-http-server");
+			rspamd_http_server_func (fd, "/tmp/", addr, serv_key, c);
+			gperf_profiler_stop ();
+			exit (EXIT_SUCCESS);
+		}
+	}
+
+	close (fd);
+}
+
+static void
+rspamd_http_stop_servers (pid_t *sfd)
+{
+	guint i;
+	gint res;
+
+	for (i = 0; i < nservers; i++) {
+		kill (sfd[i], SIGTERM);
+		wait (&res);
+	}
+}
+
 void
 rspamd_http_test_func (void)
 {
 	struct event_base *ev_base = event_init ();
-	rspamd_mempool_t *pool = rspamd_mempool_new (rspamd_mempool_suggest_size ());
-	gpointer serv_key, client_key, peer_key;
+	rspamd_mempool_t *pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), NULL);
+	struct rspamd_cryptobox_keypair *serv_key, *client_key;
+	struct rspamd_cryptobox_pubkey *peer_key;
 	struct rspamd_keypair_cache *c;
 	rspamd_mempool_mutex_t *mtx;
 	rspamd_inet_addr_t *addr;
 	gdouble ts1, ts2;
-	gchar filepath[PATH_MAX], buf[512];
-	gint fd, i, j;
-	pid_t sfd;
+	gchar filepath[PATH_MAX], *buf;
+	gchar *env;
+	gint fd;
+	guint i, j;
+	pid_t *sfd;
 	GString *b32_key;
-	double diff, total_diff = 0.0, latency[pconns * ntests], mean, std;
+	double diff, total_diff = 0.0, *latency, mean, std;
+
+	/* Read environment */
+	if ((env = getenv ("RSPAMD_HTTP_CONNS")) != NULL) {
+		pconns = strtoul (env, NULL, 10);
+	}
+	else {
+		return;
+	}
+
+	if ((env = getenv ("RSPAMD_HTTP_TESTS")) != NULL) {
+		ntests = strtoul (env, NULL, 10);
+	}
+	if ((env = getenv ("RSPAMD_HTTP_SIZE")) != NULL) {
+		file_size = strtoul (env, NULL, 10);
+	}
+	if ((env = getenv ("RSPAMD_HTTP_SERVERS")) != NULL) {
+		nservers = strtoul (env, NULL, 10);
+	}
 
 	rspamd_cryptobox_init ();
 	rspamd_snprintf (filepath, sizeof (filepath), "/tmp/http-test-XXXXXX");
 	g_assert ((fd = mkstemp (filepath)) != -1);
 
-	for (i = 0; i < file_blocks; i ++) {
-		memset (buf, 0, sizeof (buf));
-		g_assert (write (fd, buf, sizeof (buf)) == sizeof (buf));
-	}
+	sfd = g_alloca (sizeof (*sfd) * nservers);
+	latency = g_malloc0 (pconns * ntests * sizeof (gdouble));
+
+	buf = g_malloc (file_size);
+	memset (buf, 0, file_size);
+	g_assert (write (fd, buf, file_size) == file_size);
+	g_free (buf);
 
 	mtx = rspamd_mempool_get_mutex (pool);
 
-	rspamd_parse_inet_address (&addr, "127.0.0.1");
-	rspamd_inet_address_set_port (addr, ottery_rand_range (30000) + 32768);
-	serv_key = rspamd_http_connection_gen_key ();
-	client_key = rspamd_http_connection_gen_key ();
+	rspamd_parse_inet_address (&addr, "127.0.0.1", 0);
+	rspamd_inet_address_set_port (addr, 43898);
+	serv_key = rspamd_keypair_new (RSPAMD_KEYPAIR_KEX,
+			RSPAMD_CRYPTOBOX_MODE_25519);
+	client_key = rspamd_keypair_new (RSPAMD_KEYPAIR_KEX,
+			RSPAMD_CRYPTOBOX_MODE_25519);
 	c = rspamd_keypair_cache_new (16);
 
-	rspamd_mempool_lock_mutex (mtx);
-	sfd = fork ();
-	g_assert (sfd != -1);
-
-	if (sfd == 0) {
-		rspamd_http_server_func ("/tmp/", addr, mtx, serv_key, c);
-		exit (EXIT_SUCCESS);
-	}
-
-	rspamd_mempool_lock_mutex (mtx);
+	rspamd_http_start_servers (sfd, addr, serv_key, NULL);
+	usleep (100000);
 
 	/* Do client stuff */
+	gperf_profiler_init (NULL, "plain-http-client");
 	for (i = 0; i < ntests; i ++) {
 		for (j = 0; j < pconns; j ++) {
 			rspamd_http_client_func (filepath + sizeof ("/tmp") - 1, addr,
@@ -255,23 +325,31 @@ rspamd_http_test_func (void)
 		diff = (ts2 - ts1) * 1000.0;
 		total_diff += diff;
 	}
+	gperf_profiler_stop ();
 
 	msg_info ("Made %d connections of size %d in %.6f ms, %.6f cps",
 			ntests * pconns,
-			sizeof (buf) * file_blocks,
+			file_size,
 			total_diff, ntests * pconns / total_diff * 1000.);
 	mean = rspamd_http_calculate_mean (latency, &std);
 	msg_info ("Latency: %.6f ms mean, %.6f dev",
 			mean, std);
 
-	/* Now test encrypted */
-	b32_key = rspamd_http_connection_print_key (serv_key,
+	rspamd_http_stop_servers (sfd);
+
+	rspamd_http_start_servers (sfd, addr, serv_key, c);
+
+	//rspamd_mempool_lock_mutex (mtx);
+	usleep (100000);
+	b32_key = rspamd_keypair_print (serv_key,
 			RSPAMD_KEYPAIR_PUBKEY|RSPAMD_KEYPAIR_BASE32);
 	g_assert (b32_key != NULL);
-	peer_key = rspamd_http_connection_make_peer_key (b32_key->str);
+	peer_key = rspamd_pubkey_from_base32 (b32_key->str, b32_key->len,
+			RSPAMD_KEYPAIR_KEX, RSPAMD_CRYPTOBOX_MODE_25519);
 	g_assert (peer_key != NULL);
 	total_diff = 0.0;
 
+	gperf_profiler_init (NULL, "cached-http-client");
 	for (i = 0; i < ntests; i ++) {
 		for (j = 0; j < pconns; j ++) {
 			rspamd_http_client_func (filepath + sizeof ("/tmp") - 1, addr,
@@ -283,29 +361,25 @@ rspamd_http_test_func (void)
 		diff = (ts2 - ts1) * 1000.0;
 		total_diff += diff;
 	}
+	gperf_profiler_stop ();
 
 	msg_info ("Made %d encrypted connections of size %d in %.6f ms, %.6f cps",
 			ntests * pconns,
-			sizeof (buf) * file_blocks,
+			file_size,
 			total_diff, ntests * pconns / total_diff * 1000.);
 	mean = rspamd_http_calculate_mean (latency, &std);
 	msg_info ("Latency: %.6f ms mean, %.6f dev",
 			mean, std);
 
 	/* Restart server */
-	kill (sfd, SIGTERM);
-	wait (&i);
-	sfd = fork ();
-	g_assert (sfd != -1);
+	rspamd_http_stop_servers (sfd);
+	/* No keypairs cache */
+	rspamd_http_start_servers (sfd, addr, serv_key, NULL);
 
-	if (sfd == 0) {
-		rspamd_http_server_func ("/tmp/", addr, mtx, serv_key, NULL);
-		exit (EXIT_SUCCESS);
-	}
-
-	rspamd_mempool_lock_mutex (mtx);
+	usleep (100000);
 	total_diff = 0.0;
 
+	gperf_profiler_init (NULL, "fair-http-client");
 	for (i = 0; i < ntests; i ++) {
 		for (j = 0; j < pconns; j ++) {
 			rspamd_http_client_func (filepath + sizeof ("/tmp") - 1, addr,
@@ -317,16 +391,106 @@ rspamd_http_test_func (void)
 		diff = (ts2 - ts1) * 1000.0;
 		total_diff += diff;
 	}
+	gperf_profiler_stop ();
 
 	msg_info ("Made %d uncached encrypted connections of size %d in %.6f ms, %.6f cps",
 			ntests * pconns,
-			sizeof (buf) * file_blocks,
+			file_size,
 			total_diff, ntests * pconns / total_diff * 1000.);
+	mean = rspamd_http_calculate_mean (latency, &std);
+	msg_info ("Latency: %.6f ms mean, %.6f dev",
+			mean, std);
+
+	/* AES mode */
+	serv_key = rspamd_keypair_new (RSPAMD_KEYPAIR_KEX,
+			RSPAMD_CRYPTOBOX_MODE_NIST);
+	client_key = rspamd_keypair_new (RSPAMD_KEYPAIR_KEX,
+			RSPAMD_CRYPTOBOX_MODE_NIST);
+	c = rspamd_keypair_cache_new (16);
+
+	/* Restart server */
+	rspamd_http_stop_servers (sfd);
+	/* No keypairs cache */
+	rspamd_http_start_servers (sfd, addr, serv_key, c);
+
+	//rspamd_mempool_lock_mutex (mtx);
+	usleep (100000);
+	b32_key = rspamd_keypair_print (serv_key,
+			RSPAMD_KEYPAIR_PUBKEY | RSPAMD_KEYPAIR_BASE32);
+	g_assert (b32_key != NULL);
+	peer_key = rspamd_pubkey_from_base32 (b32_key->str, b32_key->len,
+			RSPAMD_KEYPAIR_KEX, RSPAMD_CRYPTOBOX_MODE_NIST);
+	g_assert (peer_key != NULL);
+	total_diff = 0.0;
+
+	gperf_profiler_init (NULL, "cached-http-client-aes");
+	for (i = 0; i < ntests; i++) {
+		for (j = 0; j < pconns; j++) {
+			rspamd_http_client_func (filepath + sizeof ("/tmp") - 1,
+					addr,
+					client_key,
+					peer_key,
+					NULL,
+					ev_base,
+					&latency[i * pconns + j]);
+		}
+		ts1 = rspamd_get_ticks ();
+		event_base_loop (ev_base, 0);
+		ts2 = rspamd_get_ticks ();
+		diff = (ts2 - ts1) * 1000.0;
+		total_diff += diff;
+	}
+	gperf_profiler_stop ();
+
+	msg_info (
+			"Made %d aes encrypted connections of size %d in %.6f ms, %.6f cps",
+			ntests * pconns,
+			file_size,
+			total_diff,
+			ntests * pconns / total_diff * 1000.);
+	mean = rspamd_http_calculate_mean (latency, &std);
+	msg_info ("Latency: %.6f ms mean, %.6f dev",
+			mean, std);
+
+	/* Restart server */
+	rspamd_http_stop_servers (sfd);
+	/* No keypairs cache */
+	rspamd_http_start_servers (sfd, addr, serv_key, NULL);
+
+	//rspamd_mempool_lock_mutex (mtx);
+	usleep (100000);
+	total_diff = 0.0;
+
+	gperf_profiler_init (NULL, "fair-http-client-aes");
+	for (i = 0; i < ntests; i++) {
+		for (j = 0; j < pconns; j++) {
+			rspamd_http_client_func (filepath + sizeof ("/tmp") - 1,
+					addr,
+					client_key,
+					peer_key,
+					c,
+					ev_base,
+					&latency[i * pconns + j]);
+		}
+		ts1 = rspamd_get_ticks ();
+		event_base_loop (ev_base, 0);
+		ts2 = rspamd_get_ticks ();
+		diff = (ts2 - ts1) * 1000.0;
+		total_diff += diff;
+	}
+	gperf_profiler_stop ();
+
+	msg_info (
+			"Made %d uncached aes encrypted connections of size %d in %.6f ms, %.6f cps",
+			ntests * pconns,
+			file_size,
+			total_diff,
+			ntests * pconns / total_diff * 1000.);
 	mean = rspamd_http_calculate_mean (latency, &std);
 	msg_info ("Latency: %.6f ms mean, %.6f dev",
 			mean, std);
 
 	close (fd);
 	unlink (filepath);
-	kill (sfd, SIGTERM);
+	rspamd_http_stop_servers (sfd);
 }

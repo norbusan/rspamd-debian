@@ -1,28 +1,19 @@
-/* Copyright (c) 2010, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "lua_common.h"
-#include "regexp.h"
 
 /***
  * @module rspamd_regexp
@@ -42,6 +33,8 @@ LUA_FUNCTION_DEF (regexp, create_cached);
 LUA_FUNCTION_DEF (regexp, get_cached);
 LUA_FUNCTION_DEF (regexp, get_pattern);
 LUA_FUNCTION_DEF (regexp, set_limit);
+LUA_FUNCTION_DEF (regexp, set_max_hits);
+LUA_FUNCTION_DEF (regexp, get_max_hits);
 LUA_FUNCTION_DEF (regexp, search);
 LUA_FUNCTION_DEF (regexp, match);
 LUA_FUNCTION_DEF (regexp, matchn);
@@ -52,6 +45,8 @@ LUA_FUNCTION_DEF (regexp, gc);
 static const struct luaL_reg regexplib_m[] = {
 	LUA_INTERFACE_DEF (regexp, get_pattern),
 	LUA_INTERFACE_DEF (regexp, set_limit),
+	LUA_INTERFACE_DEF (regexp, set_max_hits),
+	LUA_INTERFACE_DEF (regexp, get_max_hits),
 	LUA_INTERFACE_DEF (regexp, match),
 	LUA_INTERFACE_DEF (regexp, matchn),
 	LUA_INTERFACE_DEF (regexp, search),
@@ -73,20 +68,44 @@ static const struct luaL_reg regexplib_f[] = {
 
 rspamd_mempool_t *regexp_static_pool = NULL;
 
-struct rspamd_lua_regexp {
-	rspamd_regexp_t *re;
-	gchar *re_pattern;
-	gsize match_limit;
-	gint re_flags;
-};
-
 static struct rspamd_lua_regexp *
 lua_check_regexp (lua_State * L)
 {
-	void *ud = luaL_checkudata (L, 1, "rspamd{regexp}");
+	void *ud = rspamd_lua_check_udata (L, 1, "rspamd{regexp}");
 
 	luaL_argcheck (L, ud != NULL, 1, "'regexp' expected");
 	return ud ? *((struct rspamd_lua_regexp **)ud) : NULL;
+}
+
+static gchar *
+rspamd_lua_get_module_name (lua_State *L)
+{
+	lua_Debug d;
+	gchar *p;
+	gchar func_buf[128];
+
+	if (lua_getstack (L, 1, &d) == 1) {
+		(void) lua_getinfo (L, "Sl", &d);
+		if ((p = strrchr (d.short_src, '/')) == NULL) {
+			p = d.short_src;
+		}
+		else {
+			p++;
+		}
+
+		if (strlen (p) > 20) {
+			rspamd_snprintf (func_buf, sizeof (func_buf), "%10s...]:%d", p,
+					d.currentline);
+		}
+		else {
+			rspamd_snprintf (func_buf, sizeof (func_buf), "%s:%d", p,
+					d.currentline);
+		}
+
+		return g_strdup (func_buf);
+	}
+
+	return NULL;
 }
 
 /***
@@ -124,6 +143,8 @@ lua_regexp_create (lua_State *L)
 	else {
 		new = g_slice_alloc0 (sizeof (struct rspamd_lua_regexp));
 		new->re = re;
+		new->re_pattern = g_strdup (string);
+		new->module = rspamd_lua_get_module_name (L);
 		pnew = lua_newuserdata (L, sizeof (struct rspamd_lua_regexp *));
 		rspamd_lua_setclass (L, "rspamd{regexp}", -1);
 		*pnew = new;
@@ -157,6 +178,8 @@ lua_regexp_get_cached (lua_State *L)
 	if (re) {
 		new = g_slice_alloc0 (sizeof (struct rspamd_lua_regexp));
 		new->re = rspamd_regexp_ref (re);
+		new->re_pattern = g_strdup (string);
+		new->module = rspamd_lua_get_module_name (L);
 		pnew = lua_newuserdata (L, sizeof (struct rspamd_lua_regexp *));
 		rspamd_lua_setclass (L, "rspamd{regexp}", -1);
 		*pnew = new;
@@ -201,6 +224,8 @@ lua_regexp_create_cached (lua_State *L)
 	if (re) {
 		new = g_slice_alloc0 (sizeof (struct rspamd_lua_regexp));
 		new->re = rspamd_regexp_ref (re);
+		new->re_pattern = g_strdup (string);
+		new->module = rspamd_lua_get_module_name (L);
 		pnew = lua_newuserdata (L, sizeof (struct rspamd_lua_regexp *));
 
 		rspamd_lua_setclass (L, "rspamd{regexp}", -1);
@@ -218,6 +243,8 @@ lua_regexp_create_cached (lua_State *L)
 		else {
 			new = g_slice_alloc0 (sizeof (struct rspamd_lua_regexp));
 			new->re = rspamd_regexp_ref (re);
+			new->re_pattern = g_strdup (string);
+			new->module = rspamd_lua_get_module_name (L);
 			pnew = lua_newuserdata (L, sizeof (struct rspamd_lua_regexp *));
 			rspamd_lua_setclass (L, "rspamd{regexp}", -1);
 			*pnew = new;
@@ -271,6 +298,50 @@ lua_regexp_set_limit (lua_State *L)
 	}
 
 	return 0;
+}
+
+/***
+ * @method re:set_max_hits(lim)
+ * Set maximum number of hits returned by a regexp
+ * @param {number} lim limit in hits count
+ * @return {number} old number of max hits
+ */
+static int
+lua_regexp_set_max_hits (lua_State *L)
+{
+	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	guint lim;
+
+	lim = luaL_checknumber (L, 2);
+
+	if (re && re->re && !IS_DESTROYED (re)) {
+		lua_pushnumber (L, rspamd_regexp_set_maxhits (re->re, lim));
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+/***
+ * @method re:get_max_hits(lim)
+ * Get maximum number of hits returned by a regexp
+ * @return {number} number of max hits
+ */
+static int
+lua_regexp_get_max_hits (lua_State *L)
+{
+	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+
+	if (re && re->re && !IS_DESTROYED (re)) {
+		lua_pushnumber (L, rspamd_regexp_get_maxhits (re->re));
+	}
+	else {
+		lua_pushnumber (L, 1);
+	}
+
+	return 1;
 }
 
 /***
@@ -347,7 +418,7 @@ lua_regexp_search (lua_State *L)
 					captures)) {
 
 				if (capture) {
-					lua_newtable (L);
+					lua_createtable (L, captures->len, 0);
 
 					for (capn = 0; capn < captures->len; capn ++) {
 						cap = &g_array_index (captures, struct rspamd_re_capture,
@@ -538,6 +609,12 @@ lua_regexp_split (lua_State *L)
 		}
 		else if (lua_type (L, 2) == LUA_TUSERDATA) {
 			t = lua_check_text (L, 2);
+
+			if (t == NULL) {
+				lua_error (L);
+				return 0;
+			}
+
 			data = t->start;
 			len = t->len;
 			is_text = TRUE;
@@ -562,11 +639,14 @@ lua_regexp_split (lua_State *L)
 						rspamd_lua_setclass (L, "rspamd{text}", -1);
 						t->start = old_start;
 						t->len = start - old_start;
-						t->own = FALSE;
+						t->flags = 0;
 					}
 
 					lua_rawseti (L, -2, ++i);
 					matched = TRUE;
+				}
+				else if (start == end) {
+					break;
 				}
 				old_start = end;
 			}
@@ -584,7 +664,7 @@ lua_regexp_split (lua_State *L)
 					rspamd_lua_setclass (L, "rspamd{text}", -1);
 					t->start = end;
 					t->len = (data + len) - end;
-					t->own = FALSE;
+					t->flags = 0;
 				}
 
 				lua_rawseti (L, -2, ++i);
@@ -632,6 +712,8 @@ lua_regexp_gc (lua_State *L)
 			rspamd_regexp_unref (to_del->re);
 		}
 
+		g_free (to_del->re_pattern);
+		g_free (to_del->module);
 		g_slice_free1 (sizeof (*to_del), to_del);
 	}
 
@@ -662,5 +744,10 @@ luaopen_regexp (lua_State * L)
 	luaL_register (L, NULL, regexplib_m);
 	rspamd_lua_add_preload (L, "rspamd_regexp", lua_load_regexp);
 
-	regexp_static_pool = rspamd_mempool_new (rspamd_mempool_suggest_size ());
+	if (regexp_static_pool == NULL) {
+		regexp_static_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (),
+				"regexp_lua_pool");
+	}
+
+	lua_settop (L, 0);
 }

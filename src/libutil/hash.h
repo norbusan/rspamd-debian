@@ -11,6 +11,9 @@
 
 struct rspamd_lru_hash_s;
 typedef struct rspamd_lru_hash_s rspamd_lru_hash_t;
+struct rspamd_lru_element_s;
+typedef struct rspamd_lru_element_s rspamd_lru_element_t;
+
 
 /**
  * Create new lru hash
@@ -22,7 +25,6 @@ typedef struct rspamd_lru_hash_s rspamd_lru_hash_t;
  */
 rspamd_lru_hash_t * rspamd_lru_hash_new (
 	gint maxsize,
-	gint maxage,
 	GDestroyNotify key_destroy,
 	GDestroyNotify value_destroy);
 
@@ -37,7 +39,6 @@ rspamd_lru_hash_t * rspamd_lru_hash_new (
  */
 rspamd_lru_hash_t * rspamd_lru_hash_new_full (
 	gint maxsize,
-	gint maxage,
 	GDestroyNotify key_destroy,
 	GDestroyNotify value_destroy,
 	GHashFunc hfunc,
@@ -52,6 +53,15 @@ rspamd_lru_hash_t * rspamd_lru_hash_new_full (
 gpointer rspamd_lru_hash_lookup (rspamd_lru_hash_t *hash,
 	gconstpointer key,
 	time_t now);
+
+/**
+ * Removes key from LRU cache
+ * @param hash
+ * @param key
+ * @return TRUE if key has been found and removed
+ */
+gboolean rspamd_lru_hash_remove (rspamd_lru_hash_t *hash,
+		gconstpointer key);
 /**
  * Insert item in hash
  * @param hash hash object
@@ -71,6 +81,17 @@ void rspamd_lru_hash_insert (rspamd_lru_hash_t *hash,
 
 void rspamd_lru_hash_destroy (rspamd_lru_hash_t *hash);
 
+/**
+ * Get hash table for this lru hash (use rspamd_lru_element_t as data)
+ */
+GHashTable *rspamd_lru_hash_get_htable (rspamd_lru_hash_t *hash);
+
+/**
+ * Get element's data
+ * @param elt
+ * @return
+ */
+gpointer rspamd_lru_hash_element_data (rspamd_lru_element_t *elt);
 #endif
 
 /*

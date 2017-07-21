@@ -1,31 +1,25 @@
-/* Copyright (c) 2010-2012, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "config.h"
-#include "main.h"
+#include "rspamd.h"
 #include "map.h"
 #include "filter.h"
 #include "dynamic_cfg.h"
+#include "unix-std.h"
+#include "lua/lua_common.h"
 
 struct config_json_buf {
 	GString *buf;
@@ -43,17 +37,18 @@ apply_dynamic_conf (const ucl_object_t *top, struct rspamd_config *cfg)
 	gint test_act;
 	const ucl_object_t *cur_elt, *cur_nm, *it_val;
 	ucl_object_iter_t it = NULL;
-	struct metric *real_metric;
-	struct metric_action *cur_action;
-	struct rspamd_symbol_def *s;
+	struct rspamd_metric *real_metric;
+	const gchar *name;
+	gdouble nscore;
+	static const guint priority = 3;
 
-	while ((cur_elt = ucl_iterate_object (top, &it, true))) {
+	while ((cur_elt = ucl_object_iterate (top, &it, true))) {
 		if (ucl_object_type (cur_elt) != UCL_OBJECT) {
 			msg_err ("loaded json array element is not an object");
 			continue;
 		}
 
-		cur_nm = ucl_object_find_key (cur_elt, "metric");
+		cur_nm = ucl_object_lookup (cur_elt, "metric");
 		if (!cur_nm || ucl_object_type (cur_nm) != UCL_STRING) {
 			msg_err (
 					"loaded json metric object element has no 'metric' attribute");
@@ -66,23 +61,27 @@ apply_dynamic_conf (const ucl_object_t *top, struct rspamd_config *cfg)
 			continue;
 		}
 
-		cur_nm = ucl_object_find_key (cur_elt, "symbols");
+		cur_nm = ucl_object_lookup (cur_elt, "symbols");
 		/* Parse symbols */
 		if (cur_nm && ucl_object_type (cur_nm) == UCL_ARRAY) {
 			ucl_object_iter_t nit = NULL;
 
-			while ((it_val = ucl_iterate_object (cur_nm, &nit, true))) {
-				if (ucl_object_find_key (it_val, "name") &&
-						ucl_object_find_key (it_val, "value")) {
+			while ((it_val = ucl_object_iterate (cur_nm, &nit, true))) {
+				if (ucl_object_lookup (it_val, "name") &&
+						ucl_object_lookup (it_val, "value")) {
 					const ucl_object_t *n =
-							ucl_object_find_key (it_val, "name");
+							ucl_object_lookup (it_val, "name");
 					const ucl_object_t *v =
-							ucl_object_find_key (it_val, "value");
+							ucl_object_lookup (it_val, "value");
 
-					if((s = g_hash_table_lookup (real_metric->symbols,
-							ucl_object_tostring (n))) != NULL) {
-						*s->weight_ptr = ucl_object_todouble (v);
-					}
+					nscore = ucl_object_todouble (v);
+
+					/*
+					 * We use priority = 3 here
+					 */
+					rspamd_config_add_metric_symbol (cfg, real_metric->name,
+							ucl_object_tostring (n), nscore, NULL, NULL,
+							0, priority, cfg->default_max_shots);
 				}
 				else {
 					msg_info (
@@ -97,26 +96,26 @@ apply_dynamic_conf (const ucl_object_t *top, struct rspamd_config *cfg)
 			ucl_object_insert_key ((ucl_object_t *)cur_elt, arr, "symbols",
 					sizeof ("symbols") - 1, false);
 		}
-		cur_nm = ucl_object_find_key (cur_elt, "actions");
+		cur_nm = ucl_object_lookup (cur_elt, "actions");
 		/* Parse actions */
 		if (cur_nm && ucl_object_type (cur_nm) == UCL_ARRAY) {
 			ucl_object_iter_t nit = NULL;
 
-			while ((it_val = ucl_iterate_object (cur_nm, &nit, true))) {
-				if (ucl_object_find_key (it_val, "name") &&
-						ucl_object_find_key (it_val, "value")) {
-					if (!rspamd_action_from_str (ucl_object_tostring (
-							ucl_object_find_key (it_val, "name")), &test_act)) {
+			while ((it_val = ucl_object_iterate (cur_nm, &nit, true))) {
+				if (ucl_object_lookup (it_val, "name") &&
+						ucl_object_lookup (it_val, "value")) {
+					name = ucl_object_tostring (ucl_object_lookup (it_val, "name"));
+
+					if (!name || !rspamd_action_from_str (name, &test_act)) {
 						msg_err ("unknown action: %s",
-								ucl_object_tostring (ucl_object_find_key (it_val,
+								ucl_object_tostring (ucl_object_lookup (it_val,
 										"name")));
 						continue;
 					}
-					cur_action = &real_metric->actions[test_act];
-					cur_action->action = test_act;
-					cur_action->score =
-							ucl_object_todouble (ucl_object_find_key (it_val,
-									"value"));
+					nscore = ucl_object_todouble (ucl_object_lookup (it_val,
+							"value"));
+					rspamd_config_set_action_score (cfg, real_metric->name,
+							name, nscore, priority);
 				}
 				else {
 					msg_info (
@@ -135,11 +134,11 @@ apply_dynamic_conf (const ucl_object_t *top, struct rspamd_config *cfg)
 }
 
 /* Callbacks for reading json dynamic rules */
-gchar *
-json_config_read_cb (rspamd_mempool_t * pool,
-	gchar * chunk,
+static gchar *
+json_config_read_cb (gchar * chunk,
 	gint len,
-	struct map_cb_data *data)
+	struct map_cb_data *data,
+	gboolean final)
 {
 	struct config_json_buf *jb, *pd;
 
@@ -167,8 +166,8 @@ json_config_read_cb (rspamd_mempool_t * pool,
 	return NULL;
 }
 
-void
-json_config_fin_cb (rspamd_mempool_t * pool, struct map_cb_data *data)
+static void
+json_config_fin_cb (struct map_cb_data *data)
 {
 	struct config_json_buf *jb;
 	ucl_object_t *top;
@@ -297,7 +296,7 @@ dump_dynamic_config (struct rspamd_config *cfg)
 	}
 
 	if (!ucl_object_emit_full (cfg->current_dynamic_conf, UCL_EMIT_JSON,
-			ucl_object_emit_fd_funcs (fd))) {
+			ucl_object_emit_fd_funcs (fd), NULL)) {
 		msg_err ("cannot emit ucl object: %s", strerror (errno));
 		close (fd);
 		return FALSE;
@@ -347,15 +346,21 @@ dynamic_metric_find_elt (const ucl_object_t *arr, const gchar *name)
 	ucl_object_iter_t it = NULL;
 	const ucl_object_t *cur, *n;
 
-	while ((cur = ucl_iterate_object (arr, &it, true)) != NULL) {
+	it = ucl_object_iterate_new (arr);
+
+	while ((cur = ucl_object_iterate_safe (it, true)) != NULL) {
 		if (cur->type == UCL_OBJECT) {
-			n = ucl_object_find_key (cur, "name");
+			n = ucl_object_lookup (cur, "name");
 			if (n && n->type == UCL_STRING &&
 				strcmp (name, ucl_object_tostring (n)) == 0) {
-				return (ucl_object_t *)ucl_object_find_key (cur, "value");
+				ucl_object_iterate_free (it);
+
+				return (ucl_object_t *)ucl_object_lookup (cur, "value");
 			}
 		}
 	}
+
+	ucl_object_iterate_free (it);
 
 	return NULL;
 }
@@ -366,15 +371,21 @@ dynamic_metric_find_metric (const ucl_object_t *arr, const gchar *metric)
 	ucl_object_iter_t it = NULL;
 	const ucl_object_t *cur, *n;
 
-	while ((cur = ucl_iterate_object (arr, &it, true)) != NULL) {
+	it = ucl_object_iterate_new (arr);
+
+	while ((cur = ucl_object_iterate_safe (it, true)) != NULL) {
 		if (cur->type == UCL_OBJECT) {
-			n = ucl_object_find_key (cur, "metric");
+			n = ucl_object_lookup (cur, "metric");
 			if (n && n->type == UCL_STRING &&
 				strcmp (metric, ucl_object_tostring (n)) == 0) {
+				ucl_object_iterate_free (it);
+
 				return (ucl_object_t *)cur;
 			}
 		}
 	}
+
+	ucl_object_iterate_free (it);
 
 	return NULL;
 }
@@ -395,6 +406,102 @@ new_dynamic_elt (ucl_object_t *arr, const gchar *name, gdouble value)
 	return n;
 }
 
+static gint
+rspamd_maybe_add_lua_dynsym (struct rspamd_config *cfg,
+		const gchar *sym,
+		gdouble score)
+{
+	lua_State *L = cfg->lua_state;
+	gint ret = -1;
+	struct rspamd_config **pcfg;
+
+	lua_getglobal (L, "rspamd_plugins");
+	if (lua_type (L, -1) == LUA_TTABLE) {
+		lua_pushstring (L, "dynamic_conf");
+		lua_gettable (L, -2);
+
+		if (lua_type (L, -1) == LUA_TTABLE) {
+			lua_pushstring (L, "add_symbol");
+			lua_gettable (L, -2);
+
+			if (lua_type (L, -1) == LUA_TFUNCTION) {
+				pcfg = lua_newuserdata (L, sizeof (*pcfg));
+				*pcfg = cfg;
+				rspamd_lua_setclass (L, "rspamd{config}", -1);
+				lua_pushstring (L, sym);
+				lua_pushnumber (L, score);
+
+				if (lua_pcall (L, 3, 1, 0) != 0) {
+					msg_err_config ("cannot execute add_symbol script: %s",
+							lua_tostring (L, -1));
+				}
+				else {
+					ret = lua_toboolean (L, -1);
+				}
+
+				lua_pop (L, 1);
+			}
+			else {
+				lua_pop (L, 1);
+			}
+		}
+
+		lua_pop (L, 1);
+	}
+
+	lua_pop (L, 1);
+
+	return ret;
+}
+
+static gint
+rspamd_maybe_add_lua_dynact (struct rspamd_config *cfg,
+		const gchar *action,
+		gdouble score)
+{
+	lua_State *L = cfg->lua_state;
+	gint ret = -1;
+	struct rspamd_config **pcfg;
+
+	lua_getglobal (L, "rspamd_plugins");
+	if (lua_type (L, -1) == LUA_TTABLE) {
+		lua_pushstring (L, "dynamic_conf");
+		lua_gettable (L, -2);
+
+		if (lua_type (L, -1) == LUA_TTABLE) {
+			lua_pushstring (L, "add_action");
+			lua_gettable (L, -2);
+
+			if (lua_type (L, -1) == LUA_TFUNCTION) {
+				pcfg = lua_newuserdata (L, sizeof (*pcfg));
+				*pcfg = cfg;
+				rspamd_lua_setclass (L, "rspamd{config}", -1);
+				lua_pushstring (L, action);
+				lua_pushnumber (L, score);
+
+				if (lua_pcall (L, 3, 1, 0) != 0) {
+					msg_err_config ("cannot execute add_action script: %s",
+							lua_tostring (L, -1));
+				}
+				else {
+					ret = lua_toboolean (L, -1);
+				}
+
+				lua_pop (L, 1);
+			}
+			else {
+				lua_pop (L, 1);
+			}
+		}
+
+		lua_pop (L, 1);
+	}
+
+	lua_pop (L, 1);
+
+	return ret;
+}
+
 /**
  * Add symbol for specified metric
  * @param cfg config file object
@@ -410,6 +517,11 @@ add_dynamic_symbol (struct rspamd_config *cfg,
 	gdouble value)
 {
 	ucl_object_t *metric, *syms;
+	gint ret;
+
+	if ((ret = rspamd_maybe_add_lua_dynsym (cfg, symbol, value)) != -1) {
+		return ret == 0 ? FALSE : TRUE;
+	}
 
 	if (cfg->dynamic_conf == NULL) {
 		msg_info ("dynamic conf is disabled");
@@ -422,7 +534,7 @@ add_dynamic_symbol (struct rspamd_config *cfg,
 		metric = new_dynamic_metric (metric_name, cfg->current_dynamic_conf);
 	}
 
-	syms = (ucl_object_t *)ucl_object_find_key (metric, "symbols");
+	syms = (ucl_object_t *)ucl_object_lookup (metric, "symbols");
 	if (syms != NULL) {
 		ucl_object_t *sym;
 
@@ -438,6 +550,47 @@ add_dynamic_symbol (struct rspamd_config *cfg,
 	apply_dynamic_conf (cfg->current_dynamic_conf, cfg);
 
 	return TRUE;
+}
+
+gboolean
+remove_dynamic_symbol (struct rspamd_config *cfg,
+	const gchar *metric_name,
+	const gchar *symbol)
+{
+	ucl_object_t *metric, *syms;
+	gboolean ret = FALSE;
+
+	if (cfg->dynamic_conf == NULL) {
+		msg_info ("dynamic conf is disabled");
+		return FALSE;
+	}
+
+	metric = dynamic_metric_find_metric (cfg->current_dynamic_conf,
+			metric_name);
+	if (metric == NULL) {
+		return FALSE;
+	}
+
+	syms = (ucl_object_t *)ucl_object_lookup (metric, "symbols");
+	if (syms != NULL) {
+		ucl_object_t *sym;
+
+		sym = dynamic_metric_find_elt (syms, symbol);
+
+		if (sym) {
+			ret = ucl_array_delete ((ucl_object_t *)syms, sym) != NULL;
+
+			if (ret) {
+				ucl_object_unref (sym);
+			}
+		}
+	}
+
+	if (ret) {
+		apply_dynamic_conf (cfg->current_dynamic_conf, cfg);
+	}
+
+	return ret;
 }
 
 
@@ -457,6 +610,11 @@ add_dynamic_action (struct rspamd_config *cfg,
 {
 	ucl_object_t *metric, *acts;
 	const gchar *action_name = rspamd_action_to_str (action);
+	gint ret;
+
+	if ((ret = rspamd_maybe_add_lua_dynact (cfg, action_name, value)) != -1) {
+		return ret == 0 ? FALSE : TRUE;
+	}
 
 	if (cfg->dynamic_conf == NULL) {
 		msg_info ("dynamic conf is disabled");
@@ -469,7 +627,7 @@ add_dynamic_action (struct rspamd_config *cfg,
 		metric = new_dynamic_metric (metric_name, cfg->current_dynamic_conf);
 	}
 
-	acts = (ucl_object_t *)ucl_object_find_key (metric, "actions");
+	acts = (ucl_object_t *)ucl_object_lookup (metric, "actions");
 	if (acts != NULL) {
 		ucl_object_t *act;
 
@@ -485,4 +643,46 @@ add_dynamic_action (struct rspamd_config *cfg,
 	apply_dynamic_conf (cfg->current_dynamic_conf, cfg);
 
 	return TRUE;
+}
+
+gboolean
+remove_dynamic_action (struct rspamd_config *cfg,
+	const gchar *metric_name,
+	guint action)
+{
+	ucl_object_t *metric, *acts;
+	const gchar *action_name = rspamd_action_to_str (action);
+	gboolean ret = FALSE;
+
+	if (cfg->dynamic_conf == NULL) {
+		msg_info ("dynamic conf is disabled");
+		return FALSE;
+	}
+
+	metric = dynamic_metric_find_metric (cfg->current_dynamic_conf,
+			metric_name);
+	if (metric == NULL) {
+		return FALSE;
+	}
+
+	acts = (ucl_object_t *)ucl_object_lookup (metric, "actions");
+
+	if (acts != NULL) {
+		ucl_object_t *act;
+
+		act = dynamic_metric_find_elt (acts, action_name);
+
+		if (act) {
+			ret = ucl_array_delete (acts, act) != NULL;
+		}
+		if (ret) {
+			ucl_object_unref (act);
+		}
+	}
+
+	if (ret) {
+		apply_dynamic_conf (cfg->current_dynamic_conf, cfg);
+	}
+
+	return ret;
 }

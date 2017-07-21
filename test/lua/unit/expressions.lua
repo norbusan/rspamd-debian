@@ -5,7 +5,7 @@ context("Rspamd expressions", function()
   local rspamd_mempool = require "rspamd_mempool"
   local rspamd_regexp = require "rspamd_regexp"
   local split_re = rspamd_regexp.create('/\\s+|\\)|\\(/')
-  
+
   local function parse_func(str)
     -- extract token till the first space character
     local token = str
@@ -16,37 +16,38 @@ context("Rspamd expressions", function()
     -- Return token name
     return token
   end
-  
+
   test("Expression creation function", function()
     local function process_func(token, task)
       -- Do something using token and task
     end
-    
+
     local pool = rspamd_mempool.create()
-    
+
     local cases = {
-       {'A & B | !C', 'C ! A B & |'},
-       {'A & (B | !C)', 'A B C ! | &'},
+       {'A & B | !C', '(C) ! (A) (B) & |'},
+       {'A & (B | !C)', '(A) (B) (C) ! | &'},
        {'A & B &', nil},
        -- Unbalanced braces
        {'(((A))', nil},
        -- Balanced braces
-       {'(((A)))', 'A'},
-       -- Plus and comparision operators
-       {'A + B + C + D > 2', '2 A B C D +(4) >'},
+       {'(((A)))', '(A)'},
+       -- Plus and comparison operators
+       {'A + B + C + D > 2', '2 (A) (B) (C) (D) +(4) >'},
        -- Plus and logic operators
-       {'((A + B + C + D) > 2) & D', 'D 2 A B C D +(4) > &'},
+       {'((A + B + C + D) > 2) & D', '(D) 2 (A) (B) (C) (D) +(4) > &'},
        -- Associativity
-       {'A | B | C & D & E', 'A B C D E &(3) |(3)'},
+       {'A | B | C & D & E', '(A) (B) (C) (D) (E) &(3) |(3)'},
        -- More associativity
-       {'1 | 0 & 0 | 0', '1 0 0 & 0 |(3)'},
+       {'1 | 0 & 0 | 0', '(1) (0) (0) (0) & |(3)'},
+       {'(A) & (B) & ((C) | (D) | (E) | (F))', '(A) (B) (C) (D) (E) (F) |(4) &(3)' },
        -- Extra space
-       {'A & B | ! C', 'C ! A B & |'},
+       {'A & B | ! C', '(C) ! (A) (B) & |'},
     }
     for _,c in ipairs(cases) do
-      local expr,err = rspamd_expression.create(c[1], 
+      local expr,err = rspamd_expression.create(c[1],
         {parse_func, process_func}, pool)
-      
+
       if not c[2] then
         assert_nil(expr, "Should not be able to parse " .. c[1])
       else
@@ -60,14 +61,14 @@ context("Rspamd expressions", function()
   end)
   test("Expression process function", function()
     local function process_func(token, input)
-    
+
       --print(token)
       local t = input[token]
-      
+
       if t then return 1 end
       return 0
     end
-    
+
     local pool = rspamd_mempool.create()
     local atoms = {
       A = true,
@@ -76,6 +77,11 @@ context("Rspamd expressions", function()
       D = false,
       E = true,
       F = false,
+      G = false,
+      H = false,
+      I = false,
+      J = false,
+      K = false,
     }
     local cases = {
        {'A & B | !C', 0},
@@ -87,18 +93,21 @@ context("Rspamd expressions", function()
        {'F && ((A + B + C + D) > 1)', 0},
        {'(E) && ((B + B + B + B) >= 1)', 0},
        {'!!C', 1},
+       {'(B) & (D) & ((G) | (H) | (I) | (A))', 0},
+       {'A & C & (!D || !C || !E)', 1},
+       {'A & C & !(D || C || E)', 0},
     }
     for _,c in ipairs(cases) do
-      local expr,err = rspamd_expression.create(c[1], 
+      local expr,err = rspamd_expression.create(c[1],
         {parse_func, process_func}, pool)
 
       assert_not_nil(expr, "Cannot parse " .. c[1])
       --print(expr)
       res = expr:process(atoms)
-      assert_equal(res, c[2], string.format("Processed expr '%s' returned '%d', expected: '%d'",
-        expr:to_string(), res, c[2]))
+      assert_equal(res, c[2], string.format("Processed expr '%s'{%s} returned '%d', expected: '%d'",
+        expr:to_string(), c[1], res, c[2]))
     end
-    
+
     pool:destroy()
   end)
 end)

@@ -112,7 +112,9 @@ typedef int (*http_cb) (http_parser*);
   XX(25, PURGE,       PURGE)        \
   /* SPAMC compatibility */			\
   XX(26, SYMBOLS,     SYMBOLS)      \
-  XX(27, CHECK,       CHECK)
+  XX(27, CHECK,       CHECK)        \
+  XX(28, METHOD_MAX,       METHOD_MAX)        \
+  XX(-1, INVALID,     INVALID)      \
 
 enum http_method
   {
@@ -137,7 +139,7 @@ enum flags
 
 
 /* Map for errno-related constants
- * 
+ *
  * The provided argument should be a macro that takes 2 arguments.
  */
 #define HTTP_ERRNO_MAP(XX)                                           \

@@ -1,34 +1,25 @@
-/*
- * Copyright (c) 2009-2012, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "config.h"
 #include "dns.h"
 #include "spf.h"
-#include "main.h"
+#include "rspamd.h"
 #include "message.h"
-#include "filter.h"
 #include "utlist.h"
+#include "libserver/mempool_vars_internal.h"
 
 #define SPF_VER1_STR "v=spf1"
 #define SPF_VER2_STR "spf2."
@@ -61,12 +52,14 @@ struct spf_record {
 	gint requests_inflight;
 
 	guint ttl;
-	GPtrArray *resolved; /* Array of struct spf_resolved_element */
+	GPtrArray *resolved;
+	/* Array of struct spf_resolved_element */
 	const gchar *sender;
 	const gchar *sender_domain;
 	gchar *local_part;
 	struct rspamd_task *task;
 	spf_cb_t callback;
+	gpointer cbdata;
 	gboolean done;
 };
 
@@ -93,25 +86,44 @@ struct spf_record {
 
 #undef SPF_DEBUG
 
+#define msg_err_spf(...) rspamd_default_log_function (G_LOG_LEVEL_CRITICAL, \
+        "spf", rec->task->task_pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+#define msg_warn_spf(...)   rspamd_default_log_function (G_LOG_LEVEL_WARNING, \
+        "spf", rec->task->task_pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+#define msg_info_spf(...)   rspamd_default_log_function (G_LOG_LEVEL_INFO, \
+        "spf", rec->task->task_pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+#define msg_debug_spf(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
+        "spf", rec->task->task_pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+
+
 struct spf_dns_cb {
 	struct spf_record *rec;
 	struct spf_addr *addr;
 	struct spf_resolved_element *resolved;
-	gchar *ptr_host;
+	const gchar *ptr_host;
 	spf_action_t cur_action;
 	gboolean in_include;
 };
 
 #define CHECK_REC(rec)                                          \
-	do {                                                        \
-		if ((rec)->nested > SPF_MAX_NESTING ||                  \
-			(rec)->dns_requests > SPF_MAX_DNS_REQUESTS) {       \
-			msg_info ("<%s> spf recursion limit %d is reached, domain: %s", \
-				(rec)->task->message_id, (rec)->dns_requests,   \
-				(rec)->sender_domain);                          \
-			return FALSE;                                       \
-		}                                                       \
-	} while (0)                                                 \
+    do {                                                        \
+        if ((rec)->nested > SPF_MAX_NESTING ||                  \
+            (rec)->dns_requests > SPF_MAX_DNS_REQUESTS) {       \
+            msg_info_spf ("<%s> spf recursion limit %d is reached, domain: %s", \
+                (rec)->task->message_id, (rec)->dns_requests,   \
+                (rec)->sender_domain);                          \
+            return FALSE;                                       \
+        }                                                       \
+    } while (0)                                                 \
+
 
 static gboolean start_spf_parse (struct spf_record *rec,
 		struct spf_resolved_element *resolved, gchar *begin);
@@ -125,18 +137,53 @@ check_spf_mech (const gchar *elt, gboolean *need_shift)
 	*need_shift = TRUE;
 
 	switch (*elt) {
-	case '-':
-		return SPF_FAIL;
-	case '~':
-		return SPF_SOFT_FAIL;
-	case '+':
-		return SPF_PASS;
-	case '?':
-		return SPF_NEUTRAL;
-	default:
-		*need_shift = FALSE;
-		return SPF_PASS;
+		case '-':
+			return SPF_FAIL;
+		case '~':
+			return SPF_SOFT_FAIL;
+		case '+':
+			return SPF_PASS;
+		case '?':
+			return SPF_NEUTRAL;
+		default:
+			*need_shift = FALSE;
+			return SPF_PASS;
 	}
+}
+
+static const gchar *
+rspamd_spf_dns_action_to_str (spf_action_t act)
+{
+	const char *ret = "unknown";
+
+	switch (act) {
+	case SPF_RESOLVE_MX:
+		ret = "MX";
+		break;
+	case SPF_RESOLVE_A:
+		ret = "A";
+		break;
+	case SPF_RESOLVE_PTR:
+		ret = "PTR";
+		break;
+	case SPF_RESOLVE_AAA:
+		ret = "AAAA";
+		break;
+	case SPF_RESOLVE_REDIRECT:
+		ret = "REDIRECT";
+		break;
+	case SPF_RESOLVE_INCLUDE:
+		ret = "INCLUDE";
+		break;
+	case SPF_RESOLVE_EXISTS:
+		ret = "EXISTS";
+		break;
+	case SPF_RESOLVE_EXP:
+		ret = "EXP";
+		break;
+	}
+
+	return ret;
 }
 
 static struct spf_addr *
@@ -157,6 +204,8 @@ rspamd_spf_new_addr (struct spf_record *rec,
 	}
 
 	g_ptr_array_add (resolved->elts, naddr);
+	naddr->prev = naddr;
+	naddr->next = NULL;
 
 	return naddr;
 }
@@ -164,11 +213,13 @@ rspamd_spf_new_addr (struct spf_record *rec,
 static void
 rspamd_spf_free_addr (gpointer a)
 {
-	struct spf_addr *addr = a;
+	struct spf_addr *addr = a, *tmp, *cur;
 
 	if (addr) {
 		g_free (addr->spf_string);
-		g_slice_free1 (sizeof (*addr), addr);
+		DL_FOREACH_SAFE (addr, cur, tmp) {
+			g_slice_free1 (sizeof (*cur), cur);
+		}
 	}
 }
 
@@ -198,7 +249,7 @@ spf_record_destructor (gpointer r)
 	guint i;
 
 	if (rec) {
-		for (i = 0; i < rec->resolved->len; i ++) {
+		for (i = 0; i < rec->resolved->len; i++) {
 			elt = g_ptr_array_index (rec->resolved, i);
 			g_ptr_array_free (elt->elts, TRUE);
 			g_free (elt->cur_domain);
@@ -215,7 +266,7 @@ rspamd_flatten_record_dtor (struct spf_resolved *r)
 	struct spf_addr *addr;
 	guint i;
 
-	for (i = 0; i < r->elts->len; i ++) {
+	for (i = 0; i < r->elts->len; i++) {
 		addr = &g_array_index (r->elts, struct spf_addr, i);
 		g_free (addr->spf_string);
 	}
@@ -229,8 +280,8 @@ static void
 rspamd_spf_process_reference (struct spf_resolved *target,
 		struct spf_addr *addr, struct spf_record *rec, gboolean top)
 {
-	struct spf_resolved_element *elt;
-	struct spf_addr *cur = NULL, taddr;
+	struct spf_resolved_element *elt, *relt;
+	struct spf_addr *cur = NULL, taddr, *cur_addr;
 	guint i;
 
 	if (addr) {
@@ -242,38 +293,70 @@ rspamd_spf_process_reference (struct spf_resolved *target,
 		elt = g_ptr_array_index (rec->resolved, 0);
 	}
 
-	while (elt->redirected) {
+	if (rec->ttl < target->ttl) {
+		msg_debug_spf ("reducing ttl from %d to %d after subrecord processing %s",
+				target->ttl, rec->ttl, rec->sender_domain);
+		target->ttl = rec->ttl;
+	}
+
+	if (elt->redirected) {
 		g_assert (elt->elts->len > 0);
 
-		for (i = 0; i < elt->elts->len; i ++) {
+		for (i = 0; i < elt->elts->len; i++) {
 			cur = g_ptr_array_index (elt->elts, i);
-			if (cur->flags & RSPAMD_SPF_FLAG_PARSED) {
+			if (cur->flags & RSPAMD_SPF_FLAG_REDIRECT) {
 				break;
 			}
 		}
 
 		g_assert (cur != NULL);
-		if (!(cur->flags & RSPAMD_SPF_FLAG_PARSED)) {
+		if (!(cur->flags & (RSPAMD_SPF_FLAG_PARSED|RSPAMD_SPF_FLAG_RESOLVED))) {
 			/* Unresolved redirect */
-			msg_info ("redirect to %s cannot be resolved", cur->spf_string);
-			return;
+			msg_info_spf ("redirect to %s cannot be resolved", cur->spf_string);
 		}
-
-		g_assert (cur->flags & RSPAMD_SPF_FLAG_REFRENCE);
-		g_assert (cur->m.idx < rec->resolved->len);
-		elt = g_ptr_array_index (rec->resolved, cur->m.idx);
+		else {
+			g_assert (cur->flags & RSPAMD_SPF_FLAG_REFERENCE);
+			g_assert (cur->m.idx < rec->resolved->len);
+			relt = g_ptr_array_index (rec->resolved, cur->m.idx);
+			msg_debug_spf ("domain %s is redirected to %s", elt->cur_domain,
+					relt->cur_domain);
+		}
 	}
 
-	for (i = 0; i < elt->elts->len; i ++) {
+	for (i = 0; i < elt->elts->len; i++) {
 		cur = g_ptr_array_index (elt->elts, i);
 
-		if (!(cur->flags & RSPAMD_SPF_FLAG_PARSED)) {
+		if (cur->flags & RSPAMD_SPF_FLAG_TEMPFAIL) {
+			target->temp_failed = TRUE;
+			continue;
+		}
+		if (cur->flags & RSPAMD_SPF_FLAG_PERMFAIL) {
+			target->perm_failed = TRUE;
+			continue;
+		}
+		if (cur->flags & RSPAMD_SPF_FLAG_NA) {
+			target->na = TRUE;
+			continue;
+		}
+		if (cur->flags & RSPAMD_SPF_FLAG_INVALID) {
+			/* Ignore invalid elements */
+			continue;
+		}
+		if ((cur->flags & (RSPAMD_SPF_FLAG_PARSED|RSPAMD_SPF_FLAG_RESOLVED)) !=
+				(RSPAMD_SPF_FLAG_RESOLVED|RSPAMD_SPF_FLAG_PARSED)) {
 			/* Ignore unparsed addrs */
 			continue;
 		}
-		else if (cur->flags & RSPAMD_SPF_FLAG_REFRENCE) {
+		if (cur->flags & RSPAMD_SPF_FLAG_REFERENCE) {
 			/* Process reference */
-			rspamd_spf_process_reference (target, cur, rec, FALSE);
+			if (cur->flags & RSPAMD_SPF_FLAG_REDIRECT) {
+				/* Stop on redirected domain */
+				rspamd_spf_process_reference (target, cur, rec, top);
+				break;
+			}
+			else {
+				rspamd_spf_process_reference (target, cur, rec, FALSE);
+			}
 		}
 		else {
 			if ((cur->flags & RSPAMD_SPF_FLAG_ANY) && !top) {
@@ -281,10 +364,11 @@ rspamd_spf_process_reference (struct spf_resolved *target,
 				continue;
 			}
 
-			memcpy (&taddr, cur, sizeof (taddr));
-			/* Steal element */
-			cur->spf_string = NULL;
-			g_array_append_val (target->elts, taddr);
+			DL_FOREACH (cur, cur_addr) {
+				memcpy (&taddr, cur_addr, sizeof (taddr));
+				taddr.spf_string = g_strdup (cur_addr->spf_string);
+				g_array_append_val (target->elts, taddr);
+			}
 		}
 	}
 }
@@ -299,15 +383,24 @@ rspamd_spf_record_flatten (struct spf_record *rec)
 
 	g_assert (rec != NULL);
 
-	res = g_slice_alloc (sizeof (*res));
-	res->elts = g_array_sized_new (FALSE, FALSE, sizeof (struct spf_addr),
-			rec->resolved->len);
-	res->domain = g_strdup (rec->sender_domain);
-	res->ttl = rec->ttl;
-	REF_INIT_RETAIN (res, rspamd_flatten_record_dtor);
+	if (rec->resolved) {
+		res = g_slice_alloc0 (sizeof (*res));
+		res->elts = g_array_sized_new (FALSE, FALSE, sizeof (struct spf_addr),
+				rec->resolved->len);
+		res->domain = g_strdup (rec->sender_domain);
+		res->ttl = rec->ttl;
+		REF_INIT_RETAIN (res, rspamd_flatten_record_dtor);
 
-	if (rec->resolved->len > 0) {
-		rspamd_spf_process_reference (res, NULL, rec, TRUE);
+		if (rec->resolved->len > 0) {
+			rspamd_spf_process_reference (res, NULL, rec, TRUE);
+		}
+	}
+	else {
+		res = g_slice_alloc0 (sizeof (*res));
+		res->elts = g_array_new (FALSE, FALSE, sizeof (struct spf_addr));
+		res->domain = g_strdup (rec->sender_domain);
+		res->ttl = rec->ttl;
+		REF_INIT_RETAIN (res, rspamd_flatten_record_dtor);
 	}
 
 	return res;
@@ -320,7 +413,7 @@ rspamd_spf_maybe_return (struct spf_record *rec)
 
 	if (rec->requests_inflight == 0 && !rec->done) {
 		flat = rspamd_spf_record_flatten (rec);
-		rec->callback (flat, rec->task);
+		rec->callback (flat, rec->task, rec->cbdata);
 		REF_RELEASE (flat);
 		rec->done = TRUE;
 	}
@@ -330,42 +423,47 @@ static gboolean
 spf_check_ptr_host (struct spf_dns_cb *cb, const char *name)
 {
 	const char *dend, *nend, *dstart, *nstart;
+	struct spf_record *rec = cb->rec;
 
-	if (name == NULL) {
-		return FALSE;
-	}
 	if (cb->ptr_host != NULL) {
 		dstart = cb->ptr_host;
-
 	}
 	else {
 		dstart = cb->resolved->cur_domain;
 	}
 
-	msg_debug ("check ptr %s vs %s", name, dstart);
+	if (name == NULL || dstart == NULL) {
+		return FALSE;
+	}
+
+	msg_debug_spf ("check ptr %s vs %s", name, dstart);
 
 	/* We need to check whether `cur_domain` is a subdomain for `name` */
 	dend = dstart + strlen (dstart) - 1;
 	nstart = name;
 	nend = nstart + strlen (nstart) - 1;
 
-	if (nend == nstart || dend == dstart) {
+	if (nend <= nstart || dend <= dstart) {
 		return FALSE;
 	}
 	/* Strip last '.' from names */
 	if (*nend == '.') {
-		nend --;
+		nend--;
 	}
 	if (*dend == '.') {
-		dend --;
+		dend--;
+	}
+	if (nend <= nstart || dend <= dstart) {
+		return FALSE;
 	}
 
 	/* Now compare from end to start */
 	for (;;) {
 		if (g_ascii_tolower (*dend) != g_ascii_tolower (*nend)) {
-			msg_debug ("ptr records mismatch: %s and %s", dend, nend);
+			msg_debug_spf ("ptr records mismatch: %s and %s", dend, nend);
 			return FALSE;
 		}
+
 		if (dend == dstart) {
 			break;
 		}
@@ -373,10 +471,11 @@ spf_check_ptr_host (struct spf_dns_cb *cb, const char *name)
 			/* Name is shorter than cur_domain */
 			return FALSE;
 		}
-		nend --;
-		dend --;
+		nend--;
+		dend--;
 	}
-	if (nend != nstart && *(nend - 1) != '.') {
+
+	if (nend > nstart && *(nend - 1) != '.') {
 		/* Not a subdomain */
 		return FALSE;
 	}
@@ -385,19 +484,55 @@ spf_check_ptr_host (struct spf_dns_cb *cb, const char *name)
 }
 
 static void
-spf_record_process_addr (struct spf_addr *addr, struct rdns_reply_entry *reply)
+spf_record_process_addr (struct spf_record *rec, struct spf_addr *addr, struct
+		rdns_reply_entry *reply)
 {
-	if (reply->type == RDNS_REQUEST_AAAA) {
-		memcpy (addr->addr6, &reply->content.aaa.addr, sizeof (addr->addr6));
-		addr->flags |= RSPAMD_SPF_FLAG_IPV6;
-	}
-	else if (reply->type == RDNS_REQUEST_A) {
-		memcpy (addr->addr4, &reply->content.a.addr, sizeof (addr->addr4));
-		addr->flags |= RSPAMD_SPF_FLAG_IPV4;
+	struct spf_addr *naddr;
+
+	if (!(addr->flags & RSPAMD_SPF_FLAG_PROCESSED)) {
+		/* That's the first address */
+		if (reply->type == RDNS_REQUEST_AAAA) {
+			memcpy (addr->addr6,
+					&reply->content.aaa.addr,
+					sizeof (addr->addr6));
+			addr->flags |= RSPAMD_SPF_FLAG_IPV6;
+		}
+		else if (reply->type == RDNS_REQUEST_A) {
+			memcpy (addr->addr4, &reply->content.a.addr, sizeof (addr->addr4));
+			addr->flags |= RSPAMD_SPF_FLAG_IPV4;
+		}
+		else {
+			msg_err_spf (
+					"internal error, bad DNS reply is treated as address: %s",
+					rdns_strtype (reply->type));
+		}
+
+		addr->flags |= RSPAMD_SPF_FLAG_PROCESSED;
 	}
 	else {
-		msg_err ("internal error, bad DNS reply is treated as address: %s",
-			rdns_strtype (reply->type));
+		/* We need to create a new address */
+		naddr = g_slice_alloc0 (sizeof (*naddr));
+		memcpy (naddr, addr, sizeof (*naddr));
+		naddr->next = NULL;
+		naddr->prev = NULL;
+
+		if (reply->type == RDNS_REQUEST_AAAA) {
+			memcpy (naddr->addr6,
+					&reply->content.aaa.addr,
+					sizeof (addr->addr6));
+			naddr->flags |= RSPAMD_SPF_FLAG_IPV6;
+		}
+		else if (reply->type == RDNS_REQUEST_A) {
+			memcpy (naddr->addr4, &reply->content.a.addr, sizeof (addr->addr4));
+			naddr->flags |= RSPAMD_SPF_FLAG_IPV4;
+		}
+		else {
+			msg_err_spf (
+					"internal error, bad DNS reply is treated as address: %s",
+					rdns_strtype (reply->type));
+		}
+
+		DL_APPEND (addr, naddr);
 	}
 }
 
@@ -405,199 +540,291 @@ static void
 spf_record_addr_set (struct spf_addr *addr, gboolean allow_any)
 {
 	guchar fill;
-	guint maskv4, maskv6;
 
-	if (allow_any) {
-		fill = 0;
-		maskv4 = 0;
-		maskv6 = 0;
+	if (!(addr->flags & RSPAMD_SPF_FLAG_PROCESSED)) {
+		if (allow_any) {
+			fill = 0;
+			addr->m.dual.mask_v4 = 0;
+			addr->m.dual.mask_v6 = 0;
+		}
+		else {
+			fill = 0xff;
+		}
+
+		memset (addr->addr4, fill, sizeof (addr->addr4));
+		memset (addr->addr6, fill, sizeof (addr->addr6));
+
+
+		addr->flags |= RSPAMD_SPF_FLAG_IPV4;
+		addr->flags |= RSPAMD_SPF_FLAG_IPV6;
+	}
+}
+
+static gboolean
+spf_process_txt_record (struct spf_record *rec, struct spf_resolved_element *resolved,
+		struct rdns_reply *reply)
+{
+	struct rdns_reply_entry *elt, *selected = NULL;
+	gboolean ret = FALSE;
+
+	/*
+	 * We prefer spf version 1 as other records are mostly likely garbadge
+	 * or incorrect records (e.g. spf2 records)
+	 */
+	LL_FOREACH (reply->entries, elt) {
+		if (strncmp (elt->content.txt.data, "v=spf1", sizeof ("v=spf1") - 1)
+				== 0) {
+			selected = elt;
+			break;
+		}
+	}
+
+	if (!selected) {
+		LL_FOREACH (reply->entries, elt) {
+			if (start_spf_parse (rec, resolved, elt->content.txt.data)) {
+				ret = TRUE;
+				break;
+			}
+		}
 	}
 	else {
-		fill = 0xff;
-		maskv4 = 32;
-		maskv6 = 128;
+		ret = start_spf_parse (rec, resolved, selected->content.txt.data);
 	}
 
-	memset (addr->addr4, fill, sizeof (addr->addr4));
-	memset (addr->addr6, fill, sizeof (addr->addr6));
-	addr->m.dual.mask_v4 = maskv4;
-	addr->m.dual.mask_v6 = maskv6;
-
-	addr->flags |= RSPAMD_SPF_FLAG_IPV4;
-	addr->flags |= RSPAMD_SPF_FLAG_IPV6;
+	return ret;
 }
 
 static void
 spf_record_dns_callback (struct rdns_reply *reply, gpointer arg)
 {
 	struct spf_dns_cb *cb = arg;
-	gchar *begin;
 	struct rdns_reply_entry *elt_data;
 	struct rspamd_task *task;
 	struct spf_addr *addr;
-	gboolean ret;
+	struct spf_record *rec;
 
-	task = cb->rec->task;
+	rec = cb->rec;
+	task = rec->task;
 
 	cb->rec->requests_inflight--;
 	addr = cb->addr;
 
 	if (reply->code == RDNS_RC_NOERROR) {
-		/* Add all logic for all DNS states here */
-		LL_FOREACH (reply->entries, elt_data)
-		{
+		LL_FOREACH (reply->entries, elt_data) {
+			/* Adjust ttl if a resolved record has lower ttl than spf record itself */
+			if ((guint)elt_data->ttl < rec->ttl) {
+				msg_debug_spf ("reducing ttl from %d to %d after DNS resolving",
+						rec->ttl, elt_data->ttl);
+				rec->ttl = elt_data->ttl;
+			}
+
 			switch (cb->cur_action) {
+				case SPF_RESOLVE_MX:
+					if (elt_data->type == RDNS_REQUEST_MX) {
+						/* Now resolve A record for this MX */
+						msg_debug_spf ("resolve %s after resolving of MX",
+								elt_data->content.mx.name);
+						if (make_dns_request_task_forced (task,
+								spf_record_dns_callback, (void *) cb,
+								RDNS_REQUEST_A,
+								elt_data->content.mx.name)) {
+							cb->rec->requests_inflight++;
+						}
+
+						if (make_dns_request_task_forced (task,
+								spf_record_dns_callback, (void *) cb,
+								RDNS_REQUEST_AAAA,
+								elt_data->content.mx.name)) {
+							cb->rec->requests_inflight++;
+						}
+					}
+					else {
+						cb->addr->flags |= RSPAMD_SPF_FLAG_RESOLVED;
+						cb->addr->flags &= ~RSPAMD_SPF_FLAG_PERMFAIL;
+						spf_record_process_addr (rec, addr, elt_data);
+					}
+					break;
+				case SPF_RESOLVE_A:
+				case SPF_RESOLVE_AAA:
+					cb->addr->flags |= RSPAMD_SPF_FLAG_RESOLVED;
+					cb->addr->flags &= ~RSPAMD_SPF_FLAG_PERMFAIL;
+					spf_record_process_addr (rec, addr, elt_data);
+					break;
+				case SPF_RESOLVE_PTR:
+					if (elt_data->type == RDNS_REQUEST_PTR) {
+						/* Validate returned records prior to making A requests */
+						if (spf_check_ptr_host (cb,
+								elt_data->content.ptr.name)) {
+							msg_debug_spf ("resolve %s after resolving of PTR",
+									elt_data->content.ptr.name);
+							if (make_dns_request_task_forced (task,
+									spf_record_dns_callback, (void *) cb,
+									RDNS_REQUEST_A,
+									elt_data->content.ptr.name)) {
+								cb->rec->requests_inflight++;
+							}
+							if (make_dns_request_task_forced (task,
+									spf_record_dns_callback, (void *) cb,
+									RDNS_REQUEST_AAAA,
+									elt_data->content.ptr.name)) {
+								cb->rec->requests_inflight++;
+							}
+						}
+					}
+					else {
+						cb->addr->flags |= RSPAMD_SPF_FLAG_RESOLVED;
+						spf_record_process_addr (rec, addr, elt_data);
+					}
+					break;
+				case SPF_RESOLVE_REDIRECT:
+					if (elt_data->type == RDNS_REQUEST_TXT) {
+						cb->addr->flags |= RSPAMD_SPF_FLAG_RESOLVED;
+						if (!spf_process_txt_record (rec, cb->resolved, reply)) {
+							cb->addr->flags |= RSPAMD_SPF_FLAG_PERMFAIL;
+						}
+					}
+
+					goto end;
+					break;
+				case SPF_RESOLVE_INCLUDE:
+					if (elt_data->type == RDNS_REQUEST_TXT) {
+						cb->addr->flags |= RSPAMD_SPF_FLAG_RESOLVED;
+						spf_process_txt_record (rec, cb->resolved, reply);
+					}
+					goto end;
+
+					break;
+				case SPF_RESOLVE_EXP:
+					break;
+				case SPF_RESOLVE_EXISTS:
+					if (elt_data->type == RDNS_REQUEST_A ||
+						elt_data->type == RDNS_REQUEST_AAAA) {
+						/*
+						 * If specified address resolves, we can accept
+						 * connection from every IP
+						 */
+						addr->flags |= RSPAMD_SPF_FLAG_RESOLVED;
+						spf_record_addr_set (addr, TRUE);
+					}
+					break;
+			}
+		}
+	}
+	else if (reply->code == RDNS_RC_NXDOMAIN || reply->code == RDNS_RC_NOREC) {
+		switch (cb->cur_action) {
 			case SPF_RESOLVE_MX:
-				if (elt_data->type == RDNS_REQUEST_MX) {
-					/* Now resolve A record for this MX */
-					msg_debug ("resolve %s after resolving of MX",
-							elt_data->content.mx.name);
-					if (make_dns_request (task->resolver, task->s,
-						task->task_pool,
-						spf_record_dns_callback, (void *)cb, RDNS_REQUEST_A,
-						elt_data->content.mx.name)) {
-						task->dns_requests++;
-						cb->rec->requests_inflight++;
-					}
-					if (make_dns_request (task->resolver, task->s,
-						task->task_pool,
-						spf_record_dns_callback, (void *)cb, RDNS_REQUEST_AAAA,
-						elt_data->content.mx.name)) {
-						task->dns_requests++;
-						cb->rec->requests_inflight++;
-					}
-				}
-				else {
-					spf_record_process_addr (addr, elt_data);
+				if (!(cb->addr->flags & RSPAMD_SPF_FLAG_RESOLVED)) {
+					cb->addr->flags |= RSPAMD_SPF_FLAG_PERMFAIL;
+					msg_debug_spf (
+							"<%s>: spf error for domain %s: cannot find MX"
+							" record for %s: %s",
+							task->message_id,
+							cb->rec->sender_domain,
+							cb->resolved->cur_domain,
+							rdns_strerror (reply->code));
+					spf_record_addr_set (addr, FALSE);
 				}
 				break;
 			case SPF_RESOLVE_A:
-			case SPF_RESOLVE_AAA:
-				spf_record_process_addr (addr, elt_data);
-				break;
-			case SPF_RESOLVE_PTR:
-				if (elt_data->type == RDNS_REQUEST_PTR) {
-					/* Validate returned records prior to making A requests */
-					if (spf_check_ptr_host (cb, elt_data->content.ptr.name)) {
-						msg_debug ("resolve %s after resolving of PTR",
-								elt_data->content.ptr.name);
-						if (make_dns_request (task->resolver, task->s,
-								task->task_pool,
-								spf_record_dns_callback, (void *)cb,
-								RDNS_REQUEST_A,
-								elt_data->content.ptr.name)) {
-							task->dns_requests++;
-							cb->rec->requests_inflight++;
-						}
-						if (make_dns_request (task->resolver, task->s,
-								task->task_pool,
-								spf_record_dns_callback, (void *)cb,
-								RDNS_REQUEST_AAAA,
-								elt_data->content.ptr.name)) {
-							task->dns_requests++;
-							cb->rec->requests_inflight++;
-						}
+				if (!(cb->addr->flags & RSPAMD_SPF_FLAG_RESOLVED)) {
+					cb->addr->flags |= RSPAMD_SPF_FLAG_PERMFAIL;
+					msg_debug_spf (
+							"<%s>: spf error for domain %s: cannot resolve A"
+							" record for %s: %s",
+							task->message_id,
+							cb->rec->sender_domain,
+							cb->resolved->cur_domain,
+							rdns_strerror (reply->code));
+
+					if (rdns_request_has_type (reply->request, RDNS_REQUEST_A)) {
+						spf_record_addr_set (addr, FALSE);
 					}
 				}
-				else {
-					spf_record_process_addr (addr, elt_data);
+				break;
+			case SPF_RESOLVE_AAA:
+				if (!(cb->addr->flags & RSPAMD_SPF_FLAG_RESOLVED)) {
+					cb->addr->flags |= RSPAMD_SPF_FLAG_PERMFAIL;
+					msg_debug_spf (
+							"<%s>: spf error for domain %s: cannot resolve AAAA"
+							" record for %s: %s",
+							task->message_id,
+							cb->rec->sender_domain,
+							cb->resolved->cur_domain,
+							rdns_strerror (reply->code));
+					if (rdns_request_has_type (reply->request, RDNS_REQUEST_AAAA)) {
+						spf_record_addr_set (addr, FALSE);
+					}
+				}
+				break;
+			case SPF_RESOLVE_PTR:
+				if (!(cb->addr->flags & RSPAMD_SPF_FLAG_RESOLVED)) {
+					msg_debug_spf (
+							"<%s>: spf error for domain %s: cannot resolve PTR"
+							" record for %s: %s",
+							task->message_id,
+							cb->rec->sender_domain,
+							cb->resolved->cur_domain,
+							rdns_strerror (reply->code));
+					cb->addr->flags |= RSPAMD_SPF_FLAG_PERMFAIL;
+
+					spf_record_addr_set (addr, FALSE);
 				}
 				break;
 			case SPF_RESOLVE_REDIRECT:
-				if (elt_data->type == RDNS_REQUEST_TXT) {
-					begin = elt_data->content.txt.data;
-					ret = start_spf_parse (cb->rec, cb->resolved, begin);
-
-					if (ret) {
-						cb->addr->flags |= RSPAMD_SPF_FLAG_PARSED;
-					}
-					else {
-						cb->addr->flags &= ~RSPAMD_SPF_FLAG_PARSED;
-					}
+				if (!(cb->addr->flags & RSPAMD_SPF_FLAG_RESOLVED)) {
+					cb->addr->flags |= RSPAMD_SPF_FLAG_PERMFAIL;
+					msg_debug_spf (
+							"<%s>: spf error for domain %s: cannot resolve REDIRECT"
+							" record for %s: %s",
+							task->message_id,
+							cb->rec->sender_domain,
+							cb->resolved->cur_domain,
+							rdns_strerror (reply->code));
 				}
+
 				break;
 			case SPF_RESOLVE_INCLUDE:
-				if (elt_data->type == RDNS_REQUEST_TXT) {
-					begin = elt_data->content.txt.data;
-					ret = start_spf_parse (cb->rec, cb->resolved, begin);
+				if (!(cb->addr->flags & RSPAMD_SPF_FLAG_RESOLVED)) {
+					msg_debug_spf (
+							"<%s>: spf error for domain %s: cannot resolve INCLUDE"
+							" record for %s: %s",
+							task->message_id,
+							cb->rec->sender_domain,
+							cb->resolved->cur_domain,
+							rdns_strerror (reply->code));
 
-					if (ret) {
-						cb->addr->flags |= RSPAMD_SPF_FLAG_PARSED;
-					}
-					else {
-						cb->addr->flags &= ~RSPAMD_SPF_FLAG_PARSED;
-					}
+					cb->addr->flags |= RSPAMD_SPF_FLAG_PERMFAIL;
 				}
 				break;
 			case SPF_RESOLVE_EXP:
 				break;
 			case SPF_RESOLVE_EXISTS:
-				if (elt_data->type == RDNS_REQUEST_A || elt_data->type ==
-					RDNS_REQUEST_AAAA) {
-					/* If specified address resolves, we can accept connection from every IP */
-					spf_record_addr_set (addr, TRUE);
+				if (!(cb->addr->flags & RSPAMD_SPF_FLAG_RESOLVED)) {
+					msg_debug_spf (
+							"<%s>: spf error for domain %s: cannot resolve EXISTS"
+							" record for %s: %s",
+							task->message_id,
+							cb->rec->sender_domain,
+							cb->resolved->cur_domain,
+							rdns_strerror (reply->code));
+					spf_record_addr_set (addr, FALSE);
 				}
 				break;
-			}
 		}
 	}
-	else if (reply->code == RDNS_RC_NXDOMAIN) {
-		switch (cb->cur_action) {
-		case SPF_RESOLVE_MX:
-			if (rdns_request_has_type (reply->request, RDNS_REQUEST_MX)) {
-				msg_info (
-					"<%s>: spf error for domain %s: cannot find MX record for %s",
-					task->message_id,
-					cb->rec->sender_domain,
-					cb->resolved->cur_domain);
-				spf_record_addr_set (addr, FALSE);
-			}
-			else {
-				msg_info (
-					"<%s>: spf error for domain %s: cannot resolve MX record for %s",
-					task->message_id,
-					cb->rec->sender_domain,
-					cb->resolved->cur_domain);
-				spf_record_addr_set (addr, FALSE);
-			}
-			break;
-		case SPF_RESOLVE_A:
-			if (rdns_request_has_type (reply->request, RDNS_REQUEST_A)) {
-				spf_record_addr_set (addr, FALSE);
-			}
-			break;
-		case SPF_RESOLVE_AAA:
-			if (rdns_request_has_type (reply->request, RDNS_REQUEST_AAAA)) {
-				spf_record_addr_set (addr, FALSE);
-			}
-			break;
-		case SPF_RESOLVE_PTR:
-			spf_record_addr_set (addr, FALSE);
-			break;
-		case SPF_RESOLVE_REDIRECT:
-			msg_info (
-				"<%s>: spf error for domain %s: cannot resolve TXT record for %s",
+	else {
+		cb->addr->flags |= RSPAMD_SPF_FLAG_TEMPFAIL;
+		msg_info_spf (
+				"<%s>: spf error for domain %s: cannot resolve %s DNS record for"
+				" %s: %s",
 				task->message_id,
 				cb->rec->sender_domain,
-				cb->resolved->cur_domain);
-			cb->addr->flags &= ~RSPAMD_SPF_FLAG_PARSED;
-			break;
-		case SPF_RESOLVE_INCLUDE:
-			msg_info (
-				"<%s>: spf error for domain %s: cannot resolve TXT record for %s",
-				task->message_id,
-				cb->rec->sender_domain,
-				cb->resolved->cur_domain);
-			cb->addr->flags &= ~RSPAMD_SPF_FLAG_PARSED;
-			break;
-		case SPF_RESOLVE_EXP:
-			break;
-		case SPF_RESOLVE_EXISTS:
-			spf_record_addr_set (addr, FALSE);
-			break;
-		}
+				rspamd_spf_dns_action_to_str (cb->cur_action),
+				cb->ptr_host,
+				rdns_strerror (reply->code));
 	}
 
+end:
 	rspamd_spf_maybe_return (cb->rec);
 }
 
@@ -610,9 +837,9 @@ spf_record_dns_callback (struct rdns_reply *reply, gpointer arg)
  */
 static const gchar *
 parse_spf_domain_mask (struct spf_record *rec, struct spf_addr *addr,
+		struct spf_resolved_element *resolved,
 		gboolean allow_mask)
 {
-	struct spf_resolved_element *resolved;
 	struct rspamd_task *task = rec->task;
 	enum {
 		parse_spf_elt = 0,
@@ -629,7 +856,6 @@ parse_spf_domain_mask (struct spf_record *rec, struct spf_addr *addr,
 	gchar t;
 	guint16 cur_mask = 0;
 
-	resolved = g_ptr_array_index (rec->resolved, rec->resolved->len - 1);
 	host = resolved->cur_domain;
 	c = p;
 
@@ -637,74 +863,76 @@ parse_spf_domain_mask (struct spf_record *rec, struct spf_addr *addr,
 		t = *p;
 
 		switch (state) {
-		case parse_spf_elt:
-			if (t == ':') {
-				state = parse_semicolon;
-			}
-			else if (t == '/') {
-				/* No domain but mask */
-				state = parse_slash;
-			}
-			p ++;
-			break;
-		case parse_semicolon:
-			if (t == '/') {
-				/* Empty domain, technically an error */
-				state = parse_slash;
-			}
-			c = p;
-			state = parse_domain;
-			break;
-		case parse_domain:
-			if (t == '/') {
-				hostbuf = rspamd_mempool_alloc (task->task_pool, p - c + 1);
-				rspamd_strlcpy (hostbuf, c, p - c + 1);
-				host = hostbuf;
-				state = parse_slash;
-			}
-			p ++;
-			break;
-		case parse_slash:
-			c = p;
-			if (allow_mask) {
-				state = parse_ipv4_mask;
-			}
-			else {
-				state = skip_garbadge;
-			}
-			cur_mask = 0;
-			break;
-		case parse_ipv4_mask:
-			if (g_ascii_isdigit (t)) {
-				/* Ignore errors here */
-				cur_mask = cur_mask * 10 + (t - '0');
-			}
-			else if (t == '/') {
-				if (cur_mask <= 32) {
-					addr->m.dual.mask_v4 = cur_mask;
+			case parse_spf_elt:
+				if (t == ':') {
+					state = parse_semicolon;
+				}
+				else if (t == '/') {
+					/* No domain but mask */
+					state = parse_slash;
+				}
+				p++;
+				break;
+			case parse_semicolon:
+				if (t == '/') {
+					/* Empty domain, technically an error */
+					state = parse_slash;
 				}
 				else {
-					msg_info ("bad ipv4 mask: %d", cur_mask);
+					c = p;
+					state = parse_domain;
 				}
-				state = parse_second_slash;
-			}
-			p ++;
-			break;
-		case parse_second_slash:
-			c = p;
-			state = parse_ipv6_mask;
-			cur_mask = 0;
-			break;
-		case parse_ipv6_mask:
-			if (g_ascii_isdigit (t)) {
-				/* Ignore errors here */
-				cur_mask = cur_mask * 10 + (t - '0');
-			}
-			p ++;
-			break;
-		case skip_garbadge:
-			p++;
-			break;
+				break;
+			case parse_domain:
+				if (t == '/') {
+					hostbuf = rspamd_mempool_alloc (task->task_pool, p - c + 1);
+					rspamd_strlcpy (hostbuf, c, p - c + 1);
+					host = hostbuf;
+					state = parse_slash;
+				}
+				p++;
+				break;
+			case parse_slash:
+				c = p;
+				if (allow_mask) {
+					state = parse_ipv4_mask;
+				}
+				else {
+					state = skip_garbadge;
+				}
+				cur_mask = 0;
+				break;
+			case parse_ipv4_mask:
+				if (g_ascii_isdigit (t)) {
+					/* Ignore errors here */
+					cur_mask = cur_mask * 10 + (t - '0');
+				}
+				else if (t == '/') {
+					if (cur_mask <= 32) {
+						addr->m.dual.mask_v4 = cur_mask;
+					}
+					else {
+						msg_info_spf ("bad ipv4 mask: %d", cur_mask);
+					}
+					state = parse_second_slash;
+				}
+				p++;
+				break;
+			case parse_second_slash:
+				c = p;
+				state = parse_ipv6_mask;
+				cur_mask = 0;
+				break;
+			case parse_ipv6_mask:
+				if (g_ascii_isdigit (t)) {
+					/* Ignore errors here */
+					cur_mask = cur_mask * 10 + (t - '0');
+				}
+				p++;
+				break;
+			case skip_garbadge:
+				p++;
+				break;
 		}
 	}
 
@@ -714,7 +942,7 @@ parse_spf_domain_mask (struct spf_record *rec, struct spf_addr *addr,
 			addr->m.dual.mask_v4 = cur_mask;
 		}
 		else {
-			msg_info ("bad ipv4 mask: %d", cur_mask);
+			msg_info_spf ("bad ipv4 mask: %d", cur_mask);
 		}
 	}
 	else if (state == parse_ipv6_mask) {
@@ -722,7 +950,7 @@ parse_spf_domain_mask (struct spf_record *rec, struct spf_addr *addr,
 			addr->m.dual.mask_v6 = cur_mask;
 		}
 		else {
-			msg_info ("bad ipv6 mask: %d", cur_mask);
+			msg_info_spf ("bad ipv6 mask: %d", cur_mask);
 		}
 	}
 	else if (state == parse_domain && p - c > 0) {
@@ -731,21 +959,25 @@ parse_spf_domain_mask (struct spf_record *rec, struct spf_addr *addr,
 		host = hostbuf;
 	}
 
+	if (cur_mask == 0) {
+		addr->m.dual.mask_v4 = 32;
+		addr->m.dual.mask_v6 = 64;
+	}
+
 	return host;
 }
 
 static gboolean
-parse_spf_a (struct spf_record *rec, struct spf_addr *addr)
+parse_spf_a (struct spf_record *rec,
+		struct spf_resolved_element *resolved, struct spf_addr *addr)
 {
 	struct spf_dns_cb *cb;
 	const gchar *host = NULL;
 	struct rspamd_task *task = rec->task;
-	struct spf_resolved_element *resolved;
 
-	resolved = g_ptr_array_index (rec->resolved, rec->resolved->len - 1);
 	CHECK_REC (rec);
 
-	host = parse_spf_domain_mask (rec, addr, TRUE);
+	host = parse_spf_domain_mask (rec, addr, resolved, TRUE);
 
 	if (host == NULL) {
 		return FALSE;
@@ -754,15 +986,29 @@ parse_spf_a (struct spf_record *rec, struct spf_addr *addr)
 	rec->dns_requests++;
 	cb = rspamd_mempool_alloc (task->task_pool, sizeof (struct spf_dns_cb));
 	cb->rec = rec;
+	cb->ptr_host = host;
 	cb->addr = addr;
 	cb->cur_action = SPF_RESOLVE_A;
 	cb->resolved = resolved;
-	msg_debug ("resolve a %s", host);
+	msg_debug_spf ("resolve a %s", host);
 
-	if (make_dns_request (task->resolver, task->s, task->task_pool,
-		spf_record_dns_callback, (void *)cb, RDNS_REQUEST_A, host)) {
-		task->dns_requests++;
+	if (make_dns_request_task_forced (task,
+			spf_record_dns_callback, (void *) cb, RDNS_REQUEST_A, host)) {
 		rec->requests_inflight++;
+
+		cb = rspamd_mempool_alloc (task->task_pool, sizeof (struct spf_dns_cb));
+		cb->rec = rec;
+		cb->ptr_host = host;
+		cb->addr = addr;
+		cb->cur_action = SPF_RESOLVE_AAA;
+		cb->resolved = resolved;
+		msg_debug_spf ("resolve aaa %s", host);
+
+		if (make_dns_request_task_forced (task,
+				spf_record_dns_callback, (void *) cb, RDNS_REQUEST_AAAA, host)) {
+			rec->requests_inflight++;
+		}
+
 		return TRUE;
 	}
 
@@ -771,18 +1017,17 @@ parse_spf_a (struct spf_record *rec, struct spf_addr *addr)
 }
 
 static gboolean
-parse_spf_ptr (struct spf_record *rec, struct spf_addr *addr)
+parse_spf_ptr (struct spf_record *rec,
+		struct spf_resolved_element *resolved, struct spf_addr *addr)
 {
 	struct spf_dns_cb *cb;
 	const gchar *host;
 	gchar *ptr;
 	struct rspamd_task *task = rec->task;
-	struct spf_resolved_element *resolved;
 
-	resolved = g_ptr_array_index (rec->resolved, rec->resolved->len - 1);
 	CHECK_REC (rec);
 
-	host = parse_spf_domain_mask (rec, addr, FALSE);
+	host = parse_spf_domain_mask (rec, addr, resolved, FALSE);
 
 	rec->dns_requests++;
 	cb = rspamd_mempool_alloc (task->task_pool, sizeof (struct spf_dns_cb));
@@ -792,18 +1037,17 @@ parse_spf_ptr (struct spf_record *rec, struct spf_addr *addr)
 	cb->resolved = resolved;
 	cb->ptr_host = rspamd_mempool_strdup (task->task_pool, host);
 	ptr =
-		rdns_generate_ptr_from_str (rspamd_inet_address_to_string (
-				task->from_addr));
+			rdns_generate_ptr_from_str (rspamd_inet_address_to_string (
+					task->from_addr));
 
 	if (ptr == NULL) {
 		return FALSE;
 	}
 
 	rspamd_mempool_add_destructor (task->task_pool, free, ptr);
-	msg_debug ("resolve ptr %s for %s", ptr, host);
-	if (make_dns_request (task->resolver, task->s, task->task_pool,
-		spf_record_dns_callback, (void *)cb, RDNS_REQUEST_PTR, ptr)) {
-		task->dns_requests++;
+	msg_debug_spf ("resolve ptr %s for %s", ptr, host);
+	if (make_dns_request_task_forced (task,
+			spf_record_dns_callback, (void *) cb, RDNS_REQUEST_PTR, ptr)) {
 		rec->requests_inflight++;
 
 		return TRUE;
@@ -813,18 +1057,16 @@ parse_spf_ptr (struct spf_record *rec, struct spf_addr *addr)
 }
 
 static gboolean
-parse_spf_mx (struct spf_record *rec, struct spf_addr *addr)
+parse_spf_mx (struct spf_record *rec,
+		struct spf_resolved_element *resolved, struct spf_addr *addr)
 {
 	struct spf_dns_cb *cb;
 	const gchar *host;
 	struct rspamd_task *task = rec->task;
-	struct spf_resolved_element *resolved;
-
-	resolved = g_ptr_array_index (rec->resolved, rec->resolved->len - 1);
 
 	CHECK_REC (rec);
 
-	host = parse_spf_domain_mask (rec, addr, TRUE);
+	host = parse_spf_domain_mask (rec, addr, resolved, TRUE);
 
 	if (host == NULL) {
 		return FALSE;
@@ -835,12 +1077,12 @@ parse_spf_mx (struct spf_record *rec, struct spf_addr *addr)
 	cb->rec = rec;
 	cb->addr = addr;
 	cb->cur_action = SPF_RESOLVE_MX;
+	cb->ptr_host = host;
 	cb->resolved = resolved;
 
-	msg_debug ("resolve mx for %s", host);
-	if (make_dns_request (task->resolver, task->s, task->task_pool,
-		spf_record_dns_callback, (void *)cb, RDNS_REQUEST_MX, host)) {
-		task->dns_requests++;
+	msg_debug_spf ("resolve mx for %s", host);
+	if (make_dns_request_task_forced (task,
+			spf_record_dns_callback, (void *) cb, RDNS_REQUEST_MX, host)) {
 		rec->requests_inflight++;
 
 		return TRUE;
@@ -857,7 +1099,15 @@ parse_spf_all (struct spf_record *rec, struct spf_addr *addr)
 	memset (&addr->addr6, 0, sizeof (addr->addr6));
 	/* Here we set all masks to 0 */
 	addr->m.idx = 0;
-	addr->flags |= RSPAMD_SPF_FLAG_ANY;
+	addr->flags |= RSPAMD_SPF_FLAG_ANY|RSPAMD_SPF_FLAG_RESOLVED;
+	msg_debug_spf ("parsed all elt");
+
+	/* Disallow +all */
+	if (addr->mech == SPF_PASS) {
+		addr->flags |= RSPAMD_SPF_FLAG_INVALID;
+		msg_info_spf ("allow any SPF record for %s, ignore it",
+				rec->sender_domain);
+	}
 
 	return TRUE;
 }
@@ -870,8 +1120,7 @@ parse_spf_ip4 (struct spf_record *rec, struct spf_addr *addr)
 	gsize len;
 	gchar ipbuf[INET_ADDRSTRLEN + 1];
 	guint32 mask;
-
-	CHECK_REC (rec);
+	static const guint32 min_valid_mask = 8;
 
 	semicolon = strchr (addr->spf_string, ':');
 
@@ -879,7 +1128,7 @@ parse_spf_ip4 (struct spf_record *rec, struct spf_addr *addr)
 		return FALSE;
 	}
 
-	semicolon ++;
+	semicolon++;
 	slash = strchr (semicolon, '/');
 
 	if (slash) {
@@ -900,13 +1149,22 @@ parse_spf_ip4 (struct spf_record *rec, struct spf_addr *addr)
 		if (mask > 32) {
 			return FALSE;
 		}
+
 		addr->m.dual.mask_v4 = mask;
+
+		if (mask < min_valid_mask) {
+			addr->flags |= RSPAMD_SPF_FLAG_INVALID;
+			msg_info_spf ("too wide SPF record for %s: %s/%d",
+					rec->sender_domain,
+					ipbuf, addr->m.dual.mask_v4);
+		}
 	}
 	else {
 		addr->m.dual.mask_v4 = 32;
 	}
 
-	addr->flags |= RSPAMD_SPF_FLAG_IPV4;
+	addr->flags |= RSPAMD_SPF_FLAG_IPV4|RSPAMD_SPF_FLAG_RESOLVED;
+	msg_debug_spf ("parsed ipv4 record %s/%d", ipbuf, addr->m.dual.mask_v4);
 
 	return TRUE;
 }
@@ -919,8 +1177,7 @@ parse_spf_ip6 (struct spf_record *rec, struct spf_addr *addr)
 	gsize len;
 	gchar ipbuf[INET6_ADDRSTRLEN + 1];
 	guint32 mask;
-
-	CHECK_REC (rec);
+	static const guint32 min_valid_mask = 8;
 
 	semicolon = strchr (addr->spf_string, ':');
 
@@ -928,7 +1185,7 @@ parse_spf_ip6 (struct spf_record *rec, struct spf_addr *addr)
 		return FALSE;
 	}
 
-	semicolon ++;
+	semicolon++;
 	slash = strchr (semicolon, '/');
 
 	if (slash) {
@@ -949,13 +1206,22 @@ parse_spf_ip6 (struct spf_record *rec, struct spf_addr *addr)
 		if (mask > 128) {
 			return FALSE;
 		}
+
 		addr->m.dual.mask_v6 = mask;
+
+		if (mask < min_valid_mask) {
+			addr->flags |= RSPAMD_SPF_FLAG_INVALID;
+			msg_info_spf ("too wide SPF record for %s: %s/%d",
+					rec->sender_domain,
+					ipbuf, addr->m.dual.mask_v6);
+		}
 	}
 	else {
 		addr->m.dual.mask_v6 = 128;
 	}
 
-	addr->flags |= RSPAMD_SPF_FLAG_IPV6;
+	addr->flags |= RSPAMD_SPF_FLAG_IPV6|RSPAMD_SPF_FLAG_RESOLVED;
+	msg_debug_spf ("parsed ipv6 record %s/%d", ipbuf, addr->m.dual.mask_v6);
 
 	return TRUE;
 }
@@ -985,13 +1251,13 @@ parse_spf_include (struct spf_record *rec, struct spf_addr *addr)
 	cb->cur_action = SPF_RESOLVE_INCLUDE;
 	addr->m.idx = rec->resolved->len;
 	cb->resolved = rspamd_spf_new_addr_list (rec, domain);
+	cb->ptr_host = domain;
 	/* Set reference */
-	addr->flags |= RSPAMD_SPF_FLAG_REFRENCE;
-	msg_debug ("resolve include %s", domain);
+	addr->flags |= RSPAMD_SPF_FLAG_REFERENCE;
+	msg_debug_spf ("resolve include %s", domain);
 
-	if (make_dns_request (task->resolver, task->s, task->task_pool,
-		spf_record_dns_callback, (void *)cb, RDNS_REQUEST_TXT, domain)) {
-		task->dns_requests++;
+	if (make_dns_request_task_forced (task,
+			spf_record_dns_callback, (void *) cb, RDNS_REQUEST_TXT, domain)) {
 		rec->requests_inflight++;
 
 		return TRUE;
@@ -1004,9 +1270,7 @@ parse_spf_include (struct spf_record *rec, struct spf_addr *addr)
 static gboolean
 parse_spf_exp (struct spf_record *rec, struct spf_addr *addr)
 {
-	CHECK_REC (rec);
-
-	msg_info ("exp record is ignored");
+	msg_info_spf ("exp record is ignored");
 	return TRUE;
 }
 
@@ -1016,9 +1280,7 @@ parse_spf_redirect (struct spf_record *rec,
 {
 	struct spf_dns_cb *cb;
 	const gchar *domain;
-	struct spf_addr *cur;
 	struct rspamd_task *task = rec->task;
-	guint i;
 
 	CHECK_REC (rec);
 
@@ -1033,29 +1295,20 @@ parse_spf_redirect (struct spf_record *rec,
 	rec->dns_requests++;
 	resolved->redirected = TRUE;
 
-	/* Now clear all elements but this one */
-	for (i = 0; i < resolved->elts->len; i ++) {
-		cur = g_ptr_array_index (resolved->elts, i);
-
-		if (cur != addr) {
-			cur->flags &= ~RSPAMD_SPF_FLAG_PARSED;
-		}
-	}
-
 	cb = rspamd_mempool_alloc (task->task_pool, sizeof (struct spf_dns_cb));
 	/* Set reference */
-	addr->flags |= RSPAMD_SPF_FLAG_REFRENCE;
+	addr->flags |= RSPAMD_SPF_FLAG_REFERENCE | RSPAMD_SPF_FLAG_REDIRECT;
 	addr->m.idx = rec->resolved->len;
 
 	cb->rec = rec;
 	cb->addr = addr;
 	cb->cur_action = SPF_RESOLVE_REDIRECT;
 	cb->resolved = rspamd_spf_new_addr_list (rec, domain);
-	msg_debug ("resolve redirect %s", domain);
+	cb->ptr_host = domain;
+	msg_debug_spf ("resolve redirect %s", domain);
 
-	if (make_dns_request (task->resolver, task->s, task->task_pool,
-		spf_record_dns_callback, (void *)cb, RDNS_REQUEST_TXT, domain)) {
-		task->dns_requests++;
+	if (make_dns_request_task_forced (task,
+			spf_record_dns_callback, (void *) cb, RDNS_REQUEST_TXT, domain)) {
 		rec->requests_inflight++;
 
 		return TRUE;
@@ -1077,11 +1330,11 @@ parse_spf_exists (struct spf_record *rec, struct spf_addr *addr)
 
 	host = strchr (addr->spf_string, ':');
 	if (host == NULL) {
-		msg_info ("bad SPF exist record: %s", addr->spf_string);
+		msg_info_spf ("bad SPF exist record: %s", addr->spf_string);
 		return FALSE;
 	}
 
-	host ++;
+	host++;
 	rec->dns_requests++;
 
 	cb = rspamd_mempool_alloc (task->task_pool, sizeof (struct spf_dns_cb));
@@ -1089,11 +1342,11 @@ parse_spf_exists (struct spf_record *rec, struct spf_addr *addr)
 	cb->addr = addr;
 	cb->cur_action = SPF_RESOLVE_EXISTS;
 	cb->resolved = resolved;
+	cb->ptr_host = host;
 
-	msg_debug ("resolve exists %s", host);
-	if (make_dns_request (task->resolver, task->s, task->task_pool,
-		spf_record_dns_callback, (void *)cb, RDNS_REQUEST_A, host)) {
-		task->dns_requests++;
+	msg_debug_spf ("resolve exists %s", host);
+	if (make_dns_request_task_forced (task,
+			spf_record_dns_callback, (void *) cb, RDNS_REQUEST_A, host)) {
 		rec->requests_inflight++;
 
 		return TRUE;
@@ -1102,54 +1355,128 @@ parse_spf_exists (struct spf_record *rec, struct spf_addr *addr)
 	return FALSE;
 }
 
-static void
-reverse_spf_ip (gchar *ip, gint len)
+static gsize
+rspamd_spf_split_elt (const gchar *val, gsize len, gint *pos,
+		gsize poslen, gchar delim)
 {
-	gchar ipbuf[sizeof("255.255.255.255") - 1], *p, *c;
-	gint t = 0, l = len;
+	const gchar *p, *end;
+	guint cur_pos = 0, cur_st = 0, nsub = 0;
 
-	if (len > (gint)sizeof (ipbuf)) {
-		msg_info ("cannot reverse string of length %d", len);
-		return;
-	}
+	p = val;
+	end = val + len;
 
-	p = ipbuf + len;
-	c = ip;
-	while (--l) {
-		if (*c == '.') {
-			memcpy (p, c - t, t);
-			*--p = '.';
-			c++;
-			t = 0;
-			continue;
+	while (p < end && cur_pos + 2 < poslen) {
+		if (*p == delim) {
+			if (p - val > cur_st) {
+				pos[cur_pos] = cur_st;
+				pos[cur_pos + 1] = p - val;
+				cur_st = p - val + 1;
+				cur_pos += 2;
+				nsub ++;
+			}
+
+			p ++;
 		}
-
-		t++;
-		c++;
-		p--;
+		else {
+			p ++;
+		}
 	}
 
-	memcpy (p - 1, c - t, t + 1);
-	memcpy (ip,	   ipbuf, len);
+	if (cur_pos + 2 < poslen) {
+		if (end - val > cur_st) {
+			pos[cur_pos] = cur_st;
+			pos[cur_pos + 1] = end - val;
+			nsub ++;
+		}
+	}
+	else {
+		pos[cur_pos] = p - val;
+		pos[cur_pos + 1] = end - val;
+		nsub ++;
+	}
+
+	return nsub;
+}
+
+static gsize
+rspamd_spf_process_substitution (const gchar *macro_value,
+		gsize macro_len, guint ndelim, gchar delim, gboolean reversed,
+		gchar *dest)
+{
+	gchar *d = dest;
+	const gchar canon_delim = '.';
+	guint vlen, i;
+	gint pos[49 * 2], tlen;
+
+	if (!reversed && ndelim == 0 && delim == canon_delim) {
+		/* Trivial case */
+		memcpy (dest, macro_value, macro_len);
+
+		return macro_len;
+	}
+
+	vlen = rspamd_spf_split_elt (macro_value, macro_len,
+			pos, G_N_ELEMENTS (pos), delim);
+
+	if (vlen > 0) {
+		if (reversed) {
+			for (i = vlen - 1; ; i--) {
+				tlen = pos[i * 2 + 1] - pos[i * 2];
+
+				if (i != 0) {
+					memcpy (d, &macro_value[pos[i * 2]], tlen);
+					d += tlen;
+					*d++ = canon_delim;
+				}
+				else {
+					memcpy (d, &macro_value[pos[i * 2]], tlen);
+					d += tlen;
+					break;
+				}
+			}
+		}
+		else {
+			for (i = 0; i < vlen; i++) {
+				tlen = pos[i * 2 + 1] - pos[i * 2];
+
+				if (i != vlen - 1) {
+					memcpy (d, &macro_value[pos[i * 2]], tlen);
+					d += tlen;
+					*d++ = canon_delim;
+				}
+				else {
+					memcpy (d, &macro_value[pos[i * 2]], tlen);
+					d += tlen;
+				}
+			}
+		}
+	}
+	else {
+		/* Trivial case */
+		memcpy (dest, macro_value, macro_len);
+
+		return macro_len;
+	}
+
+	return (d - dest);
 }
 
 static const gchar *
-expand_spf_macro (struct spf_record *rec,
-	const gchar *begin)
+expand_spf_macro (struct spf_record *rec, struct spf_resolved_element *resolved,
+		const gchar *begin)
 {
-	const gchar *p;
-	gchar *c, *new, *tmp;
-	gint len = 0, slen = 0, state = 0;
-	gchar ip_buf[INET6_ADDRSTRLEN];
-	gboolean need_expand = FALSE;
+	const gchar *p, *macro_value;
+	gchar *c, *new, *tmp, delim;
+	gsize len = 0, slen = 0, macro_len;
+	gint state = 0, ndelim = 0;
+	gchar ip_buf[INET6_ADDRSTRLEN + 1];
+	gboolean need_expand = FALSE, reversed;
 	struct rspamd_task *task;
-	struct spf_resolved_element *resolved;
 
 	g_assert (rec != NULL);
 	g_assert (begin != NULL);
 
 	task = rec->task;
-	resolved = g_ptr_array_index (rec->resolved, rec->resolved->len - 1);
 	p = begin;
 	/* Calculate length */
 	while (*p) {
@@ -1183,8 +1510,9 @@ expand_spf_macro (struct spf_record *rec,
 			}
 			else {
 				/* Something unknown */
-				msg_info ("<%s>: spf error for domain %s: unknown spf element",
-					task->message_id, rec->sender_domain);
+				msg_info_spf (
+						"<%s>: spf error for domain %s: unknown spf element",
+						task->message_id, rec->sender_domain);
 				return begin;
 			}
 			p++;
@@ -1217,12 +1545,13 @@ expand_spf_macro (struct spf_record *rec,
 				}
 				break;
 			default:
-				msg_info (
-					"<%s>: spf error for domain %s: unknown or unsupported spf macro %c in %s",
-					task->message_id,
-					rec->sender_domain,
-					*p,
-					begin);
+				msg_info_spf (
+						"<%s>: spf error for domain %s: unknown or "
+								"unsupported spf macro %c in %s",
+						task->message_id,
+						rec->sender_domain,
+						*p,
+						begin);
 				return begin;
 			}
 			p++;
@@ -1235,18 +1564,12 @@ expand_spf_macro (struct spf_record *rec,
 				state = 0;
 				need_expand = TRUE;
 			}
-			else if (*p != 'r' && !g_ascii_isdigit (*p)) {
-				msg_info (
-					"<%s>: spf error for domain %s: unknown or unsupported spf modifier %c in %s",
-					task->message_id,
-					rec->sender_domain,
-					*p,
-					begin);
-				return begin;
-			}
 			p++;
 			slen++;
 			break;
+
+		default:
+			assert (0);
 		}
 	}
 
@@ -1256,6 +1579,12 @@ expand_spf_macro (struct spf_record *rec,
 	}
 
 	new = rspamd_mempool_alloc (task->task_pool, len + 1);
+
+	/* Reduce TTL to avoid caching of records with macros */
+	if (rec->ttl != 0) {
+		rec->ttl = 0;
+		msg_debug_spf ("disable SPF caching as there is macro expansion");
+	}
 
 	c = new;
 	p = begin;
@@ -1299,8 +1628,9 @@ expand_spf_macro (struct spf_record *rec,
 			}
 			else {
 				/* Something unknown */
-				msg_info ("<%s>: spf error for domain %s: unknown spf element",
-					task->message_id, rec->sender_domain);
+				msg_info_spf (
+						"<%s>: spf error for domain %s: unknown spf element",
+						task->message_id, rec->sender_domain);
 				return begin;
 			}
 			p++;
@@ -1309,78 +1639,106 @@ expand_spf_macro (struct spf_record *rec,
 			/* Read macro name */
 			switch (g_ascii_tolower (*p)) {
 			case 'i':
-				len = rspamd_strlcpy (ip_buf,
+				macro_len = rspamd_strlcpy (ip_buf,
 						rspamd_inet_address_to_string (task->from_addr),
 						sizeof (ip_buf));
-				memcpy (c, ip_buf, len);
-				c += len;
+				macro_value = ip_buf;
 				break;
 			case 's':
-				len = strlen (rec->sender);
-				memcpy (c, rec->sender, len);
-				c += len;
+				macro_len = strlen (rec->sender);
+				macro_value = rec->sender;
 				break;
 			case 'l':
-				len = strlen (rec->local_part);
-				memcpy (c, rec->local_part, len);
-				c += len;
+				macro_len = strlen (rec->local_part);
+				macro_value = rec->local_part;
 				break;
 			case 'o':
-				len = strlen (rec->sender_domain);
-				memcpy (c, rec->sender_domain, len);
-				c += len;
+				macro_len = strlen (rec->sender_domain);
+				macro_value = rec->sender_domain;
 				break;
 			case 'd':
-				len = strlen (resolved->cur_domain);
-				memcpy (c, resolved->cur_domain, len);
-				c += len;
+				macro_len = strlen (resolved->cur_domain);
+				macro_value = resolved->cur_domain;
 				break;
 			case 'v':
-				len = sizeof ("in-addr") - 1;
-				memcpy (c, "in-addr", len);
-				c += len;
+				if (rspamd_inet_address_get_af (task->from_addr) == AF_INET) {
+					macro_len = sizeof ("in-addr") - 1;
+					macro_value = "in-addr";
+				}
+				else {
+					macro_len = sizeof ("ip6") - 1;
+					macro_value = "ip6";
+				}
 				break;
 			case 'h':
 				if (task->helo) {
 					tmp = strchr (task->helo, '@');
 					if (tmp) {
-						len = strlen (tmp + 1);
-						memcpy (c, tmp + 1, len);
-						c += len;
+						macro_len = strlen (tmp + 1);
+						macro_value = tmp + 1;
+					}
+					else {
+						macro_len = strlen (task->helo);
+						macro_value = task->helo;
 					}
 				}
 				break;
 			default:
-				msg_info (
-					"<%s>: spf error for domain %s: unknown or unsupported spf macro %c in %s",
-					task->message_id,
-					rec->sender_domain,
-					*p,
-					begin);
+				macro_len = 0;
+				macro_value = NULL;
+				msg_info_spf (
+						"<%s>: spf error for domain %s: unknown or "
+								"unsupported spf macro %c in %s",
+						task->message_id,
+						rec->sender_domain,
+						*p,
+						begin);
 				return begin;
 			}
+
 			p++;
 			state = 3;
+			ndelim = 0;
+			delim = '.';
+			reversed = FALSE;
 			break;
+
 		case 3:
 			/* Read modifier */
 			if (*p == '}') {
 				state = 0;
+				len = rspamd_spf_process_substitution (macro_value,
+						macro_len, ndelim, delim, reversed, c);
+				c += len;
 			}
 			else if (*p == 'r' && len != 0) {
-				reverse_spf_ip (c - len, len);
-				len = 0;
+				reversed = TRUE;
 			}
 			else if (g_ascii_isdigit (*p)) {
-				/*XXX: try to implement domain trimming */
+				ndelim = strtoul (p, &tmp, 10);
+
+				if (tmp == NULL || tmp == p) {
+					p ++;
+				}
+				else {
+					p = tmp;
+
+					continue;
+				}
+			}
+			else if (*p == '+' || *p == '-' ||
+					*p == '.' || *p == ',' || *p == '/' || *p == '_' ||
+					*p == '=') {
+				delim = *p;
 			}
 			else {
-				msg_info (
-					"<%s>: spf error for domain %s: unknown or unsupported spf macro %c in %s",
-					task->message_id,
-					rec->sender_domain,
-					*p,
-					begin);
+				msg_info_spf (
+						"<%s>: spf error for domain %s: unknown or "
+								"unsupported spf macro %c (%s) in %s",
+						task->message_id,
+						rec->sender_domain,
+						*p,
+						begin);
 				return begin;
 			}
 			p++;
@@ -1413,7 +1771,7 @@ parse_spf_record (struct spf_record *rec, struct spf_resolved_element *resolved,
 	}
 
 	task = rec->task;
-	begin = expand_spf_macro (rec, elt);
+	begin = expand_spf_macro (rec, resolved, elt);
 	addr = rspamd_spf_new_addr (rec, resolved, begin);
 	g_assert (addr != NULL);
 	t = g_ascii_tolower (addr->spf_string[0]);
@@ -1421,100 +1779,106 @@ parse_spf_record (struct spf_record *rec, struct spf_resolved_element *resolved,
 
 	/* Now check what we have */
 	switch (t) {
-	case 'a':
-		/* all or a */
-		if (g_ascii_strncasecmp (begin, SPF_ALL,
-				sizeof (SPF_ALL) - 1) == 0) {
-			res = parse_spf_all (rec, addr);
-		}
-		else if (g_ascii_strncasecmp (begin, SPF_A,
-				sizeof (SPF_A) - 1) == 0) {
-			res = parse_spf_a (rec, addr);
-		}
-		else {
-			msg_info ("<%s>: spf error for domain %s: bad spf command %s",
-					task->message_id, rec->sender_domain, begin);
-		}
-		break;
-	case 'i':
-		/* include or ip4 */
-		if (g_ascii_strncasecmp (begin, SPF_IP4,
-				sizeof (SPF_IP4) - 1) == 0) {
-			res = parse_spf_ip4 (rec, addr);
-		}
-		else if (g_ascii_strncasecmp (begin, SPF_INCLUDE,
-				sizeof (SPF_INCLUDE) - 1) == 0) {
-			res = parse_spf_include (rec, addr);
-		}
-		else if (g_ascii_strncasecmp (begin, SPF_IP6, sizeof (SPF_IP6) -
-				1) == 0) {
-			res = parse_spf_ip6 (rec, addr);
-		}
-		else {
-			msg_info ("<%s>: spf error for domain %s: bad spf command %s",
-					task->message_id, rec->sender_domain, begin);
-		}
-		break;
-	case 'm':
-		/* mx */
-		if (g_ascii_strncasecmp (begin, SPF_MX, sizeof (SPF_MX) - 1) == 0) {
-			res = parse_spf_mx (rec, addr);
-		}
-		else {
-			msg_info ("<%s>: spf error for domain %s: bad spf command %s",
-					task->message_id, rec->sender_domain, begin);
-		}
-		break;
-	case 'p':
-		/* ptr */
-		if (g_ascii_strncasecmp (begin, SPF_PTR,
-				sizeof (SPF_PTR) - 1) == 0) {
-			res = parse_spf_ptr (rec, addr);
-		}
-		else {
-			msg_info ("<%s>: spf error for domain %s: bad spf command %s",
-					task->message_id, rec->sender_domain, begin);
-		}
-		break;
-	case 'e':
-		/* exp or exists */
-		if (g_ascii_strncasecmp (begin, SPF_EXP,
-				sizeof (SPF_EXP) - 1) == 0) {
-			res = parse_spf_exp (rec, addr);
-		}
-		else if (g_ascii_strncasecmp (begin, SPF_EXISTS,
-				sizeof (SPF_EXISTS) - 1) == 0) {
-			res = parse_spf_exists (rec, addr);
-		}
-		else {
-			msg_info ("<%s>: spf error for domain %s: bad spf command %s",
-					task->message_id, rec->sender_domain, begin);
-		}
-		break;
-	case 'r':
-		/* redirect */
-		if (g_ascii_strncasecmp (begin, SPF_REDIRECT,
-				sizeof (SPF_REDIRECT) - 1) == 0) {
-			res = parse_spf_redirect (rec, resolved, addr);
-		}
-		else {
-			msg_info ("<%s>: spf error for domain %s: bad spf command %s",
-					task->message_id, rec->sender_domain, begin);
-		}
-		break;
-	case 'v':
-		if (g_ascii_strncasecmp (begin, "v=spf",
-				sizeof ("v=spf") - 1) == 0) {
-			/* Skip this element till the end of record */
-			while (*begin && !g_ascii_isspace (*begin)) {
-				begin++;
+		case 'a':
+			/* all or a */
+			if (g_ascii_strncasecmp (begin, SPF_ALL,
+					sizeof (SPF_ALL) - 1) == 0) {
+				res = parse_spf_all (rec, addr);
 			}
-		}
-		break;
-	default:
-		msg_info ("<%s>: spf error for domain %s: bad spf command %s",
-				task->message_id, rec->sender_domain, begin);
-		break;
+			else if (g_ascii_strncasecmp (begin, SPF_A,
+					sizeof (SPF_A) - 1) == 0) {
+				res = parse_spf_a (rec, resolved, addr);
+			}
+			else {
+				msg_info_spf (
+						"<%s>: spf error for domain %s: bad spf command %s",
+						task->message_id, rec->sender_domain, begin);
+			}
+			break;
+		case 'i':
+			/* include or ip4 */
+			if (g_ascii_strncasecmp (begin, SPF_IP4,
+					sizeof (SPF_IP4) - 1) == 0) {
+				res = parse_spf_ip4 (rec, addr);
+			}
+			else if (g_ascii_strncasecmp (begin, SPF_INCLUDE,
+					sizeof (SPF_INCLUDE) - 1) == 0) {
+				res = parse_spf_include (rec, addr);
+			}
+			else if (g_ascii_strncasecmp (begin, SPF_IP6, sizeof (SPF_IP6) -
+														  1) == 0) {
+				res = parse_spf_ip6 (rec, addr);
+			}
+			else {
+				msg_info_spf (
+						"<%s>: spf error for domain %s: bad spf command %s",
+						task->message_id, rec->sender_domain, begin);
+			}
+			break;
+		case 'm':
+			/* mx */
+			if (g_ascii_strncasecmp (begin, SPF_MX, sizeof (SPF_MX) - 1) == 0) {
+				res = parse_spf_mx (rec, resolved, addr);
+			}
+			else {
+				msg_info_spf (
+						"<%s>: spf error for domain %s: bad spf command %s",
+						task->message_id, rec->sender_domain, begin);
+			}
+			break;
+		case 'p':
+			/* ptr */
+			if (g_ascii_strncasecmp (begin, SPF_PTR,
+					sizeof (SPF_PTR) - 1) == 0) {
+				res = parse_spf_ptr (rec, resolved, addr);
+			}
+			else {
+				msg_info_spf (
+						"<%s>: spf error for domain %s: bad spf command %s",
+						task->message_id, rec->sender_domain, begin);
+			}
+			break;
+		case 'e':
+			/* exp or exists */
+			if (g_ascii_strncasecmp (begin, SPF_EXP,
+					sizeof (SPF_EXP) - 1) == 0) {
+				res = parse_spf_exp (rec, addr);
+			}
+			else if (g_ascii_strncasecmp (begin, SPF_EXISTS,
+					sizeof (SPF_EXISTS) - 1) == 0) {
+				res = parse_spf_exists (rec, addr);
+			}
+			else {
+				msg_info_spf (
+						"<%s>: spf error for domain %s: bad spf command %s",
+						task->message_id, rec->sender_domain, begin);
+			}
+			break;
+		case 'r':
+			/* redirect */
+			if (g_ascii_strncasecmp (begin, SPF_REDIRECT,
+					sizeof (SPF_REDIRECT) - 1) == 0) {
+				res = parse_spf_redirect (rec, resolved, addr);
+			}
+			else {
+				msg_info_spf (
+						"<%s>: spf error for domain %s: bad spf command %s",
+						task->message_id, rec->sender_domain, begin);
+			}
+			break;
+		case 'v':
+			if (g_ascii_strncasecmp (begin, "v=spf",
+					sizeof ("v=spf") - 1) == 0) {
+				/* Skip this element till the end of record */
+				while (*begin && !g_ascii_isspace (*begin)) {
+					begin++;
+				}
+			}
+			break;
+		default:
+			msg_info_spf ("<%s>: spf error for domain %s: bad spf command %s",
+					task->message_id, rec->sender_domain, begin);
+			break;
 	}
 
 	if (res) {
@@ -1527,17 +1891,17 @@ parse_spf_record (struct spf_record *rec, struct spf_resolved_element *resolved,
 static void
 parse_spf_scopes (struct spf_record *rec, gchar **begin)
 {
-	for (;; ) {
+	for (; ;) {
 		if (g_ascii_strncasecmp (*begin, SPF_SCOPE_PRA, sizeof (SPF_SCOPE_PRA) -
-			1) == 0) {
+														1) == 0) {
 			*begin += sizeof (SPF_SCOPE_PRA) - 1;
 			/* XXX: Implement actual PRA check */
 			/* extract_pra_info (rec); */
 			continue;
 		}
 		else if (g_ascii_strncasecmp (*begin, SPF_SCOPE_MFROM,
-			sizeof (SPF_SCOPE_MFROM) - 1) == 0) {
-			/* mfrom is standart spf1 check */
+				sizeof (SPF_SCOPE_MFROM) - 1) == 0) {
+			/* mfrom is standard spf1 check */
 			*begin += sizeof (SPF_SCOPE_MFROM) - 1;
 			continue;
 		}
@@ -1559,7 +1923,8 @@ start_spf_parse (struct spf_record *rec, struct spf_resolved_element *resolved,
 		begin++;
 	}
 
-	if (g_ascii_strncasecmp (begin, SPF_VER1_STR, sizeof (SPF_VER1_STR) - 1) == 0) {
+	if (g_ascii_strncasecmp (begin, SPF_VER1_STR, sizeof (SPF_VER1_STR) - 1) ==
+		0) {
 		begin += sizeof (SPF_VER1_STR) - 1;
 
 		while (g_ascii_isspace (*begin) && *begin) {
@@ -1567,12 +1932,12 @@ start_spf_parse (struct spf_record *rec, struct spf_resolved_element *resolved,
 		}
 	}
 	else if (g_ascii_strncasecmp (begin, SPF_VER2_STR, sizeof (SPF_VER2_STR) -
-		1) == 0) {
+													   1) == 0) {
 		/* Skip one number of record, so no we are here spf2.0/ */
 		begin += sizeof (SPF_VER2_STR);
 		if (*begin != '/') {
-			msg_info ("<%s>: spf error for domain %s: sender id is invalid",
-				rec->task->message_id, rec->sender_domain);
+			msg_info_spf ("<%s>: spf error for domain %s: sender id is invalid",
+					rec->task->message_id, rec->sender_domain);
 		}
 		else {
 			begin++;
@@ -1581,11 +1946,12 @@ start_spf_parse (struct spf_record *rec, struct spf_resolved_element *resolved,
 		/* Now common spf record */
 	}
 	else {
-		msg_debug ("<%s>: spf error for domain %s: bad spf record version: %*s",
-			rec->task->message_id,
-			rec->sender_domain,
-			sizeof (SPF_VER1_STR) - 1,
-			begin);
+		msg_debug_spf (
+				"<%s>: spf error for domain %s: bad spf record start: %*s",
+				rec->task->message_id,
+				rec->sender_domain,
+				(gint)sizeof (SPF_VER1_STR) - 1,
+				begin);
 		return FALSE;
 	}
 
@@ -1600,7 +1966,7 @@ start_spf_parse (struct spf_record *rec, struct spf_resolved_element *resolved,
 
 		while (*cur_elt) {
 			parse_spf_record (rec, resolved, *cur_elt);
-			cur_elt ++;
+			cur_elt++;
 		}
 
 		g_strfreev (elts);
@@ -1615,8 +1981,8 @@ static void
 spf_dns_callback (struct rdns_reply *reply, gpointer arg)
 {
 	struct spf_record *rec = arg;
-	struct rdns_reply_entry *elt;
-	struct spf_resolved_element *resolved;
+	struct spf_resolved_element *resolved = NULL;
+	struct spf_addr *addr;
 
 	rec->requests_inflight--;
 
@@ -1626,10 +1992,47 @@ spf_dns_callback (struct rdns_reply *reply, gpointer arg)
 			/* Top level resolved element */
 			rec->ttl = reply->entries->ttl;
 		}
+	}
+	else if ((reply->code == RDNS_RC_NOREC || reply->code == RDNS_RC_NXDOMAIN)
+			&& rec->dns_requests == 0) {
+		resolved = rspamd_spf_new_addr_list (rec, rec->sender_domain);
+		addr = g_slice_alloc0 (sizeof(*addr));
+		addr->flags = 0;
+		addr->flags |= RSPAMD_SPF_FLAG_NA;
+		g_ptr_array_insert (resolved->elts, 0, addr);
+	}
+	else if (reply->code != RDNS_RC_NOREC && reply->code != RDNS_RC_NXDOMAIN
+			&& rec->dns_requests == 0) {
+		resolved = rspamd_spf_new_addr_list (rec, rec->sender_domain);
+		addr = g_slice_alloc0 (sizeof(*addr));
+		addr->flags = 0;
+		addr->flags |= RSPAMD_SPF_FLAG_TEMPFAIL;
+		g_ptr_array_insert (resolved->elts, 0, addr);
+	}
 
-		LL_FOREACH (reply->entries, elt) {
-			if (start_spf_parse (rec, resolved, elt->content.txt.data)) {
-				break;
+	if (resolved) {
+		if (!spf_process_txt_record (rec, resolved, reply)) {
+			resolved = g_ptr_array_index(rec->resolved, 0);
+			if (rec->resolved->len > 1) {
+				addr = g_ptr_array_index(resolved->elts, 0);
+				if ((reply->code == RDNS_RC_NOREC || reply->code == RDNS_RC_NXDOMAIN)
+						&& (addr->flags & RSPAMD_SPF_FLAG_REDIRECT)) {
+					addr->flags |= RSPAMD_SPF_FLAG_PERMFAIL;
+				} else {
+					addr->flags |= RSPAMD_SPF_FLAG_TEMPFAIL;
+				}
+			}
+			else {
+				addr = g_slice_alloc0 (sizeof(*addr));
+				addr->flags = 0;
+				if (reply->code == RDNS_RC_NOREC || reply->code == RDNS_RC_NXDOMAIN
+						|| reply->code == RDNS_RC_NOERROR) {
+					addr->flags |= RSPAMD_SPF_FLAG_NA;
+				}
+				else {
+					addr->flags |= RSPAMD_SPF_FLAG_TEMPFAIL;
+				}
+				g_ptr_array_insert (resolved->elts, 0, addr);
 			}
 		}
 	}
@@ -1637,67 +2040,115 @@ spf_dns_callback (struct rdns_reply *reply, gpointer arg)
 	rspamd_spf_maybe_return (rec);
 }
 
-const gchar *
-get_spf_domain (struct rspamd_task *task)
+struct rspamd_spf_cred {
+	gchar *local_part;
+	gchar *domain;
+	gchar *sender;
+};
+
+struct rspamd_spf_cred *
+rspamd_spf_cache_domain (struct rspamd_task *task)
 {
-	const gchar *domain, *res = NULL;
-	const gchar *sender;
+	struct rspamd_email_address *addr;
+	struct rspamd_spf_cred *cred = NULL;
 
-	sender = rspamd_task_get_sender (task);
+	addr = rspamd_task_get_sender (task);
+	if (!addr || (addr->flags & RSPAMD_EMAIL_ADDR_EMPTY)) {
+		/* Get domain from helo */
 
-	if (sender != NULL) {
-		domain = strchr (sender, '@');
-		if (domain) {
-			res = domain + 1;
+		if (task->helo) {
+			GString *fs = g_string_new ("");
+
+			cred = rspamd_mempool_alloc (task->task_pool, sizeof (*cred));
+			cred->domain = task->helo;
+			cred->local_part = "postmaster";
+			rspamd_printf_gstring (fs, "postmaster@%s", cred->domain);
+			cred->sender = fs->str;
+			rspamd_mempool_add_destructor (task->task_pool,
+					rspamd_gstring_free_hard, fs);
 		}
 	}
+	else {
+		rspamd_ftok_t tok;
 
-	return res;
+		cred = rspamd_mempool_alloc (task->task_pool, sizeof (*cred));
+		tok.begin = addr->domain;
+		tok.len = addr->domain_len;
+		cred->domain = rspamd_mempool_ftokdup (task->task_pool, &tok);
+		tok.begin = addr->user;
+		tok.len = addr->user_len;
+		cred->local_part = rspamd_mempool_ftokdup (task->task_pool, &tok);
+		tok.begin = addr->addr;
+		tok.len = addr->addr_len;
+		cred->sender = rspamd_mempool_ftokdup (task->task_pool, &tok);
+	}
+
+	if (cred) {
+		rspamd_mempool_set_variable (task->task_pool, RSPAMD_MEMPOOL_SPF_DOMAIN,
+				cred, NULL);
+	}
+
+	return cred;
+}
+
+const gchar *
+rspamd_spf_get_domain (struct rspamd_task *task)
+{
+	gchar *domain = NULL;
+	struct rspamd_spf_cred *cred;
+
+	cred = rspamd_mempool_get_variable (task->task_pool,
+			RSPAMD_MEMPOOL_SPF_DOMAIN);
+
+	if (!cred) {
+		cred = rspamd_spf_cache_domain (task);
+	}
+
+	if (cred) {
+		domain = cred->domain;
+	}
+
+	return domain;
 }
 
 gboolean
-resolve_spf (struct rspamd_task *task, spf_cb_t callback)
+rspamd_spf_resolve (struct rspamd_task *task, spf_cb_t callback,
+		gpointer cbdata)
 {
 	struct spf_record *rec;
-	gchar *domain;
-	const gchar *sender;
+	struct rspamd_spf_cred *cred;
 
-	sender = rspamd_task_get_sender (task);
+	cred = rspamd_mempool_get_variable (task->task_pool,
+			RSPAMD_MEMPOOL_SPF_DOMAIN);
+
+	if (!cred) {
+		cred = rspamd_spf_cache_domain (task);
+	}
+
+	if (!cred || !cred->domain) {
+		return FALSE;
+	}
 
 	rec = rspamd_mempool_alloc0 (task->task_pool, sizeof (struct spf_record));
 	rec->task = task;
 	rec->callback = callback;
+	rec->cbdata = cbdata;
 
 	rec->resolved = g_ptr_array_sized_new (8);
 
 	/* Add destructor */
 	rspamd_mempool_add_destructor (task->task_pool,
-		(rspamd_mempool_destruct_t)spf_record_destructor,
-		rec);
+			(rspamd_mempool_destruct_t) spf_record_destructor,
+			rec);
 
 	/* Extract from data */
-	if (sender != NULL && (domain = strchr (sender, '@')) != NULL) {
-		rec->sender = sender;
+	rec->sender = cred->sender;
+	rec->local_part = cred->local_part;
+	rec->sender_domain = cred->domain;
 
-		rec->local_part = rspamd_mempool_alloc (task->task_pool,
-				domain - sender);
-		rspamd_strlcpy (rec->local_part, sender, domain - sender);
-		rec->sender_domain = domain + 1;
-	}
-	else if (task->helo != NULL && strchr (task->helo, '.') != NULL) {
-		/* For notifies we can check HELO identity and check SPF accordingly */
-		/* XXX: very poor check */
-		rec->local_part = rspamd_mempool_strdup (task->task_pool, "postmaster");
-		rec->sender_domain = task->helo;
-	}
-	else {
-		return FALSE;
-	}
-
-	if (make_dns_request (task->resolver, task->s, task->task_pool,
+	if (make_dns_request_task_forced (task,
 			spf_dns_callback,
-			(void *)rec, RDNS_REQUEST_TXT, rec->sender_domain)) {
-		task->dns_requests++;
+			(void *) rec, RDNS_REQUEST_TXT, rec->sender_domain)) {
 		rec->requests_inflight++;
 		return TRUE;
 	}

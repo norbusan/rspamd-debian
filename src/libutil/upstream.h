@@ -7,31 +7,42 @@
 #include "ucl.h"
 
 enum rspamd_upstream_rotation {
-	RSPAMD_UPSTREAM_RANDOM,
+	RSPAMD_UPSTREAM_RANDOM = 0,
 	RSPAMD_UPSTREAM_HASHED,
 	RSPAMD_UPSTREAM_ROUND_ROBIN,
 	RSPAMD_UPSTREAM_MASTER_SLAVE,
-	RSPAMD_UPSTREAM_SEQUENTIAL
+	RSPAMD_UPSTREAM_SEQUENTIAL,
+	RSPAMD_UPSTREAM_UNDEF
 };
 
+enum rspamd_upstream_flag {
+	RSPAMD_UPSTREAM_FLAG_NORESOLVE = (1 << 0),
+};
 
 struct rspamd_config;
 /* Opaque upstream structures */
 struct upstream;
 struct upstream_list;
+struct upstream_ctx;
 
 /**
  * Init upstreams library
  * @param resolver
  */
-void rspamd_upstreams_library_init (struct rdns_resolver *resolver,
-		struct event_base *base);
+struct upstream_ctx* rspamd_upstreams_library_init (void);
+
+/**
+ * Remove reference from upstreams library
+ */
+void rspamd_upstreams_library_unref (struct upstream_ctx *ctx);
 
 /**
  * Configure attributes of upstreams library
  * @param cfg
  */
-void rspamd_upstreams_library_config (struct rspamd_config *cfg);
+void rspamd_upstreams_library_config (struct rspamd_config *cfg,
+		struct upstream_ctx *ctx, struct event_base *ev_base,
+		struct rdns_resolver *resolver);
 
 /**
  * Upstream error logic
@@ -52,10 +63,33 @@ void rspamd_upstream_fail (struct upstream *up);
 void rspamd_upstream_ok (struct upstream *up);
 
 /**
+ * Set weight for an upstream
+ * @param up
+ */
+void rspamd_upstream_set_weight (struct upstream *up, guint weight);
+
+/**
  * Create new list of upstreams
  * @return
  */
-struct upstream_list* rspamd_upstreams_create (void);
+struct upstream_list* rspamd_upstreams_create (struct upstream_ctx *ctx);
+
+/**
+ * Sets specific flag to the upstream list
+ * @param ups
+ * @param flags
+ */
+void rspamd_upstreams_set_flags (struct upstream_list *ups,
+		enum rspamd_upstream_flag flags);
+
+/**
+ * Sets rotation policy for upstreams list
+ * @param ups
+ * @param rot
+ */
+void rspamd_upstreams_set_rotation (struct upstream_list *ups,
+		enum rspamd_upstream_rotation rot);
+
 /**
  * Destroy list of upstreams
  * @param ups
@@ -76,6 +110,11 @@ gsize rspamd_upstreams_count (struct upstream_list *ups);
  */
 gsize rspamd_upstreams_alive (struct upstream_list *ups);
 
+enum rspamd_upstream_parse_type {
+	RSPAMD_UPSTREAM_PARSE_DEFAULT = 0,
+	RSPAMD_UPSTREAM_PARSE_NAMESERVER,
+};
+
 /**
  * Add upstream from the string
  * @param ups upstream list
@@ -84,8 +123,9 @@ gsize rspamd_upstreams_alive (struct upstream_list *ups);
  * @param data optional userdata
  * @return TRUE if upstream has been added
  */
-gboolean rspamd_upstreams_add_upstream (struct upstream_list *ups,
-		const gchar *str, guint16 def_port, void *data);
+gboolean rspamd_upstreams_add_upstream (struct upstream_list *ups, const gchar *str,
+		guint16 def_port, enum rspamd_upstream_parse_type parse_type,
+		void *data);
 
 /**
  * Add multiple upstreams from comma, semicolon or space separated line
@@ -110,6 +150,19 @@ gboolean rspamd_upstreams_parse_line (struct upstream_list *ups,
 gboolean rspamd_upstreams_from_ucl (struct upstream_list *ups,
 		const ucl_object_t *in, guint16 def_port, void *data);
 
+
+typedef void (*rspamd_upstream_traverse_func) (struct upstream *up, guint idx,
+		void *ud);
+
+/**
+ * Traverse upstreams list calling the function specified
+ * @param ups
+ * @param cb
+ * @param ud
+ */
+void rspamd_upstreams_foreach (struct upstream_list *ups,
+		rspamd_upstream_traverse_func cb, void *ud);
+
 /**
  * Returns the current IP address of the upstream
  * @param up
@@ -133,13 +186,44 @@ gboolean rspamd_upstream_add_addr (struct upstream *up,
 const gchar* rspamd_upstream_name (struct upstream *up);
 
 /**
+ * Sets opaque user data associated with this upstream
+ * @param up
+ * @param data
+ * @return old data
+ */
+gpointer rspamd_upstream_set_data (struct upstream *up, gpointer data);
+
+/**
+ * Gets opaque user data associated with this upstream
+ * @param up
+ * @return
+ */
+gpointer rspamd_upstream_get_data (struct upstream *up);
+
+/**
  * Get new upstream from the list
  * @param ups upstream list
  * @param type type of rotation algorithm, for `RSPAMD_UPSTREAM_HASHED` it is required to specify `key` and `keylen` as arguments
  * @return
  */
 struct upstream* rspamd_upstream_get (struct upstream_list *ups,
-		enum rspamd_upstream_rotation type, ...);
+		enum rspamd_upstream_rotation default_type,
+		const guchar *key, gsize keylen);
+
+/**
+ * Get new upstream from the list
+ * @param ups upstream list
+ * @param type type of rotation algorithm, for `RSPAMD_UPSTREAM_HASHED` it is required to specify `key` and `keylen` as arguments
+ * @return
+ */
+struct upstream* rspamd_upstream_get_forced (struct upstream_list *ups,
+		enum rspamd_upstream_rotation forced_type,
+		const guchar *key, gsize keylen);
+
+/**
+ * Re-resolve addresses for all upstreams registered
+ */
+void rspamd_upstream_reresolve (struct upstream_ctx *ctx);
 
 #endif /* UPSTREAM_H */
 /*

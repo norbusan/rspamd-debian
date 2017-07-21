@@ -1,5 +1,20 @@
-/* Copyright (c) 2010-2015, Vsevolod Stakhov
- * Copyright (C) 2002-2015 Igor Sysoev
+/*-
+ * Copyright 2016 Vsevolod Stakhov
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/* Copyright (C) 2002-2015 Igor Sysoev
  * Copyright (C) 2011-2015 Nginx, Inc.
  * All rights reserved.
  *
@@ -24,8 +39,7 @@
  */
 
 #include "printf.h"
-#include "fstring.h"
-#include "main.h"
+#include "str_util.h"
 
 /**
  * From FreeBSD libutil code
@@ -40,11 +54,10 @@ rspamd_humanize_number (gchar *buf, gchar *last, gint64 num, gboolean bytes)
 	const gchar *prefixes;
 	int i, r, remainder, sign;
 	gint64 divisor;
-	gsize baselen, len = last - buf;
+	gsize len = last - buf;
 
 	remainder = 0;
 
-	baselen = 1;
 	if (!bytes) {
 		divisor = 1000;
 		prefixes = "\0\0\0k\0\0M\0\0G\0\0T\0\0P\0\0E";
@@ -54,22 +67,14 @@ rspamd_humanize_number (gchar *buf, gchar *last, gint64 num, gboolean bytes)
 		prefixes = "B\0\0k\0\0M\0\0G\0\0T\0\0P\0\0E";
 	}
 
-
 #define SCALE2PREFIX(scale)     (&prefixes[(scale) * 3])
 
 	if (num < 0) {
 		sign = -1;
 		num = -num;
-		baselen += 2; /* sign, digit */
 	}
 	else {
 		sign = 1;
-		baselen += 1; /* digit */
-	}
-
-	/* Check if enough room for `x y' + suffix + `\0' */
-	if (len < baselen + 1) {
-		return buf;
 	}
 
 	/*
@@ -82,9 +87,17 @@ rspamd_humanize_number (gchar *buf, gchar *last, gint64 num, gboolean bytes)
 		num /= divisor;
 	}
 
-	r = rspamd_snprintf (buf, len, "%L%s",
-			sign * (num + (remainder + 50) / 1000),
-			SCALE2PREFIX (i));
+	if (remainder == 0 || num > divisor / 2) {
+		r = rspamd_snprintf (buf, len, "%L%s",
+				sign * (num + (remainder + 50) / divisor),
+				SCALE2PREFIX (i));
+	}
+	else {
+		/* Floating point version */
+		r = rspamd_snprintf (buf, len, "%.2f%s",
+				sign * (num + remainder / (gdouble)divisor),
+				SCALE2PREFIX (i));
+	}
 
 #undef SCALE2PREFIX
 
@@ -219,6 +232,18 @@ rspamd_printf_append_gstring (const gchar *buf, glong buflen, gpointer ud)
 	return buflen;
 }
 
+static glong
+rspamd_printf_append_fstring (const gchar *buf, glong buflen, gpointer ud)
+{
+	rspamd_fstring_t **dst = ud;
+
+	if (buflen > 0) {
+		*dst = rspamd_fstring_append (*dst, buf, buflen);
+	}
+
+	return buflen;
+}
+
 glong
 rspamd_fprintf (FILE *f, const gchar *fmt, ...)
 {
@@ -307,6 +332,25 @@ rspamd_vprintf_gstring (GString *s, const gchar *fmt, va_list args)
 	return rspamd_vprintf_common (rspamd_printf_append_gstring, s, fmt, args);
 }
 
+glong
+rspamd_printf_fstring (rspamd_fstring_t **s, const gchar *fmt, ...)
+{
+	va_list args;
+	glong r;
+
+	va_start (args, fmt);
+	r = rspamd_vprintf_fstring (s, fmt, args);
+	va_end (args);
+
+	return r;
+}
+
+glong
+rspamd_vprintf_fstring (rspamd_fstring_t **s, const gchar *fmt, va_list args)
+{
+	return rspamd_vprintf_common (rspamd_printf_append_fstring, s, fmt, args);
+}
+
 #define RSPAMD_PRINTF_APPEND(buf, len)                                         \
 	do {                                                                       \
 		RSPAMD_PRINTF_APPEND_BUF(buf, len);                                    \
@@ -329,15 +373,16 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 	const gchar *fmt,
 	va_list args)
 {
-	gchar zero, numbuf[G_ASCII_DTOSTR_BUF_SIZE], *p, *last, c;
-	const gchar *buf_start = fmt;
+	gchar zero, numbuf[G_ASCII_DTOSTR_BUF_SIZE], dtoabuf[8], *p, *last, c;
+	const gchar *buf_start = fmt, *fmt_start = NULL;
 	gint d;
-	long double f, scale;
+	gdouble f;
 	glong written = 0, wr, slen;
 	gint64 i64;
 	guint64 ui64;
-	guint width, sign, hex, humanize, bytes, frac_width, i;
+	guint width, sign, hex, humanize, bytes, frac_width, b32;
 	rspamd_fstring_t *v;
+	rspamd_ftok_t *tok;
 	GString *gs;
 	GError *err;
 	gboolean bv;
@@ -360,6 +405,8 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 				written += wr;
 			}
 
+			fmt_start = fmt;
+
 			i64 = 0;
 			ui64 = 0;
 
@@ -367,6 +414,7 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 			width = 0;
 			sign = 1;
 			hex = 0;
+			b32 = 0;
 			bytes = 0;
 			humanize = 0;
 			frac_width = 0;
@@ -400,6 +448,11 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 					sign = 0;
 					fmt++;
 					continue;
+				case 'b':
+					b32 = 1;
+					sign = 0;
+					fmt++;
+					continue;
 				case 'H':
 					humanize = 1;
 					bytes = 1;
@@ -417,7 +470,6 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 					if (*fmt == '*') {
 						d = (gint)va_arg (args, gint);
 						if (G_UNLIKELY (d < 0)) {
-							msg_err ("critical error: fraction width is less than 0");
 							return 0;
 						}
 						frac_width = (guint)d;
@@ -434,7 +486,6 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 				case '*':
 					d = (gint)va_arg (args, gint);
 					if (G_UNLIKELY (d < 0)) {
-						msg_err ("critical error: size is less than 0");
 						return 0;
 					}
 					slen = (glong)d;
@@ -453,13 +504,53 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 
 			case 'V':
 				v = va_arg (args, rspamd_fstring_t *);
-				RSPAMD_PRINTF_APPEND (v->begin, v->len);
 
+				if (v) {
+					slen = v->len;
+
+					if (G_UNLIKELY (width != 0)) {
+						slen = MIN (v->len, width);
+					}
+
+					RSPAMD_PRINTF_APPEND (v->str, slen);
+				}
+				else {
+					RSPAMD_PRINTF_APPEND ("(NULL)", 6);
+				}
+
+				continue;
+
+			case 'T':
+				tok = va_arg (args, rspamd_ftok_t *);
+
+				if (tok) {
+					slen = tok->len;
+
+					if (G_UNLIKELY (width != 0)) {
+						slen = MIN (tok->len, width);
+					}
+					RSPAMD_PRINTF_APPEND (tok->begin, slen);
+				}
+				else {
+					RSPAMD_PRINTF_APPEND ("(NULL)", 6);
+				}
 				continue;
 
 			case 'v':
 				gs = va_arg (args, GString *);
-				RSPAMD_PRINTF_APPEND (gs->str, gs->len);
+
+				if (gs) {
+					slen = gs->len;
+
+					if (G_UNLIKELY (width != 0)) {
+						slen = MIN (gs->len, width);
+					}
+
+					RSPAMD_PRINTF_APPEND (gs->str, slen);
+				}
+				else {
+					RSPAMD_PRINTF_APPEND ("(NULL)", 6);
+				}
 
 				continue;
 
@@ -488,27 +579,66 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 					p = "(NULL)";
 				}
 
-				if (slen == -1) {
-					/* NULL terminated string */
-					slen = strlen (p);
-				}
+				if (G_UNLIKELY (b32)) {
+					gchar *b32buf;
 
-				if (G_LIKELY(hex == 0)) {
-					RSPAMD_PRINTF_APPEND (p, slen);
-				}
-				else {
-					gchar hexbuf[2];
-					while (slen) {
-						hexbuf[0] = hex == 2 ? _HEX[*p & 0xf] : _hex[*p & 0xf];
-						hexbuf[1] = hex == 2 ? _HEX[(*p >> 8) & 0xf] :
-								_hex[(*p >> 8) & 0xf];
-						RSPAMD_PRINTF_APPEND_BUF (hexbuf, 2);
-						p ++;
-						slen --;
+					if (G_UNLIKELY (slen == -1)) {
+						if (G_LIKELY (width != 0)) {
+							slen = width;
+						}
+						else {
+							/* NULL terminated string */
+							slen = strlen (p);
+						}
 					}
-					fmt ++;
+
+					b32buf = rspamd_encode_base32 (p, slen);
+
+					if (b32buf) {
+						RSPAMD_PRINTF_APPEND (b32buf, strlen (b32buf));
+						g_free (b32buf);
+					}
+					else {
+						RSPAMD_PRINTF_APPEND ("(NULL)", sizeof ("(NULL)") - 1);
+					}
+				}
+				else if (G_UNLIKELY (hex)) {
+					gchar hexbuf[2];
+
+					if (G_UNLIKELY (slen == -1)) {
+						if (G_LIKELY (width != 0)) {
+							slen = width;
+						}
+						else {
+							/* NULL terminated string */
+							slen = strlen (p);
+						}
+					}
+
+					while (slen) {
+						hexbuf[0] = hex == 2 ? _HEX[(*p >> 4) & 0xf] :
+								_hex[(*p >> 4) & 0xf];
+						hexbuf[1] = hex == 2 ? _HEX[*p & 0xf] : _hex[*p & 0xf];
+						RSPAMD_PRINTF_APPEND_BUF (hexbuf, 2);
+						p++;
+						slen--;
+					}
+
+					fmt++;
 					buf_start = fmt;
 
+				}
+				else {
+					if (slen == -1) {
+						/* NULL terminated string */
+						slen = strlen (p);
+					}
+
+					if (G_UNLIKELY (width != 0)) {
+						slen = MIN (slen, width);
+					}
+
+					RSPAMD_PRINTF_APPEND (p, slen);
 				}
 
 				continue;
@@ -523,7 +653,7 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 				sign = 1;
 				break;
 
-			case 'T':
+			case 't':
 				i64 = (gint64) va_arg (args, time_t);
 				sign = 1;
 				break;
@@ -570,69 +700,29 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 
 
 			case 'f':
-			case 'F':
-				if (*fmt == 'f') {
-					f = (long double) va_arg (args, double);
-				}
-				else {
-					f = (long double) va_arg (args, long double);
-				}
-				p = numbuf;
-				last = p + sizeof (numbuf);
-				if (f < 0) {
-					*p++ = '-';
-					f = -f;
-				}
-				if (frac_width == 0) {
-					frac_width = 6;
-				}
-
-				ui64 = (gint64) f;
-
-				p = rspamd_sprintf_num (p, last, ui64, zero, 0, width);
-
-				if (frac_width) {
-
-					if (p < last) {
-						*p++ = '.';
-					}
-
-					scale = 1.0;
-
-					for (i = 0; i < frac_width; i++) {
-						scale *= 10.0;
-					}
-
-					/*
-					 * (gint64) cast is required for msvc6:
-					 * it can not convert guint64 to double
-					 */
-					ui64 = (guint64) ((f - (gint64) ui64) * scale);
-
-					p = rspamd_sprintf_num (p, last, ui64, '0', 0, frac_width);
-				}
-
-				slen = p - numbuf;
-				RSPAMD_PRINTF_APPEND (numbuf, slen);
-
-				continue;
-
 			case 'g':
-			case 'G':
-				if (*fmt == 'g') {
-					f = (long double) va_arg (args, double);
-				}
-				else {
-					f = (long double) va_arg (args, long double);
-				}
-
-				g_ascii_formatd (numbuf, sizeof (numbuf), "%g", (double)f);
+				f = (gdouble) va_arg (args, double);
+				rspamd_strlcpy (dtoabuf, fmt_start, MIN (sizeof (dtoabuf),
+						(fmt - fmt_start + 2)));
+				g_ascii_formatd (numbuf, sizeof (numbuf), dtoabuf, (double)f);
 				slen = strlen (numbuf);
 				RSPAMD_PRINTF_APPEND (numbuf, slen);
 
 				continue;
 
-			case 'b':
+			case 'F':
+			case 'G':
+				f = (gdouble) va_arg (args, long double);
+				slen = rspamd_strlcpy (dtoabuf, fmt_start, MIN (sizeof (dtoabuf),
+						(fmt - fmt_start + 2)));
+				dtoabuf[slen - 1] = g_ascii_tolower (dtoabuf[slen - 1]);
+				g_ascii_formatd (numbuf, sizeof (numbuf), dtoabuf, (double)f);
+				slen = strlen (numbuf);
+				RSPAMD_PRINTF_APPEND (numbuf, slen);
+
+				continue;
+
+			case 'B':
 				bv = (gboolean) va_arg (args, double);
 				RSPAMD_PRINTF_APPEND (bv ? "true" : "false", bv ? 4 : 5);
 
@@ -660,7 +750,7 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 				continue;
 
 			case 'N':
-				c = LF;
+				c = '\n';
 				RSPAMD_PRINTF_APPEND (&c, 1);
 
 				continue;

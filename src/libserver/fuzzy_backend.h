@@ -1,89 +1,113 @@
-/* Copyright (c) 2014, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-#ifndef FUZZY_BACKEND_H_
-#define FUZZY_BACKEND_H_
+#ifndef SRC_LIBSERVER_FUZZY_BACKEND_H_
+#define SRC_LIBSERVER_FUZZY_BACKEND_H_
 
 #include "config.h"
-#include "fuzzy_storage.h"
-
+#include <event.h>
+#include "fuzzy_wire.h"
 
 struct rspamd_fuzzy_backend;
+struct rspamd_config;
+
+/*
+ * Callbacks for fuzzy methods
+ */
+typedef void (*rspamd_fuzzy_check_cb) (struct rspamd_fuzzy_reply *rep, void *ud);
+typedef void (*rspamd_fuzzy_update_cb) (gboolean success, void *ud);
+typedef void (*rspamd_fuzzy_version_cb) (guint64 rev, void *ud);
+typedef void (*rspamd_fuzzy_count_cb) (guint64 count, void *ud);
+typedef gboolean (*rspamd_fuzzy_periodic_cb) (void *ud);
 
 /**
  * Open fuzzy backend
- * @param path file to open (legacy file will be converted automatically)
- * @param err error pointer
- * @return backend structure or NULL
+ * @param ev_base
+ * @param config
+ * @param err
+ * @return
  */
-struct rspamd_fuzzy_backend* rspamd_fuzzy_backend_open (const gchar *path,
+struct rspamd_fuzzy_backend * rspamd_fuzzy_backend_create (struct event_base *ev_base,
+		const ucl_object_t *config,
+		struct rspamd_config *cfg,
 		GError **err);
 
+
 /**
- * Check specified fuzzy in the backend
- * @param backend
+ * Check a specific hash in storage
  * @param cmd
- * @return reply with probability and weight
+ * @param cb
+ * @param ud
  */
-struct rspamd_fuzzy_reply rspamd_fuzzy_backend_check (
-		struct rspamd_fuzzy_backend *backend,
+void rspamd_fuzzy_backend_check (struct rspamd_fuzzy_backend *bk,
 		const struct rspamd_fuzzy_cmd *cmd,
-		gint64 expire);
+		rspamd_fuzzy_check_cb cb, void *ud);
 
 /**
- * Add digest to the database
+ * Process updates for a specific queue
+ * @param bk
+ * @param updates queue of struct fuzzy_peer_cmd
+ * @param src
+ */
+void rspamd_fuzzy_backend_process_updates (struct rspamd_fuzzy_backend *bk,
+		GQueue *updates, const gchar *src, rspamd_fuzzy_update_cb cb,
+		void *ud);
+
+/**
+ * Gets number of hashes from the backend
+ * @param bk
+ * @param cb
+ * @param ud
+ */
+void rspamd_fuzzy_backend_count (struct rspamd_fuzzy_backend *bk,
+		rspamd_fuzzy_count_cb cb, void *ud);
+
+/**
+ * Returns number of revision for a specific source
+ * @param bk
+ * @param src
+ * @param cb
+ * @param ud
+ */
+void rspamd_fuzzy_backend_version (struct rspamd_fuzzy_backend *bk,
+		const gchar *src,
+		rspamd_fuzzy_version_cb cb, void *ud);
+
+/**
+ * Returns unique id for backend
  * @param backend
- * @param cmd
  * @return
  */
-gboolean rspamd_fuzzy_backend_add (
-		struct rspamd_fuzzy_backend *backend,
-		const struct rspamd_fuzzy_cmd *cmd);
+const gchar * rspamd_fuzzy_backend_id (struct rspamd_fuzzy_backend *backend);
 
 /**
- * Delete digest from the database
+ * Starts expire process for the backend
  * @param backend
- * @param cmd
- * @return
  */
-gboolean rspamd_fuzzy_backend_del (
-		struct rspamd_fuzzy_backend *backend,
-		const struct rspamd_fuzzy_cmd *cmd);
+void rspamd_fuzzy_backend_start_update (struct rspamd_fuzzy_backend *backend,
+		gdouble timeout,
+		rspamd_fuzzy_periodic_cb cb,
+		void *ud);
+
+struct event_base* rspamd_fuzzy_backend_event_base (struct rspamd_fuzzy_backend *backend);
+gdouble rspamd_fuzzy_backend_get_expire (struct rspamd_fuzzy_backend *backend);
 
 /**
- * Sync storage
- * @param backend
- * @return
- */
-gboolean rspamd_fuzzy_backend_sync (struct rspamd_fuzzy_backend *backend,
-		gint64 expire);
-
-/**
- * Close storage
+ * Closes backend
  * @param backend
  */
 void rspamd_fuzzy_backend_close (struct rspamd_fuzzy_backend *backend);
 
-gsize rspamd_fuzzy_backend_count (struct rspamd_fuzzy_backend *backend);
-gsize rspamd_fuzzy_backend_expired (struct rspamd_fuzzy_backend *backend);
-
-#endif /* FUZZY_BACKEND_H_ */
+#endif /* SRC_LIBSERVER_FUZZY_BACKEND_H_ */

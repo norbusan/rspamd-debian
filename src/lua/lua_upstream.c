@@ -1,30 +1,20 @@
-/* Copyright (c) 2010-2011, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "config.h"
 #include "lua_common.h"
-#include "upstream.h"
-#include "cfg_file.h"
 
 
 /***
@@ -98,7 +88,7 @@ static const struct luaL_reg upstream_m[] = {
 static struct upstream *
 lua_check_upstream (lua_State * L)
 {
-	void *ud = luaL_checkudata (L, 1, "rspamd{upstream}");
+	void *ud = rspamd_lua_check_udata (L, 1, "rspamd{upstream}");
 
 	luaL_argcheck (L, ud != NULL, 1, "'upstream' expected");
 	return ud ? *((struct upstream **)ud) : NULL;
@@ -161,61 +151,49 @@ lua_upstream_ok (lua_State *L)
 static struct upstream_list *
 lua_check_upstream_list (lua_State * L)
 {
-	void *ud = luaL_checkudata (L, 1, "rspamd{upstream_list}");
+	void *ud = rspamd_lua_check_udata (L, 1, "rspamd{upstream_list}");
 
 	luaL_argcheck (L, ud != NULL, 1, "'upstream_list' expected");
 	return ud ? *((struct upstream_list **)ud) : NULL;
 }
 
 /***
- * @function upstream_list.create(def)
+ * @function upstream_list.create(cfg, def, [default_port])
  * Create new upstream list from its string definition in form `<upstream>,<upstream>;<upstream>`
+ * @param {rspamd_config} cfg configuration reference
  * @param {string} def upstream list definition
+ * @param {number} default_port default port for upstreams
  * @return {upstream_list} upstream list structure
  */
 static gint
 lua_upstream_list_create (lua_State *L)
 {
 	struct upstream_list *new = NULL, **pnew;
+	struct rspamd_config *cfg = lua_check_config (L, 1);
 	const gchar *def;
-	char **tokens, **t;
 	guint default_port = 0;
 
-	def = luaL_checkstring (L, 1);
-	if (def) {
-		if (lua_gettop (L) >= 2) {
-			default_port = luaL_checknumber (L, 2);
+	def = luaL_checkstring (L, 2);
+	if (def && cfg) {
+		if (lua_gettop (L) >= 3) {
+			default_port = luaL_checknumber (L, 3);
 		}
 
-		tokens = g_strsplit_set (def, ",;", 0);
-		if (!tokens || !tokens[0]) {
-			goto err;
+		new = rspamd_upstreams_create (cfg->ups_ctx);
+
+		if (rspamd_upstreams_parse_line (new, def, default_port, NULL)) {
+			pnew = lua_newuserdata (L, sizeof (struct upstream_list *));
+			rspamd_lua_setclass (L, "rspamd{upstream_list}", -1);
+			*pnew = new;
 		}
-		t = tokens;
-
-		new = rspamd_upstreams_create ();
-		while (*t != NULL) {
-			if (!rspamd_upstreams_add_upstream (new, *t, default_port, NULL)) {
-				goto err;
-			}
-			t ++;
+		else {
+			rspamd_upstreams_destroy (new);
+			lua_pushnil (L);
 		}
-		pnew = lua_newuserdata (L, sizeof (struct upstream_list *));
-		rspamd_lua_setclass (L, "rspamd{upstream_list}", -1);
-
-		g_strfreev (tokens);
-		*pnew = new;
 	}
-
-	return 1;
-err:
-	if (tokens) {
-		g_strfreev (tokens);
+	else {
+		lua_error (L);
 	}
-	if (new) {
-		rspamd_upstreams_destroy (new);
-	}
-	lua_pushnil (L);
 
 	return 1;
 }
@@ -289,7 +267,7 @@ lua_upstream_list_get_upstream_round_robin (lua_State *L)
 	upl = lua_check_upstream_list (L);
 	if (upl) {
 
-		selected = rspamd_upstream_get (upl, RSPAMD_UPSTREAM_ROUND_ROBIN);
+		selected = rspamd_upstream_get (upl, RSPAMD_UPSTREAM_ROUND_ROBIN, NULL, 0);
 		if (selected) {
 			pselected = lua_newuserdata (L, sizeof (struct upstream *));
 			rspamd_lua_setclass (L, "rspamd{upstream}", -1);
@@ -320,7 +298,9 @@ lua_upstream_list_get_upstream_master_slave (lua_State *L)
 	upl = lua_check_upstream_list (L);
 	if (upl) {
 
-		selected = rspamd_upstream_get (upl, RSPAMD_UPSTREAM_MASTER_SLAVE);
+		selected = rspamd_upstream_get (upl, RSPAMD_UPSTREAM_MASTER_SLAVE,
+				NULL,
+				0);
 		if (selected) {
 			pselected = lua_newuserdata (L, sizeof (struct upstream *));
 			rspamd_lua_setclass (L, "rspamd{upstream}", -1);

@@ -1,33 +1,23 @@
-/*
- * Copyright (c) 2009-2012, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *	 * Redistributions of source code must retain the above copyright
- *	   notice, this list of conditions and the following disclaimer.
- *	 * Redistributions in binary form must reproduce the above copyright
- *	   notice, this list of conditions and the following disclaimer in the
- *	   documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "lua_common.h"
-#include "symbols_cache.h"
 #include "expression.h"
-#include "filter.h"
+#include "composites.h"
+
 #ifdef HAVE_SYS_UTSNAME_H
-#include <sys/utsname.h>
 #endif
 
 /*
@@ -39,19 +29,18 @@ static void
 lua_process_metric (lua_State *L, const gchar *name, struct rspamd_config *cfg)
 {
 	GList *metric_list;
-	gchar *symbol, *old_desc;
-	const gchar *desc;
-	struct metric *metric;
+	gchar *symbol;
+	const gchar *desc = NULL;
+	struct rspamd_metric *metric;
 	gdouble *score;
-	struct rspamd_symbol_def *s;
+	struct rspamd_symbol *s;
 
 	/* Get module opt structure */
 	if ((metric = g_hash_table_lookup (cfg->metrics, name)) == NULL) {
-		metric = rspamd_config_new_metric (cfg, metric);
-		metric->name = rspamd_mempool_strdup (cfg->cfg_pool, name);
+		metric = rspamd_config_new_metric (cfg, metric, name);
 	}
 
-	/* Now iterate throught module table */
+	/* Now iterate through module table */
 	for (lua_pushnil (L); lua_next (L, -2); lua_pop (L, 1)) {
 		/* key - -2, value - -1 */
 		symbol =
@@ -67,7 +56,7 @@ lua_process_metric (lua_State *L, const gchar *name, struct rspamd_config *cfg)
 					*score = lua_tonumber (L, -1);
 				}
 				else {
-					msg_warn ("cannot get weight of symbol: %s", symbol);
+					msg_warn_config("cannot get weight of symbol: %s", symbol);
 					continue;
 				}
 				lua_pop (L, 1);
@@ -75,20 +64,6 @@ lua_process_metric (lua_State *L, const gchar *name, struct rspamd_config *cfg)
 				lua_gettable (L, -2);
 				if (lua_isstring (L, -1)) {
 					desc = lua_tostring (L, -1);
-					old_desc =
-						g_hash_table_lookup (metric->descriptions, symbol);
-					if (old_desc) {
-						msg_info ("replacing description for symbol %s",
-							symbol);
-						g_hash_table_replace (metric->descriptions,
-							symbol,
-							rspamd_mempool_strdup (cfg->cfg_pool, desc));
-					}
-					else {
-						g_hash_table_insert (metric->descriptions,
-							symbol,
-							rspamd_mempool_strdup (cfg->cfg_pool, desc));
-					}
 				}
 				lua_pop (L, 1);
 			}
@@ -98,13 +73,13 @@ lua_process_metric (lua_State *L, const gchar *name, struct rspamd_config *cfg)
 				*score = lua_tonumber (L, -1);
 			}
 			else {
-				msg_warn ("cannot get weight of symbol: %s", symbol);
+				msg_warn_config("cannot get weight of symbol: %s", symbol);
 				continue;
 			}
 			/* Insert symbol */
 			if ((s =
 				g_hash_table_lookup (metric->symbols, symbol)) != NULL) {
-				msg_info ("replacing weight for symbol %s: %.2f -> %.2f",
+				msg_info_config("replacing weight for symbol %s: %.2f -> %.2f",
 					symbol,
 					*s->weight_ptr,
 					*score);
@@ -115,6 +90,10 @@ lua_process_metric (lua_State *L, const gchar *name, struct rspamd_config *cfg)
 				s->name = symbol;
 				s->weight_ptr = score;
 				g_hash_table_insert (metric->symbols, symbol, s);
+			}
+
+			if (desc) {
+				s->description = rspamd_mempool_strdup (cfg->cfg_pool, desc);
 			}
 
 			if ((metric_list =
@@ -146,7 +125,7 @@ rspamd_lua_post_load_config (struct rspamd_config *cfg)
 	gsize keylen;
 	GError *err = NULL;
 
-	/* First check all module options that may be overriden in 'config' global */
+	/* First check all module options that may be overridden in 'config' global */
 	lua_getglobal (L, "config");
 
 	if (lua_istable (L, -1)) {
@@ -197,7 +176,7 @@ rspamd_lua_post_load_config (struct rspamd_config *cfg)
 				sym = rspamd_mempool_strdup (cfg->cfg_pool, name);
 				if (!rspamd_parse_expression (val, 0, &composite_expr_subr, NULL,
 							cfg->cfg_pool, &err, &expr)) {
-					msg_err ("cannot parse composite expression '%s': %s", val,
+					msg_err_config("cannot parse composite expression '%s': %s", val,
 							err->message);
 					g_error_free (err);
 					err = NULL;
@@ -207,111 +186,17 @@ rspamd_lua_post_load_config (struct rspamd_config *cfg)
 				if ((old_expr =
 					g_hash_table_lookup (cfg->composite_symbols,
 					name)) != NULL) {
-					msg_info ("replacing composite symbol %s", name);
+					msg_info_config("replacing composite symbol %s", name);
 					g_hash_table_replace (cfg->composite_symbols, sym, expr);
 				}
 				else {
 					g_hash_table_insert (cfg->composite_symbols, sym, expr);
-					register_virtual_symbol (&cfg->cache, sym, 1);
+					rspamd_symbols_cache_add_symbol (cfg->cache, sym,
+							0, NULL, NULL, SYMBOL_TYPE_COMPOSITE, -1);
 				}
 			}
 		}
 	}
-}
 
-/* Handle lua dynamic config param */
-gboolean
-rspamd_lua_handle_param (struct rspamd_task *task,
-	gchar *mname,
-	gchar *optname,
-	enum lua_var_type expected_type,
-	gpointer *res)
-{
-	/* xxx: Adopt this for rcl */
-
-	/* Option not found */
-	*res = NULL;
-	return FALSE;
-}
-
-#define FAKE_RES_VAR "rspamd_res"
-gboolean
-rspamd_lua_check_condition (struct rspamd_config *cfg, const gchar *condition)
-{
-	lua_State *L = cfg->lua_state;
-	gchar *hostbuf, *condbuf;
-	gsize hostlen;
-	gboolean res;
-#ifdef HAVE_SYS_UTSNAME_H
-	struct utsname uts;
-#endif
-
-	/* Set some globals for condition */
-	/* XXX: think what other variables can be useful */
-	hostlen = sysconf (_SC_HOST_NAME_MAX) + 1;
-	hostbuf = alloca (hostlen);
-	gethostname (hostbuf, hostlen);
-	hostbuf[hostlen - 1] = '\0';
-
-	/* Hostname */
-	lua_pushstring (L, hostbuf);
-	lua_setglobal (L, "hostname");
-	/* Config file name */
-	lua_pushstring (L, cfg->cfg_name);
-	lua_setglobal (L, "cfg_name");
-	/* Check for uname */
-#ifdef HAVE_SYS_UTSNAME_H
-	uname (&uts);
-	lua_pushstring (L, uts.sysname);
-	lua_setglobal (L, "osname");
-	lua_pushstring (L, uts.release);
-	lua_setglobal (L, "osrelease");
-#else
-	lua_pushstring (L, "unknown");
-	lua_setglobal (L, "osname");
-	lua_pushstring (L, "");
-	lua_setglobal (L, "osrelease");
-#endif
-
-#ifdef HAVE_OPENSSL
-	lua_pushboolean (L, TRUE);
-#else
-	lua_pushboolean (L, FALSE);
-#endif
-	lua_setglobal (L, "rspamd_supports_rsa");
-
-	/* Rspamd paths */
-	lua_newtable (L);
-	rspamd_lua_table_set (L, "confdir",	  RSPAMD_CONFDIR);
-	rspamd_lua_table_set (L, "rundir",	  RSPAMD_RUNDIR);
-	rspamd_lua_table_set (L, "dbdir",	  RSPAMD_DBDIR);
-	rspamd_lua_table_set (L, "logdir",	  RSPAMD_LOGDIR);
-	rspamd_lua_table_set (L, "pluginsdir", RSPAMD_PLUGINSDIR);
-	rspamd_lua_table_set (L, "prefix",	  RSPAMD_PREFIX);
-	lua_setglobal (L, "rspamd_paths");
-
-	/* Make fake string */
-	hostlen = sizeof (FAKE_RES_VAR "=") + strlen (condition);
-	condbuf = g_malloc (hostlen);
-	rspamd_strlcpy (condbuf, FAKE_RES_VAR "=", sizeof (FAKE_RES_VAR "="));
-	g_strlcat (condbuf, condition, hostlen);
-	/* Evaluate condition */
-	if (luaL_dostring (L, condbuf) != 0) {
-		msg_err ("eval of '%s' failed: '%s'", condition, lua_tostring (L, -1));
-		g_free (condbuf);
-		return FALSE;
-	}
-	/* Get global variable res to get result */
-	lua_getglobal (L, FAKE_RES_VAR);
-	if (!lua_isboolean (L, -1)) {
-		msg_err ("bad string evaluated: %s, type: %s", condbuf,
-			lua_typename (L, lua_type (L, -1)));
-		g_free (condbuf);
-		return FALSE;
-	}
-
-	res = lua_toboolean (L, -1);
-	g_free (condbuf);
-
-	return res;
+	lua_settop (L, 0);
 }

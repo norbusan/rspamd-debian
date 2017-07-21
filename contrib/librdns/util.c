@@ -247,6 +247,96 @@ rdns_strtype (enum rdns_request_type type)
 	return dns_types[type];
 }
 
+enum rdns_request_type
+rdns_type_fromstr (const char *str)
+{
+	if (str) {
+		if (strcmp (str, "a") == 0) {
+			return RDNS_REQUEST_A;
+		}
+		else if (strcmp (str, "ns") == 0) {
+			return RDNS_REQUEST_NS;
+		}
+		else if (strcmp (str, "soa") == 0) {
+			return RDNS_REQUEST_SOA;
+		}
+		else if (strcmp (str, "ptr") == 0) {
+			return RDNS_REQUEST_PTR;
+		}
+		else if (strcmp (str, "mx") == 0) {
+			return RDNS_REQUEST_MX;
+		}
+		else if (strcmp (str, "srv") == 0) {
+			return RDNS_REQUEST_SRV;
+		}
+		else if (strcmp (str, "txt") == 0) {
+			return RDNS_REQUEST_TXT;
+		}
+		else if (strcmp (str, "spf") == 0) {
+			return RDNS_REQUEST_SPF;
+		}
+		else if (strcmp (str, "aaaa") == 0) {
+			return RDNS_REQUEST_AAAA;
+		}
+		else if (strcmp (str, "tlsa") == 0) {
+			return RDNS_REQUEST_TLSA;
+		}
+		else if (strcmp (str, "any") == 0) {
+			return RDNS_REQUEST_ANY;
+		}
+	}
+
+	return -1;
+}
+
+enum dns_rcode
+rdns_rcode_fromstr (const char *str)
+{
+	if (str) {
+		if (strcmp (str, "noerror") == 0) {
+			return RDNS_RC_NOERROR;
+		}
+		else if (strcmp (str, "formerr") == 0) {
+			return RDNS_RC_FORMERR;
+		}
+		else if (strcmp (str, "servfail") == 0) {
+			return RDNS_RC_SERVFAIL;
+		}
+		else if (strcmp (str, "nxdomain") == 0) {
+			return RDNS_RC_NXDOMAIN;
+		}
+		else if (strcmp (str, "notimp") == 0) {
+			return RDNS_RC_NOTIMP;
+		}
+		else if (strcmp (str, "yxdomain") == 0) {
+			return RDNS_RC_YXDOMAIN;
+		}
+		else if (strcmp (str, "yxrrset") == 0) {
+			return RDNS_RC_YXRRSET;
+		}
+		else if (strcmp (str, "nxrrset") == 0) {
+			return RDNS_RC_NXRRSET;
+		}
+		else if (strcmp (str, "notauth") == 0) {
+			return RDNS_RC_NOTAUTH;
+		}
+		else if (strcmp (str, "notzone") == 0) {
+			return RDNS_RC_NOTZONE;
+		}
+		else if (strcmp (str, "timeout") == 0) {
+			return RDNS_RC_TIMEOUT;
+		}
+		else if (strcmp (str, "neterr") == 0) {
+			return RDNS_RC_NETERR;
+		}
+		else if (strcmp (str, "norec") == 0) {
+			return RDNS_RC_NOREC;
+		}
+	}
+
+	return -1;
+}
+
 uint16_t
 rdns_permutor_generate_id (void)
 {
@@ -312,18 +402,23 @@ rdns_request_free (struct rdns_request *req)
 		if (req->reply != NULL) {
 			rdns_reply_free (req->reply);
 		}
-		if (req->state >= RDNS_REQUEST_SENT &&
-				req->state < RDNS_REQUEST_REPLIED) {
-			/* Remove timer */
-			req->async->del_timer (req->async->data,
-					req->async_event);
-			/* Remove from id hashes */
-			HASH_DEL (req->io->requests, req);
-		}
-		else if (req->state == RDNS_REQUEST_REGISTERED) {
-			/* Remove retransmit event */
-			req->async->del_write (req->async->data,
-					req->async_event);
+		if (req->async_event) {
+			if (req->state == RDNS_REQUEST_WAIT_REPLY) {
+				/* Remove timer */
+				req->async->del_timer (req->async->data,
+						req->async_event);
+				/* Remove from id hashes */
+				HASH_DEL (req->io->requests, req);
+				req->async_event = NULL;
+			}
+			else if (req->state == RDNS_REQUEST_WAIT_SEND) {
+				/* Remove retransmit event */
+				req->async->del_write (req->async->data,
+						req->async_event);
+				HASH_DEL (req->io->requests, req);
+				req->async_event = NULL;
+			}
+
 		}
 #ifdef TWEETNACL
 		if (req->curve_plugin_data != NULL) {
@@ -368,28 +463,56 @@ rdns_request_retain (struct rdns_request *req)
 }
 
 void
+rdns_request_unschedule (struct rdns_request *req)
+{
+	if (req->async_event) {
+		if (req->state == RDNS_REQUEST_WAIT_REPLY) {
+			req->async->del_timer (req->async->data,
+					req->async_event);
+			/* Remove from id hashes */
+			HASH_DEL (req->io->requests, req);
+			req->async_event = NULL;
+		}
+		else if (req->state == RDNS_REQUEST_WAIT_SEND) {
+			req->async->del_write (req->async->data,
+					req->async_event);
+			/* Remove from id hashes */
+			HASH_DEL (req->io->requests, req);
+			req->async_event = NULL;
+		}
+	}
+}
+
+void
 rdns_request_release (struct rdns_request *req)
 {
+	rdns_request_unschedule (req);
 	REF_RELEASE (req);
 }
 
 static bool
-rdns_resolver_conf_process_line (struct rdns_resolver *resolver, char *line)
+rdns_resolver_conf_process_line (struct rdns_resolver *resolver,
+		const char *line, rdns_resolv_conf_cb cb, void *ud)
 {
-	char *p, *c;
+	const char *p, *c, *end;
 	bool has_obrace = false;
 	unsigned int port = dns_port;
 
-	if (strncmp (line, "nameserver", sizeof ("nameserver") - 1) == 0) {
+	end = line + strlen (line);
+
+	if (end - line > sizeof ("nameserver") - 1 &&
+			strncmp (line, "nameserver", sizeof ("nameserver") - 1) == 0) {
 		p = line + sizeof ("nameserver") - 1;
 		/* Skip spaces */
 		while (*p == ' ' || *p == '\t') {
 			p ++;
 		}
+
 		if (*p == '[') {
 			has_obrace = true;
 			p ++;
 		}
+
 		if (isxdigit (*p) || *p == ':') {
 			c = p;
 			while (isxdigit (*p) || *p == ':' || *p == '.') {
@@ -401,7 +524,7 @@ rdns_resolver_conf_process_line (struct rdns_resolver *resolver, char *line)
 			else if (*p != '\0' && !isspace (*p) && *p != '#') {
 				return false;
 			}
-			*p = '\0';
+
 			if (has_obrace) {
 				p ++;
 				if (*p == ':') {
@@ -413,7 +536,14 @@ rdns_resolver_conf_process_line (struct rdns_resolver *resolver, char *line)
 				}
 			}
 
-			return rdns_resolver_add_server (resolver, c, port, 0, default_io_cnt);
+			if (cb == NULL) {
+				return rdns_resolver_add_server (resolver, c, port, 0,
+						default_io_cnt) != NULL;
+			}
+			else {
+				return cb (resolver, c, port, 0,
+						default_io_cnt, ud);
+			}
 		}
 		else {
 			return false;
@@ -425,10 +555,12 @@ rdns_resolver_conf_process_line (struct rdns_resolver *resolver, char *line)
 }
 
 bool
-rdns_resolver_parse_resolv_conf (struct rdns_resolver *resolver, const char *path)
+rdns_resolver_parse_resolv_conf_cb (struct rdns_resolver *resolver,
+		const char *path, rdns_resolv_conf_cb cb, void *ud)
 {
 	FILE *in;
 	char buf[BUFSIZ];
+	char *p;
 
 	in = fopen (path, "r");
 
@@ -437,10 +569,18 @@ rdns_resolver_parse_resolv_conf (struct rdns_resolver *resolver, const char *pat
 	}
 
 	while (!feof (in)) {
-		if (fgets (buf, sizeof (buf), in) == NULL) {
+		if (fgets (buf, sizeof (buf) - 1, in) == NULL) {
 			break;
 		}
-		if (!rdns_resolver_conf_process_line (resolver, buf)) {
+
+		/* Strip trailing spaces */
+		p = buf + strlen (buf) - 1;
+		while (p > buf &&
+				(*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
+			*p-- = '\0';
+		}
+
+		if (!rdns_resolver_conf_process_line (resolver, buf, cb, ud)) {
 			rdns_warn ("rdns_resolver_parse_resolv_conf: cannot parse line: %s", buf);
 			fclose (in);
 			return false;
@@ -448,7 +588,14 @@ rdns_resolver_parse_resolv_conf (struct rdns_resolver *resolver, const char *pat
 	}
 
 	fclose (in);
+
 	return true;
+}
+
+bool
+rdns_resolver_parse_resolv_conf (struct rdns_resolver *resolver, const char *path)
+{
+	return rdns_resolver_parse_resolv_conf_cb (resolver, path, NULL, NULL);
 }
 
 bool

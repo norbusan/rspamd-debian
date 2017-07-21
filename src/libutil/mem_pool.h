@@ -13,15 +13,24 @@
 #define RSPAMD_MEM_POOL_H
 
 #include "config.h"
-#ifdef HAVE_PTHREAD_PROCESS_SHARED
+#if defined(HAVE_PTHREAD_PROCESS_SHARED) && !defined(DISABLE_PTHREAD_MUTEX)
 #include <pthread.h>
 #endif
 
 struct f_str_s;
 
-#define MEM_ALIGNMENT   sizeof(unsigned long)    /* platform word */
+#define MEMPOOL_TAG_LEN 20
+#define MEMPOOL_UID_LEN 20
+#define MEM_ALIGNMENT   8
 #define align_ptr(p, a)                                                   \
-	(guint8 *) (((uintptr_t) (p) + ((uintptr_t) a - 1)) & ~((uintptr_t) a - 1))
+    (guint8 *) (((uintptr_t) (p) + ((uintptr_t) a - 1)) & ~((uintptr_t) a - 1))
+
+enum rspamd_mempool_chain_type {
+	RSPAMD_MEMPOOL_NORMAL = 0,
+	RSPAMD_MEMPOOL_TMP,
+	RSPAMD_MEMPOOL_SHARED,
+	RSPAMD_MEMPOOL_MAX
+};
 
 /**
  * Destructor type definition
@@ -31,7 +40,7 @@ typedef void (*rspamd_mempool_destruct_t)(void *ptr);
 /**
  * Pool mutex structure
  */
-#ifndef HAVE_PTHREAD_PROCESS_SHARED
+#if !defined(HAVE_PTHREAD_PROCESS_SHARED) || defined(DISABLE_PTHREAD_MUTEX)
 typedef struct memory_pool_mutex_s {
 	gint lock;
 	pid_t owner;
@@ -55,18 +64,7 @@ typedef pthread_rwlock_t rspamd_mempool_rwlock_t;
 struct _pool_chain {
 	guint8 *begin;                  /**< begin of pool chain block              */
 	guint8 *pos;                    /**< current start of free space in block   */
-	gsize len;      /**< length of block                        */
-	struct _pool_chain *next;       /**< chain link                             */
-};
-
-/**
- * Shared pool page
- */
-struct _pool_chain_shared {
-	guint8 *begin;
-	guint8 *pos;
-	gsize len;
-	struct _pool_chain_shared *next;
+	gsize len;                      /**< length of block                        */
 	rspamd_mempool_mutex_t *lock;
 };
 
@@ -74,11 +72,18 @@ struct _pool_chain_shared {
  * Destructors list item structure
  */
 struct _pool_destructors {
-	rspamd_mempool_destruct_t func;             /**< pointer to destructor					*/
+	rspamd_mempool_destruct_t func;         /**< pointer to destructor					*/
 	void *data;                             /**< data to free							*/
 	const gchar *function;                  /**< function from which this destructor was added */
 	const gchar *loc;                       /**< line number                            */
-	struct _pool_destructors *prev;         /**< chain link								*/
+};
+
+/**
+ * Tag to use for logging purposes
+ */
+struct rspamd_mempool_tag {
+	gchar tagname[MEMPOOL_TAG_LEN];         /**< readable name							*/
+	gchar uid[MEMPOOL_UID_LEN];             /**< unique id								*/
 };
 
 /**
@@ -86,14 +91,12 @@ struct _pool_destructors {
  */
 struct rspamd_mutex_s;
 typedef struct memory_pool_s {
-	struct _pool_chain *cur_pool;           /**< currently used page					*/
-	struct _pool_chain *first_pool;         /**< first page								*/
-	struct _pool_chain *cur_pool_tmp;       /**< currently used temporary page			*/
-	struct _pool_chain *first_pool_tmp;     /**< first temporary page					*/
-	struct _pool_chain_shared *shared_pool; /**< shared chain							*/
-	struct _pool_destructors *destructors;  /**< destructors chain						*/
+	GPtrArray *pools[RSPAMD_MEMPOOL_MAX];
+	GArray *destructors;
+	GPtrArray *trash_stack;
 	GHashTable *variables;                  /**< private memory pool variables			*/
-	struct rspamd_mutex_s *mtx;             /**< threads lock							*/
+	gsize elt_len;							/**< size of an element						*/
+	struct rspamd_mempool_tag tag;          /**< memory pool tag						*/
 } rspamd_mempool_t;
 
 /**
@@ -116,7 +119,7 @@ typedef struct memory_pool_stat_s {
  * @param size size of pool's page
  * @return new memory pool object
  */
-rspamd_mempool_t * rspamd_mempool_new (gsize size);
+rspamd_mempool_t *rspamd_mempool_new (gsize size, const gchar *tag);
 
 /**
  * Get memory from pool
@@ -172,6 +175,17 @@ gchar * rspamd_mempool_strdup (rspamd_mempool_t * pool, const gchar *src);
 gchar * rspamd_mempool_fstrdup (rspamd_mempool_t * pool,
 	const struct f_str_s *src);
 
+struct f_str_tok;
+
+/**
+ * Make a copy of fixed string token in pool as null terminated string
+ * @param pool memory pool object
+ * @param src source string
+ * @return pointer to newly created string that is copy of src
+ */
+gchar * rspamd_mempool_ftokdup (rspamd_mempool_t *pool,
+		const struct f_str_tok *src);
+
 /**
  * Allocate piece of shared memory
  * @param pool memory pool object
@@ -181,21 +195,6 @@ void * rspamd_mempool_alloc_shared (rspamd_mempool_t * pool, gsize size);
 void * rspamd_mempool_alloc0_shared (rspamd_mempool_t *pool, gsize size);
 gchar * rspamd_mempool_strdup_shared (rspamd_mempool_t * pool,
 	const gchar *src);
-
-/**
- * Lock chunk of shared memory in which pointer is placed
- * @param pool memory pool object
- * @param pointer pointer of shared memory object that is to be locked (the whole page that contains that object is locked)
- */
-void rspamd_mempool_lock_shared (rspamd_mempool_t *pool, void *pointer);
-
-/**
- * Unlock chunk of shared memory in which pointer is placed
- * @param pool memory pool object
- * @param pointer pointer of shared memory object that is to be unlocked (the whole page that contains that object is locked)
- */
-void rspamd_mempool_lock_shared (rspamd_mempool_t *pool, void *pointer);
-
 /**
  * Add destructor callback to pool
  * @param pool memory pool object
@@ -255,13 +254,13 @@ void rspamd_mempool_unlock_mutex (rspamd_mempool_mutex_t *mutex);
 rspamd_mempool_rwlock_t * rspamd_mempool_get_rwlock (rspamd_mempool_t *pool);
 
 /**
- * Aquire read lock
+ * Acquire read lock
  * @param lock rwlock object
  */
 void rspamd_mempool_rlock_rwlock (rspamd_mempool_rwlock_t *lock);
 
 /**
- * Aquire write lock
+ * Acquire write lock
  * @param lock rwlock object
  */
 void rspamd_mempool_wlock_rwlock (rspamd_mempool_rwlock_t *lock);
@@ -314,5 +313,28 @@ void rspamd_mempool_set_variable (rspamd_mempool_t *pool, const gchar *name,
 gpointer rspamd_mempool_get_variable (rspamd_mempool_t *pool,
 	const gchar *name);
 
+/**
+ * Removes variable from memory pool
+ * @param pool memory pool object
+ * @param name name of variable
+ */
+void rspamd_mempool_remove_variable (rspamd_mempool_t *pool,
+		const gchar *name);
+/**
+ * Prepend element to a list creating it in the memory pool
+ * @param l
+ * @param p
+ * @return
+ */
+GList *rspamd_mempool_glist_prepend (rspamd_mempool_t *pool,
+		GList *l, gpointer p) G_GNUC_WARN_UNUSED_RESULT;
+/**
+ * Append element to a list creating it in the memory pool
+ * @param l
+ * @param p
+ * @return
+ */
+GList *rspamd_mempool_glist_append (rspamd_mempool_t *pool,
+		GList *l, gpointer p) G_GNUC_WARN_UNUSED_RESULT;
 
 #endif

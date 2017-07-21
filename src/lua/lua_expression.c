@@ -1,27 +1,18 @@
-/*
- * Copyright (c) 2015, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *	 * Redistributions of source code must retain the above copyright
- *	   notice, this list of conditions and the following disclaimer.
- *	 * Redistributions in binary form must reproduce the above copyright
- *	   notice, this list of conditions and the following disclaimer in the
- *	   documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "lua_common.h"
 #include "expression.h"
 
@@ -76,9 +67,26 @@ LUA_FUNCTION_DEF (expr, to_string);
  */
 LUA_FUNCTION_DEF (expr, process);
 
+/***
+ * @method rspamd_expression:process_traced(input)
+ * Executes the expression and pass input to process atom callbacks. This function also saves the full trace
+ * @param {any} input input data for processing callbacks
+ * @return {number, table of matched atoms} result of the expression evaluation
+ */
+LUA_FUNCTION_DEF (expr, process_traced);
+
+/***
+ * @method rspamd_expression:atoms()
+ * Extract all atoms from the expression as table of strings
+ * @return {table/strings} list of all atoms in the expression
+ */
+LUA_FUNCTION_DEF (expr, atoms);
+
 static const struct luaL_reg exprlib_m[] = {
 	LUA_INTERFACE_DEF (expr, to_string),
+	LUA_INTERFACE_DEF (expr, atoms),
 	LUA_INTERFACE_DEF (expr, process),
+	LUA_INTERFACE_DEF (expr, process_traced),
 	{"__tostring", lua_expr_to_string},
 	{NULL, NULL}
 };
@@ -116,7 +124,7 @@ lua_expr_quark (void)
 struct lua_expression *
 rspamd_lua_expression (lua_State * L, gint pos)
 {
-	void *ud = luaL_checkudata (L, pos, "rspamd{expr}");
+	void *ud = rspamd_lua_check_udata (L, pos, "rspamd{expr}");
 	luaL_argcheck (L, ud != NULL, pos, "'expr' expected");
 	return ud ? *((struct lua_expression **)ud) : NULL;
 }
@@ -136,6 +144,8 @@ lua_atom_parse (const gchar *line, gsize len,
 
 	if (lua_pcall (e->L, 1, 1, 0) != 0) {
 		msg_info ("callback call failed: %s", lua_tostring (e->L, -1));
+		lua_pop (e->L, 1);
+		return NULL;
 	}
 
 	if (lua_type (e->L, -1) != LUA_TSTRING) {
@@ -159,7 +169,7 @@ static gint
 lua_atom_process (gpointer input, rspamd_expression_atom_t *atom)
 {
 	struct lua_expression *e = (struct lua_expression *)atom->data;
-	gint ret;
+	gint ret = 0;
 
 	lua_rawgeti (e->L, LUA_REGISTRYINDEX, e->process_idx);
 	lua_pushlstring (e->L, atom->str, atom->len);
@@ -167,10 +177,12 @@ lua_atom_process (gpointer input, rspamd_expression_atom_t *atom)
 
 	if (lua_pcall (e->L, 2, 1, 0) != 0) {
 		msg_info ("callback call failed: %s", lua_tostring (e->L, -1));
+		lua_pop (e->L, 1);
 	}
-
-	ret = lua_tonumber (e->L, -1);
-	lua_pop (e->L, 1);
+	else {
+		ret = lua_tonumber (e->L, -1);
+		lua_pop (e->L, 1);
+	}
 
 	return ret;
 }
@@ -191,6 +203,40 @@ lua_expr_process (lua_State *L)
 	lua_pushnumber (L, res);
 
 	return 1;
+}
+
+static gint
+lua_expr_process_traced (lua_State *L)
+{
+	struct lua_expression *e = rspamd_lua_expression (L, 1);
+	rspamd_expression_atom_t *atom;
+	gint res;
+	guint i;
+	gint flags = 0;
+	GPtrArray *trace;
+
+	if (lua_gettop (L) >= 3) {
+		flags = lua_tonumber (L, 3);
+	}
+
+	trace = g_ptr_array_sized_new (32);
+	res = rspamd_process_expression_track (e->expr, flags, GINT_TO_POINTER (2),
+			trace);
+
+	lua_pushnumber (L, res);
+
+	lua_createtable (L, trace->len, 0);
+
+	for (i = 0; i < trace->len; i ++) {
+		atom = g_ptr_array_index (trace, i);
+
+		lua_pushlstring (L, atom->str, atom->len);
+		lua_rawseti (L, -2, i + 1);
+	}
+
+	g_ptr_array_free (trace, TRUE);
+
+	return 2;
 }
 
 static gint
@@ -289,6 +335,39 @@ lua_expr_to_string (lua_State *L)
 		else {
 			lua_pushnil (L);
 		}
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+struct lua_expr_atoms_cbdata {
+	lua_State *L;
+	gint idx;
+};
+
+static void
+lua_exr_atom_cb (const rspamd_ftok_t *tok, gpointer ud)
+{
+	struct lua_expr_atoms_cbdata *cbdata = ud;
+
+	lua_pushlstring (cbdata->L, tok->begin, tok->len);
+	lua_rawseti (cbdata->L, -2, cbdata->idx ++);
+}
+
+static gint
+lua_expr_atoms (lua_State *L)
+{
+	struct lua_expression *e = rspamd_lua_expression (L, 1);
+	struct lua_expr_atoms_cbdata cbdata;
+
+	if (e != NULL && e->expr != NULL) {
+		lua_newtable (L);
+		cbdata.L = L;
+		cbdata.idx = 1;
+		rspamd_expression_atom_foreach (e->expr, lua_exr_atom_cb, &cbdata);
 	}
 	else {
 		lua_pushnil (L);

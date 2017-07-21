@@ -1,33 +1,27 @@
-/* Copyright (c) 2014, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "config.h"
-#include "main.h"
+#include "rspamd.h"
 #include "radix.h"
 #include "ottery.h"
+#include "btrie.h"
 
-const gsize max_elts = 50 * 1024;
+const gsize max_elts = 500 * 1024;
 const gint lookup_cycles = 1 * 1024;
+const gint lookup_divisor = 10;
 
 const uint masks[] = {
 		8,
@@ -72,11 +66,17 @@ struct _tv {
 	{"109.206.26.202", NULL, "12", 0, 0, 0, 0},
 	{"130.244.233.150", NULL, "0", 0, 0, 0, 0},
 
+	/* Close ip addresses */
+	{"1.2.3.1",  NULL, "32",  0, 0, 0, 0},
+	{"1.2.3.2",  NULL, "32", 0, 0, 0, 0},
+	{"1.2.3.3", NULL, "32",  0, 0, 0, 0},
+	{"1.2.3.4", NULL, "32", 0, 0, 0, 0},
+
 	{NULL, NULL, NULL, 0, 0, 0, 0}
 };
 
 static void
-rspamd_radix_text_vec (void)
+rspamd_radix_test_vec (void)
 {
 	radix_compressed_t *tree = radix_create_compressed ();
 	struct _tv *t = &test_vec[0];
@@ -126,7 +126,7 @@ rspamd_radix_text_vec (void)
 	while (t->ip != NULL) {
 		val = radix_find_compressed (tree, t->addr, t->len);
 		g_assert (val == ++i);
-		//g_assert (val != RADIX_NO_VALUE);
+		/* g_assert (val != RADIX_NO_VALUE); */
 		if (t->nip != NULL) {
 			val = radix_find_compressed (tree, t->naddr, t->len);
 			g_assert (val != i);
@@ -137,12 +137,78 @@ rspamd_radix_text_vec (void)
 	radix_destroy_compressed (tree);
 }
 
+static void
+rspamd_btrie_test_vec (void)
+{
+	rspamd_mempool_t *pool;
+	struct btrie *tree;
+	struct _tv *t = &test_vec[0];
+	struct in_addr ina;
+	struct in6_addr in6a;
+	gsize i;
+	gpointer val;
+
+	pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), "btrie");
+	tree = btrie_init (pool);
+
+	while (t->ip != NULL) {
+		t->addr = g_malloc (sizeof (in6a));
+		t->naddr = g_malloc (sizeof (in6a));
+		if (inet_pton (AF_INET, t->ip, &ina) == 1) {
+			memcpy (t->addr, &ina, sizeof (ina));
+			t->len = sizeof (ina);
+		}
+		else if (inet_pton (AF_INET6, t->ip, &in6a) == 1) {
+			memcpy (t->addr, &in6a, sizeof (in6a));
+			t->len = sizeof (in6a);
+		}
+		else {
+			g_assert (0);
+		}
+		if (t->nip) {
+			if (inet_pton (AF_INET, t->nip, &ina) == 1) {
+				memcpy (t->naddr, &ina, sizeof (ina));
+			}
+			else if (inet_pton (AF_INET6, t->nip, &in6a) == 1) {
+				memcpy (t->naddr, &in6a, sizeof (in6a));
+			}
+			else {
+				g_assert (0);
+			}
+		}
+
+		t->mask = strtoul (t->m, NULL, 10);
+		t ++;
+	}
+	t = &test_vec[0];
+
+	i = 0;
+	while (t->ip != NULL) {
+		g_assert (btrie_add_prefix (tree, t->addr, t->mask,
+				GSIZE_TO_POINTER (++i)) == BTRIE_OKAY);
+		t ++;
+	}
+
+	i = 0;
+	t = &test_vec[0];
+	while (t->ip != NULL) {
+		val = btrie_lookup (tree, t->addr, t->len * NBBY);
+		i ++;
+
+		g_assert (GPOINTER_TO_SIZE (val) == i);
+		if (t->nip != NULL) {
+			val = btrie_lookup (tree, t->naddr, t->len * NBBY);
+			g_assert (GPOINTER_TO_SIZE (val) != i);
+		}
+		t ++;
+	}
+}
+
 void
 rspamd_radix_test_func (void)
 {
-#if 0
-	radix_tree_t *tree = radix_tree_create ();
-#endif
+	struct btrie *btrie;
+	rspamd_mempool_t *pool;
 	radix_compressed_t *comp_tree = radix_create_compressed ();
 	struct {
 		guint32 addr;
@@ -150,14 +216,16 @@ rspamd_radix_test_func (void)
 		guint8 addr6[16];
 		guint32 mask6;
 	} *addrs;
-	gsize nelts, i;
+	gsize nelts, i, check;
 	gint lc;
 	gboolean all_good = TRUE;
 	gdouble ts1, ts2;
 	double diff;
 
 	/* Test suite for the compressed trie */
-	rspamd_radix_text_vec ();
+
+	rspamd_btrie_test_vec ();
+	rspamd_radix_test_vec ();
 
 	nelts = max_elts;
 	/* First of all we generate many elements and push them to the array */
@@ -169,57 +237,76 @@ rspamd_radix_test_func (void)
 		ottery_rand_bytes (addrs[i].addr6, sizeof(addrs[i].addr6));
 		addrs[i].mask6 = ottery_rand_range(128);
 	}
-#if 0
-	msg_info ("old radix performance (%z elts)", nelts);
+
+	pool = rspamd_mempool_new (65536, "btrie");
+	btrie = btrie_init (pool);
+	msg_info ("btrie performance (%z elts)", nelts);
+
 	ts1 = rspamd_get_ticks ();
 	for (i = 0; i < nelts; i ++) {
-		guint32 mask = G_MAXUINT32 << (32 - addrs[i].mask);
-		radix32tree_insert (tree, addrs[i].addr, mask, 1);
+		btrie_add_prefix (btrie, addrs[i].addr6,
+				addrs[i].mask6, GSIZE_TO_POINTER (i + 1));
 	}
 	ts2 = rspamd_get_ticks ();
 	diff = (ts2 - ts1) * 1000.0;
 
-	msg_info ("Added %z elements in %.6f ms", nelts, diff);
+	msg_info ("Added %hz elements in %.6f ms", nelts, diff);
 
 	ts1 = rspamd_get_ticks ();
-	for (lc = 0; lc < lookup_cycles; lc ++) {
-		for (i = 0; i < nelts; i ++) {
-			g_assert (radix32tree_find (tree, addrs[i].addr) != RADIX_NO_VALUE);
+	for (lc = 0; lc < lookup_cycles && all_good; lc ++) {
+		for (i = 0; i < nelts / lookup_divisor; i ++) {
+			check = ottery_rand_range (nelts - 1);
+
+			if (btrie_lookup (btrie, addrs[check].addr6, sizeof (addrs[check].addr6))
+					== NULL) {
+				char ipbuf[INET6_ADDRSTRLEN + 1];
+
+				all_good = FALSE;
+
+				inet_ntop(AF_INET6, addrs[check].addr6, ipbuf, sizeof(ipbuf));
+				msg_info("BAD btrie: {\"%s\", NULL, \"%ud\", 0, 0, 0, 0},",
+						ipbuf,
+						addrs[check].mask6);
+				all_good = FALSE;
+			}
 		}
 	}
+	g_assert (all_good);
 	ts2 = rspamd_get_ticks ();
 	diff = (ts2 - ts1) * 1000.0;
 
-	msg_info ("Checked %z elements in %.6f ms", nelts, diff);
+	msg_info ("Checked %hz elements in %.6f ms",
+			nelts * lookup_cycles / lookup_divisor, diff);
 
-	ts1 = rspamd_get_ticks ();
-	for (i = 0; i < nelts; i ++) {
-		radix32tree_delete (tree, addrs[i].addr, addrs[i].mask);
-	}
-	ts2 = rspamd_get_ticks ();
-	diff = (ts2 - ts1) * 1000.;
-
-	msg_info ("Deleted %z elements in %.6f ms", nelts, diff);
-
-	radix_tree_free (tree);
-#endif
 	msg_info ("new radix performance (%z elts)", nelts);
 	ts1 = rspamd_get_ticks ();
+
 	for (i = 0; i < nelts; i ++) {
 		radix_insert_compressed (comp_tree, addrs[i].addr6, sizeof (addrs[i].addr6),
-				128 - addrs[i].mask6, i);
+				128 - addrs[i].mask6, i + 1);
 	}
+
 	ts2 = rspamd_get_ticks ();
 	diff = (ts2 - ts1) * 1000.0;
 
-	msg_info ("Added %z elements in %.6f ms", nelts, diff);
+	msg_info ("Added %hz elements in %.6f ms", nelts, diff);
 
 	ts1 = rspamd_get_ticks ();
-	for (lc = 0; lc < lookup_cycles; lc ++) {
-		for (i = 0; i < nelts; i ++) {
-			if (radix_find_compressed (comp_tree, addrs[i].addr6, sizeof (addrs[i].addr6))
+	for (lc = 0; lc < lookup_cycles && all_good; lc ++) {
+		for (i = 0; i < nelts / lookup_divisor; i ++) {
+			check = ottery_rand_range (nelts - 1);
+
+			if (radix_find_compressed (comp_tree, addrs[check].addr6,
+					sizeof (addrs[check].addr6))
 					== RADIX_NO_VALUE) {
+				char ipbuf[INET6_ADDRSTRLEN + 1];
+
 				all_good = FALSE;
+
+				inet_ntop(AF_INET6, addrs[check].addr6, ipbuf, sizeof(ipbuf));
+				msg_info("BAD: {\"%s\", NULL, \"%ud\", 0, 0, 0, 0},",
+						ipbuf,
+						addrs[check].mask6);
 			}
 		}
 	}
@@ -240,7 +327,8 @@ rspamd_radix_test_func (void)
 	ts2 = rspamd_get_ticks ();
 	diff = (ts2 - ts1) * 1000.0;
 
-	msg_info ("Checked %z elements in %.6f ms", nelts, diff);
+	msg_info ("Checked %hz elements in %.6f ms",
+			nelts * lookup_cycles / lookup_divisor, diff);
 	radix_destroy_compressed (comp_tree);
 
 	g_free (addrs);

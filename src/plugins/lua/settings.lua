@@ -1,63 +1,113 @@
 --[[
 Copyright (c) 2011-2015, Vsevolod Stakhov <vsevolod@highsecure.ru>
-All rights reserved.
 
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-1. Redistributions of source code must retain the above copyright notice, this
-list of conditions and the following disclaimer.
+    http://www.apache.org/licenses/LICENSE-2.0
 
-2. Redistributions in binary form must reproduce the above copyright notice,
-this list of conditions and the following disclaimer in the documentation
-and/or other materials provided with the distribution.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 ]]--
+
+if confighelp then
+  return
+end
 
 -- This plugin implements user dynamic settings
 -- Settings documentation can be found here:
 -- https://rspamd.com/doc/configuration/settings.html
 
-local set_section = rspamd_config:get_all_opt("settings")
-if not set_section then return end
-local settings = {
-  [1] = {},
-  [2] = {},
-  [3] = {}
-}
+local rspamd_logger = require "rspamd_logger"
+local redis_params
+
+local settings = {}
+local settings_ids = {}
 local settings_initialized = false
 local max_pri = 0
-local rspamd_logger = require "rspamd_logger"
 local rspamd_ip = require "rspamd_ip"
 local rspamd_regexp = require "rspamd_regexp"
-require "fun" ()
+local ucl = require "ucl"
+local fun = require "fun"
+
+-- Checks for overridden settings within query params and returns 'true' if
+-- settings are overridden
+local function check_query_settings(task)
+  -- Try 'settings' attribute
+  local query_set = task:get_request_header('settings')
+  if query_set then
+    local parser = ucl.parser()
+    local res,err = parser:parse_string(tostring(query_set))
+    if res then
+      task:set_settings(parser:get_object())
+
+      return true
+    else
+      rspamd_logger.errx(task, 'Parse error: %s', err)
+    end
+  end
+
+  local query_maxscore = task:get_request_header('maxscore')
+  if query_maxscore then
+    -- We have score limits redefined by request
+    local ms = tonumber(tostring(query_maxscore))
+    if ms then
+      local nset = {
+        default = {
+          actions = {
+            reject = ms
+          }
+        }
+      }
+
+      local query_softscore = task:get_request_header('softscore')
+      if query_softscore then
+        local ss = tonumber(tostring(query_softscore))
+        nset['default']['actions']['add header'] = ss
+      end
+
+      task:set_settings(nset)
+
+      return true
+    end
+  end
+
+  local settings_id = task:get_request_header('settings-id')
+  if settings_id and settings_initialized then
+    -- settings_id is rspamd text, so need to convert it to string for lua
+    local id_str = tostring(settings_id)
+    local elt = settings_ids[id_str]
+    if elt and elt['apply'] then
+      task:set_settings(elt['apply'])
+      rspamd_logger.infox(task, "applying settings id %s", id_str)
+
+      return true
+    end
+  end
+
+  return false
+end
 
 -- Check limit for a task
 local function check_settings(task)
   local function check_addr_setting(rule, addr)
     local function check_specific_addr(elt)
       if rule['name'] then
-        if elt['addr'] == rule['name'] then
+        if rule['name']:lower() == elt['addr']:lower() then
           return true
         end
       end
       if rule['user'] then
-        if rule['user'] == elt['user'] then
+        if rule['user']:lower() == elt['user']:lower() then
           return true
         end
       end
-      if rule['domain'] then
-        if rule['domain'] == elt['domain'] then
+      if rule['domain'] and elt['domain'] then
+        if rule['domain']:lower() == elt['domain']:lower() then
           return true
         end
       end
@@ -81,18 +131,28 @@ local function check_settings(task)
   local function check_ip_setting(rule, ip)
     if rule[2] ~= 0 then
       local nip = ip:apply_mask(rule[2])
-      if nip and nip == rule[1] then
+      if nip and nip:to_string() == rule[1]:to_string() then
         return true
       end
-    elseif ip == rule[1] then
+    elseif ip:to_string() == rule[1]:to_string() then
       return true
     end
 
     return false
   end
 
-  local function check_specific_setting(name, rule, ip, from, rcpt, user)
+  local function check_specific_setting(_, rule, ip, client_ip, from, rcpt,
+      user, auth_user)
     local res = false
+
+    if rule['authenticated'] then
+      if auth_user then
+        res = true
+      end
+      if not res then
+        return nil
+      end
+    end
 
     if rule['ip'] then
       if not ip then
@@ -100,6 +160,21 @@ local function check_settings(task)
       end
       for _, i in ipairs(rule['ip']) do
         res = check_ip_setting(i, ip)
+        if res then
+          break
+        end
+      end
+      if not res then
+        return nil
+      end
+    end
+
+    if rule['client_ip'] then
+      if not client_ip or not client_ip:is_valid() then
+        return nil
+      end
+      for _, i in ipairs(rule['client_ip']) do
+        res = check_ip_setting(i, client_ip)
         if res then
           break
         end
@@ -154,15 +229,33 @@ local function check_settings(task)
       end
     end
 
-    if res then
-      if rule['whitelist'] then
-        return {whitelist = true}
-      else
-        return rule['apply']
+    if rule['request_header'] then
+      for k, v in pairs(rule['request_header']) do
+        local h = task:get_request_header(k)
+        res = (h and v:match(h))
+        if res then
+          break
+        end
+      end
+      if not res then
+        return nil
       end
     end
 
+    if res then
+      if rule['whitelist'] then
+        rule['apply'] = {whitelist = true}
+      end
+
+      return rule
+    end
+
     return nil
+  end
+
+  -- Check if we have override as query argument
+  if check_query_settings(task) then
+    return
   end
 
   -- Do not waste resources
@@ -170,34 +263,45 @@ local function check_settings(task)
     return
   end
 
-  rspamd_logger.info("check for settings")
+  rspamd_logger.infox(task, "check for settings")
   local ip = task:get_from_ip()
+  local client_ip = task:get_client_ip()
   local from = task:get_from()
   local rcpt = task:get_recipients()
   local uname = task:get_user()
   local user = {}
   if uname then
     user[1] = {}
-    for localpart, domainpart in string.gmatch(uname, "(.+)@(.+)") do
+    local localpart, domainpart = string.gmatch(uname, "(.+)@(.+)")()
+    if localpart then
       user[1]["user"] = localpart
       user[1]["domain"] = domainpart
       user[1]["addr"] = uname
-      break
-    end
-    if not user[1]["addr"] then
+    else
       user[1]["user"] = uname
       user[1]["addr"] = uname
     end
   end
   -- Match rules according their order
+  local applied = false
+
   for pri = max_pri,1,-1 do
-    if settings[pri] then
-      for name, rule in pairs(settings[pri]) do
-        local rule = check_specific_setting(name, rule, ip, from, rcpt, user)
+    if not applied and settings[pri] then
+      for _,s in ipairs(settings[pri]) do
+        local rule = check_specific_setting(s.name, s.rule, ip, client_ip, from, rcpt, user, uname)
         if rule then
-          rspamd_logger.info(string.format("<%s> apply settings according to rule %s",
-            task:get_message_id(), name))
-          task:set_settings(rule)
+          rspamd_logger.infox(task, "<%1> apply settings according to rule %2",
+            task:get_message_id(), s.name)
+          if rule['apply'] then
+            task:set_settings(rule['apply'])
+            applied = true
+          end
+          if rule['symbols'] then
+            -- Add symbols, specified in the settings
+            fun.each(function(val)
+              task:insert_result(val, 1.0)
+            end, rule['symbols'])
+          end
         end
       end
     end
@@ -231,13 +335,13 @@ local function process_settings_table(tbl)
 
   -- Check the setting element internal data
   local process_setting_elt = function(name, elt)
-  
+
     -- Process IP address
     local function process_ip(ip)
       local out = {}
 
       if type(ip) == "table" then
-        for i,v in ipairs(ip) do
+        for _,v in ipairs(ip) do
           table.insert(out, process_ip(v))
         end
       elseif type(ip) == "string" then
@@ -251,7 +355,7 @@ local function process_settings_table(tbl)
             out[1] = res
             out[2] = 0
           else
-            rspamd_logger.err("bad IP address: " .. ip)
+            rspamd_logger.errx(rspamd_config, "bad IP address: " .. ip)
             return nil
           end
         else
@@ -262,7 +366,7 @@ local function process_settings_table(tbl)
             out[1] = res
             out[2] = mask
           else
-            rspamd_logger.err("bad IP address: " .. ip)
+            rspamd_logger.errx(rspamd_config, "bad IP address: " .. ip)
             return nil
           end
         end
@@ -276,7 +380,7 @@ local function process_settings_table(tbl)
     local function process_addr(addr)
       local out = {}
       if type(addr) == "table" then
-        for i,v in ipairs(addr) do
+        for _,v in ipairs(addr) do
           table.insert(out, process_addr(v))
         end
       elseif type(addr) == "string" then
@@ -287,7 +391,7 @@ local function process_settings_table(tbl)
           if re then
             out['regexp'] = re
           else
-            rspamd_logger.err("bad regexp: " .. addr)
+            rspamd_logger.errx(rspamd_config, "bad regexp: " .. addr)
             return nil
           end
 
@@ -312,11 +416,11 @@ local function process_settings_table(tbl)
       return out
     end
 
-    local check_table = function(elt, out)
-      if type(elt) == 'string' then
+    local check_table = function(chk_elt, out)
+      if type(chk_elt) == 'string' then
         return {out}
       end
-      
+
       return out
     end
 
@@ -327,6 +431,13 @@ local function process_settings_table(tbl)
 
       if ip then
         out['ip'] = check_table(elt['ip'], ip)
+      end
+    end
+    if elt['client_ip'] then
+      local ip = process_ip(elt['client_ip'])
+
+      if ip then
+        out['client_ip'] = check_table(elt['client_ip'], ip)
       end
     end
     if elt['from'] then
@@ -348,37 +459,60 @@ local function process_settings_table(tbl)
         out['user'] = check_table(elt['user'], user)
       end
     end
+    if elt['authenticated'] then
+      out['authenticated'] = true
+    end
+    if elt['request_header'] then
+      local rho = {}
+      for k, v in pairs(elt['request_header']) do
+        local re = rspamd_regexp.get_cached(v)
+        if not re then
+          re = rspamd_regexp.create_cached(v)
+        end
+        if re then
+          rho[k] = re
+        end
+      end
+      out['request_header'] = rho
+    end
 
     -- Now we must process actions
+    if elt['symbols'] then out['symbols'] = elt['symbols'] end
+    if elt['id'] then
+      out['id'] = elt['id']
+      settings_ids[elt['id']] = out
+    end
+
     if elt['apply'] then
       -- Just insert all metric results to the action key
       out['apply'] = elt['apply']
     elseif elt['whitelist'] or elt['want_spam'] then
       out['whitelist'] = true
     else
-      rspamd_logger.err("no actions in settings: " .. name)
+      rspamd_logger.errx(rspamd_config, "no actions in settings: " .. name)
       return nil
     end
-    
+
     return out
   end
 
   settings_initialized = false
   -- filter trash in the input
-  local ft = filter(
+  local ft = fun.filter(
     function(_, elt)
       if type(elt) == "table" then
         return true
       end
       return false
     end, tbl)
-  
+
   -- clear all settings
   max_pri = 0
   local nrules = 0
-  for k,v in pairs(settings) do settings[k]={} end
+  settings_ids = {}
+  for k in pairs(settings) do settings[k]={} end
   -- fill new settings by priority
-  for_each(function(k, v)
+  fun.for_each(function(k, v)
     local pri = get_priority(v)
     if pri > max_pri then max_pri = pri end
     if not settings[pri] then
@@ -386,24 +520,27 @@ local function process_settings_table(tbl)
     end
     local s = process_setting_elt(k, v)
     if s then
-      settings[pri][k] = s
+      table.insert(settings[pri], {name = k, rule = s})
       nrules = nrules + 1
     end
   end, ft)
+  -- sort settings with equal priopities in alphabetical order
+  for pri,_ in pairs(settings) do
+    table.sort(settings[pri], function(a,b) return a.name < b.name end)
+  end
 
   settings_initialized = true
-  rspamd_logger.infox('loaded %1 elements of settings', nrules)
-  
+  rspamd_logger.infox(rspamd_config, 'loaded %1 elements of settings', nrules)
+
   return true
 end
 
 -- Parse settings map from the ucl line
 local function process_settings_map(string)
-  local ucl = require "ucl"
   local parser = ucl.parser()
   local res,err = parser:parse_string(string)
   if not res then
-    rspamd_logger.warn('cannot parse settings map: ' .. err)
+    rspamd_logger.warnx(rspamd_config, 'cannot parse settings map: ' .. err)
   else
     local obj = parser:get_object()
     if obj['settings'] then
@@ -412,17 +549,99 @@ local function process_settings_map(string)
       process_settings_table(obj)
     end
   end
+
+  return res
 end
 
-if set_section[1] and type(set_section[1]) == "string" then
-  -- Just a map of ucl
-  if rspamd_config:add_map(set_section[1], "settings map", process_settings_map) then
-    rspamd_config:register_pre_filter(check_settings)
-  else
-    rspamd_logger.errx('cannot load settings from %1', set_section)
-  end
-elseif type(set_section) == "table" then
-  if process_settings_table(set_section) then
-    rspamd_config:register_pre_filter(check_settings)
+local function gen_redis_callback(handler, id)
+  return function(task)
+    local key = handler(task)
+
+    local function redis_settings_cb(err, data)
+      if not err and type(data) == 'string' then
+        local parser = ucl.parser()
+        local res,ucl_err = parser:parse_string(data)
+        if not res then
+          rspamd_logger.warnx(rspamd_config, 'cannot parse settings from redis: %s',
+            ucl_err)
+        else
+          local obj = parser:get_object()
+          rspamd_logger.infox(task, "<%1> apply settings according to redis rule %2",
+            task:get_message_id(), id)
+          task:set_settings(obj)
+        end
+      end
+    end
+
+    if not key then
+      rspamd_logger.errx(rspamd_config, 'Cannot execute handler number %s', id)
+      return
+    end
+
+    local ret,_,_ = rspamd_redis_make_request(task,
+      redis_params, -- connect params
+      key, -- hash key
+      false, -- is write
+      redis_settings_cb, --callback
+      'GET', -- command
+      {key} -- arguments
+    )
+    if not ret then
+      rspamd_logger.errx(task, 'Redis GET failed: %s', ret)
+    end
   end
 end
+
+local redis_section = rspamd_config:get_all_opt("settings_redis")
+local redis_key_handlers = {}
+
+if redis_section then
+  redis_params = rspamd_parse_redis_server('settings_redis')
+  if redis_params then
+    local handlers = redis_section.handlers
+
+    for id,h in pairs(handlers) do
+      local chunk,err = load(h)
+
+      if not chunk then
+        rspamd_logger.errx(rspamd_config, 'Cannot load handler from string: %s',
+            tostring(err))
+      else
+        local res,func = pcall(chunk)
+        if not res then
+          rspamd_logger.errx(rspamd_config, 'Cannot add handler from string: %s',
+            tostring(func))
+        else
+          redis_key_handlers[id] = func
+        end
+      end
+    end
+  end
+
+  fun.each(function(id, h)
+    rspamd_config:register_symbol({
+      name = 'REDIS_SETTINGS' .. tostring(id),
+      type = 'prefilter',
+      callback = gen_redis_callback(h, id),
+      priority = 10
+    })
+  end, redis_key_handlers)
+end
+
+local set_section = rspamd_config:get_all_opt("settings")
+
+if set_section and set_section[1] and type(set_section[1]) == "string" then
+  -- Just a map of ucl
+  if not rspamd_config:add_map(set_section[1], "settings map", process_settings_map) then
+    rspamd_logger.errx(rspamd_config, 'cannot load settings from %1', set_section)
+  end
+elseif set_section and type(set_section) == "table" then
+  process_settings_table(set_section)
+end
+
+rspamd_config:register_symbol({
+  name = 'SETTINGS_CHECK',
+  type = 'prefilter',
+  callback = check_settings,
+  priority = 10
+})

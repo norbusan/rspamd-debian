@@ -1,77 +1,34 @@
-/* Copyright (c) 2010-2011, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
-
 #ifndef DKIM_H_
 #define DKIM_H_
 
 #include "config.h"
 #include "event.h"
 #include "dns.h"
-#ifdef HAVE_OPENSSL
-#include <openssl/rsa.h>
-#include <openssl/engine.h>
-#endif
+#include "ref.h"
 
 /* Main types and definitions */
 
-#define DKIM_SIGNHEADER     "DKIM-Signature"
+#define RSPAMD_DKIM_SIGNHEADER     "DKIM-Signature"
+#define RSPAMD_DKIM_ARC_SIGNHEADER     "ARC-Message-Signature"
+#define RSPAMD_DKIM_ARC_AUTHHEADER     "ARC-Authentication-Results"
+#define RSPAMD_DKIM_ARC_SEALHEADER     "ARC-Seal"
 /* DKIM signature header */
 
-/* special DNS tokens */
-#define DKIM_DNSKEYNAME     "_domainkey"
-/* reserved DNS sub-zone */
-#define DKIM_DNSPOLICYNAME  "_adsp" /* reserved DNS sub-zone */
-
-/* Canonization methods */
-#define DKIM_CANON_UNKNOWN  (-1)    /* unknown method */
-#define DKIM_CANON_SIMPLE   0   /* as specified in DKIM spec */
-#define DKIM_CANON_RELAXED  1   /* as specified in DKIM spec */
-
-#define DKIM_CANON_DEFAULT  DKIM_CANON_SIMPLE
-
-/* Signature methods */
-#define DKIM_SIGN_UNKNOWN   (-2)    /* unknown method */
-#define DKIM_SIGN_DEFAULT   (-1)    /* use internal default */
-#define DKIM_SIGN_RSASHA1   0   /* an RSA-signed SHA1 digest */
-#define DKIM_SIGN_RSASHA256 1   /* an RSA-signed SHA256 digest */
-
-/* Params */
-#define DKIM_PARAM_UNKNOWN  (-1)    /* unknown */
-#define DKIM_PARAM_SIGNATURE    0   /* b */
-#define DKIM_PARAM_SIGNALG  1   /* a */
-#define DKIM_PARAM_DOMAIN   2   /* d */
-#define DKIM_PARAM_CANONALG 3   /* c */
-#define DKIM_PARAM_QUERYMETHOD  4   /* q */
-#define DKIM_PARAM_SELECTOR 5   /* s */
-#define DKIM_PARAM_HDRLIST  6   /* h */
-#define DKIM_PARAM_VERSION  7   /* v */
-#define DKIM_PARAM_IDENTITY 8   /* i */
-#define DKIM_PARAM_TIMESTAMP    9   /* t */
-#define DKIM_PARAM_EXPIRATION   10  /* x */
-#define DKIM_PARAM_COPIEDHDRS   11  /* z */
-#define DKIM_PARAM_BODYHASH 12  /* bh */
-#define DKIM_PARAM_BODYLENGTH   13  /* l */
 
 /* Errors (from OpenDKIM) */
 
@@ -82,7 +39,7 @@
 #define DKIM_SIGERROR_EXPIRED       3   /* signature expired */
 #define DKIM_SIGERROR_FUTURE        4   /* signature in the future */
 #define DKIM_SIGERROR_TIMESTAMPS    5   /* x= < t= */
-#define DKIM_SIGERROR_UNUSED        6   /* OBSOLETE */
+#define DKIM_SIGERROR_NOREC         6   /* No record */
 #define DKIM_SIGERROR_INVALID_HC    7   /* c= invalid (header) */
 #define DKIM_SIGERROR_INVALID_BC    8   /* c= invalid (body) */
 #define DKIM_SIGERROR_MISSING_A     9   /* a= missing */
@@ -124,47 +81,44 @@
 #define DKIM_SIGERROR_EMPTY_V       45  /* v= tag empty */
 
 /* Check results */
-#define DKIM_CONTINUE   0   /* continue */
-#define DKIM_REJECT 1   /* reject */
-#define DKIM_TRYAGAIN   2   /* try again later */
-#define DKIM_NOTFOUND   3   /* requested record not found */
-#define DKIM_RECORD_ERROR   4   /* error requesting record */
+enum rspamd_dkim_check_result {
+	DKIM_CONTINUE = 0,
+	DKIM_REJECT,
+	DKIM_TRYAGAIN,
+	DKIM_NOTFOUND,
+	DKIM_RECORD_ERROR,
+	DKIM_PERM_ERROR,
+};
 
-typedef struct rspamd_dkim_context_s {
-	rspamd_mempool_t *pool;
-	gint sig_alg;
-	gint header_canon_type;
-	gint body_canon_type;
-	gsize len;
-	gchar *domain;
-	gchar *selector;
-	time_t timestamp;
-	time_t expiration;
-	gint8 *b;
-	gint8 *bh;
-	guint bhlen;
-	guint blen;
-	GPtrArray *hlist;
-	guint ver;
-	gchar *dns_key;
-	GChecksum *headers_hash;
-	GChecksum *body_hash;
-} rspamd_dkim_context_t;
+#define DKIM_CANON_SIMPLE   0   /* as specified in DKIM spec */
+#define DKIM_CANON_RELAXED  1   /* as specified in DKIM spec */
 
-typedef struct rspamd_dkim_key_s {
-	guint8 *keydata;
-	guint keylen;
-	gsize decoded_len;
-	guint ttl;
-#ifdef HAVE_OPENSSL
-	RSA *key_rsa;
-	BIO *key_bio;
-	EVP_PKEY *key_evp;
-#endif
-}
-rspamd_dkim_key_t;
+struct rspamd_dkim_context_s;
+typedef struct rspamd_dkim_context_s rspamd_dkim_context_t;
+
+struct rspamd_dkim_sign_context_s;
+typedef struct rspamd_dkim_sign_context_s rspamd_dkim_sign_context_t;
+
+struct rspamd_dkim_key_s;
+typedef struct rspamd_dkim_key_s rspamd_dkim_key_t;
+
+struct rspamd_dkim_sign_key_s;
+typedef struct rspamd_dkim_sign_key_s rspamd_dkim_sign_key_t;
 
 struct rspamd_task;
+
+enum rspamd_dkim_sign_key_type {
+	RSPAMD_DKIM_SIGN_KEY_FILE = 0,
+	RSPAMD_DKIM_SIGN_KEY_PEM,
+	RSPAMD_DKIM_SIGN_KEY_BASE64,
+	RSPAMD_DKIM_SIGN_KEY_DER
+};
+
+enum rspamd_dkim_type {
+	RSPAMD_DKIM_NORMAL,
+	RSPAMD_DKIM_ARC_SIG,
+	RSPAMD_DKIM_ARC_SEAL
+};
 
 /* Err MUST be freed if it is not NULL, key is allocated by slice allocator */
 typedef void (*dkim_key_handler_f)(rspamd_dkim_key_t *key, gsize keylen,
@@ -179,9 +133,44 @@ typedef void (*dkim_key_handler_f)(rspamd_dkim_key_t *key, gsize keylen,
  * @return new context or NULL
  */
 rspamd_dkim_context_t * rspamd_create_dkim_context (const gchar *sig,
-	rspamd_mempool_t *pool,
-	guint time_jitter,
-	GError **err);
+		rspamd_mempool_t *pool,
+		guint time_jitter,
+		enum rspamd_dkim_type type,
+		GError **err);
+
+/**
+ * Create new dkim context for making a signature
+ * @param task
+ * @param priv_key
+ * @param err
+ * @return
+ */
+rspamd_dkim_sign_context_t * rspamd_create_dkim_sign_context (struct rspamd_task *task,
+		rspamd_dkim_sign_key_t *priv_key,
+		gint headers_canon,
+		gint body_canon,
+		const gchar *dkim_headers,
+		enum rspamd_dkim_type type,
+		GError **err);
+
+/**
+ * Load dkim key
+ * @param path
+ * @param err
+ * @return
+ */
+rspamd_dkim_sign_key_t* rspamd_dkim_sign_key_load (const gchar *what, gsize len,
+		enum rspamd_dkim_sign_key_type type,
+		GError **err);
+
+/**
+ * Invalidate modified sign key
+ * @param key
+ * @return
+ */
+gboolean rspamd_dkim_sign_key_maybe_invalidate (rspamd_dkim_sign_key_t *key,
+		enum rspamd_dkim_sign_key_type type,
+		const gchar *what, gsize len);
 
 /**
  * Make DNS request for specified context and obtain and parse key
@@ -191,8 +180,7 @@ rspamd_dkim_context_t * rspamd_create_dkim_context (const gchar *sig,
  * @return
  */
 gboolean rspamd_get_dkim_key (rspamd_dkim_context_t *ctx,
-	struct rspamd_dns_resolver *resolver,
-	struct rspamd_async_session *s,
+	struct rspamd_task *task,
 	dkim_key_handler_f handler,
 	gpointer ud);
 
@@ -203,9 +191,34 @@ gboolean rspamd_get_dkim_key (rspamd_dkim_context_t *ctx,
  * @param task task to check
  * @return
  */
-gint rspamd_dkim_check (rspamd_dkim_context_t *ctx,
+enum rspamd_dkim_check_result rspamd_dkim_check (rspamd_dkim_context_t *ctx,
 	rspamd_dkim_key_t *key,
 	struct rspamd_task *task);
+
+GString *rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
+		const gchar *domain, time_t expire, gsize len, guint idx,
+		const gchar *arc_cv, rspamd_dkim_sign_context_t *ctx);
+
+rspamd_dkim_key_t * rspamd_dkim_key_ref (rspamd_dkim_key_t *k);
+void rspamd_dkim_key_unref (rspamd_dkim_key_t *k);
+rspamd_dkim_sign_key_t * rspamd_dkim_sign_key_ref (rspamd_dkim_sign_key_t *k);
+void rspamd_dkim_sign_key_unref (rspamd_dkim_sign_key_t *k);
+const gchar* rspamd_dkim_get_domain (rspamd_dkim_context_t *ctx);
+const gchar* rspamd_dkim_get_dns_key (rspamd_dkim_context_t *ctx);
+guint rspamd_dkim_key_get_ttl (rspamd_dkim_key_t *k);
+
+/**
+ * Canonocalise header using relaxed algorithm
+ * @param hname
+ * @param hvalue
+ * @param out
+ * @param outlen
+ * @return
+ */
+goffset rspamd_dkim_canonize_header_relaxed_str (const gchar *hname,
+		const gchar *hvalue,
+		gchar *out,
+		gsize outlen);
 
 /**
  * Free DKIM key

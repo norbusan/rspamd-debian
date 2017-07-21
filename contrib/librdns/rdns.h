@@ -126,13 +126,14 @@ enum dns_rcode {
 	RDNS_RC_NETERR = 12,
 	RDNS_RC_NOREC = 13
 };
-	
+
 struct rdns_reply {
 	struct rdns_request *request;
 	struct rdns_resolver *resolver;
 	struct rdns_reply_entry *entries;
 	const char *requested_name;
 	enum dns_rcode code;
+	bool authenticated;
 };
 
 typedef void (*rdns_periodic_callback)(void *user_data);
@@ -152,11 +153,27 @@ struct rdns_async_context {
 	void (*cleanup)(void *priv_data);
 };
 
+struct rdns_upstream_elt {
+	void *server;
+	void *lib_data;
+};
+
+struct rdns_upstream_context {
+	void *data;
+	struct rdns_upstream_elt* (*select)(const char *name,
+			size_t len, void *ups_data);
+	struct rdns_upstream_elt* (*select_retransmit)(const char *name,
+			size_t len, void *ups_data);
+	unsigned int (*count)(void *ups_data);
+	void (*ok)(struct rdns_upstream_elt *elt, void *ups_data);
+	void (*fail)(struct rdns_upstream_elt *elt, void *ups_data);
+};
+
 /**
  * Type of rdns plugin
  */
 enum rdns_plugin_type {
-	RDNS_PLUGIN_CURVE = 0//!< use the specified plugin instead of send/recv functions
+	RDNS_PLUGIN_CURVE = 0
 };
 
 typedef ssize_t (*rdns_network_send_callback) (struct rdns_request *req, void *plugin_data);
@@ -221,14 +238,20 @@ void rdns_resolver_async_bind (struct rdns_resolver *resolver,
 		struct rdns_async_context *ctx);
 
 /**
+ * Enable stub dnssec resolver
+ * @param resolver
+ */
+void rdns_resolver_set_dnssec (struct rdns_resolver *resolver, bool enabled);
+
+/**
  * Add new DNS server definition to the resolver
  * @param resolver resolver object
  * @param name name of DNS server (should be ipv4 or ipv6 address)
  * @param priority priority (can be 0 for fair round-robin)
  * @param io_cnt a number of sockets that are simultaneously opened to this server
- * @return true if a server has been added to resolver
+ * @return opaque pointer that could be used to select upstream
  */
-bool rdns_resolver_add_server (struct rdns_resolver *resolver,
+void* rdns_resolver_add_server (struct rdns_resolver *resolver,
 		const char *name, unsigned int port,
 		int priority, unsigned int io_cnt);
 
@@ -241,6 +264,20 @@ bool rdns_resolver_add_server (struct rdns_resolver *resolver,
  */
 bool rdns_resolver_parse_resolv_conf (struct rdns_resolver *resolver,
 		const char *path);
+
+typedef bool (*rdns_resolv_conf_cb) (struct rdns_resolver *resolver,
+		const char *name, unsigned int port,
+		int priority, unsigned int io_cnt, void *ud);
+/**
+ * Parse nameservers calling the specified callback for each nameserver
+ * @param resolve resolver object
+ * @param path path to resolv.conf file (/etc/resolv.conf typically)
+ * @param cb callback to call
+ * @param ud userdata for callback
+ * @return true if resolv.conf has been parsed
+ */
+bool rdns_resolver_parse_resolv_conf_cb (struct rdns_resolver *resolver,
+		const char *path, rdns_resolv_conf_cb cb, void *ud);
 
 /**
  * Set an external logger function to log messages from the resolver
@@ -259,6 +296,15 @@ void rdns_resolver_set_logger (struct rdns_resolver *resolver,
 void rdns_resolver_set_log_level (struct rdns_resolver *resolver,
 		enum rdns_log_level level);
 
+/**
+ * Set upstream library for selecting DNS upstreams
+ * @param resolver resolver object
+ * @param ups_ctx upstream functions
+ * @param ups_data opaque data
+ */
+void rdns_resolver_set_upstream_lib (struct rdns_resolver *resolver,
+		struct rdns_upstream_context *ups_ctx,
+		void *ups_data);
 
 /**
  * Set maximum number of dns requests to be sent to a socket to be refreshed
@@ -322,6 +368,20 @@ const char *rdns_strerror (enum dns_rcode rcode);
 const char *rdns_strtype (enum rdns_request_type type);
 
 /**
+ * Parse string and return request type
+ * @param str
+ * @return
+ */
+enum rdns_request_type rdns_type_fromstr (const char *str);
+
+/**
+ * Parse string and return error code
+ * @param str
+ * @return
+ */
+enum dns_rcode rdns_rcode_fromstr (const char *str);
+
+/**
  * Increase refcount for a request
  * @param req
  * @return
@@ -356,6 +416,16 @@ const struct rdns_request_name* rdns_request_get_name (struct rdns_request *req,
  * @return name to resolve or NULL if `str` is not an IP address; caller must free result when it is unused
  */
 char * rdns_generate_ptr_from_str (const char *str);
+
+/**
+ * Format DNS name of the packet punycoding if needed
+ * @param req request
+ * @param name name string
+ * @param namelen length of name
+ */
+bool rdns_format_dns_name (struct rdns_resolver *resolver,
+		const char *name, size_t namelen,
+		char **out, size_t *outlen);
 
 /*
  * Private functions used by async libraries as callbacks

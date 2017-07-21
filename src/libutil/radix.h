@@ -1,27 +1,18 @@
-/*
- * Copyright (c) 2009-2015, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #ifndef RADIX_H
 #define RADIX_H
 
@@ -39,7 +30,7 @@ typedef struct radix_tree_compressed radix_compressed_t;
  * @param tree radix trie
  * @param key key to insert (bitstring)
  * @param keylen length of the key (in bytes)
- * @param masklen lenght of mask that should be applied to the key (in bits)
+ * @param masklen length of mask that should be applied to the key (in bits)
  * @param value opaque value pointer
  * @return previous value of the key or `RADIX_NO_VALUE`
  */
@@ -56,7 +47,7 @@ radix_insert_compressed (radix_compressed_t * tree,
  * @param keylen length of a key
  * @return opaque pointer or `RADIX_NO_VALUE` if no value has been found
  */
-uintptr_t radix_find_compressed (radix_compressed_t * tree, guint8 *key,
+uintptr_t radix_find_compressed (radix_compressed_t * tree, const guint8 *key,
 		gsize keylen);
 
 /**
@@ -66,7 +57,7 @@ uintptr_t radix_find_compressed (radix_compressed_t * tree, guint8 *key,
  * @return
  */
 uintptr_t radix_find_compressed_addr (radix_compressed_t *tree,
-		rspamd_inet_addr_t *addr);
+		const rspamd_inet_addr_t *addr);
 
 /**
  * Destroy the complete radix trie
@@ -88,14 +79,14 @@ radix_compressed_t *radix_create_compressed (void);
  * @return number of elements inserted
  */
 gint rspamd_radix_add_iplist (const gchar *list, const gchar *separators,
-		radix_compressed_t *tree);
+		radix_compressed_t *tree, gconstpointer value, gboolean resolve);
 
 /**
  * Generic version of @see rspamd_radix_add_iplist. This function creates tree
  * if `tree` is NULL.
  */
 gboolean radix_add_generic_iplist (const gchar *ip_list,
-		radix_compressed_t **tree);
+		radix_compressed_t **tree, gboolean resolve);
 
 /**
  * Returns number of elements in the tree
@@ -103,5 +94,17 @@ gboolean radix_add_generic_iplist (const gchar *ip_list,
  * @return
  */
 gsize radix_get_size (radix_compressed_t *tree);
+
+/**
+ * Return string that describes this radix tree (memory, nodes, compression etc)
+ * @param tree
+ * @return constant string
+ */
+const gchar * radix_get_info (radix_compressed_t *tree);
+
+/**
+ * Returns memory pool associated with the radix tree
+ */
+rspamd_mempool_t* radix_get_pool (radix_compressed_t *tree);
 
 #endif

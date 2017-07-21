@@ -5,8 +5,14 @@
 #include "mem_pool.h"
 #include "printf.h"
 #include "fstring.h"
-#include "ucl.h"
 #include "addr.h"
+#include "str_util.h"
+
+#ifdef HAVE_NETDB_H
+#include <netdb.h>
+#endif
+#include <event.h>
+#include <time.h>
 
 struct rspamd_config;
 struct rspamd_main;
@@ -69,7 +75,7 @@ GList * rspamd_sockets_list (const gchar *credits,
 /*
  * Create socketpair
  */
-gint rspamd_socketpair (gint pair[2]);
+gboolean rspamd_socketpair (gint pair[2]);
 
 /*
  * Write pid to file
@@ -105,11 +111,6 @@ void rspamd_signals_init (struct sigaction *sa, void (*sig_handler)(gint));
  * Send specified signal to each worker
  */
 void rspamd_pass_signal (GHashTable *, gint );
-/*
- * Convert string to lowercase
- */
-void rspamd_str_lc (gchar *str, guint size);
-void rspamd_str_lc_utf8 (gchar *str, guint size);
 
 #ifndef HAVE_SETPROCTITLE
 /*
@@ -158,8 +159,7 @@ gchar * resolve_stat_filename (rspamd_mempool_t *pool,
 	gchar *from);
 
 const gchar *
-calculate_check_time (gdouble start_real, gdouble start_virtual, gint resolution,
-	guint32 *scan_time);
+rspamd_log_check_time (gdouble start, gdouble end, gint resolution);
 
 /*
  * File locking functions
@@ -168,62 +168,28 @@ gboolean rspamd_file_lock (gint fd, gboolean async);
 gboolean rspamd_file_unlock (gint fd, gboolean async);
 
 /*
- * Hash table utility functions for case insensitive hashing
- */
-guint rspamd_strcase_hash (gconstpointer key);
-gboolean rspamd_strcase_equal (gconstpointer v, gconstpointer v2);
-
-/*
- * Hash table utility functions for case sensitive hashing
- */
-guint rspamd_str_hash (gconstpointer key);
-gboolean rspamd_str_equal (gconstpointer v, gconstpointer v2);
-
-
-/*
- * Hash table utility functions for hashing fixed strings
- */
-guint rspamd_fstring_icase_hash (gconstpointer key);
-gboolean rspamd_fstring_icase_equal (gconstpointer v, gconstpointer v2);
-guint rspamd_gstring_icase_hash (gconstpointer key);
-gboolean rspamd_gstring_icase_equal (gconstpointer v, gconstpointer v2);
-
-/*
  * Google perf-tools initialization function
  */
 void gperf_profiler_init (struct rspamd_config *cfg, const gchar *descr);
+void gperf_profiler_stop (void);
 
 /*
  * Workarounds for older versions of glib
  */
 #if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION < 22))
 void g_ptr_array_unref (GPtrArray *array);
+gboolean g_int64_equal (gconstpointer v1, gconstpointer v2);
+guint g_int64_hash (gconstpointer v);
 #endif
 #if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION < 14))
 void g_queue_clear (GQueue *queue);
 #endif
-
-
-/**
- * Copy src to dest limited to len, in compare with standart strlcpy(3) rspamd strlcpy does not
- * traverse the whole string and it is possible to use it for non NULL terminated strings. This is
- * more like memccpy(dst, src, size, '\0')
- *
- * @param dst destination string
- * @param src source string
- * @param siz length of destination buffer
- * @return bytes copied
- */
-gsize rspamd_strlcpy (gchar *dst, const gchar *src, gsize siz);
-
-/**
- * Lowercase strlcpy variant
- * @param dst
- * @param src
- * @param siz
- * @return
- */
-gsize rspamd_strlcpy_tolower (gchar *dst, const gchar *src, gsize siz);
+#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION < 32))
+void g_queue_free_full (GQueue *queue, GDestroyNotify free_func);
+#endif
+#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION < 40))
+void g_ptr_array_insert (GPtrArray *array, gint index_, gpointer data);
+#endif
 
 /*
  * Convert milliseconds to timeval fields
@@ -234,32 +200,13 @@ gsize rspamd_strlcpy_tolower (gchar *dst, const gchar *src, gsize siz);
 #define double_to_tv(dbl, tv) do { (tv)->tv_sec = (int)(dbl); (tv)->tv_usec = \
 									   ((dbl) - (int)(dbl)) * 1000 * 1000; \
 } while (0)
+#define double_to_ts(dbl, ts) do { (ts)->tv_sec = (int)(dbl); (ts)->tv_nsec = \
+                                       ((dbl) - (int)(dbl)) * 1e9; \
+} while (0)
 #define tv_to_msec(tv) ((tv)->tv_sec * 1000LLU + (tv)->tv_usec / 1000LLU)
+#define tv_to_double(tv) ((double)(tv)->tv_sec + (tv)->tv_usec / 1.0e6)
 #define ts_to_usec(ts) ((ts)->tv_sec * 1000000LLU +							\
 	(ts)->tv_nsec / 1000LLU)
-
-guint rspamd_url_hash (gconstpointer u);
-
-/* Compare two emails for building emails hash */
-gboolean rspamd_emails_cmp (gconstpointer a, gconstpointer b);
-
-/* Compare two urls for building emails hash */
-gboolean rspamd_urls_cmp (gconstpointer a, gconstpointer b);
-
-/*
- * Find string find in string s ignoring case
- */
-gchar * rspamd_strncasestr (const gchar *s, const gchar *find, gint len);
-
-/*
- * Try to convert string of length to long
- */
-gboolean rspamd_strtol (const gchar *s, gsize len, glong *value);
-
-/*
- * Try to convert string of length to unsigned long
- */
-gboolean rspamd_strtoul (const gchar *s, gsize len, gulong *value);
 
 /**
  * Try to allocate a file on filesystem (using fallocate or posix_fallocate)
@@ -386,13 +333,6 @@ void rspamd_hash_table_copy (GHashTable *src, GHashTable *dst,
 	gpointer (*value_copy_func)(gconstpointer data, gpointer ud),
 	gpointer ud);
 
-/**
- * Utility function to provide mem_pool copy for rspamd_hash_table_copy function
- * @param data string to copy
- * @param ud memory pool to use
- * @return
- */
-gpointer rspamd_str_pool_copy (gconstpointer data, gpointer ud);
 
 /**
  * Read passphrase from tty
@@ -405,42 +345,6 @@ gpointer rspamd_str_pool_copy (gconstpointer data, gpointer ud);
 gint rspamd_read_passphrase (gchar *buf, gint size, gint rwflag, gpointer key);
 
 /**
- * Emit UCL object to gstring
- * @param obj object to emit
- * @param emit_type emitter type
- * @param target target string
- */
-void rspamd_ucl_emit_gstring (ucl_object_t *obj,
-	enum ucl_emitter emit_type,
-	GString *target);
-
-/**
- * Encode string using base32 encoding
- * @param in input
- * @param inlen input length
- * @return freshly allocated base32 encoding of a specified string
- */
-gchar * rspamd_encode_base32 (const guchar *in, gsize inlen);
-
-/**
- * Decode string using base32 encoding
- * @param in input
- * @param inlen input length
- * @return freshly allocated base32 decoded value or NULL if input is invalid
- */
-guchar* rspamd_decode_base32 (const gchar *in, gsize inlen, gsize *outlen);
-
-/**
- * Encode string using base64 encoding
- * @param in input
- * @param inlen input length
- * @param str_len maximum string length (if <= 0 then no lines are split)
- * @return freshly allocated base64 encoded value or NULL if input is invalid
- */
-gchar * rspamd_encode_base64 (const guchar *in, gsize inlen, gint str_len,
-		gsize *outlen);
-
-/**
  * Portably return the current clock ticks as seconds
  * @return
  */
@@ -451,6 +355,12 @@ gdouble rspamd_get_ticks (void);
  * @return
  */
 gdouble rspamd_get_virtual_ticks (void);
+
+
+/**
+ * Return the real timestamp as unixtime
+ */
+gdouble rspamd_get_calendar_ticks (void);
 
 /**
  * Special utility to help array freeing in rspamd_mempool
@@ -470,14 +380,144 @@ void rspamd_array_free_hard (gpointer p);
 void rspamd_gstring_free_hard (gpointer p);
 
 /**
+ * Special utility to help GString freeing (without freeing the memory segment) in rspamd_mempool
+ * @param p
+ */
+void rspamd_gstring_free_soft (gpointer p);
+
+struct rspamd_external_libs_ctx;
+/**
  * Initialize rspamd libraries
  */
-void rspamd_init_libs (void);
+struct rspamd_external_libs_ctx* rspamd_init_libs (void);
+
+/**
+ * Configure libraries
+ */
+void rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
+		struct rspamd_config *cfg);
+
+/**
+ * Reset and initialize decompressor
+ * @param ctx
+ */
+gboolean rspamd_libs_reset_decompression (struct rspamd_external_libs_ctx *ctx);
+/**
+ * Reset and initialize compressor
+ * @param ctx
+ */
+gboolean rspamd_libs_reset_compression (struct rspamd_external_libs_ctx *ctx);
+
+/**
+ * Destroy external libraries context
+ */
+void rspamd_deinit_libs (struct rspamd_external_libs_ctx *ctx);
 
 /**
  * Returns some statically initialized random hash seed
  * @return hash seed
  */
 guint64 rspamd_hash_seed (void);
+
+/**
+ * Returns random hex string of the specified length
+ * @param buf
+ * @param len
+ */
+void rspamd_random_hex (guchar *buf, guint64 len);
+
+/**
+ * Returns
+ * @param pattern pattern to create (should end with some number of X symbols), modified by this function
+ * @return
+ */
+gint rspamd_shmem_mkstemp (gchar *pattern);
+
+/**
+ * Return jittered time value
+ */
+gdouble rspamd_time_jitter (gdouble in, gdouble jitter);
+
+/**
+ * Return random double in range [0..1)
+ * @return
+ */
+gdouble rspamd_random_double (void);
+
+/**
+ * Return random double in range [0..1) using xoroshiro128+ algorithm (not crypto secure)
+ * @return
+ */
+gdouble rspamd_random_double_fast (void);
+
+guint64 rspamd_random_uint64_fast (void);
+
+/**
+ * Seed fast rng
+ */
+void rspamd_random_seed_fast (void);
+
+/**
+ * Constant time version of memcmp
+ */
+gboolean rspamd_constant_memcmp (const guchar *a, const guchar *b, gsize len);
+
+/* Special case for ancient libevent */
+#if !defined(LIBEVENT_VERSION_NUMBER) || LIBEVENT_VERSION_NUMBER < 0x02000000UL
+struct event_base * event_get_base (struct event *ev);
+#endif
+/* CentOS libevent */
+#ifndef evsignal_set
+#define evsignal_set(ev, x, cb, arg)    \
+    event_set((ev), (x), EV_SIGNAL|EV_PERSIST, (cb), (arg))
+#endif
+
+/**
+ * Open file without following symlinks or special stuff
+ * @param fname filename
+ * @param oflags open flags
+ * @param mode mode to open
+ * @return fd or -1 in case of error
+ */
+int rspamd_file_xopen (const char *fname, int oflags, guint mode,
+		gboolean allow_symlink);
+
+/**
+ * Map file without following symlinks or special stuff
+ * @param fname filename
+ * @param mode mode to open
+ * @param size target size (must NOT be NULL)
+ * @return pointer to memory (should be freed using munmap) or NULL in case of error
+ */
+gpointer rspamd_file_xmap (const char *fname, guint mode, gsize *size,
+		gboolean allow_symlink);
+
+/**
+ * Map named shared memory segment
+ * @param fname filename
+ * @param mode mode to open
+ * @param size target size (must NOT be NULL)
+ * @return pointer to memory (should be freed using munmap) or NULL in case of error
+ */
+gpointer rspamd_shmem_xmap (const char *fname, guint mode,
+		gsize *size);
+
+/**
+ * Normalize probabilities using polynomial function
+ * @param x probability (bias .. 1)
+ * @return
+ */
+gdouble rspamd_normalize_probability (gdouble x, gdouble bias);
+
+/**
+ * Converts struct tm to time_t
+ * @param tm
+ * @param tz timezone in format (hours * 100) + minutes
+ * @return
+ */
+guint64 rspamd_tm_to_time (const struct tm *tm, glong tz);
+
+#define PTR_ARRAY_FOREACH(ar, i, cur) for ((i) = 0; (ar) != NULL && (i) < (ar)->len && (((cur) = g_ptr_array_index((ar), (i))) || 1); ++(i))
+
 
 #endif

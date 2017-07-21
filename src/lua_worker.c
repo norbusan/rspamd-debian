@@ -1,30 +1,22 @@
-/* Copyright (c) 2010-2012, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
-
 #include "config.h"
 #include "util.h"
-#include "main.h"
+#include "rspamd.h"
+#include "libserver/worker_util.h"
 #include "protocol.h"
 #include "upstream.h"
 #include "cfg_file.h"
@@ -32,6 +24,7 @@
 #include "message.h"
 #include "map.h"
 #include "dns.h"
+#include "unix-std.h"
 
 #include "lua/lua_common.h"
 
@@ -46,24 +39,27 @@ gpointer init_lua_worker (struct rspamd_config *cfg);
 void start_lua_worker (struct rspamd_worker *worker);
 
 worker_t lua_worker = {
-	"lua",                  /* Name */
-	init_lua_worker,        /* Init function */
-	start_lua_worker,       /* Start function */
-	TRUE,                   /* Has socket */
-	FALSE,                  /* Non unique */
-	FALSE,                  /* Non threaded */
-	TRUE,                   /* Killable */
-	SOCK_STREAM             /* TCP socket */
+	"lua",                     /* Name */
+	init_lua_worker,           /* Init function */
+	start_lua_worker,          /* Start function */
+	RSPAMD_WORKER_HAS_SOCKET | RSPAMD_WORKER_KILLABLE,
+	RSPAMD_WORKER_SOCKET_TCP,  /* TCP socket */
+	RSPAMD_WORKER_VER          /* Version info */
 };
 
+static const guint64 rspamd_lua_ctx_magic = 0x8055e2652aacf96eULL;
 /*
  * Worker's context
  */
 struct rspamd_lua_worker_ctx {
-	/* DNS resolver */
-	struct rspamd_dns_resolver *resolver;
+	guint64 magic;
 	/* Events base */
 	struct event_base *ev_base;
+	/* DNS resolver */
+	struct rspamd_dns_resolver *resolver;
+	/* Config */
+	struct rspamd_config *cfg;
+	/* END OF COMMON PART */
 	/* Other params */
 	GHashTable *params;
 	/* Lua script to load */
@@ -74,8 +70,6 @@ struct rspamd_lua_worker_ctx {
 	gint cbref_accept;
 	/* Callback for finishing */
 	gint cbref_fin;
-	/* Config file */
-	struct rspamd_config *cfg;
 	/* The rest options */
 	ucl_object_t *opts;
 };
@@ -103,8 +97,8 @@ static const struct luaL_reg lua_workerlib_m[] = {
 static gint
 luaopen_lua_worker (lua_State * L)
 {
-	rspamd_lua_new_class (L, "rspamd{worker}", lua_workerlib_m);
-	luaL_register (L, "rspamd_worker", null_reg);
+	rspamd_lua_new_class (L, "rspamd{lua_worker}", lua_workerlib_m);
+	luaL_register (L, "rspamd_lua_worker", null_reg);
 
 	lua_pop (L, 1);                      /* remove metatable from stack */
 
@@ -114,8 +108,8 @@ luaopen_lua_worker (lua_State * L)
 struct rspamd_lua_worker_ctx *
 lua_check_lua_worker (lua_State * L)
 {
-	void *ud = luaL_checkudata (L, 1, "rspamd{worker}");
-	luaL_argcheck (L, ud != NULL, 1, "'worker' expected");
+	void *ud = luaL_checkudata (L, 1, "rspamd{lua_worker}");
+	luaL_argcheck (L, ud != NULL, 1, "'lua_worker' expected");
 	return ud ? *((struct rspamd_lua_worker_ctx **)ud) : NULL;
 }
 
@@ -183,7 +177,7 @@ lua_worker_register_exit_callback (lua_State *L)
 	return 1;
 }
 
-/* XXX: This fucntions should be rewritten completely */
+/* XXX: This functions should be rewritten completely */
 static int
 lua_worker_get_option (lua_State *L)
 {
@@ -198,7 +192,7 @@ lua_worker_get_option (lua_State *L)
 			lua_pushnil (L);
 		}
 		else {
-			val = ucl_object_find_key (ctx->opts, name);
+			val = ucl_object_lookup (ctx->opts, name);
 			if (val == NULL) {
 				lua_pushnil (L);
 			}
@@ -268,7 +262,7 @@ lua_accept_socket (gint fd, short what, void *arg)
 	L = ctx->L;
 
 	if ((nfd =
-		rspamd_accept_from_socket (fd, &addr)) == -1) {
+		rspamd_accept_from_socket (fd, &addr, worker->accept_events)) == -1) {
 		msg_warn ("accept failed: %s", strerror (errno));
 		return;
 	}
@@ -284,7 +278,7 @@ lua_accept_socket (gint fd, short what, void *arg)
 	/* Call finalizer function */
 	lua_rawgeti (L, LUA_REGISTRYINDEX, ctx->cbref_accept);
 	pctx = lua_newuserdata (L, sizeof (gpointer));
-	rspamd_lua_setclass (L, "rspamd{worker}", -1);
+	rspamd_lua_setclass (L, "rspamd{lua_worker}", -1);
 	*pctx = ctx;
 	lua_pushinteger (L, nfd);
 	rspamd_lua_ip_push (L, addr);
@@ -293,9 +287,11 @@ lua_accept_socket (gint fd, short what, void *arg)
 
 	if (lua_pcall (L, 4, 0, 0) != 0) {
 		msg_info ("call to worker accept failed: %s", lua_tostring (L, -1));
+		lua_pop (L, 1);
 	}
 
-	rspamd_inet_address_destroy (addr);
+	rspamd_inet_address_free (addr);
+	close (nfd);
 }
 
 static gboolean
@@ -316,16 +312,23 @@ init_lua_worker (struct rspamd_config *cfg)
 
 	type = g_quark_try_string ("lua");
 
-	ctx = g_malloc0 (sizeof (struct rspamd_lua_worker_ctx));
+	ctx = rspamd_mempool_alloc (cfg->cfg_pool,
+			sizeof (struct rspamd_lua_worker_ctx));
+	ctx->magic = rspamd_lua_ctx_magic;
 	ctx->params = g_hash_table_new_full (rspamd_str_hash,
 			rspamd_str_equal,
 			g_free,
 			(GDestroyNotify)g_list_free);
 
 
-	rspamd_rcl_register_worker_option (cfg, type, "file",
-		rspamd_rcl_parse_struct_string, ctx,
-		G_STRUCT_OFFSET (struct rspamd_lua_worker_ctx, file), 0);
+	rspamd_rcl_register_worker_option (cfg,
+			type,
+			"file",
+			rspamd_rcl_parse_struct_string,
+			ctx,
+			G_STRUCT_OFFSET (struct rspamd_lua_worker_ctx, file),
+			0,
+			"Run the following lua script when accepting a connection");
 
 	rspamd_rcl_register_worker_parser (cfg, type, rspamd_lua_worker_parser,
 		ctx);
@@ -349,7 +352,8 @@ start_lua_worker (struct rspamd_worker *worker)
 
 	ctx->ev_base = rspamd_prepare_worker (worker,
 			"lua_worker",
-			lua_accept_socket);
+			lua_accept_socket,
+			TRUE);
 
 	L = worker->srv->cfg->lua_state;
 	ctx->L = L;
@@ -373,8 +377,8 @@ start_lua_worker (struct rspamd_worker *worker)
 	}
 
 	pctx = lua_newuserdata (L, sizeof (gpointer));
-	rspamd_lua_setclass (L, "rspamd{worker}", -1);
-	lua_setglobal (L, "rspamd_worker");
+	rspamd_lua_setclass (L, "rspamd{lua_worker}", -1);
+	lua_setglobal (L, "rspamd_lua_worker");
 	*pctx = ctx;
 
 	if (luaL_dofile (L, ctx->file) != 0) {
@@ -389,29 +393,29 @@ start_lua_worker (struct rspamd_worker *worker)
 	}
 
 	/* Maps events */
-	rspamd_map_watch (worker->srv->cfg, ctx->ev_base);
+	rspamd_map_watch (worker->srv->cfg, ctx->ev_base, ctx->resolver, 0);
 
 	event_base_loop (ctx->ev_base, 0);
+	rspamd_worker_block_signals ();
+
 	luaL_unref (L, LUA_REGISTRYINDEX, ctx->cbref_accept);
 	if (ctx->cbref_fin != 0) {
 		/* Call finalizer function */
 		lua_rawgeti (L, LUA_REGISTRYINDEX, ctx->cbref_fin);
 		pctx = lua_newuserdata (L, sizeof (gpointer));
-		rspamd_lua_setclass (L, "rspamd{worker}", -1);
+		rspamd_lua_setclass (L, "rspamd{lua_worker}", -1);
 		*pctx = ctx;
 		if (lua_pcall (L, 1, 0, 0) != 0) {
 			msg_info ("call to worker finalizer failed: %s", lua_tostring (L,
 				-1));
+			lua_pop (L, 1);
 		}
 		/* Free resources */
 		luaL_unref (L, LUA_REGISTRYINDEX, ctx->cbref_fin);
 	}
 
-	rspamd_log_close (rspamd_main->logger);
+	rspamd_log_close (worker->srv->logger);
+	REF_RELEASE (ctx->cfg);
 	exit (EXIT_SUCCESS);
 }
-
-/*
- * vi:ts=4
- */
 

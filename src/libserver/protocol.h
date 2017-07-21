@@ -18,7 +18,20 @@
 #define RSPAMD_LENGTH_ERROR RSPAMD_BASE_ERROR + 4
 #define RSPAMD_STATFILE_ERROR RSPAMD_BASE_ERROR + 5
 
-struct metric;
+struct rspamd_protocol_log_symbol_result {
+	guint32 id;
+	float score;
+};
+struct rspamd_protocol_log_message_sum {
+	guint32 nresults;
+	guint32 nextra;
+	guint32 settings_id;
+	gdouble score;
+	gdouble required_score;
+	struct rspamd_protocol_log_symbol_result results[];
+};
+
+struct rspamd_metric;
 
 /**
  * Process headers into HTTP message and set appropriate task fields
@@ -53,8 +66,29 @@ gboolean rspamd_protocol_handle_request (struct rspamd_task *task,
  * @param task
  */
 void rspamd_protocol_http_reply (struct rspamd_http_message *msg,
-	struct rspamd_task *task);
+		struct rspamd_task *task, ucl_object_t **pobj);
+/**
+ * Write data to log pipes
+ * @param task
+ */
+void rspamd_protocol_write_log_pipe (struct rspamd_task *task);
 
+enum rspamd_protocol_flags {
+	RSPAMD_PROTOCOL_BASIC = 1 << 0,
+	RSPAMD_PROTOCOL_METRICS = 1 << 1,
+	RSPAMD_PROTOCOL_MESSAGES = 1 << 2,
+	RSPAMD_PROTOCOL_RMILTER = 1 << 3,
+	RSPAMD_PROTOCOL_DKIM = 1 << 4,
+	RSPAMD_PROTOCOL_URLS = 1 << 5,
+	RSPAMD_PROTOCOL_EXTRA = 1 << 6,
+};
+
+#define RSPAMD_PROTOCOL_DEFAULT (RSPAMD_PROTOCOL_BASIC| \
+		RSPAMD_PROTOCOL_METRICS| \
+		RSPAMD_PROTOCOL_MESSAGES| \
+		RSPAMD_PROTOCOL_RMILTER| \
+		RSPAMD_PROTOCOL_DKIM| \
+		RSPAMD_PROTOCOL_EXTRA)
 /**
  * Write reply to ucl object filling log buffer
  * @param task
@@ -62,7 +96,7 @@ void rspamd_protocol_http_reply (struct rspamd_http_message *msg,
  * @return
  */
 ucl_object_t * rspamd_protocol_write_ucl (struct rspamd_task *task,
-		GString *logbuf);
+		enum rspamd_protocol_flags flags);
 
 /**
  * Write reply for specified task command
@@ -71,12 +105,16 @@ ucl_object_t * rspamd_protocol_write_ucl (struct rspamd_task *task,
  */
 void rspamd_protocol_write_reply (struct rspamd_task *task);
 
-
 /**
- * Register custom fucntion to extend protocol
- * @param name symbolic name of custom function
- * @param func callback function for writing reply
+ * Convert rspamd output to legacy protocol reply
+ * @param task
+ * @param top
+ * @param out
  */
-void register_protocol_command (const gchar *name, protocol_reply_func func);
+void rspamd_ucl_torspamc_output (const ucl_object_t *top,
+	rspamd_fstring_t **out);
+
+void  rspamd_ucl_tospamc_output (const ucl_object_t *top,
+		rspamd_fstring_t **out);
 
 #endif

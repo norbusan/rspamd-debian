@@ -1,27 +1,18 @@
-/*
- * Copyright (c) 2009-2012, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 /***MODULE:regexp
  * rspamd module that implements different regexp rules
  */
@@ -33,9 +24,11 @@
 #include "mime_expressions.h"
 #include "libutil/map.h"
 #include "lua/lua_common.h"
-#include "main.h"
+
+static const guint64 rspamd_regexp_cb_magic = 0xca9d9649fc3e2659ULL;
 
 struct regexp_module_item {
+	guint64 magic;
 	struct rspamd_expression *expr;
 	const gchar *symbol;
 	struct ucl_lua_funcdata *lua_function;
@@ -62,7 +55,8 @@ module_t regexp_module = {
 	regexp_module_init,
 	regexp_module_config,
 	regexp_module_reconfig,
-	NULL
+	NULL,
+	RSPAMD_MODULE_VER
 };
 
 /* Process regexp expression */
@@ -78,7 +72,8 @@ read_regexp_expression (rspamd_mempool_t * pool,
 
 	if (!rspamd_parse_expression (line, 0, &mime_expr_subr, cfg, pool, &err,
 			&e)) {
-		msg_warn ("%s = \"%s\" is invalid regexp expression: %e", symbol, line,
+		msg_warn_pool ("%s = \"%s\" is invalid regexp expression: %e", symbol,
+				line,
 				err);
 		g_error_free (err);
 
@@ -96,12 +91,32 @@ read_regexp_expression (rspamd_mempool_t * pool,
 gint
 regexp_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 {
-	regexp_module_ctx = g_malloc (sizeof (struct regexp_ctx));
-
-	regexp_module_ctx->regexp_pool = rspamd_mempool_new (
-		rspamd_mempool_suggest_size ());
+	if (regexp_module_ctx == NULL) {
+		regexp_module_ctx = g_malloc (sizeof (struct regexp_ctx));
+		regexp_module_ctx->regexp_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), NULL);
+	}
 
 	*ctx = (struct module_ctx *)regexp_module_ctx;
+
+	rspamd_rcl_add_doc_by_path (cfg,
+			NULL,
+			"Regular expressions rules plugin",
+			"regexp",
+			UCL_OBJECT,
+			NULL,
+			0,
+			NULL,
+			0);
+
+	rspamd_rcl_add_doc_by_path (cfg,
+			"regexp",
+			"Maximum size of data chunk scanned with any regexp (further data is truncated)",
+			"max_size",
+			UCL_INT,
+			NULL,
+			0,
+			NULL,
+			0);
 
 	return 0;
 }
@@ -109,62 +124,204 @@ regexp_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 gint
 regexp_module_config (struct rspamd_config *cfg)
 {
-	struct regexp_module_item *cur_item;
-	const ucl_object_t *sec, *value;
+	struct regexp_module_item *cur_item = NULL;
+	const ucl_object_t *sec, *value, *elt;
 	ucl_object_iter_t it = NULL;
-	gint res = TRUE;
+	gint res = TRUE, id, nre = 0, nlua = 0, nshots = cfg->default_max_shots;
 
-	sec = ucl_object_find_key (cfg->rcl_obj, "regexp");
+	if (!rspamd_config_is_module_enabled (cfg, "regexp")) {
+		return TRUE;
+	}
+
+	sec = ucl_object_lookup (cfg->rcl_obj, "regexp");
 	if (sec == NULL) {
-		msg_err ("regexp module enabled, but no rules are defined");
+		msg_err_config ("regexp module enabled, but no rules are defined");
 		return TRUE;
 	}
 
 	regexp_module_ctx->max_size = 0;
 
-	while ((value = ucl_iterate_object (sec, &it, true)) != NULL) {
+	while ((value = ucl_object_iterate (sec, &it, true)) != NULL) {
 		if (g_ascii_strncasecmp (ucl_object_key (value), "max_size",
 			sizeof ("max_size") - 1) == 0) {
 			regexp_module_ctx->max_size = ucl_obj_toint (value);
-			rspamd_mime_expression_set_re_limit (regexp_module_ctx->max_size);
+			rspamd_re_cache_set_limit (cfg->re_cache, regexp_module_ctx->max_size);
 		}
 		else if (g_ascii_strncasecmp (ucl_object_key (value), "max_threads",
 			sizeof ("max_threads") - 1) == 0) {
-			msg_warn ("regexp module is now single threaded, max_threads is ignored");
+			msg_warn_config ("regexp module is now single threaded, max_threads is ignored");
 		}
 		else if (value->type == UCL_STRING) {
 			cur_item = rspamd_mempool_alloc0 (regexp_module_ctx->regexp_pool,
 					sizeof (struct regexp_module_item));
 			cur_item->symbol = ucl_object_key (value);
+			cur_item->magic = rspamd_regexp_cb_magic;
+
 			if (!read_regexp_expression (regexp_module_ctx->regexp_pool,
 				cur_item, ucl_object_key (value),
 				ucl_obj_tostring (value), cfg)) {
 				res = FALSE;
 			}
 			else {
-				register_symbol (&cfg->cache,
+				rspamd_symbols_cache_add_symbol (cfg->cache,
 						cur_item->symbol,
-						1,
+						0,
 						process_regexp_item,
-						cur_item);
+						cur_item,
+						SYMBOL_TYPE_NORMAL, -1);
+				nre ++;
 			}
 		}
 		else if (value->type == UCL_USERDATA) {
+			/* Just a lua function */
 			cur_item = rspamd_mempool_alloc0 (regexp_module_ctx->regexp_pool,
 					sizeof (struct regexp_module_item));
+			cur_item->magic = rspamd_regexp_cb_magic;
 			cur_item->symbol = ucl_object_key (value);
 			cur_item->lua_function = ucl_object_toclosure (value);
-			register_symbol (&cfg->cache,
+
+			rspamd_symbols_cache_add_symbol (cfg->cache,
 				cur_item->symbol,
-				1,
+				0,
 				process_regexp_item,
-				cur_item);
+				cur_item,
+				SYMBOL_TYPE_NORMAL, -1);
+			nlua ++;
+		}
+		else if (value->type == UCL_OBJECT) {
+			const gchar *description = NULL, *group = NULL,
+					*metric = DEFAULT_METRIC;
+			gdouble score = 0.0;
+			guint flags = 0, priority = 0;
+			gboolean is_lua = FALSE, valid_expression = TRUE;
+
+			/* We have some lua table, extract its arguments */
+			elt = ucl_object_lookup (value, "callback");
+
+			if (elt == NULL || elt->type != UCL_USERDATA) {
+
+				/* Try plain regexp expression */
+				elt = ucl_object_lookup_any (value, "regexp", "re", NULL);
+
+				if (elt != NULL && ucl_object_type (elt) == UCL_STRING) {
+					cur_item = rspamd_mempool_alloc0 (regexp_module_ctx->regexp_pool,
+							sizeof (struct regexp_module_item));
+					cur_item->symbol = ucl_object_key (value);
+					cur_item->magic = rspamd_regexp_cb_magic;
+
+					if (!read_regexp_expression (regexp_module_ctx->regexp_pool,
+							cur_item, ucl_object_key (value),
+							ucl_obj_tostring (elt), cfg)) {
+						res = FALSE;
+					}
+					else {
+						valid_expression = TRUE;
+						nre ++;
+					}
+				}
+				else {
+					msg_err_config (
+							"no callback/expression defined for regexp symbol: "
+									"%s", ucl_object_key (value));
+				}
+			}
+			else {
+				is_lua = TRUE;
+				nlua ++;
+				cur_item = rspamd_mempool_alloc0 (
+						regexp_module_ctx->regexp_pool,
+						sizeof (struct regexp_module_item));
+				cur_item->magic = rspamd_regexp_cb_magic;
+				cur_item->symbol = ucl_object_key (value);
+				cur_item->lua_function = ucl_object_toclosure (value);
+			}
+
+			if (cur_item && (is_lua || valid_expression)) {
+				id = rspamd_symbols_cache_add_symbol (cfg->cache,
+						cur_item->symbol,
+						0,
+						process_regexp_item,
+						cur_item,
+						SYMBOL_TYPE_NORMAL, -1);
+
+				elt = ucl_object_lookup (value, "condition");
+
+				if (elt != NULL && ucl_object_type (elt) == UCL_USERDATA) {
+					struct ucl_lua_funcdata *conddata;
+
+					conddata = ucl_object_toclosure (elt);
+					rspamd_symbols_cache_add_condition (cfg->cache, id,
+							conddata->L, conddata->idx);
+				}
+
+				elt = ucl_object_lookup (value, "metric");
+
+				if (elt) {
+					metric = ucl_object_tostring (elt);
+				}
+
+				elt = ucl_object_lookup (value, "description");
+
+				if (elt) {
+					description = ucl_object_tostring (elt);
+				}
+
+				elt = ucl_object_lookup (value, "group");
+
+				if (elt) {
+					group = ucl_object_tostring (elt);
+				}
+
+				elt = ucl_object_lookup (value, "score");
+
+				if (elt) {
+					score = ucl_object_todouble (elt);
+				}
+
+				elt = ucl_object_lookup (value, "one_shot");
+
+				if (elt) {
+					if (ucl_object_toboolean (elt)) {
+						nshots = 1;
+					}
+				}
+
+				if ((elt = ucl_object_lookup (value, "any_shot")) != NULL) {
+					if (ucl_object_toboolean (elt)) {
+						nshots = -1;
+					}
+				}
+
+				if ((elt = ucl_object_lookup (value, "nshots")) != NULL) {
+					nshots = ucl_object_toint (elt);
+				}
+
+				elt = ucl_object_lookup (value, "one_param");
+
+				if (elt) {
+					if (ucl_object_toboolean (elt)) {
+						flags |= RSPAMD_SYMBOL_FLAG_ONEPARAM;
+					}
+				}
+
+				elt = ucl_object_lookup (value, "priority");
+
+				if (elt) {
+					priority = ucl_object_toint (elt);
+				}
+
+				rspamd_config_add_metric_symbol (cfg, metric, cur_item->symbol,
+						score, description, group, flags, priority, nshots);
+			}
 		}
 		else {
-			msg_warn ("unknown type of attribute %s for regexp module",
+			msg_warn_config ("unknown type of attribute %s for regexp module",
 				ucl_object_key (value));
 		}
 	}
+
+	msg_info_config ("init internal regexp module, %d regexp rules and %d "
+			"lua rules are loaded", nre, nlua);
 
 	return res;
 }
@@ -178,15 +335,16 @@ regexp_module_reconfig (struct rspamd_config *cfg)
 	rspamd_mempool_delete (regexp_module_ctx->regexp_pool);
 	memset (regexp_module_ctx, 0, sizeof (*regexp_module_ctx));
 	regexp_module_ctx->ctx = saved_ctx;
-	regexp_module_ctx->regexp_pool = rspamd_mempool_new (
-		rspamd_mempool_suggest_size ());
+	regexp_module_ctx->regexp_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), NULL);
 
 	return regexp_module_config (cfg);
 }
 
-static gboolean rspamd_lua_call_expression_func(
-		struct ucl_lua_funcdata *lua_data, struct rspamd_task *task,
-		GArray *args, gint *res)
+static gboolean
+rspamd_lua_call_expression_func (struct ucl_lua_funcdata *lua_data,
+		struct rspamd_task *task,
+		GArray *args, gint *res,
+		const gchar *symbol)
 {
 	lua_State *L = lua_data->L;
 	struct rspamd_task **ptask;
@@ -212,7 +370,8 @@ static gboolean rspamd_lua_call_expression_func(
 					lua_pushboolean (L, (gboolean) GPOINTER_TO_SIZE(arg->data));
 					break;
 				default:
-					msg_err("cannot pass custom params to lua function");
+					msg_err_task ("%s: cannot pass custom params to lua function",
+							symbol);
 					return FALSE;
 				}
 			}
@@ -221,9 +380,13 @@ static gboolean rspamd_lua_call_expression_func(
 	}
 
 	if (lua_pcall (L, nargs + 1, 1, 0) != 0) {
-		msg_info("call to lua function failed: %s", lua_tostring (L, -1));
+		msg_info_task ("%s: call to lua function failed: %s", symbol,
+				lua_tostring (L, -1));
+		lua_pop (L, 1);
+
 		return FALSE;
 	}
+
 	pop++;
 
 	if (lua_type (L, -1) == LUA_TNUMBER) {
@@ -233,7 +396,8 @@ static gboolean rspamd_lua_call_expression_func(
 		*res = lua_toboolean (L, -1);
 	}
 	else {
-		msg_info("lua function must return a boolean");
+		msg_info_task ("%s: lua function must return a boolean", symbol);
+		*res = FALSE;
 	}
 
 	lua_pop (L, pop);
@@ -253,8 +417,9 @@ process_regexp_item (struct rspamd_task *task, void *user_data)
 		/* Just call function */
 		res = FALSE;
 		if (!rspamd_lua_call_expression_func (item->lua_function, task, NULL,
-				&res)) {
-			msg_err ("error occurred when checking symbol %s", item->symbol);
+				&res, item->symbol)) {
+			msg_err_task ("error occurred when checking symbol %s",
+					item->symbol);
 		}
 	}
 	else {
@@ -263,7 +428,7 @@ process_regexp_item (struct rspamd_task *task, void *user_data)
 			res = rspamd_process_expression (item->expr, 0, task);
 		}
 		else {
-			msg_warn ("FIXME: %s symbol is broken with new expressions",
+			msg_warn_task ("FIXME: %s symbol is broken with new expressions",
 					item->symbol);
 		}
 	}

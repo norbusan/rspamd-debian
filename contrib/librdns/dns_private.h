@@ -30,14 +30,6 @@
 #include "upstream.h"
 #include "ref.h"
 
-static const unsigned base = 36;
-static const unsigned t_min = 1;
-static const unsigned t_max = 26;
-static const unsigned skew = 38;
-static const unsigned damp = 700;
-static const unsigned initial_n = 128;
-static const unsigned initial_bias = 72;
-
 static const int dns_port = 53;
 static const int default_io_cnt = 8;
 
@@ -59,6 +51,7 @@ struct rdns_server {
 	unsigned int io_cnt;
 
 	struct rdns_io_channel **io_channels;
+	void *ups_elt;
 	upstream_entry_t up;
 };
 
@@ -79,7 +72,8 @@ struct rdns_request {
 	enum {
 		RDNS_REQUEST_NEW = 0,
 		RDNS_REQUEST_REGISTERED = 1,
-		RDNS_REQUEST_SENT,
+		RDNS_REQUEST_WAIT_SEND,
+		RDNS_REQUEST_WAIT_REPLY,
 		RDNS_REQUEST_REPLIED
 	} state;
 
@@ -92,7 +86,7 @@ struct rdns_request {
 
 	void *async_event;
 
-#ifdef TWEETNACL
+#if defined(TWEETNACL) || defined(USE_RSPAMD_CRYPTOBOX)
 	void *curve_plugin_data;
 #endif
 
@@ -120,7 +114,7 @@ struct rdns_resolver {
 	struct rdns_io_channel *io_channels; /**< hash of io chains indexed by socket        */
 	struct rdns_async_context *async; /** async callbacks */
 	void *periodic; /** periodic event for resolver */
-
+	struct rdns_upstream_context *ups;
 	struct rdns_plugin *curve_plugin;
 
 	rdns_log_function logger;
@@ -132,6 +126,7 @@ struct rdns_resolver {
 
 	bool async_binded;
 	bool initialized;
+	bool enable_dnssec;
 	ref_entry_t ref;
 };
 
@@ -151,7 +146,9 @@ struct dns_header {
 	unsigned int rd:1;
 
 	unsigned int ra:1;
-	unsigned int unused:3;
+	unsigned int cd : 1;
+	unsigned int ad : 1;
+	unsigned int z : 1;
 	unsigned int rcode:4;
 #else
 	unsigned int rd :1;
@@ -161,7 +158,9 @@ struct dns_header {
 	unsigned int qr :1;
 
 	unsigned int rcode :4;
-	unsigned int unused :3;
+	unsigned int z : 1;
+	unsigned int ad : 1;
+	unsigned int cd : 1;
 	unsigned int ra :1;
 #endif
 

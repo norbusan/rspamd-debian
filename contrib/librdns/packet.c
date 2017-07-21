@@ -129,10 +129,10 @@ rdns_format_dns_name (struct rdns_resolver *resolver, const char *in,
 	}
 
 	/* We need to encode */
-
 	p = in;
-	olen = inlen + 1 + sizeof ("xn--") * labels;
-	*out = malloc (olen);
+	/* We allocate 4 times more memory as we cannot guarantee encoding bounds */
+	olen = inlen * sizeof (int32_t) + 1 + sizeof ("xn--") * labels;
+	*out = malloc (olen + 1);
 
 	if (*out == NULL) {
 		return false;
@@ -158,8 +158,7 @@ rdns_format_dns_name (struct rdns_resolver *resolver, const char *in,
 				}
 				else {
 					rdns_info ("no buffer remain for punycoding query");
-					free (*out);
-					return false;
+					goto err;
 				}
 
 				free (uclabel);
@@ -183,7 +182,7 @@ rdns_format_dns_name (struct rdns_resolver *resolver, const char *in,
 				}
 				if (remain < label_len + 1) {
 					rdns_info ("no buffer remain for punycoding query");
-					return false;
+					goto err;
 				}
 				if (label_len == 0) {
 					/* Two dots in order, skip this */
@@ -208,7 +207,7 @@ rdns_format_dns_name (struct rdns_resolver *resolver, const char *in,
 				}
 				if (remain < label_len + 1) {
 					rdns_info ("no buffer remain for punycoding query");
-					return false;
+					goto err;
 				}
 				memcpy (o, p, label_len);
 				o += label_len;
@@ -220,14 +219,20 @@ rdns_format_dns_name (struct rdns_resolver *resolver, const char *in,
 		}
 		if (remain == 0) {
 			rdns_info ("no buffer remain for punycoding query");
-			return false;
+			goto err;
 		}
 	}
+
 	*o = '\0';
 
 	*outlen = o - *out;
 
 	return true;
+
+	err:
+	free (*out);
+	*out = NULL;
+	return false;
 }
 
 bool
@@ -261,8 +266,16 @@ rdns_add_edns0 (struct rdns_request *req)
 	*p16++ = htons (UDP_PACKET_SIZE);
 	/* Extended rcode 00 00 */
 	*p16++ = 0;
-	/* Z 10000000 00000000 to allow dnssec, disabled currently */
-	*p16++ = 0;
+	/* Z 10000000 00000000 to allow dnssec */
+	p8 = (uint8_t *)p16;
+	if (req->resolver->enable_dnssec) {
+		*p8++ = 0x80;
+	}
+	else {
+		*p8++ = 0x00;
+	}
+	*p8++ = 0;
+	p16 = (uint16_t *)p8;
 	/* Length */
 	*p16 = 0;
 	req->pos += sizeof (uint8_t) + sizeof (uint16_t) * 5;

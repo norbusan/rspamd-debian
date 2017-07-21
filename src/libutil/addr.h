@@ -1,35 +1,48 @@
-/* Copyright (c) 2014, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 #ifndef ADDR_H_
 #define ADDR_H_
 
 #include "config.h"
+#include "rdns.h"
+
+#ifdef HAVE_SYS_SOCKET_H
+#include <sys/socket.h>
+#endif
+#ifdef HAVE_NETINET_IN_H
+#include <netinet/in.h>
+#endif
+#ifdef HAVE_ARPA_INET_H
+#include <arpa/inet.h>
+#endif
+/* unix sockets */
+#ifdef HAVE_SYS_UN_H
+#include <sys/un.h>
+#endif
+
 #include "mem_pool.h"
 
 /**
  * Opaque structure
  */
 typedef struct rspamd_inet_addr_s rspamd_inet_addr_t;
+struct radix_tree_compressed;
+
+struct radix_tree_compressed **rspamd_inet_library_init (void);
+void rspamd_inet_library_destroy (void);
 
 /**
  * Create new inet address structure based on the address familiy and opaque init pointer
@@ -49,13 +62,54 @@ rspamd_inet_addr_t * rspamd_inet_address_from_sa (const struct sockaddr *sa,
 		socklen_t slen);
 
 /**
+ * Create new inet address from rdns reply
+ * @param rep reply element
+ * @return new ipv4 or ipv6 addr (port is NOT set)
+ */
+rspamd_inet_addr_t * rspamd_inet_address_from_rnds (
+		const struct rdns_reply_entry *rep);
+
+/**
+ * Parse string with ipv6 address of length `len` to `target` which should be
+ * at least sizeof (in6_addr_t)
+ * @param text input string
+ * @param len length of `text` (if 0, then `text` must be zero terminated)
+ * @param target target structure
+ * @return TRUE if the address has been parsed, otherwise `target` content is undefined
+ */
+gboolean rspamd_parse_inet_address_ip6 (const guchar *text, gsize len,
+		gpointer target);
+
+/**
+ * Parse string with ipv4 address of length `len` to `target` which should be
+ * at least sizeof (in4_addr_t)
+ * @param text input string
+ * @param len length of `text` (if 0, then `text` must be zero terminated)
+ * @param target target structure
+ * @return TRUE if the address has been parsed, otherwise `target` content is undefined
+ */
+gboolean rspamd_parse_inet_address_ip4 (const guchar *text, gsize len,
+		gpointer target);
+
+/**
+ * Parse ipv4 or ipv6 address to a static buffer `target`. Does not support Unix sockets
+ * @param src
+ * @param srclen
+ * @param target
+ * @return
+ */
+gboolean rspamd_parse_inet_address_ip (const char *src,
+		gsize srclen, rspamd_inet_addr_t *target);
+
+/**
  * Try to parse address from string
  * @param target target to fill
  * @param src IP string representation
  * @return TRUE if addr has been parsed
  */
 gboolean rspamd_parse_inet_address (rspamd_inet_addr_t **target,
-	const char *src);
+		const char *src,
+		gsize srclen);
 
 /**
  * Returns string representation of inet address
@@ -63,6 +117,13 @@ gboolean rspamd_parse_inet_address (rspamd_inet_addr_t **target,
  * @return statically allocated string pointer (not thread safe)
  */
 const char * rspamd_inet_address_to_string (const rspamd_inet_addr_t *addr);
+
+/**
+ * Returns pretty string representation of inet address
+ * @param addr
+ * @return statically allocated string pointer (not thread safe)
+ */
+const char * rspamd_inet_address_to_string_pretty (const rspamd_inet_addr_t *addr);
 
 /**
  * Returns port number for the specified inet address in host byte order
@@ -85,7 +146,7 @@ gint rspamd_inet_address_get_af (const rspamd_inet_addr_t *addr);
  * @param klen
  * @return
  */
-guchar * rspamd_inet_address_get_radix_key (const rspamd_inet_addr_t *addr, guint *klen);
+guchar * rspamd_inet_address_get_hash_key (const rspamd_inet_addr_t *addr, guint *klen);
 
 /**
  * Receive data from an unconnected socket and fill the inet_addr structure if needed
@@ -143,14 +204,12 @@ gboolean rspamd_ip_is_valid (const rspamd_inet_addr_t *addr);
 /**
  * Accept from listening socket filling addr structure
  * @param sock listening socket
- * @param addr allocated inet addr structur
+ * @param addr allocated inet addr structure
+ * @param accept_events events for accepting new sockets
  * @return
  */
-gint rspamd_accept_from_socket (gint sock, rspamd_inet_addr_t **addr);
-
-gboolean rspamd_parse_host_port_priority_strv (gchar **tokens,
-	GPtrArray **addrs, guint *priority,
-	gchar **name, guint default_port, rspamd_mempool_t *pool);
+gint rspamd_accept_from_socket (gint sock, rspamd_inet_addr_t **addr,
+		GList *accept_events);
 
 /**
  * Parse host[:port[:priority]] line
@@ -165,20 +224,10 @@ gboolean rspamd_parse_host_port_priority (const gchar *str,
 		rspamd_mempool_t *pool);
 
 /**
- * Parse host:port line
- * @param ina host address
- * @param port port
- * @return TRUE if string was parsed
- */
-gboolean rspamd_parse_host_port (const gchar *str,
-		GPtrArray **addrs,
-	gchar **name, guint default_port, rspamd_mempool_t *pool);
-
-/**
  * Destroy the specified IP address
  * @param addr
  */
-void rspamd_inet_address_destroy (rspamd_inet_addr_t *addr);
+void rspamd_inet_address_free (rspamd_inet_addr_t *addr);
 
 /**
  * Apply the specified mask to an address (ignored for AF_UNIX)
@@ -210,5 +259,28 @@ gint rspamd_inet_address_compare_ptr (gconstpointer a1,
  * @return
  */
 rspamd_inet_addr_t *rspamd_inet_address_copy (const rspamd_inet_addr_t *addr);
+
+/**
+ * Returns hash for inet address
+ */
+guint rspamd_inet_address_hash (gconstpointer a);
+
+
+/**
+ * Returns true if two address are equal
+ */
+gboolean rspamd_inet_address_equal (gconstpointer a, gconstpointer b);
+
+/**
+ * Returns TRUE if an address belongs to some local address
+ */
+gboolean rspamd_inet_address_is_local (const rspamd_inet_addr_t *addr,
+		gboolean check_laddrs);
+
+/**
+ * Returns size of storage required to store a complete IP address
+ * @return
+ */
+gsize rspamd_inet_address_storage_size (void);
 
 #endif /* ADDR_H_ */

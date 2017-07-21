@@ -1,30 +1,20 @@
-/*
- * Copyright (c) 2015, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *	 * Redistributions of source code must retain the above copyright
- *	   notice, this list of conditions and the following disclaimer.
- *	 * Redistributions in binary form must reproduce the above copyright
- *	   notice, this list of conditions and the following disclaimer in the
- *	   documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "lua_common.h"
 #include "message.h"
-#include "diff.h"
 
 /* Textpart methods */
 /***
@@ -37,8 +27,8 @@ rspamd_config.R_EMPTY_IMAGE = function (task)
 	if parts then
 		for _,part in ipairs(parts) do
 			if part:is_empty() then
-				images = task:get_images()
-				if images then
+				texts = task:get_texts()
+				if texts then
 					return true
 				end
 				return false
@@ -55,12 +45,44 @@ end
  * @return {boolean} true if part is valid `UTF8` part
  */
 LUA_FUNCTION_DEF (textpart, is_utf);
+
 /***
- * @method text_part:get_content()
- * Get the text of the part
+ * @method text_part:has_8bit_raw()
+ * Return TRUE if a part has raw 8bit characters
+ * @return {boolean} true if a part has raw 8bit characters
+ */
+LUA_FUNCTION_DEF (textpart, has_8bit_raw);
+
+/***
+ * @method text_part:has_8bit()
+ * Return TRUE if a part has raw 8bit characters
+ * @return {boolean} true if a part has encoded 8bit characters
+ */
+LUA_FUNCTION_DEF (textpart, has_8bit);
+
+/***
+ * @method text_part:get_content([type])
+ * Get the text of the part (html tags stripped). Optional `type` defines type of content to get:
+ * - `content` (default): utf8 content with HTML tags stripped and newlines preserved
+ * - `content_oneline`: utf8 content with HTML tags and newlines stripped
+ * - `raw`: raw content, not mime decoded nor utf8 converted
+ * - `raw_parsed`: raw content, mime decoded, not utf8 converted
+ * - `raw_utf`: raw content, mime decoded, utf8 converted (but with HTML tags and newlines)
  * @return {text} `UTF8` encoded content of the part (zero-copy if not converted to a lua string)
  */
 LUA_FUNCTION_DEF (textpart, get_content);
+/***
+ * @method text_part:get_raw_content()
+ * Get the original text of the part
+ * @return {text} `UTF8` encoded content of the part (zero-copy if not converted to a lua string)
+ */
+LUA_FUNCTION_DEF (textpart, get_raw_content);
+/***
+ * @method text_part:get_content_oneline()
+ *Get the text of the part (html tags and newlines stripped)
+ * @return {text} `UTF8` encoded content of the part (zero-copy if not converted to a lua string)
+ */
+LUA_FUNCTION_DEF (textpart, get_content_oneline);
 /***
  * @method text_part:get_length()
  * Get length of the text of the part
@@ -68,11 +90,41 @@ LUA_FUNCTION_DEF (textpart, get_content);
  */
 LUA_FUNCTION_DEF (textpart, get_length);
 /***
+ * @method mime_part:get_raw_length()
+ * Get length of the **raw** content of the part (e.g. HTML with tags unstripped)
+ * @return {integer} length of part in **bytes**
+ */
+LUA_FUNCTION_DEF (textpart, get_raw_length);
+/***
+ * @method mime_part:get_urls_length()
+ * Get length of the urls within the part
+ * @return {integer} length of urls in **bytes**
+ */
+LUA_FUNCTION_DEF (textpart, get_urls_length);
+/***
  * @method mime_part:get_lines_count()
  * Get lines number in the part
  * @return {integer} number of lines in the part
  */
 LUA_FUNCTION_DEF (textpart, get_lines_count);
+/***
+ * @method mime_part:get_stats()
+ * Returns a table with the following data:
+ * - `lines`: number of lines
+ * - `spaces`: number of spaces
+ * - `double_spaces`: double spaces
+ * - `empty_lines`: number of empty lines
+ * - `non_ascii_characters`: number of non ascii characters
+ * - `ascii_characters`: number of ascii characters
+ * @return {table} table of stats
+ */
+LUA_FUNCTION_DEF (textpart, get_stats);
+/***
+ * @method mime_part:get_words_count()
+ * Get words number in the part
+ * @return {integer} number of words in the part
+ */
+LUA_FUNCTION_DEF (textpart, get_words_count);
 /***
  * @method text_part:is_empty()
  * Returns `true` if the specified part is empty
@@ -86,11 +138,11 @@ LUA_FUNCTION_DEF (textpart, is_empty);
  */
 LUA_FUNCTION_DEF (textpart, is_html);
 /***
- * @method text_part:get_fuzzy()
- * Returns base32 encoded value of fuzzy hash of the specified part
- * @return {string} fuzzy hash value
+ * @method text_part:get_html()
+ * Returns html content of the specified part
+ * @return {html} html content
  */
-LUA_FUNCTION_DEF (textpart, get_fuzzy);
+LUA_FUNCTION_DEF (textpart, get_html);
 /***
  * @method text_part:get_language()
  * Returns the code of the most used unicode script in the text part. Does not work with raw parts
@@ -103,28 +155,25 @@ LUA_FUNCTION_DEF (textpart, get_language);
  * @return {mimepart} mimepart object
  */
 LUA_FUNCTION_DEF (textpart, get_mimepart);
-/***
- * @method text_part:compare_distance(other)
- * Calculates the difference to another text part.  This function is intended to work with
- * the parts of `multipart/alternative` container only. If the two parts are not the parts of the
- * same `multipart/alternative` container, then they are considered as unrelated and
- * `-1` is returned.
- * @param {text_part} other text part to compare
- * @return {integer} commodity percentage (e.g. the same strings give `100`, different give `0` and unrelated give `-1`)
- */
-LUA_FUNCTION_DEF (textpart, compare_distance);
 
 static const struct luaL_reg textpartlib_m[] = {
 	LUA_INTERFACE_DEF (textpart, is_utf),
+	LUA_INTERFACE_DEF (textpart, has_8bit_raw),
+	LUA_INTERFACE_DEF (textpart, has_8bit),
 	LUA_INTERFACE_DEF (textpart, get_content),
+	LUA_INTERFACE_DEF (textpart, get_raw_content),
+	LUA_INTERFACE_DEF (textpart, get_content_oneline),
 	LUA_INTERFACE_DEF (textpart, get_length),
+	LUA_INTERFACE_DEF (textpart, get_raw_length),
+	LUA_INTERFACE_DEF (textpart, get_urls_length),
 	LUA_INTERFACE_DEF (textpart, get_lines_count),
+	LUA_INTERFACE_DEF (textpart, get_words_count),
 	LUA_INTERFACE_DEF (textpart, is_empty),
 	LUA_INTERFACE_DEF (textpart, is_html),
-	LUA_INTERFACE_DEF (textpart, get_fuzzy),
+	LUA_INTERFACE_DEF (textpart, get_html),
 	LUA_INTERFACE_DEF (textpart, get_language),
 	LUA_INTERFACE_DEF (textpart, get_mimepart),
-	LUA_INTERFACE_DEF (textpart, compare_distance),
+	LUA_INTERFACE_DEF (textpart, get_stats),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
 };
@@ -137,7 +186,7 @@ static const struct luaL_reg textpartlib_m[] = {
 @example
 rspamd_config.MISSING_CONTENT_TYPE = function(task)
 	local parts = task:get_parts()
-	if parts and table.maxn(parts) > 1 then
+	if parts and #parts > 1 then
 		-- We have more than one part
 		for _,p in ipairs(parts) do
 			local ct = p:get_header('Content-Type')
@@ -207,50 +256,145 @@ LUA_FUNCTION_DEF (mimepart, get_length);
 /***
  * @method mime_part:get_type()
  * Extract content-type string of the mime part
- * @return {string} content type in form 'type/subtype'
+ * @return {string,string} content type in form 'type','subtype'
  */
 LUA_FUNCTION_DEF (mimepart, get_type);
+
+/***
+ * @method mime_part:get_cte()
+ * Extract content-transfer-encoding for a part
+ * @return {string} content transfer encoding (e.g. `base64` or `7bit`)
+ */
+LUA_FUNCTION_DEF (mimepart, get_cte);
+
 /***
  * @method mime_part:get_filename()
- * Extract filename associated with mime part if it is an attachement
+ * Extract filename associated with mime part if it is an attachment
  * @return {string} filename or `nil` if no file is associated with this part
  */
 LUA_FUNCTION_DEF (mimepart, get_filename);
+/***
+ * @method mime_part:is_image()
+ * Returns true if mime part is an image
+ * @return {bool} true if a part is an image
+ */
+LUA_FUNCTION_DEF (mimepart, is_image);
+/***
+ * @method mime_part:get_image()
+ * Returns rspamd_image structure associated with this part. This structure has
+ * the following methods:
+ *
+ * * `get_width` - return width of an image in pixels
+ * * `get_height` - return height of an image in pixels
+ * * `get_type` - return string representation of image's type (e.g. 'jpeg')
+ * * `get_filename` - return string with image's file name
+ * * `get_size` - return size in bytes
+ * @return {rspamd_image} image structure or nil if a part is not an image
+ */
+LUA_FUNCTION_DEF (mimepart, get_image);
+/***
+ * @method mime_part:is_archive()
+ * Returns true if mime part is an archive
+ * @return {bool} true if a part is an archive
+ */
+LUA_FUNCTION_DEF (mimepart, is_archive);
+/***
+ * @method mime_part:get_archive()
+ * Returns rspamd_archive structure associated with this part. This structure has
+ * the following methods:
+ *
+ * * `get_files` - return list of strings with filenames inside archive
+ * * `get_files_full` - return list of tables with all information about files
+ * * `is_encrypted` - return true if an archive is encrypted
+ * * `get_type` - return string representation of image's type (e.g. 'zip')
+ * * `get_filename` - return string with archive's file name
+ * * `get_size` - return size in bytes
+ * @return {rspamd_archive} archive structure or nil if a part is not an archive
+ */
+LUA_FUNCTION_DEF (mimepart, get_archive);
+/***
+ * @method mime_part:is_text()
+ * Returns true if mime part is a text part
+ * @return {bool} true if a part is a text part
+ */
+LUA_FUNCTION_DEF (mimepart, is_text);
+/***
+ * @method mime_part:get_text()
+ * Returns rspamd_textpart structure associated with this part.
+ * @return {rspamd_textpart} textpart structure or nil if a part is not an text
+ */
+LUA_FUNCTION_DEF (mimepart, get_text);
+
+/***
+ * @method mime_part:get_digest()
+ * Returns the unique digest for this mime part
+ * @return {string} 128 characters hex string with digest of the part
+ */
+LUA_FUNCTION_DEF (mimepart, get_digest);
+/***
+ * @method mime_part:is_broken()
+ * Returns true if mime part has incorrectly specified content type
+ * @return {bool} true if a part has bad content type
+ */
+LUA_FUNCTION_DEF (mimepart, is_broken);
+/***
+ * @method mime_part:headers_foreach(callback, [params])
+ * This method calls `callback` for each header that satisfies some condition.
+ * By default, all headers are iterated unless `callback` returns `true`. Nil or
+ * false means continue of iterations.
+ * Params could be as following:
+ *
+ * - `full`: header value is full table of all attributes @see task:get_header_full for details
+ * - `regexp`: return headers that satisfies the specified regexp
+ * @param {function} callback function from header name and header value
+ * @param {table} params optional parameters
+ */
+LUA_FUNCTION_DEF (mimepart, headers_foreach);
 
 static const struct luaL_reg mimepartlib_m[] = {
 	LUA_INTERFACE_DEF (mimepart, get_content),
 	LUA_INTERFACE_DEF (mimepart, get_length),
 	LUA_INTERFACE_DEF (mimepart, get_type),
+	LUA_INTERFACE_DEF (mimepart, get_cte),
 	LUA_INTERFACE_DEF (mimepart, get_filename),
 	LUA_INTERFACE_DEF (mimepart, get_header),
 	LUA_INTERFACE_DEF (mimepart, get_header_raw),
 	LUA_INTERFACE_DEF (mimepart, get_header_full),
+	LUA_INTERFACE_DEF (mimepart, is_image),
+	LUA_INTERFACE_DEF (mimepart, get_image),
+	LUA_INTERFACE_DEF (mimepart, is_archive),
+	LUA_INTERFACE_DEF (mimepart, get_archive),
+	LUA_INTERFACE_DEF (mimepart, is_text),
+	LUA_INTERFACE_DEF (mimepart, is_broken),
+	LUA_INTERFACE_DEF (mimepart, get_text),
+	LUA_INTERFACE_DEF (mimepart, get_digest),
+	LUA_INTERFACE_DEF (mimepart, headers_foreach),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
 };
 
 
-static struct mime_text_part *
+static struct rspamd_mime_text_part *
 lua_check_textpart (lua_State * L)
 {
-	void *ud = luaL_checkudata (L, 1, "rspamd{textpart}");
+	void *ud = rspamd_lua_check_udata (L, 1, "rspamd{textpart}");
 	luaL_argcheck (L, ud != NULL, 1, "'textpart' expected");
-	return ud ? *((struct mime_text_part **)ud) : NULL;
+	return ud ? *((struct rspamd_mime_text_part **)ud) : NULL;
 }
 
-static struct mime_part *
+static struct rspamd_mime_part *
 lua_check_mimepart (lua_State * L)
 {
-	void *ud = luaL_checkudata (L, 1, "rspamd{mimepart}");
+	void *ud = rspamd_lua_check_udata (L, 1, "rspamd{mimepart}");
 	luaL_argcheck (L, ud != NULL, 1, "'mimepart' expected");
-	return ud ? *((struct mime_part **)ud) : NULL;
+	return ud ? *((struct rspamd_mime_part **)ud) : NULL;
 }
 
 
 static gint
 lua_textpart_is_utf (lua_State * L)
 {
-	struct mime_text_part *part = lua_check_textpart (L);
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
 
 	if (part == NULL || IS_PART_EMPTY (part)) {
 		lua_pushboolean (L, FALSE);
@@ -264,9 +408,105 @@ lua_textpart_is_utf (lua_State * L)
 
 
 static gint
+lua_textpart_has_8bit_raw (lua_State * L)
+{
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
+
+	if (part) {
+		if (part->flags & RSPAMD_MIME_TEXT_PART_FLAG_8BIT) {
+			lua_pushboolean (L, TRUE);
+		}
+		else {
+			lua_pushboolean (L, FALSE);
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_textpart_has_8bit (lua_State * L)
+{
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
+
+	if (part) {
+		if (part->flags & RSPAMD_MIME_TEXT_PART_FLAG_8BIT_ENCODED) {
+			lua_pushboolean (L, TRUE);
+		}
+		else {
+			lua_pushboolean (L, FALSE);
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+
+static gint
 lua_textpart_get_content (lua_State * L)
 {
-	struct mime_text_part *part = lua_check_textpart (L);
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
+	struct rspamd_lua_text *t;
+	gsize len;
+	const gchar *start, *type = NULL;
+
+	if (part == NULL || IS_PART_EMPTY (part)) {
+		lua_pushnil (L);
+		return 1;
+	}
+
+	if (lua_type (L, 2) == LUA_TSTRING) {
+		type = lua_tostring (L, 2);
+	}
+
+	t = lua_newuserdata (L, sizeof (*t));
+	rspamd_lua_setclass (L, "rspamd{text}", -1);
+
+	if (!type) {
+		start = part->content->data;
+		len = part->content->len;
+	}
+	else if (strcmp (type, "content") == 0) {
+		start = part->content->data;
+		len = part->content->len;
+	}
+	else if (strcmp (type, "content_oneline") == 0) {
+		start = part->stripped_content->data;
+		len = part->stripped_content->len;
+	}
+	else if (strcmp (type, "raw_parsed") == 0) {
+		start = part->parsed.begin;
+		len = part->parsed.len;
+	}
+	else if (strcmp (type, "raw_utf") == 0) {
+		start = part->utf_raw_content->data;
+		len = part->utf_raw_content->len;
+	}
+	else if (strcmp (type, "raw") == 0) {
+		start = part->raw.begin;
+		len = part->raw.len;
+	}
+	else {
+		return luaL_error (L, "invalid content type: %s", type);
+	}
+
+	t->start = start;
+	t->len = len;
+	t->flags = 0;
+
+	return 1;
+}
+
+static gint
+lua_textpart_get_raw_content (lua_State * L)
+{
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
 	struct rspamd_lua_text *t;
 
 	if (part == NULL || IS_PART_EMPTY (part)) {
@@ -276,9 +516,29 @@ lua_textpart_get_content (lua_State * L)
 
 	t = lua_newuserdata (L, sizeof (*t));
 	rspamd_lua_setclass (L, "rspamd{text}", -1);
-	t->start = part->content->data;
-	t->len = part->content->len;
-	t->own = FALSE;
+	t->start = part->raw.begin;
+	t->len = part->raw.len;
+	t->flags = 0;
+
+	return 1;
+}
+
+static gint
+lua_textpart_get_content_oneline (lua_State * L)
+{
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
+	struct rspamd_lua_text *t;
+
+	if (part == NULL || IS_PART_EMPTY (part)) {
+		lua_pushnil (L);
+		return 1;
+	}
+
+	t = lua_newuserdata (L, sizeof (*t));
+	rspamd_lua_setclass (L, "rspamd{text}", -1);
+	t->start = part->stripped_content->data;
+	t->len = part->stripped_content->len;
+	t->flags = 0;
 
 	return 1;
 }
@@ -286,14 +546,14 @@ lua_textpart_get_content (lua_State * L)
 static gint
 lua_textpart_get_length (lua_State * L)
 {
-	struct mime_text_part *part = lua_check_textpart (L);
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
 
 	if (part == NULL) {
 		lua_pushnil (L);
 		return 1;
 	}
 
-	if (IS_PART_EMPTY (part)) {
+	if (IS_PART_EMPTY (part) || part->content == NULL) {
 		lua_pushnumber (L, 0);
 	}
 	else {
@@ -304,9 +564,50 @@ lua_textpart_get_length (lua_State * L)
 }
 
 static gint
+lua_textpart_get_raw_length (lua_State * L)
+{
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
+
+	if (part == NULL) {
+		lua_pushnil (L);
+		return 1;
+	}
+
+	lua_pushnumber (L, part->raw.len);
+
+	return 1;
+}
+
+static gint
+lua_textpart_get_urls_length (lua_State * L)
+{
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
+	GList *cur;
+	guint total = 0;
+	struct rspamd_process_exception *ex;
+
+	if (part == NULL) {
+		lua_pushnil (L);
+		return 1;
+	}
+
+	for (cur = part->exceptions; cur != NULL; cur = g_list_next (cur)) {
+		ex = cur->data;
+
+		if (ex->type == RSPAMD_EXCEPTION_URL) {
+			total += ex->len;
+		}
+	}
+
+	lua_pushnumber (L, total);
+
+	return 1;
+}
+
+static gint
 lua_textpart_get_lines_count (lua_State * L)
 {
-	struct mime_text_part *part = lua_check_textpart (L);
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
 
 	if (part == NULL) {
 		lua_pushnil (L);
@@ -324,9 +625,29 @@ lua_textpart_get_lines_count (lua_State * L)
 }
 
 static gint
+lua_textpart_get_words_count (lua_State *L)
+{
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
+
+	if (part == NULL) {
+		lua_pushnil (L);
+		return 1;
+	}
+
+	if (IS_PART_EMPTY (part) || part->normalized_words == NULL) {
+		lua_pushnumber (L, 0);
+	}
+	else {
+		lua_pushnumber (L, part->normalized_words->len);
+	}
+
+	return 1;
+}
+
+static gint
 lua_textpart_is_empty (lua_State * L)
 {
-	struct mime_text_part *part = lua_check_textpart (L);
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
 
 	if (part == NULL) {
 		lua_pushnil (L);
@@ -341,7 +662,7 @@ lua_textpart_is_empty (lua_State * L)
 static gint
 lua_textpart_is_html (lua_State * L)
 {
-	struct mime_text_part *part = lua_check_textpart (L);
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
 
 	if (part == NULL) {
 		lua_pushnil (L);
@@ -354,20 +675,19 @@ lua_textpart_is_html (lua_State * L)
 }
 
 static gint
-lua_textpart_get_fuzzy (lua_State * L)
+lua_textpart_get_html (lua_State * L)
 {
-	struct mime_text_part *part = lua_check_textpart (L);
-	gchar *out;
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
+	struct html_content **phc;
 
-	if (part == NULL || IS_PART_EMPTY (part)) {
+	if (part == NULL || part->html == NULL) {
 		lua_pushnil (L);
-		return 1;
 	}
-
-	out = rspamd_encode_base32 (part->fuzzy->hash_pipe,
-			strlen (part->fuzzy->hash_pipe));
-	lua_pushstring (L, out);
-	g_free (out);
+	else {
+		phc = lua_newuserdata (L, sizeof (*phc));
+		rspamd_lua_setclass (L, "rspamd{html}", -1);
+		*phc = part->html;
+	}
 
 	return 1;
 }
@@ -375,7 +695,7 @@ lua_textpart_get_fuzzy (lua_State * L)
 static gint
 lua_textpart_get_language (lua_State * L)
 {
-	struct mime_text_part *part = lua_check_textpart (L);
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
 
 	if (part != NULL) {
 		if (part->lang_code != NULL && part->lang_code[0] != '\0') {
@@ -391,12 +711,12 @@ lua_textpart_get_language (lua_State * L)
 static gint
 lua_textpart_get_mimepart (lua_State * L)
 {
-	struct mime_text_part *part = lua_check_textpart (L);
-	struct mime_part **pmime;
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
+	struct rspamd_mime_part **pmime;
 
 	if (part != NULL) {
 		if (part->mime_part != NULL) {
-			pmime = lua_newuserdata (L, sizeof (struct mime_part *));
+			pmime = lua_newuserdata (L, sizeof (struct rspamd_mime_part *));
 			rspamd_lua_setclass (L, "rspamd{mimepart}", -1);
 			*pmime = part->mime_part;
 
@@ -408,56 +728,51 @@ lua_textpart_get_mimepart (lua_State * L)
 	return 1;
 }
 
+/***
+ * @method mime_part:get_stats()
+ * Returns a table with the following data:
+ * -
+ * - `lines`: number of lines
+ * - `spaces`: number of spaces
+ * - `double_spaces`: double spaces
+ * - `empty_lines`: number of empty lines
+ * - `non_ascii_characters`: number of non ascii characters
+ * - `ascii_characters`: number of ascii characters
+ * @return {table} table of stats
+ */
 static gint
-lua_textpart_compare_distance (lua_State * L)
+lua_textpart_get_stats (lua_State * L)
 {
-	struct mime_text_part *part = lua_check_textpart (L), *other;
-	void *ud = luaL_checkudata (L, 2, "rspamd{textpart}");
-	gint diff = -1;
-	GMimeObject *parent;
-	const GMimeContentType *ct;
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
 
-	luaL_argcheck (L, ud != NULL, 2, "'textpart' expected");
-	other = ud ? *((struct mime_text_part **)ud) : NULL;
+	if (part != NULL) {
+		lua_createtable (L, 0, 7);
 
-	if (other != NULL && part->parent && part->parent == other->parent) {
-		parent = part->parent;
-		ct = g_mime_object_get_content_type (parent);
-#ifndef GMIME24
-		if (ct == NULL ||
-			!g_mime_content_type_is_type (ct, "multipart", "alternative")) {
-#else
-		if (ct == NULL ||
-			!g_mime_content_type_is_type ((GMimeContentType *)ct, "multipart",
-			"alternative")) {
-#endif
-			diff = -1;
-
-		}
-		else {
-			if (!IS_PART_EMPTY (part) && !IS_PART_EMPTY (other)) {
-				if (part->diff_str != NULL && other->diff_str != NULL) {
-					diff = rspamd_diff_distance (part->diff_str,
-							other->diff_str);
-				}
-				else {
-					diff = rspamd_fuzzy_compare_parts (part, other);
-				}
-			}
-			else if ((IS_PART_EMPTY (part) &&
-				!IS_PART_EMPTY (other)) || (!IS_PART_EMPTY (part) &&
-						IS_PART_EMPTY (other))) {
-				/* Empty and non empty parts are different */
-				diff = 0;
-			}
-		}
+		lua_pushstring (L, "lines");
+		lua_pushnumber (L, part->nlines);
+		lua_settable (L, -3);
+		lua_pushstring (L, "empty_lines");
+		lua_pushnumber (L, part->empty_lines);
+		lua_settable (L, -3);
+		lua_pushstring (L, "spaces");
+		lua_pushnumber (L, part->spaces);
+		lua_settable (L, -3);
+		lua_pushstring (L, "non_spaces");
+		lua_pushnumber (L, part->non_spaces);
+		lua_settable (L, -3);
+		lua_pushstring (L, "double_spaces");
+		lua_pushnumber (L, part->double_spaces);
+		lua_settable (L, -3);
+		lua_pushstring (L, "ascii_characters");
+		lua_pushnumber (L, part->ascii_chars);
+		lua_settable (L, -3);
+		lua_pushstring (L, "non_ascii_characters");
+		lua_pushnumber (L, part->non_ascii_chars);
+		lua_settable (L, -3);
 	}
 	else {
-		diff = -1;
+		return luaL_error (L, "invalid arguments");
 	}
-
-
-	lua_pushinteger (L, diff);
 
 	return 1;
 }
@@ -467,7 +782,7 @@ lua_textpart_compare_distance (lua_State * L)
 static gint
 lua_mimepart_get_content (lua_State * L)
 {
-	struct mime_part *part = lua_check_mimepart (L);
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
 	struct rspamd_lua_text *t;
 
 	if (part == NULL) {
@@ -477,9 +792,9 @@ lua_mimepart_get_content (lua_State * L)
 
 	t = lua_newuserdata (L, sizeof (*t));
 	rspamd_lua_setclass (L, "rspamd{text}", -1);
-	t->start = part->content->data;
-	t->len = part->content->len;
-	t->own = FALSE;
+	t->start = part->parsed_data.begin;
+	t->len = part->parsed_data.len;
+	t->flags = 0;
 
 	return 1;
 }
@@ -487,14 +802,14 @@ lua_mimepart_get_content (lua_State * L)
 static gint
 lua_mimepart_get_length (lua_State * L)
 {
-	struct mime_part *part = lua_check_mimepart (L);
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
 
 	if (part == NULL) {
 		lua_pushnil (L);
 		return 1;
 	}
 
-	lua_pushinteger (L, part->content->len);
+	lua_pushnumber (L, part->parsed_data.len);
 
 	return 1;
 }
@@ -502,35 +817,46 @@ lua_mimepart_get_length (lua_State * L)
 static gint
 lua_mimepart_get_type (lua_State * L)
 {
-	struct mime_part *part = lua_check_mimepart (L);
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
 
 	if (part == NULL) {
 		lua_pushnil (L);
 		lua_pushnil (L);
 		return 2;
 	}
-#ifndef GMIME24
-	lua_pushstring (L, part->type->type);
-	lua_pushstring (L, part->type->subtype);
-#else
-	lua_pushstring (L, g_mime_content_type_get_media_type (part->type));
-	lua_pushstring (L, g_mime_content_type_get_media_subtype (part->type));
-#endif
+
+	lua_pushlstring (L, part->ct->type.begin, part->ct->type.len);
+	lua_pushlstring (L, part->ct->subtype.begin, part->ct->subtype.len);
 
 	return 2;
 }
 
 static gint
-lua_mimepart_get_filename (lua_State * L)
+lua_mimepart_get_cte (lua_State * L)
 {
-	struct mime_part *part = lua_check_mimepart (L);
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
 
-	if (part == NULL || part->filename == NULL) {
+	if (part == NULL) {
 		lua_pushnil (L);
 		return 1;
 	}
 
-	lua_pushstring (L, part->filename);
+	lua_pushstring (L, rspamd_cte_to_string (part->cte));
+
+	return 1;
+}
+
+static gint
+lua_mimepart_get_filename (lua_State * L)
+{
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL || part->cd == NULL || part->cd->filename.len == 0) {
+		lua_pushnil (L);
+		return 1;
+	}
+
+	lua_pushlstring (L, part->cd->filename.begin, part->cd->filename.len);
 
 	return 1;
 }
@@ -538,19 +864,22 @@ lua_mimepart_get_filename (lua_State * L)
 static gint
 lua_mimepart_get_header_common (lua_State *L, gboolean full, gboolean raw)
 {
-	gboolean strong = FALSE;
-	struct mime_part *part = lua_check_mimepart (L);
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
 	const gchar *name;
+	GPtrArray *ar;
 
 	name = luaL_checkstring (L, 2);
 
 	if (name && part) {
-		if (lua_gettop (L) == 3) {
-			strong = lua_toboolean (L, 3);
-		}
-		return rspamd_lua_push_header (L, part->raw_headers, name, strong, full, raw);
+
+		ar = rspamd_message_get_header_from_hash (part->raw_headers, NULL,
+				name, FALSE);
+
+		return rspamd_lua_push_header_array (L, ar, full, raw);
 	}
+
 	lua_pushnil (L);
+
 	return 1;
 }
 
@@ -572,17 +901,249 @@ lua_mimepart_get_header_raw (lua_State * L)
 	return lua_mimepart_get_header_common (L, FALSE, TRUE);
 }
 
+static gint
+lua_mimepart_is_image (lua_State * L)
+{
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	lua_pushboolean (L, (part->flags & RSPAMD_MIME_PART_IMAGE) ? true : false);
+
+	return 1;
+}
+
+static gint
+lua_mimepart_is_archive (lua_State * L)
+{
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	lua_pushboolean (L, (part->flags & RSPAMD_MIME_PART_ARCHIVE) ? true : false);
+
+	return 1;
+}
+
+static gint
+lua_mimepart_is_text (lua_State * L)
+{
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	lua_pushboolean (L, (part->flags & RSPAMD_MIME_PART_TEXT) ? true : false);
+
+	return 1;
+}
+
+static gint
+lua_mimepart_is_broken (lua_State * L)
+{
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	if (part->ct) {
+		lua_pushboolean (L, (part->ct->flags & RSPAMD_CONTENT_TYPE_BROKEN) ?
+				true : false);
+	}
+	else {
+		lua_pushboolean (L, true);
+	}
+
+	return 1;
+}
+
+static gint
+lua_mimepart_get_image (lua_State * L)
+{
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+	struct rspamd_image **pimg;
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	if (!(part->flags & RSPAMD_MIME_PART_IMAGE) || part->specific.img == NULL) {
+		lua_pushnil (L);
+	}
+	else {
+		pimg = lua_newuserdata (L, sizeof (*pimg));
+		*pimg = part->specific.img;
+		rspamd_lua_setclass (L, "rspamd{image}", -1);
+	}
+
+	return 1;
+}
+
+static gint
+lua_mimepart_get_archive (lua_State * L)
+{
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+	struct rspamd_archive **parch;
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	if (!(part->flags & RSPAMD_MIME_PART_ARCHIVE) || part->specific.arch == NULL) {
+		lua_pushnil (L);
+	}
+	else {
+		parch = lua_newuserdata (L, sizeof (*parch));
+		*parch = part->specific.arch;
+		rspamd_lua_setclass (L, "rspamd{archive}", -1);
+	}
+
+	return 1;
+}
+
+static gint
+lua_mimepart_get_text (lua_State * L)
+{
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+	struct rspamd_mime_text_part **ppart;
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	if (!(part->flags & RSPAMD_MIME_PART_TEXT) || part->specific.txt == NULL) {
+		lua_pushnil (L);
+	}
+	else {
+		ppart = lua_newuserdata (L, sizeof (*ppart));
+		*ppart = part->specific.txt;
+		rspamd_lua_setclass (L, "rspamd{textpart}", -1);
+	}
+
+	return 1;
+}
+
+static gint
+lua_mimepart_get_digest (lua_State * L)
+{
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+	gchar digestbuf[rspamd_cryptobox_HASHBYTES * 2 + 1];
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	memset (digestbuf, 0, sizeof (digestbuf));
+	rspamd_encode_hex_buf (part->digest, sizeof (part->digest),
+			digestbuf, sizeof (digestbuf));
+	lua_pushstring (L, digestbuf);
+
+	return 1;
+}
+
+static gint
+lua_mimepart_headers_foreach (lua_State *L)
+{
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+	gboolean full = FALSE, raw = FALSE;
+	struct rspamd_lua_regexp *re = NULL;
+	GList *cur;
+	struct rspamd_mime_header *hdr;
+	gint old_top;
+
+	if (part && lua_isfunction (L, 2)) {
+		if (lua_istable (L, 3)) {
+			lua_pushstring (L, "full");
+			lua_gettable (L, 3);
+
+			if (lua_isboolean (L, -1)) {
+				full = lua_toboolean (L, -1);
+			}
+
+			lua_pop (L, 1);
+
+			lua_pushstring (L, "raw");
+			lua_gettable (L, 3);
+
+			if (lua_isboolean (L, -1)) {
+				raw = lua_toboolean (L, -1);
+			}
+
+			lua_pop (L, 1);
+
+			lua_pushstring (L, "regexp");
+			lua_gettable (L, 3);
+
+			if (lua_isuserdata (L, -1)) {
+				re = *(struct rspamd_lua_regexp **)
+						rspamd_lua_check_udata (L, -1, "rspamd{regexp}");
+			}
+
+			lua_pop (L, 1);
+		}
+
+		if (part->headers_order) {
+			cur = part->headers_order->head;
+
+			while (cur) {
+				hdr = cur->data;
+
+				if (re && re->re) {
+					if (!rspamd_regexp_match (re->re, hdr->name,
+							strlen (hdr->name),FALSE)) {
+						cur = g_list_next (cur);
+						continue;
+					}
+				}
+
+				old_top = lua_gettop (L);
+				lua_pushvalue (L, 2);
+				lua_pushstring (L, hdr->name);
+				rspamd_lua_push_header (L, hdr, full, raw);
+
+				if (lua_pcall (L, 2, LUA_MULTRET, 0) != 0) {
+					msg_err ("call to header_foreach failed: %s",
+							lua_tostring (L, -1));
+					lua_settop (L, old_top);
+					break;
+				}
+				else {
+					if (lua_gettop (L) > old_top) {
+						if (lua_isboolean (L, old_top + 1)) {
+							if (lua_toboolean (L, old_top + 1)) {
+								lua_settop (L, old_top);
+								break;
+							}
+						}
+					}
+				}
+
+				lua_settop (L, old_top);
+				cur = g_list_next (cur);
+			}
+		}
+	}
+
+	return 0;
+}
+
 void
 luaopen_textpart (lua_State * L)
 {
 	rspamd_lua_new_class (L, "rspamd{textpart}", textpartlib_m);
-	lua_pop (L, 1);                      /* remove metatable from stack */
+	lua_pop (L, 1);
 }
 
 void
 luaopen_mimepart (lua_State * L)
 {
 	rspamd_lua_new_class (L, "rspamd{mimepart}", mimepartlib_m);
-	lua_pop (L, 1);                      /* remove metatable from stack */
+	lua_pop (L, 1);
 }
 

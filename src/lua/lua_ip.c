@@ -1,26 +1,18 @@
-/* Copyright (c) 2013, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "lua_common.h"
 
 /***
@@ -139,7 +131,7 @@ LUA_FUNCTION_DEF (ip, get_version);
 LUA_FUNCTION_DEF (ip, is_valid);
 /***
  * @method ip:apply_mask(mask)
- * Applies mask to IP address, reseting up to `mask` least significant bits to zero.
+ * Applies mask to IP address, resetting up to `mask` least significant bits to zero.
  * @param {integer} mask how many bits to reset
  * @return {ip} new IP object with `mask` bits reset
  */
@@ -164,6 +156,12 @@ LUA_FUNCTION_DEF (ip, copy);
  * @return {number} port number or nil
  */
 LUA_FUNCTION_DEF (ip, get_port);
+/***
+ * @method ip:is_local()
+ * Returns true if address is local one
+ * @return {boolean} `true` if address is local
+ */
+LUA_FUNCTION_DEF (ip, is_local);
 
 static const struct luaL_reg iplib_m[] = {
 	LUA_INTERFACE_DEF (ip, to_string),
@@ -176,6 +174,7 @@ static const struct luaL_reg iplib_m[] = {
 	LUA_INTERFACE_DEF (ip, is_valid),
 	LUA_INTERFACE_DEF (ip, apply_mask),
 	LUA_INTERFACE_DEF (ip, copy),
+	LUA_INTERFACE_DEF (ip, is_local),
 	{"__tostring", lua_ip_to_string},
 	{"__eq", lua_ip_equal},
 	{"__gc", lua_ip_destroy},
@@ -210,7 +209,7 @@ lua_ip_new (lua_State *L, struct rspamd_lua_ip *old)
 struct rspamd_lua_ip *
 lua_check_ip (lua_State * L, gint pos)
 {
-	void *ud = luaL_checkudata (L, pos, "rspamd{ip}");
+	void *ud = rspamd_lua_check_udata (L, pos, "rspamd{ip}");
 
 	luaL_argcheck (L, ud != NULL, pos, "'ip' expected");
 	return ud ? *((struct rspamd_lua_ip **)ud) : NULL;
@@ -224,8 +223,8 @@ lua_ip_to_table (lua_State *L)
 	guint8 *ptr;
 
 	if (ip != NULL && ip->addr) {
-		lua_newtable (L);
-		ptr = rspamd_inet_address_get_radix_key (ip->addr, &max);
+		ptr = rspamd_inet_address_get_hash_key (ip->addr, &max);
+		lua_createtable (L, max, 0);
 
 		for (i = 1; i <= max; i++, ptr++) {
 			lua_pushnumber (L, *ptr);
@@ -249,9 +248,9 @@ lua_ip_str_octets (lua_State *L)
 	char numbuf[8];
 
 	if (ip != NULL && ip->addr) {
-		lua_newtable (L);
 		af = rspamd_inet_address_get_af (ip->addr);
-		ptr = rspamd_inet_address_get_radix_key (ip->addr, &max);
+		ptr = rspamd_inet_address_get_hash_key (ip->addr, &max);
+		lua_createtable (L, max * 2, 0);
 
 		for (i = 1; i <= max; i++, ptr++) {
 			if (af == AF_INET) {
@@ -289,9 +288,9 @@ lua_ip_inversed_str_octets (lua_State *L)
 	gint af;
 
 	if (ip != NULL && ip->addr) {
-		lua_newtable (L);
-		ptr = rspamd_inet_address_get_radix_key (ip->addr, &max);
+		ptr = rspamd_inet_address_get_hash_key (ip->addr, &max);
 		af = rspamd_inet_address_get_af (ip->addr);
+		lua_createtable (L, max * 2, 0);
 
 		ptr += max - 1;
 		for (i = 1; i <= max; i++, ptr--) {
@@ -359,7 +358,11 @@ lua_ip_from_string (lua_State *L)
 	ip_str = luaL_checkstring (L, 1);
 	if (ip_str) {
 		ip = lua_ip_new (L, NULL);
-		rspamd_parse_inet_address (&ip->addr, ip_str);
+
+		if (!rspamd_parse_inet_address (&ip->addr, ip_str, 0)) {
+			msg_warn ("cannot parse ip: %s", ip_str);
+			ip->addr = NULL;
+		}
 	}
 	else {
 		lua_pushnil (L);
@@ -377,7 +380,7 @@ lua_ip_to_number (lua_State *L)
 	guchar *ptr;
 
 	if (ip != NULL && ip->addr) {
-		ptr = rspamd_inet_address_get_radix_key (ip->addr, &max);
+		ptr = rspamd_inet_address_get_hash_key (ip->addr, &max);
 
 		for (i = 0; i < max / sizeof (c); i ++) {
 			memcpy (&c, ptr + i * sizeof (c), sizeof (c));
@@ -401,7 +404,7 @@ lua_ip_destroy (lua_State *L)
 
 	if (ip) {
 		if (ip->addr) {
-			rspamd_inet_address_destroy (ip->addr);
+			rspamd_inet_address_free (ip->addr);
 		}
 		g_slice_free1 (sizeof (struct rspamd_lua_ip), ip);
 	}
@@ -489,6 +492,28 @@ lua_ip_copy (lua_State *L)
 	return 1;
 }
 
+static gint
+lua_ip_is_local (lua_State *L)
+{
+	struct rspamd_lua_ip *ip = lua_check_ip (L, 1);
+	gboolean check_laddrs = TRUE;
+
+	if (ip && ip->addr) {
+
+		if (lua_type (L, 2) == LUA_TBOOLEAN) {
+			check_laddrs = lua_toboolean (L, 2);
+		}
+
+		lua_pushboolean (L, rspamd_inet_address_is_local (ip->addr,
+				check_laddrs));
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
 void
 rspamd_lua_ip_push (lua_State *L, rspamd_inet_addr_t *addr)
 {
@@ -511,11 +536,17 @@ rspamd_lua_ip_push_fromstring (lua_State *L, const gchar *ip_str)
 	}
 	else {
 		ip = g_slice_alloc0 (sizeof (struct rspamd_lua_ip));
-		rspamd_parse_inet_address (&ip->addr, ip_str);
 
-		pip = lua_newuserdata (L, sizeof (struct rspamd_lua_ip *));
-		rspamd_lua_setclass (L, "rspamd{ip}", -1);
-		*pip = ip;
+		if (rspamd_parse_inet_address (&ip->addr, ip_str, 0)) {
+
+			pip = lua_newuserdata (L, sizeof (struct rspamd_lua_ip *));
+			rspamd_lua_setclass (L, "rspamd{ip}", -1);
+			*pip = ip;
+		}
+		else {
+			g_slice_free1 (sizeof (*ip), ip);
+			lua_pushnil (L);
+		}
 	}
 }
 
@@ -543,5 +574,5 @@ luaopen_ip (lua_State * L)
 	luaL_register (L, NULL,		   iplib_m);
 	rspamd_lua_add_preload (L, "rspamd_ip", lua_load_ip);
 
-	lua_pop (L, 1);                      /* remove metatable from stack */
+	lua_pop (L, 1);
 }

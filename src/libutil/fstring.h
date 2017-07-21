@@ -1,121 +1,193 @@
-/*
- * Functions for handling with fixed size strings
+/*-
+ * Copyright 2016 Vsevolod Stakhov
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #ifndef FSTRING_H
 #define FSTRING_H
 
 #include "config.h"
 #include "mem_pool.h"
 
-#define update_buf_size(x) (x)->free = (x)->buf->size - \
-		((x)->pos - (x)->buf->begin); (x)->buf->len = (x)->pos - (x)->buf->begin
+/**
+ * Fixed strings library
+ * These strings are NOT null-terminated for speed
+ */
 
 typedef struct f_str_s {
-	gchar *begin;
-	size_t len;
-	size_t size;
+	gsize len;
+	gsize allocated;
+	gchar str[];
 } rspamd_fstring_t;
 
-typedef struct f_str_buf_s {
-	rspamd_fstring_t *buf;
-	gchar *pos;
-	size_t free;
-} rspamd_fstring_buf_t;
+typedef struct f_str_tok {
+	gsize len;
+	const gchar *begin;
+} rspamd_ftok_t;
 
-typedef struct f_tok_s {
-	rspamd_fstring_t word;
-	size_t pos;
-} rspamd_fstring_token_t;
-
-/*
- * Search first occurence of character in string
+/**
+ * Create new fixed length string
  */
-ssize_t rspamd_fstrchr (rspamd_fstring_t *src, gchar c);
+rspamd_fstring_t* rspamd_fstring_new (void)
+		G_GNUC_WARN_UNUSED_RESULT;
 
-/*
- * Search last occurence of character in string
+/**
+ * Create new fixed length string with preallocated size
  */
-ssize_t rspamd_fstrrchr (rspamd_fstring_t *src, gchar c);
+rspamd_fstring_t *rspamd_fstring_sized_new (gsize initial_size)
+		G_GNUC_WARN_UNUSED_RESULT;
 
-/*
- * Search for pattern in orig
+/**
+ * Create new fixed length string and initialize it with the initial data
  */
-ssize_t rspamd_fstrstr (rspamd_fstring_t *orig, rspamd_fstring_t *pattern);
+rspamd_fstring_t *rspamd_fstring_new_init (const gchar *init, gsize len)
+		G_GNUC_WARN_UNUSED_RESULT;
 
-/*
- * Search for pattern in orig ignoring case
+/**
+ * Assign new value to fixed string
  */
-ssize_t rspamd_fstrstri (rspamd_fstring_t *orig, rspamd_fstring_t *pattern);
+rspamd_fstring_t *rspamd_fstring_assign (rspamd_fstring_t *str,
+		const gchar *init, gsize len) G_GNUC_WARN_UNUSED_RESULT;
 
-/*
- * Split string by tokens
- * word contains parsed word
+/**
+ * Free fixed length string
  */
-gint rspamd_fstrtok (rspamd_fstring_t *text, const gchar *sep, rspamd_fstring_token_t *state);
+void rspamd_fstring_free (rspamd_fstring_t *str);
 
-/*
- * Copy one string into other
+/**
+ * Append data to a fixed length string
  */
-size_t rspamd_fstrcpy (rspamd_fstring_t *dest, rspamd_fstring_t *src);
+rspamd_fstring_t* rspamd_fstring_append (rspamd_fstring_t *str,
+		const char *in, gsize len) G_GNUC_WARN_UNUSED_RESULT;
 
-/*
- * Concatenate two strings
+/**
+ * Append `len` repeated chars `c` to string `str`
  */
-size_t rspamd_fstrcat (rspamd_fstring_t *dest, rspamd_fstring_t *src);
+rspamd_fstring_t *rspamd_fstring_append_chars (rspamd_fstring_t *str,
+		char c, gsize len) G_GNUC_WARN_UNUSED_RESULT;
 
-/*
- * Push one character to fstr
+/**
+ * Erase `len` characters at position `pos`
  */
-gint rspamd_fstrappend_c (rspamd_fstring_t *dest, gchar c);
+void rspamd_fstring_erase (rspamd_fstring_t *str, gsize pos, gsize len);
 
-/*
- * Push one character to fstr
- */
-gint rspamd_fstrappend_u (rspamd_fstring_t *dest, gunichar c);
+#define rspamd_fstring_clear(s) rspamd_fstring_erase(s, 0, s->len)
 
-/*
- * Allocate memory for f_str_t
+/**
+ * Convert fixed string to a zero terminated string. This string should be
+ * freed by a caller
  */
-rspamd_fstring_t * rspamd_fstralloc (rspamd_mempool_t *pool, size_t len);
-
-/*
- * Allocate memory for f_str_t from temporary pool
- */
-rspamd_fstring_t * rspamd_fstralloc_tmp (rspamd_mempool_t *pool, size_t len);
-
-/*
- * Truncate string to its len
- */
-rspamd_fstring_t * rspamd_fstrtruncate (rspamd_mempool_t *pool, rspamd_fstring_t *orig);
-
-/*
- * Enlarge string to new size
- */
-rspamd_fstring_t * rspamd_fstrgrow (rspamd_mempool_t *pool, rspamd_fstring_t *orig, size_t newlen);
-
-/*
- * Return specified character
- */
-#define fstridx(str, pos) *((str)->begin + (pos))
-
-/*
- * Return fast hash value for fixed string
- */
-guint32 rspamd_fstrhash (rspamd_fstring_t *str);
+char * rspamd_fstring_cstr (const rspamd_fstring_t *str)
+		G_GNUC_WARN_UNUSED_RESULT;
 
 /*
  * Return fast hash value for fixed string converted to lowercase
  */
-guint32 rspamd_fstrhash_lc (rspamd_fstring_t *str, gboolean is_utf);
-/*
- * Make copy of string to 0-terminated string
- */
-gchar * rspamd_fstr_c_str (rspamd_fstring_t *str, rspamd_mempool_t *pool);
+guint32 rspamd_fstrhash_lc (const rspamd_ftok_t *str, gboolean is_utf);
 
-/*
- * Strip fstr string from space symbols
+/**
+ * Return true if two strings are equal
  */
-void rspamd_fstrstrip (rspamd_fstring_t *str);
+gboolean rspamd_fstring_equal (const rspamd_fstring_t *s1,
+		const rspamd_fstring_t *s2);
+
+/**
+ * Compare two fixed strings ignoring case
+ */
+gint rspamd_fstring_casecmp (const rspamd_fstring_t *s1,
+		const rspamd_fstring_t *s2);
+
+/**
+ * Compare two fixed strings
+ */
+gint rspamd_fstring_cmp (const rspamd_fstring_t *s1,
+		const rspamd_fstring_t *s2);
+
+/**
+ * Compare two fixed tokens ignoring case
+ */
+gint rspamd_ftok_casecmp (const rspamd_ftok_t *s1,
+		const rspamd_ftok_t *s2);
+
+/**
+ * Compare two fixed tokens
+ */
+gint rspamd_ftok_cmp (const rspamd_ftok_t *s1,
+		const rspamd_ftok_t *s2);
+
+/**
+ * Return TRUE if ftok is equal to specified C string
+ */
+gboolean rspamd_ftok_cstr_equal (const rspamd_ftok_t *s,
+		const gchar *pat, gboolean icase);
+
+/**
+ * Free fstring_t that is mapped to ftok_t
+ *
+ * | len | allocated | <data> -- fstring_t
+ *                     <begin> -- tok
+ *
+ * tok is expected to be allocated with g_slice_alloc
+ */
+void rspamd_fstring_mapped_ftok_free (gpointer p);
+
+/**
+ * Map token to a specified string. Token must be freed using g_slice_free1
+ */
+rspamd_ftok_t *rspamd_ftok_map (const rspamd_fstring_t *s);
+
+/**
+ * Suggest suitable size to grow fstring
+ * @param len
+ * @param allocated
+ * @param needed_len
+ * @return
+ */
+gsize rspamd_fstring_suggest_size (gsize len, gsize allocated, gsize needed_len);
+
+/**
+ * Grow the specified fixed string
+ * @param str
+ * @param needed_len
+ * @return
+ */
+rspamd_fstring_t * rspamd_fstring_grow (rspamd_fstring_t *str,
+		gsize needed_len) G_GNUC_WARN_UNUSED_RESULT;
+
+/**
+ * Copies ftok to zero terminated string (must be freed using g_free)
+ * @param src
+ * @return
+ */
+gchar *rspamd_ftokdup (const rspamd_ftok_t *src) G_GNUC_WARN_UNUSED_RESULT;
+
+/**
+ * Copies fstring to zero terminated string (must be freed using g_free)
+ * @param src
+ * @return
+ */
+gchar *rspamd_fstringdup (const rspamd_fstring_t *src) G_GNUC_WARN_UNUSED_RESULT;
+
+#define RSPAMD_FTOK_ASSIGN(t, lit) do { (t)->begin = (lit); (t)->len = sizeof(lit) - 1; } while (0)
+#define RSPAMD_FTOK_FROM_STR(t, str) do { \
+	if (G_LIKELY(str)) { \
+		(t)->begin = (const char*)(str); \
+		(t)->len = strlen (str); \
+	} \
+	else { \
+		(t)->begin = NULL; \
+		(t)->len = 0; \
+	} \
+} while (0)
 
 #endif

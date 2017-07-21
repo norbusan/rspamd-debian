@@ -1,27 +1,18 @@
-/*
- * Copyright (c) 2015, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *	 * Redistributions of source code must retain the above copyright
- *	   notice, this list of conditions and the following disclaimer.
- *	 * Redistributions in binary form must reproduce the above copyright
- *	   notice, this list of conditions and the following disclaimer in the
- *	   documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "config.h"
 #include "expression.h"
 #include "printf.h"
@@ -36,28 +27,14 @@
 #define MIN_RESORT_EVALS 50
 #define MAX_RESORT_EVALS 150
 
-enum rspamd_expression_op {
-	OP_INVALID = 0,
-	OP_PLUS, /* || or + */
-	OP_MULT, /* && or * */
-	OP_OR, /* || or | */
-	OP_AND, /* && or & */
-	OP_NOT, /* ! */
-	OP_LT, /* < */
-	OP_GT, /* > */
-	OP_LE, /* <= */
-	OP_GE, /* >= */
-	OP_OBRACE, /* ( */
-	OP_CBRACE /* ) */
+enum rspamd_expression_elt_type {
+	ELT_OP = 0,
+	ELT_ATOM,
+	ELT_LIMIT
 };
 
 struct rspamd_expression_elt {
-	enum {
-		ELT_OP = 0,
-		ELT_ATOM,
-		ELT_LIMIT
-	} type;
-
+	enum rspamd_expression_elt_type type;
 	union {
 		rspamd_expression_atom_t *atom;
 		enum rspamd_expression_op op;
@@ -166,6 +143,23 @@ static gpointer
 rspamd_expr_stack_pop (struct rspamd_expression *expr)
 {
 	return rspamd_expr_stack_elt_pop (expr->expression_stack);
+}
+
+static gpointer
+rspamd_expr_stack_peek (struct rspamd_expression *expr)
+{
+	gpointer e;
+	gint idx;
+	GPtrArray *stack = expr->expression_stack;
+
+	if (stack->len == 0) {
+		return NULL;
+	}
+
+	idx = stack->len - 1;
+	e = g_ptr_array_index (stack, idx);
+
+	return e;
 }
 
 /*
@@ -360,9 +354,17 @@ rspamd_expression_destroy (struct rspamd_expression *expr)
 			}
 		}
 
-		g_array_free (expr->expressions, TRUE);
-		g_ptr_array_free (expr->expression_stack, TRUE);
-		g_node_destroy (expr->ast);
+		if (expr->expressions) {
+			g_array_free (expr->expressions, TRUE);
+		}
+		if (expr->expression_stack) {
+			g_ptr_array_free (expr->expression_stack, TRUE);
+		}
+		if (expr->ast) {
+			g_node_destroy (expr->ast);
+		}
+
+		g_slice_free1 (sizeof (*expr), expr);
 	}
 }
 
@@ -380,11 +382,20 @@ rspamd_ast_add_node (GPtrArray *operands, struct rspamd_expression_elt *op,
 		/* Unary operator */
 		res = g_node_new (op);
 		a1 = rspamd_expr_stack_elt_pop (operands);
-		g_node_append (res, a1);
+
 		if (a1 == NULL) {
 			g_set_error (err, rspamd_expr_quark(), EINVAL, "no operand to "
 					"unary '%s' operation", rspamd_expr_op_to_str (op->p.op));
+			g_node_destroy (res);
+
 			return FALSE;
+		}
+
+		g_node_append (res, a1);
+		test_elt = a1->data;
+
+		if (test_elt->type == ELT_ATOM) {
+			test_elt->p.atom->parent = res;
 		}
 	}
 	else {
@@ -402,6 +413,7 @@ rspamd_ast_add_node (GPtrArray *operands, struct rspamd_expression_elt *op,
 					"'%s' operation", rspamd_expr_op_to_str (op->p.op));
 			return FALSE;
 		}
+
 		/* First try with a1 */
 		test = a1;
 		test_elt = test->data;
@@ -412,6 +424,7 @@ rspamd_ast_add_node (GPtrArray *operands, struct rspamd_expression_elt *op,
 			rspamd_expr_stack_elt_push (operands, a1);
 			return TRUE;
 		}
+
 		/* Now test a2 */
 		test = a2;
 		test_elt = test->data;
@@ -427,6 +440,16 @@ rspamd_ast_add_node (GPtrArray *operands, struct rspamd_expression_elt *op,
 		res = g_node_new (op);
 		g_node_append (res, a1);
 		g_node_append (res, a2);
+
+		test_elt = a1->data;
+		if (test_elt->type == ELT_ATOM) {
+			test_elt->p.atom->parent = res;
+		}
+
+		test_elt = a2->data;
+		if (test_elt->type == ELT_ATOM) {
+			test_elt->p.atom->parent = res;
+		}
 	}
 
 	/* Push back resulting node to the stack */
@@ -484,6 +507,13 @@ rspamd_ast_priority_cmp (GNode *a, GNode *b)
 	struct rspamd_expression_elt *ea = a->data, *eb = b->data;
 	gdouble w1, w2;
 
+	if (ea->type == ELT_LIMIT) {
+		return -1;
+	}
+	else if (eb->type == ELT_LIMIT) {
+		return 1;
+	}
+
 	/* Special logic for atoms */
 	if (ea->type == ELT_ATOM && eb->type == ELT_ATOM &&
 			ea->priority == eb->priority) {
@@ -503,8 +533,18 @@ rspamd_ast_priority_cmp (GNode *a, GNode *b)
 static gboolean
 rspamd_ast_resort_traverse (GNode *node, gpointer unused)
 {
+	GNode *children, *last;
+
 	if (node->children) {
+
+		children = node->children;
+		last = g_node_last_sibling (children);
+		/* Needed for utlist compatibility */
+		children->prev = last;
 		DL_SORT (node->children, rspamd_ast_priority_cmp);
+		/* Restore GLIB compatibility */
+		children = node->children;
+		children->prev = NULL;
 	}
 
 	return FALSE;
@@ -534,6 +574,7 @@ rspamd_parse_expression (const gchar *line, gsize len,
 	enum rspamd_expression_op op, op_stack;
 	const gchar *p, *c, *end;
 	GPtrArray *operand_stack;
+	GNode *tmp;
 
 	enum {
 		PARSE_ATOM = 0,
@@ -592,19 +633,47 @@ rspamd_parse_expression (const gchar *line, gsize len,
 					g_ascii_strncasecmp (p, "or ", sizeof ("or ") - 1) == 0) {
 					state = PARSE_OP;
 				}
-				else if (rspamd_regexp_search (num_re, p, end - p, NULL, NULL,
-						FALSE, NULL)) {
-					c = p;
-					state = PARSE_LIM;
-				}
 				else {
+					/*
+					 * If we have any comparison operator in the stack, then try
+					 * to parse limit
+					 */
+					op = GPOINTER_TO_INT (rspamd_expr_stack_peek (e));
+
+					if (op >= OP_LT && op <= OP_GE) {
+						if (rspamd_regexp_search (num_re,
+								p,
+								end - p,
+								NULL,
+								NULL,
+								FALSE,
+								NULL)) {
+							c = p;
+							state = PARSE_LIM;
+							continue;
+						}
+					}
+
 					/* Try to parse atom */
 					atom = subr->parse (p, end - p, pool, subr_data, err);
-					if (atom == NULL) {
+					if (atom == NULL || atom->len == 0) {
 						/* We couldn't parse the atom, so go out */
+						if (err != NULL && *err == NULL) {
+							g_set_error (err,
+									rspamd_expr_quark (),
+									500,
+									"Cannot parse atom: callback function failed"
+											" to parse '%.*s'",
+									(int) (end - p),
+									p);
+						}
 						goto err;
 					}
-					g_assert (atom->len != 0);
+
+					if (atom->str == NULL) {
+						atom->str = p;
+					}
+
 					p = p + atom->len;
 
 					/* Push to output */
@@ -613,6 +682,7 @@ rspamd_parse_expression (const gchar *line, gsize len,
 					g_array_append_val (e->expressions, elt);
 					rspamd_expr_stack_elt_push (operand_stack,
 							g_node_new (rspamd_expr_dup_elt (pool, &elt)));
+
 				}
 			}
 			break;
@@ -797,6 +867,13 @@ rspamd_parse_expression (const gchar *line, gsize len,
 	return TRUE;
 
 err:
+	while ((tmp = rspamd_expr_stack_elt_pop (operand_stack)) != NULL) {
+		g_node_destroy (tmp);
+	}
+
+	g_ptr_array_free (operand_stack, TRUE);
+	rspamd_expression_destroy (e);
+
 	return FALSE;
 }
 
@@ -863,7 +940,8 @@ rspamd_ast_node_done (struct rspamd_expression_elt *elt,
 }
 
 static gint
-rspamd_ast_do_op (struct rspamd_expression_elt *elt, gint val, gint acc, gint lim)
+rspamd_ast_do_op (struct rspamd_expression_elt *elt, gint val,
+		gint acc, gint lim, gboolean first_elt)
 {
 	gint ret = val;
 
@@ -877,23 +955,23 @@ rspamd_ast_do_op (struct rspamd_expression_elt *elt, gint val, gint acc, gint li
 		ret = acc + val;
 		break;
 	case OP_GE:
-		ret = acc >= lim;
+		ret = first_elt ? (val >= lim) : (acc >= lim);
 		break;
 	case OP_GT:
-		ret = acc > lim;
+		ret = first_elt ? (val > lim) : (acc > lim);
 		break;
 	case OP_LE:
-		ret = acc <= lim;
+		ret = first_elt ? (val <= lim) : (acc <= lim);
 		break;
 	case OP_LT:
-		ret = acc < lim;
+		ret = first_elt ? (val < lim) : (acc < lim);
 		break;
 	case OP_MULT:
 	case OP_AND:
-		ret = acc && val;
+		ret = first_elt ? (val) : (acc && val);
 		break;
 	case OP_OR:
-		ret = acc || val;
+		ret = first_elt ? (val) : (acc || val);
 		break;
 	default:
 		g_assert (0);
@@ -905,7 +983,7 @@ rspamd_ast_do_op (struct rspamd_expression_elt *elt, gint val, gint acc, gint li
 
 static gint
 rspamd_ast_process_node (struct rspamd_expression *expr, gint flags, GNode *node,
-		gpointer data)
+		gpointer data, GPtrArray *track)
 {
 	struct rspamd_expression_elt *elt, *celt, *parelt = NULL;
 	GNode *cld;
@@ -934,6 +1012,10 @@ rspamd_ast_process_node (struct rspamd_expression *expr, gint flags, GNode *node
 
 			if (elt->value) {
 				elt->p.atom->hits ++;
+
+				if (track) {
+					g_ptr_array_add (track, elt->p.atom);
+				}
 			}
 
 			if (calc_ticks) {
@@ -974,13 +1056,14 @@ rspamd_ast_process_node (struct rspamd_expression *expr, gint flags, GNode *node
 				continue;
 			}
 
-			val = rspamd_ast_process_node (expr, flags, cld, data);
+			val = rspamd_ast_process_node (expr, flags, cld, data, track);
 
 			if (acc == G_MININT) {
-				acc = val;
+				acc = rspamd_ast_do_op (elt, val, 0, lim, TRUE);
 			}
-
-			acc = rspamd_ast_do_op (elt, val, acc, lim);
+			else {
+				acc = rspamd_ast_do_op (elt, val, acc, lim, FALSE);
+			}
 
 			if (!(flags & RSPAMD_EXPRESSION_FLAG_NOOPT)) {
 				if (rspamd_ast_node_done (elt, parelt, acc, lim)) {
@@ -1006,8 +1089,8 @@ rspamd_ast_cleanup_traverse (GNode *n, gpointer d)
 }
 
 gint
-rspamd_process_expression (struct rspamd_expression *expr, gint flags,
-		gpointer data)
+rspamd_process_expression_track (struct rspamd_expression *expr, gint flags,
+		gpointer data, GPtrArray *track)
 {
 	gint ret = 0;
 
@@ -1015,7 +1098,7 @@ rspamd_process_expression (struct rspamd_expression *expr, gint flags,
 	/* Ensure that stack is empty at this point */
 	g_assert (expr->expression_stack->len == 0);
 
-	ret = rspamd_ast_process_node (expr, flags, expr->ast, data);
+	ret = rspamd_ast_process_node (expr, flags, expr->ast, data, track);
 
 	/* Cleanup */
 	g_node_traverse (expr->ast, G_IN_ORDER, G_TRAVERSE_ALL, -1,
@@ -1039,6 +1122,13 @@ rspamd_process_expression (struct rspamd_expression *expr, gint flags,
 	return ret;
 }
 
+gint
+rspamd_process_expression (struct rspamd_expression *expr, gint flags,
+		gpointer data)
+{
+	return rspamd_process_expression_track (expr, flags, data, NULL);
+}
+
 static gboolean
 rspamd_ast_string_traverse (GNode *n, gpointer d)
 {
@@ -1049,7 +1139,8 @@ rspamd_ast_string_traverse (GNode *n, gpointer d)
 	const char *op_str = NULL;
 
 	if (elt->type == ELT_ATOM) {
-		g_string_append_len (res, elt->p.atom->str, elt->p.atom->len);
+		rspamd_printf_gstring (res, "(%*s)",
+				(int)elt->p.atom->len, elt->p.atom->str);
 	}
 	else if (elt->type == ELT_LIMIT) {
 		rspamd_printf_gstring (res, "%d", elt->p.lim.val);
@@ -1090,4 +1181,56 @@ rspamd_expression_tostring (struct rspamd_expression *expr)
 	}
 
 	return res;
+}
+
+struct atom_foreach_cbdata {
+	rspamd_expression_atom_foreach_cb cb;
+	gpointer cbdata;
+};
+
+static gboolean
+rspamd_ast_atom_traverse (GNode *n, gpointer d)
+{
+	struct atom_foreach_cbdata *data = d;
+	struct rspamd_expression_elt *elt = n->data;
+	rspamd_ftok_t tok;
+
+	if (elt->type == ELT_ATOM) {
+		tok.begin = elt->p.atom->str;
+		tok.len = elt->p.atom->len;
+
+		data->cb (&tok, data->cbdata);
+	}
+
+	return FALSE;
+}
+
+void
+rspamd_expression_atom_foreach (struct rspamd_expression *expr,
+		rspamd_expression_atom_foreach_cb cb, gpointer cbdata)
+{
+	struct atom_foreach_cbdata data;
+
+	g_assert (expr != NULL);
+
+	data.cb = cb;
+	data.cbdata = cbdata;
+	g_node_traverse (expr->ast, G_POST_ORDER, G_TRAVERSE_ALL, -1,
+			rspamd_ast_atom_traverse, &data);
+}
+
+gboolean
+rspamd_expression_node_is_op (GNode *node, enum rspamd_expression_op op)
+{
+	struct rspamd_expression_elt *elt;
+
+	g_assert (node != NULL);
+
+	elt = node->data;
+
+	if (elt->type == ELT_OP && elt->p.op == op) {
+		return TRUE;
+	}
+
+	return FALSE;
 }

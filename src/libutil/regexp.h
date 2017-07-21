@@ -1,31 +1,38 @@
-/*
- * Copyright (c) 2015, Vsevolod Stakhov
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * All rights reserved.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *	 * Redistributions of source code must retain the above copyright
- *	   notice, this list of conditions and the following disclaimer.
- *	 * Redistributions in binary form must reproduce the above copyright
- *	   notice, this list of conditions and the following disclaimer in the
- *	   documentation and/or other materials provided with the distribution.
+ *   http://www.apache.org/licenses/LICENSE-2.0
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 #ifndef REGEXP_H_
 #define REGEXP_H_
 
 #include "config.h"
+
+#ifndef WITH_PCRE2
+#define PCRE_FLAG(x) G_PASTE(PCRE_, x)
+#else
+#ifndef PCRE2_CODE_UNIT_WIDTH
+#define PCRE2_CODE_UNIT_WIDTH 8
+#endif
+#define PCRE_FLAG(x) G_PASTE(PCRE2_, x)
+#endif
+
+#define RSPAMD_INVALID_ID ((guint64)-1LL)
+#define RSPAMD_REGEXP_FLAG_RAW (1 << 1)
+#define RSPAMD_REGEXP_FLAG_NOOPT (1 << 2)
+#define RSPAMD_REGEXP_FLAG_FULL_MATCH (1 << 3)
+#define RSPAMD_REGEXP_FLAG_PCRE_ONLY (1 << 4)
+#define RSPAMD_REGEXP_FLAG_DISABLE_JIT (1 << 5)
 
 typedef struct rspamd_regexp_s rspamd_regexp_t;
 struct rspamd_regexp_cache;
@@ -111,6 +118,61 @@ gpointer rspamd_regexp_get_id (rspamd_regexp_t *re);
 const char* rspamd_regexp_get_pattern (rspamd_regexp_t *re);
 
 /**
+ * Get PCRE flags for the regexp
+ */
+guint rspamd_regexp_get_pcre_flags (rspamd_regexp_t *re);
+/**
+ * Get rspamd flags for the regexp
+ */
+guint rspamd_regexp_get_flags (rspamd_regexp_t *re);
+
+/**
+ * Set rspamd flags for the regexp
+ */
+guint rspamd_regexp_set_flags (rspamd_regexp_t *re, guint new_flags);
+
+/**
+ * Set regexp maximum hits
+ */
+guint rspamd_regexp_get_maxhits (rspamd_regexp_t *re);
+
+/**
+ * Get regexp maximum hits
+ */
+guint rspamd_regexp_set_maxhits (rspamd_regexp_t *re, guint new_maxhits);
+
+/**
+ * Returns number of backreferences in a regexp
+ */
+gint rspamd_regexp_get_nbackrefs (rspamd_regexp_t *re);
+
+/**
+ * Returns number of capture groups in a regexp
+ */
+gint rspamd_regexp_get_ncaptures (rspamd_regexp_t *re);
+
+/**
+ * Returns cache id for a regexp
+ */
+guint64 rspamd_regexp_get_cache_id (rspamd_regexp_t *re);
+
+/**
+ * Sets cache id for a regexp
+ */
+guint64 rspamd_regexp_set_cache_id (rspamd_regexp_t *re, guint64 id);
+
+/**
+ * Get regexp class for the re object
+ */
+gpointer rspamd_regexp_get_class (rspamd_regexp_t *re);
+
+/**
+ * Set regexp class for the re object
+ * @return old re class value
+ */
+gpointer rspamd_regexp_set_class (rspamd_regexp_t *re, gpointer re_class);
+
+/**
  * Create new regexp cache
  * @return
  */
@@ -181,6 +243,11 @@ guint32 rspamd_regexp_hash (gconstpointer a);
 gboolean rspamd_regexp_equal (gconstpointer a, gconstpointer b);
 
 /**
+ * Acts like memcmp but for regexp
+ */
+gint rspamd_regexp_cmp (gconstpointer a, gconstpointer b);
+
+/**
  * Initialize superglobal regexp cache and library
  */
 void rspamd_regexp_library_init (void);
@@ -189,5 +256,13 @@ void rspamd_regexp_library_init (void);
  * Cleanup internal library structures
  */
 void rspamd_regexp_library_finalize (void);
+
+/**
+ * Create regexp from glob
+ * @param gl
+ * @param err
+ * @return
+ */
+rspamd_regexp_t *rspamd_regexp_from_glob (const gchar *gl, gsize sz, GError **err);
 
 #endif /* REGEXP_H_ */

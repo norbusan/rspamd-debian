@@ -1,38 +1,30 @@
-/*
- * Copyright (c) 2015, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *	 * Redistributions of source code must retain the above copyright
- *	   notice, this list of conditions and the following disclaimer.
- *	 * Redistributions in binary form must reproduce the above copyright
- *	   notice, this list of conditions and the following disclaimer in the
- *	   documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
-
 #include "config.h"
-#include "main.h"
+#include "rspamd.h"
 #include "shingles.h"
 #include "fstring.h"
 #include "ottery.h"
 #include "cryptobox.h"
+#include "unix-std.h"
 
 static const int mapping_size = 64 * 8192 + 1;
 static const int max_seg = 32;
 static const int random_fuzz_cnt = 10000;
+enum rspamd_cryptobox_mode mode = RSPAMD_CRYPTOBOX_MODE_25519;
 
 static void *
 create_mapping (int mapping_len, guchar **beg, guchar **end)
@@ -55,12 +47,12 @@ create_mapping (int mapping_len, guchar **beg, guchar **end)
 
 static void
 check_result (const rspamd_nm_t key, const rspamd_nonce_t nonce,
-		const rspamd_sig_t mac, guchar *begin, guchar *end)
+		const rspamd_mac_t mac, guchar *begin, guchar *end)
 {
 	guint64 *t = (guint64 *)begin;
 
 	g_assert (rspamd_cryptobox_decrypt_nm_inplace (begin, end - begin, nonce, key,
-			mac));
+			mac, mode));
 
 	while (t < (guint64 *)end) {
 		g_assert (*t == 0);
@@ -167,10 +159,11 @@ rspamd_cryptobox_test_func (void)
 	guchar *begin, *end;
 	rspamd_nm_t key;
 	rspamd_nonce_t nonce;
-	rspamd_sig_t mac;
+	rspamd_mac_t mac;
 	struct rspamd_cryptobox_segment *seg;
 	double t1, t2;
 	gint i, cnt, ms;
+	gboolean checked_openssl = FALSE;
 
 	map = create_mapping (mapping_size, &begin, &end);
 
@@ -182,16 +175,33 @@ rspamd_cryptobox_test_func (void)
 
 	/* Test baseline */
 	t1 = rspamd_get_ticks ();
-	rspamd_cryptobox_encrypt_nm_inplace (begin, end - begin, nonce, key, mac);
+	rspamd_cryptobox_encrypt_nm_inplace (begin, end - begin, nonce, key, mac,
+			mode);
 	t2 = rspamd_get_ticks ();
 	check_result (key, nonce, mac, begin, end);
 
 	msg_info ("baseline encryption: %.6f", t2 - t1);
+
+	mode = RSPAMD_CRYPTOBOX_MODE_NIST;
+	t1 = rspamd_get_ticks ();
+	rspamd_cryptobox_encrypt_nm_inplace (begin,
+			end - begin,
+			nonce,
+			key,
+			mac,
+			mode);
+	t2 = rspamd_get_ticks ();
+	check_result (key, nonce, mac, begin, end);
+
+	msg_info ("openssl baseline encryption: %.6f", t2 - t1);
+	mode = RSPAMD_CRYPTOBOX_MODE_25519;
+
+start:
 	/* A single chunk as vector */
 	seg[0].data = begin;
 	seg[0].len = end - begin;
 	t1 = rspamd_get_ticks ();
-	rspamd_cryptobox_encryptv_nm_inplace (seg, 1, nonce, key, mac);
+	rspamd_cryptobox_encryptv_nm_inplace (seg, 1, nonce, key, mac, mode);
 	t2 = rspamd_get_ticks ();
 
 	check_result (key, nonce, mac, begin, end);
@@ -204,7 +214,7 @@ rspamd_cryptobox_test_func (void)
 	seg[1].data = begin + seg[0].len;
 	seg[1].len = (end - begin) - seg[0].len;
 	t1 = rspamd_get_ticks ();
-	rspamd_cryptobox_encryptv_nm_inplace (seg, 2, nonce, key, mac);
+	rspamd_cryptobox_encryptv_nm_inplace (seg, 2, nonce, key, mac, mode);
 	t2 = rspamd_get_ticks ();
 
 	check_result (key, nonce, mac, begin, end);
@@ -216,7 +226,7 @@ rspamd_cryptobox_test_func (void)
 	seg[1].data = begin + seg[0].len;
 	seg[1].len = (end - begin) - seg[0].len;
 	t1 = rspamd_get_ticks ();
-	rspamd_cryptobox_encryptv_nm_inplace (seg, 2, nonce, key, mac);
+	rspamd_cryptobox_encryptv_nm_inplace (seg, 2, nonce, key, mac, mode);
 	t2 = rspamd_get_ticks ();
 
 	check_result (key, nonce, mac, begin, end);
@@ -228,7 +238,7 @@ rspamd_cryptobox_test_func (void)
 	seg[1].data = begin + seg[0].len;
 	seg[1].len = (end - begin) - seg[0].len;
 	t1 = rspamd_get_ticks ();
-	rspamd_cryptobox_encryptv_nm_inplace (seg, 2, nonce, key, mac);
+	rspamd_cryptobox_encryptv_nm_inplace (seg, 2, nonce, key, mac, mode);
 	t2 = rspamd_get_ticks ();
 
 	check_result (key, nonce, mac, begin, end);
@@ -241,7 +251,7 @@ rspamd_cryptobox_test_func (void)
 	seg[1].data = begin + seg[0].len;
 	seg[1].len = (end - begin) - seg[0].len;
 	t1 = rspamd_get_ticks ();
-	rspamd_cryptobox_encryptv_nm_inplace (seg, 2, nonce, key, mac);
+	rspamd_cryptobox_encryptv_nm_inplace (seg, 2, nonce, key, mac, mode);
 	t2 = rspamd_get_ticks ();
 
 	check_result (key, nonce, mac, begin, end);
@@ -256,7 +266,7 @@ rspamd_cryptobox_test_func (void)
 	seg[2].data = begin + seg[0].len + seg[1].len;
 	seg[2].len = (end - begin) - seg[0].len - seg[1].len;
 	t1 = rspamd_get_ticks ();
-	rspamd_cryptobox_encryptv_nm_inplace (seg, 3, nonce, key, mac);
+	rspamd_cryptobox_encryptv_nm_inplace (seg, 3, nonce, key, mac, mode);
 	t2 = rspamd_get_ticks ();
 
 	check_result (key, nonce, mac, begin, end);
@@ -265,7 +275,7 @@ rspamd_cryptobox_test_func (void)
 
 	cnt = create_random_split (seg, max_seg, begin, end);
 	t1 = rspamd_get_ticks ();
-	rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac);
+	rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac, mode);
 	t2 = rspamd_get_ticks ();
 
 	check_result (key, nonce, mac, begin, end);
@@ -274,7 +284,7 @@ rspamd_cryptobox_test_func (void)
 
 	cnt = create_realistic_split (seg, max_seg, begin, end);
 	t1 = rspamd_get_ticks ();
-	rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac);
+	rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac, mode);
 	t2 = rspamd_get_ticks ();
 
 	check_result (key, nonce, mac, begin, end);
@@ -283,7 +293,7 @@ rspamd_cryptobox_test_func (void)
 
 	cnt = create_constrainted_split (seg, max_seg + 1, 32, begin, end);
 	t1 = rspamd_get_ticks ();
-	rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac);
+	rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac, mode);
 	t2 = rspamd_get_ticks ();
 
 	check_result (key, nonce, mac, begin, end);
@@ -294,7 +304,7 @@ rspamd_cryptobox_test_func (void)
 		ms = ottery_rand_range (i % max_seg * 2) + 1;
 		cnt = create_random_split (seg, ms, begin, end);
 		t1 = rspamd_get_ticks ();
-		rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac);
+		rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac, mode);
 		t2 = rspamd_get_ticks ();
 
 		check_result (key, nonce, mac, begin, end);
@@ -307,7 +317,7 @@ rspamd_cryptobox_test_func (void)
 		ms = ottery_rand_range (i % max_seg * 2) + 1;
 		cnt = create_realistic_split (seg, ms, begin, end);
 		t1 = rspamd_get_ticks ();
-		rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac);
+		rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac, mode);
 		t2 = rspamd_get_ticks ();
 
 		check_result (key, nonce, mac, begin, end);
@@ -320,7 +330,7 @@ rspamd_cryptobox_test_func (void)
 		ms = ottery_rand_range (i % max_seg * 10) + 1;
 		cnt = create_constrainted_split (seg, ms, i, begin, end);
 		t1 = rspamd_get_ticks ();
-		rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac);
+		rspamd_cryptobox_encryptv_nm_inplace (seg, cnt, nonce, key, mac, mode);
 		t2 = rspamd_get_ticks ();
 
 		check_result (key, nonce, mac, begin, end);
@@ -328,5 +338,11 @@ rspamd_cryptobox_test_func (void)
 		if (i % 1000 == 0) {
 			msg_info ("constrainted fuzz iterations: %d", i);
 		}
+	}
+
+	if (!checked_openssl) {
+		checked_openssl = TRUE;
+		mode = RSPAMD_CRYPTOBOX_MODE_NIST;
+		goto start;
 	}
 }

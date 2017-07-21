@@ -4,9 +4,25 @@
 
 #include "config.h"
 #include "mem_pool.h"
+#include "fstring.h"
 
 struct rspamd_task;
-struct mime_text_part;
+struct rspamd_mime_text_part;
+
+enum rspamd_url_flags {
+	RSPAMD_URL_FLAG_PHISHED = 1 << 0,
+	RSPAMD_URL_FLAG_NUMERIC = 1 << 1,
+	RSPAMD_URL_FLAG_OBSCURED = 1 << 2,
+	RSPAMD_URL_FLAG_REDIRECTED = 1 << 3,
+	RSPAMD_URL_FLAG_HTML_DISPLAYED = 1 << 4,
+	RSPAMD_URL_FLAG_FROM_TEXT = 1 << 5,
+	RSPAMD_URL_FLAG_SUBJECT = 1 << 6,
+};
+
+struct rspamd_url_tag {
+	const gchar *data;
+	struct rspamd_url_tag *prev, *next;
+};
 
 struct rspamd_url {
 	gchar *string;
@@ -14,7 +30,6 @@ struct rspamd_url {
 	guint port;
 
 	gchar *user;
-	gchar *password;
 	gchar *host;
 	gchar *data;
 	gchar *query;
@@ -26,7 +41,6 @@ struct rspamd_url {
 
 	guint protocollen;
 	guint userlen;
-	guint passwordlen;
 	guint hostlen;
 	guint datalen;
 	guint querylen;
@@ -35,8 +49,9 @@ struct rspamd_url {
 	guint tldlen;
 	guint urllen;
 
-	gboolean is_phished; /* URI maybe phishing */
-	gboolean is_numeric; /* URI contains IP address */
+	enum rspamd_url_flags flags;
+	guint count;
+	GHashTable *tags;
 };
 
 enum uri_errno {
@@ -45,7 +60,9 @@ enum uri_errno {
 	URI_ERRNO_INVALID_PROTOCOL, /* No protocol was found */
 	URI_ERRNO_INVALID_PORT,     /* Port number is bad */
 	URI_ERRNO_BAD_ENCODING, /* Bad characters encoding */
-	URI_ERRNO_BAD_FORMAT
+	URI_ERRNO_BAD_FORMAT,
+	URI_ERRNO_TLD_MISSING,
+	URI_ERRNO_HOST_MISSING
 };
 
 enum rspamd_url_protocol {
@@ -56,8 +73,6 @@ enum rspamd_url_protocol {
 	PROTOCOL_MAILTO,
 	PROTOCOL_UNKNOWN
 };
-
-#define struri(uri) ((uri)->string)
 
 /**
  * Initialize url library
@@ -74,7 +89,7 @@ void rspamd_url_init (const gchar *tld_file);
  */
 void rspamd_url_text_extract (rspamd_mempool_t *pool,
 	struct rspamd_task *task,
-	struct mime_text_part *part,
+	struct rspamd_mime_text_part *part,
 	gboolean is_html);
 
 /*
@@ -98,28 +113,98 @@ enum uri_errno rspamd_url_parse (struct rspamd_url *uri,
  * @param url_str storage for url string(or NULL)
  * @return TRUE if url is found in specified text
  */
-gboolean rspamd_url_find (rspamd_mempool_t *pool,
-	const gchar *begin,
-	gsize len,
-	const gchar **start,
-	const gchar **end,
-	gchar **url_str,
-	gboolean is_html,
-	gint *statep);
+gboolean rspamd_url_find (rspamd_mempool_t *pool, const gchar *begin, gsize len,
+		gchar **url_str, gboolean is_html, goffset *url_pos);
 /*
  * Return text representation of url parsing error
  */
 const gchar * rspamd_url_strerror (enum uri_errno err);
 
+
 /**
- * Convenience routine to extract urls from an arbitrarty text
- * @param pool
- * @param start
- * @param pos
- * @return url or NULL
+ * Find TLD for a specified host string
+ * @param in input host
+ * @param inlen length of input
+ * @param out output rspamd_ftok_t with tld position
+ * @return TRUE if tld has been found
  */
-struct rspamd_url *
-rspamd_url_get_next (rspamd_mempool_t *pool,
-		const gchar *start, gchar const **pos, gint *statep);
+gboolean rspamd_url_find_tld (const gchar *in, gsize inlen, rspamd_ftok_t *out);
+
+typedef void (*url_insert_function) (struct rspamd_url *url,
+		gsize start_offset, gsize end_offset, void *ud);
+
+/**
+ * Search for multiple urls in text and call `func` for each url found
+ * @param pool
+ * @param in
+ * @param inlen
+ * @param is_html
+ * @param func
+ * @param ud
+ */
+void rspamd_url_find_multiple (rspamd_mempool_t *pool, const gchar *in,
+		gsize inlen, gboolean is_html, GPtrArray *nlines,
+		url_insert_function func, gpointer ud);
+/**
+ * Search for a single url in text and call `func` for each url found
+ * @param pool
+ * @param in
+ * @param inlen
+ * @param is_html
+ * @param func
+ * @param ud
+ */
+void rspamd_url_find_single (rspamd_mempool_t *pool, const gchar *in,
+		gsize inlen, gboolean is_html,
+		url_insert_function func, gpointer ud);
+
+/**
+ * Generic callback to insert URLs into rspamd_task
+ * @param url
+ * @param start_offset
+ * @param end_offset
+ * @param ud
+ */
+void rspamd_url_task_subject_callback (struct rspamd_url *url,
+		gsize start_offset,
+		gsize end_offset, gpointer ud);
+
+/**
+ * Adds a tag for url
+ * @param url
+ * @param tag
+ * @param pool
+ */
+void rspamd_url_add_tag (struct rspamd_url *url, const gchar *tag,
+		const gchar *value,
+		rspamd_mempool_t *pool);
+
+guint rspamd_url_hash (gconstpointer u);
+guint rspamd_email_hash (gconstpointer u);
+
+/* Compare two emails for building emails hash */
+gboolean rspamd_emails_cmp (gconstpointer a, gconstpointer b);
+
+/* Compare two urls for building emails hash */
+gboolean rspamd_urls_cmp (gconstpointer a, gconstpointer b);
+
+/**
+ * Decode URL encoded string in-place and return new length of a string, src and dst are NULL terminated
+ * @param dst
+ * @param src
+ * @param size
+ * @return
+ */
+gsize rspamd_url_decode (gchar *dst, const gchar *src, gsize size);
+
+/**
+ * Encode url if needed. In this case, memory is allocated from the specific pool.
+ * Returns pointer to begin and encoded length in `dlen`
+ * @param url
+ * @param pool
+ * @return
+ */
+const gchar * rspamd_url_encode (struct rspamd_url *url, gsize *dlen,
+		rspamd_mempool_t *pool);
 
 #endif

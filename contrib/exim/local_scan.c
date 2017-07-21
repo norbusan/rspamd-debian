@@ -175,7 +175,7 @@ int FakeSMTPCommand (socket_t sock,
 }
 
 
-static int writen (socket_t fd, const char *vptr, int n)
+static int written (socket_t fd, const char *vptr, int n)
 {
     size_t nleft;
     int nwritten;
@@ -263,7 +263,7 @@ static int SendEnvelope (char *sFile)
         if (FakeSMTPCommand (sock, "\r\n", "", sFile, 1, 0) != _OK)
             return ERR_WRITE;
             
-        if (writen (sock, psBuf, bytesRead) != bytesRead)
+        if (written (sock, psBuf, bytesRead) != bytesRead)
             return ERR_WRITE;
     }
     else
@@ -280,7 +280,7 @@ int GetFiles (char *pInpFile, int local_scan_fd)
 {
     /*
         Returns OK if no errors, else error code.
-        On succesful return, pEnvFile points to Envelope file name and
+        On successful return, pEnvFile points to Envelope file name and
         pInpFile points to Message filename
     */
     int iStatus;
@@ -331,6 +331,7 @@ int GetAndTransferMessage (int fd, char *sFile)
     char answ [4];
     int	 iStatus;
     int	 Len, ccnt;
+    int	 test;
 
     iStatus = GetFiles ((char *)sFile, fd);
 
@@ -344,10 +345,11 @@ int GetAndTransferMessage (int fd, char *sFile)
     for (ccnt = 0; ccnt <= MAX_FAILS_C; ccnt ++)
     {
 #ifdef RSPAM_UNIXSOCKET
-        if (connect (sock, (struct sockaddr *) &ssun, sizeof (struct sockaddr_un)) < 0)
+        test = connect (sock, (struct sockaddr *) &ssun, sizeof (struct sockaddr_un)) < 0;
 #else
-        if (connect (sock, (struct sockaddr *) &ssin, sizeof (struct sockaddr_in)) < 0)
+        test = connect (sock, (struct sockaddr *) &ssin, sizeof (struct sockaddr_in)) < 0;
 #endif
+        if (test)
         {
             if (ccnt < MAX_FAILS_C)
                 usleep (1000);
@@ -483,7 +485,7 @@ repeat_read:
 int WaitForScanResult (uschar **resStr)
 {
     int Len, i;
-    int rej, result = LOCAL_SCAN_ACCEPT, answer_size, spm = 0, code = 0, ns = 0, smb = 0, urf = 0;
+    int rej = 0, result = LOCAL_SCAN_ACCEPT, answer_size, spm = 0, code = 0, ns = 0, smb = 0, urf = 0;
     char *strP, *tok, *tmp;
     char *hdr = NULL, *hdrv = NULL, *spmStr = NULL, *symbols=NULL, *urls=NULL;
     char answ [4096], state[6], metric[128], back;

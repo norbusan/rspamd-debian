@@ -3,7 +3,7 @@
 #include "tests.h"
 #include "dns.h"
 #include "logger.h"
-#include "main.h"
+#include "rspamd.h"
 #include "events.h"
 #include "cfg_file.h"
 
@@ -74,13 +74,13 @@ rspamd_dns_test_func ()
 
 	cfg = (struct rspamd_config *)g_malloc (sizeof (struct rspamd_config));
 	bzero (cfg, sizeof (struct rspamd_config));
-	cfg->cfg_pool = rspamd_mempool_new (rspamd_mempool_suggest_size ());
+	cfg->cfg_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), NULL);
 	cfg->dns_retransmits = 2;
 	cfg->dns_timeout = 0.5;
 
-	pool = rspamd_mempool_new (rspamd_mempool_suggest_size ());
+	pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), NULL);
 
-	s = new_async_session (pool, session_fin, NULL, NULL, NULL);
+	s = rspamd_session_create (pool, session_fin, NULL, NULL, NULL);
 
 	resolver = dns_resolver_init (NULL, base, cfg);
 

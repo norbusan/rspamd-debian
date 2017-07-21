@@ -1,30 +1,76 @@
-/*
- * Copyright (c) 2009-2012, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *	 * Redistributions of source code must retain the above copyright
- *	   notice, this list of conditions and the following disclaimer.
- *	 * Redistributions in binary form must reproduce the above copyright
- *	   notice, this list of conditions and the following disclaimer in the
- *	   documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED BY AUTHOR ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #include "config.h"
-#include "main.h"
+#include "rspamd.h"
+#include "contrib/uthash/utlist.h"
 #include "events.h"
+#include "cryptobox.h"
+
+#define RSPAMD_SESSION_FLAG_WATCHING (1 << 0)
+#define RSPAMD_SESSION_FLAG_DESTROYING (1 << 1)
+
+#define RSPAMD_SESSION_IS_WATCHING(s) ((s)->flags & RSPAMD_SESSION_FLAG_WATCHING)
+#define RSPAMD_SESSION_IS_DESTROYING(s) ((s)->flags & RSPAMD_SESSION_FLAG_DESTROYING)
+
+#define msg_err_session(...) rspamd_default_log_function(G_LOG_LEVEL_CRITICAL, \
+        "events", session->pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+#define msg_warn_session(...)   rspamd_default_log_function (G_LOG_LEVEL_WARNING, \
+        "events", session->pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+#define msg_info_session(...)   rspamd_default_log_function (G_LOG_LEVEL_INFO, \
+        "events", session->pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+#define msg_debug_session(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
+        "events", session->pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+
+struct rspamd_watch_stack {
+	event_watcher_t cb;
+	gpointer ud;
+	struct rspamd_watch_stack *next;
+};
+
+struct rspamd_async_watcher {
+	struct rspamd_watch_stack *st;
+	guint remain;
+	gint id;
+};
+
+struct rspamd_async_event {
+	GQuark subsystem;
+	event_finalizer_t fin;
+	void *user_data;
+	struct rspamd_async_watcher *w;
+};
+
+struct rspamd_async_session {
+	session_finalizer_t fin;
+	event_finalizer_t restore;
+	event_finalizer_t cleanup;
+	GHashTable *events;
+	void *user_data;
+	rspamd_mempool_t *pool;
+	struct rspamd_async_watcher *cur_watcher;
+	guint flags;
+};
 
 static gboolean
 rspamd_event_equal (gconstpointer a, gconstpointer b)
@@ -42,64 +88,35 @@ static guint
 rspamd_event_hash (gconstpointer a)
 {
 	const struct rspamd_async_event *ev = a;
+	rspamd_cryptobox_fast_hash_state_t st;
+	union {
+		event_finalizer_t f;
+		gpointer p;
+	} u;
 
-	return GPOINTER_TO_UINT (ev->user_data);
+	u.f = ev->fin;
+
+	rspamd_cryptobox_fast_hash_init (&st, rspamd_hash_seed ());
+	rspamd_cryptobox_fast_hash_update (&st, &ev->user_data, sizeof (gpointer));
+	rspamd_cryptobox_fast_hash_update (&st, &u, sizeof (u));
+
+	return rspamd_cryptobox_fast_hash_final (&st);
 }
 
-#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION <= 30))
-static void
-event_mutex_free (gpointer data)
-{
-	GMutex *mtx = data;
-
-	g_mutex_free (mtx);
-}
-
-static void
-event_cond_free (gpointer data)
-{
-	GCond *cond = data;
-
-	g_cond_free (cond);
-}
-#endif
 
 struct rspamd_async_session *
-new_async_session (rspamd_mempool_t * pool, session_finalizer_t fin,
+rspamd_session_create (rspamd_mempool_t * pool, session_finalizer_t fin,
 	event_finalizer_t restore, event_finalizer_t cleanup, void *user_data)
 {
 	struct rspamd_async_session *new;
 
-	new = rspamd_mempool_alloc (pool, sizeof (struct rspamd_async_session));
+	new = rspamd_mempool_alloc0 (pool, sizeof (struct rspamd_async_session));
 	new->pool = pool;
 	new->fin = fin;
 	new->restore = restore;
 	new->cleanup = cleanup;
 	new->user_data = user_data;
-	new->wanna_die = FALSE;
 	new->events = g_hash_table_new (rspamd_event_hash, rspamd_event_equal);
-#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION <= 30))
-	new->mtx = g_mutex_new ();
-	new->cond = g_cond_new ();
-	rspamd_mempool_add_destructor (pool,
-		(rspamd_mempool_destruct_t) event_mutex_free,
-		new->mtx);
-	rspamd_mempool_add_destructor (pool,
-		(rspamd_mempool_destruct_t) event_cond_free,
-		new->cond);
-#else
-	new->mtx = rspamd_mempool_alloc (pool, sizeof (GMutex));
-	g_mutex_init (new->mtx);
-	new->cond = rspamd_mempool_alloc (pool, sizeof (GCond));
-	g_cond_init (new->cond);
-	rspamd_mempool_add_destructor (pool,
-		(rspamd_mempool_destruct_t) g_mutex_clear,
-		new->mtx);
-	rspamd_mempool_add_destructor (pool,
-		(rspamd_mempool_destruct_t) g_cond_clear,
-		new->cond);
-#endif
-	new->threads = 0;
 
 	rspamd_mempool_add_destructor (pool,
 		(rspamd_mempool_destruct_t) g_hash_table_destroy,
@@ -109,7 +126,7 @@ new_async_session (rspamd_mempool_t * pool, session_finalizer_t fin,
 }
 
 void
-register_async_event (struct rspamd_async_session *session,
+rspamd_session_add_event (struct rspamd_async_session *session,
 	event_finalizer_t fin,
 	void *user_data,
 	GQuark subsystem)
@@ -117,159 +134,317 @@ register_async_event (struct rspamd_async_session *session,
 	struct rspamd_async_event *new;
 
 	if (session == NULL) {
-		msg_info ("session is NULL");
+		msg_err ("session is NULL");
 		return;
 	}
 
-	g_mutex_lock (session->mtx);
 	new = rspamd_mempool_alloc (session->pool,
 			sizeof (struct rspamd_async_event));
 	new->fin = fin;
 	new->user_data = user_data;
 	new->subsystem = subsystem;
 
+	if (RSPAMD_SESSION_IS_WATCHING (session)) {
+		new->w = session->cur_watcher;
+		new->w->remain ++;
+		msg_debug_session ("added event: %p, pending %d events, "
+				"subsystem: %s, watcher: %d",
+				user_data,
+				g_hash_table_size (session->events),
+				g_quark_to_string (subsystem),
+				new->w->id);
+	}
+	else {
+		new->w = NULL;
+		msg_debug_session ("added event: %p, pending %d events, "
+				"subsystem: %s, no watcher!",
+				user_data,
+				g_hash_table_size (session->events),
+				g_quark_to_string (subsystem));
+	}
+
 	g_hash_table_insert (session->events, new, new);
+}
 
-	msg_debug ("added event: %p, pending %d events, subsystem: %s",
-		user_data,
-		g_hash_table_size (session->events),
-		g_quark_to_string (subsystem));
+static inline void
+rspamd_session_call_watcher_stack (struct rspamd_async_session *session,
+		struct rspamd_async_watcher *w)
+{
+	struct rspamd_watch_stack *st;
 
-	g_mutex_unlock (session->mtx);
+	LL_FOREACH (w->st, st) {
+		st->cb (session->user_data, st->ud);
+	}
+
+	w->st = NULL;
 }
 
 void
-remove_normal_event (struct rspamd_async_session *session,
+rspamd_session_remove_event (struct rspamd_async_session *session,
 	event_finalizer_t fin,
 	void *ud)
 {
 	struct rspamd_async_event search_ev, *found_ev;
 
 	if (session == NULL) {
-		msg_info ("session is NULL");
+		msg_err ("session is NULL");
 		return;
 	}
 
-	g_mutex_lock (session->mtx);
 	/* Search for event */
 	search_ev.fin = fin;
 	search_ev.user_data = ud;
-	if ((found_ev =
-		g_hash_table_lookup (session->events, &search_ev)) != NULL) {
-		g_hash_table_remove (session->events, found_ev);
-		msg_debug ("removed event: %p, subsystem: %s, pending %d events", ud,
-			g_quark_to_string (found_ev->subsystem),
-			g_hash_table_size (session->events));
-		/* Remove event */
-		fin (ud);
-	}
-	g_mutex_unlock (session->mtx);
+	found_ev = g_hash_table_lookup (session->events, &search_ev);
+	g_assert (found_ev != NULL);
 
-	check_session_pending (session);
+	/* Remove event */
+	fin (ud);
+
+	/* Call watcher if needed */
+	if (found_ev->w) {
+		msg_debug_session ("removed event: %p, subsystem: %s, "
+				"pending %d events, watcher: %d (%d pending)", ud,
+				g_quark_to_string (found_ev->subsystem),
+				g_hash_table_size (session->events),
+				found_ev->w->id, found_ev->w->remain);
+
+		if (found_ev->w->remain > 0) {
+			if (--found_ev->w->remain == 0) {
+				rspamd_session_call_watcher_stack (session, found_ev->w);
+			}
+		}
+	}
+	else {
+		msg_debug_session ("removed event: %p, subsystem: %s, "
+				"pending %d events, no watcher!", ud,
+				g_quark_to_string (found_ev->subsystem),
+				g_hash_table_size (session->events));
+	}
+
+	g_hash_table_remove (session->events, found_ev);
+
+	rspamd_session_pending (session);
 }
 
 static gboolean
-rspamd_session_destroy (gpointer k, gpointer v, gpointer unused)
+rspamd_session_destroy_callback (gpointer k, gpointer v, gpointer d)
 {
 	struct rspamd_async_event *ev = v;
+	struct rspamd_async_session *session = d;
 
 	/* Call event's finalizer */
-	msg_debug ("removed event on destroy: %p, subsystem: %s", ev->user_data,
-		g_quark_to_string (ev->subsystem));
+	msg_debug_session ("removed event on destroy: %p, subsystem: %s",
+			ev->user_data,
+			g_quark_to_string (ev->subsystem));
 
 	if (ev->fin != NULL) {
 		ev->fin (ev->user_data);
 	}
 
+	/* We ignore watchers on session destroying */
+
 	return TRUE;
 }
 
 gboolean
-destroy_session (struct rspamd_async_session *session)
+rspamd_session_destroy (struct rspamd_async_session *session)
 {
 	if (session == NULL) {
-		msg_info ("session is NULL");
+		msg_err ("session is NULL");
 		return FALSE;
 	}
 
-	g_mutex_lock (session->mtx);
-	if (session->threads > 0) {
-		/* Wait for conditional variable to finish processing */
-		g_mutex_unlock (session->mtx);
-		g_cond_wait (session->cond, session->mtx);
+	if (!(session->flags & RSPAMD_SESSION_FLAG_DESTROYING)) {
+		session->flags |= RSPAMD_SESSION_FLAG_DESTROYING;
+		rspamd_session_cleanup (session);
+
+		if (session->cleanup != NULL) {
+			session->cleanup (session->user_data);
+		}
 	}
 
-	session->wanna_die = TRUE;
+	return TRUE;
+}
+
+void
+rspamd_session_cleanup (struct rspamd_async_session *session)
+{
+	if (session == NULL) {
+		msg_err ("session is NULL");
+		return;
+	}
 
 	g_hash_table_foreach_remove (session->events,
-		rspamd_session_destroy,
-		session);
-
-	/* Mutex can be destroyed here */
-	g_mutex_unlock (session->mtx);
-
-	if (session->cleanup != NULL) {
-		session->cleanup (session->user_data);
-	}
-	return TRUE;
+			rspamd_session_destroy_callback,
+			session);
 }
 
 gboolean
-check_session_pending (struct rspamd_async_session *session)
+rspamd_session_pending (struct rspamd_async_session *session)
 {
-	g_mutex_lock (session->mtx);
-	if (session->wanna_die && g_hash_table_size (session->events) == 0) {
-		session->wanna_die = FALSE;
-		if (session->threads > 0) {
-			/* Wait for conditional variable to finish processing */
-			g_cond_wait (session->cond, session->mtx);
-		}
+	gboolean ret = TRUE;
+
+	if (g_hash_table_size (session->events) == 0) {
 		if (session->fin != NULL) {
-			g_mutex_unlock (session->mtx);
+			msg_debug_session ("call fin handler, as no events are pending");
+
 			if (!session->fin (session->user_data)) {
 				/* Session finished incompletely, perform restoration */
+				msg_debug_session ("restore incomplete session");
 				if (session->restore != NULL) {
 					session->restore (session->user_data);
-					/* Call pending once more */
-					return check_session_pending (session);
 				}
-				return TRUE;
 			}
 			else {
-				return FALSE;
+				ret = FALSE;
 			}
 		}
-		g_mutex_unlock (session->mtx);
-		return FALSE;
+
+		ret = FALSE;
 	}
-	g_mutex_unlock (session->mtx);
-	return TRUE;
+
+	return ret;
+}
+
+void
+rspamd_session_watch_start (struct rspamd_async_session *session,
+		gint id,
+		event_watcher_t cb,
+		gpointer ud)
+{
+	struct rspamd_watch_stack *st_elt;
+
+	g_assert (session != NULL);
+	g_assert (!RSPAMD_SESSION_IS_WATCHING (session));
+
+	if (session->cur_watcher == NULL) {
+		session->cur_watcher = rspamd_mempool_alloc0 (session->pool,
+				sizeof (*session->cur_watcher));
+	}
+
+	st_elt = rspamd_mempool_alloc (session->pool, sizeof (*st_elt));
+	st_elt->cb = cb;
+	st_elt->ud = ud;
+	LL_PREPEND (session->cur_watcher->st, st_elt);
+
+	session->cur_watcher->id = id;
+	session->flags |= RSPAMD_SESSION_FLAG_WATCHING;
+}
+
+guint
+rspamd_session_watch_stop (struct rspamd_async_session *session)
+{
+	guint remain;
+
+	g_assert (session != NULL);
+	g_assert (RSPAMD_SESSION_IS_WATCHING (session));
+
+	remain = session->cur_watcher->remain;
+
+	if (remain > 0) {
+		/* Avoid reusing */
+		session->cur_watcher = NULL;
+	}
+
+	session->flags &= ~RSPAMD_SESSION_FLAG_WATCHING;
+
+	return remain;
 }
 
 
-/**
- * Add new async thread to session
- * @param session session object
- */
-void
-register_async_thread (struct rspamd_async_session *session)
+guint
+rspamd_session_events_pending (struct rspamd_async_session *session)
 {
-	g_atomic_int_inc (&session->threads);
-	msg_debug ("added thread: pending %d thread", session->threads);
+	guint npending;
+
+	g_assert (session != NULL);
+
+	npending = g_hash_table_size (session->events);
+	msg_debug_session ("pending %d events", npending);
+
+	if (RSPAMD_SESSION_IS_WATCHING (session)) {
+		npending += session->cur_watcher->remain;
+		msg_debug_session ("pending %d watchers, id: %d",
+				session->cur_watcher->remain, session->cur_watcher->id);
+	}
+
+	return npending;
 }
 
-/**
- * Remove async thread from session and check whether session can be terminated
- * @param session session object
- */
-void
-remove_async_thread (struct rspamd_async_session *session)
+inline void
+rspamd_session_watcher_push_callback (struct rspamd_async_session *session,
+		struct rspamd_async_watcher *w,
+		event_watcher_t cb,
+		gpointer ud)
 {
-	if (g_atomic_int_dec_and_test (&session->threads)) {
-		/* Signal if there are any sessions waiting */
-		g_mutex_lock (session->mtx);
-		g_cond_signal (session->cond);
-		g_mutex_unlock (session->mtx);
+	struct rspamd_watch_stack *st;
+
+	g_assert (session != NULL);
+
+	if (w == NULL) {
+		if (RSPAMD_SESSION_IS_WATCHING (session)) {
+			w = session->cur_watcher;
+		}
+		else {
+			return;
+		}
 	}
-	msg_debug ("removed thread: pending %d thread", session->threads);
+
+	if (w) {
+		w->remain ++;
+		msg_debug_session ("push session, watcher: %d, %d events",
+				w->id,
+				w->remain);
+
+		if (cb) {
+			st = rspamd_mempool_alloc (session->pool, sizeof (*st));
+			st->cb = cb;
+			st->ud = ud;
+
+			LL_PREPEND (w->st, st);
+		}
+	}
+}
+
+void
+rspamd_session_watcher_push (struct rspamd_async_session *session)
+{
+	rspamd_session_watcher_push_callback (session, NULL, NULL, NULL);
+}
+
+void
+rspamd_session_watcher_push_specific (struct rspamd_async_session *session,
+		struct rspamd_async_watcher *w)
+{
+	rspamd_session_watcher_push_callback (session, w, NULL, NULL);
+}
+
+void
+rspamd_session_watcher_pop (struct rspamd_async_session *session,
+		struct rspamd_async_watcher *w)
+{
+	g_assert (session != NULL);
+
+	if (w && w->remain > 0) {
+		msg_debug_session ("pop session, watcher: %d, %d events", w->id,
+				w->remain);
+		w->remain --;
+
+		if (w->remain == 0) {
+			rspamd_session_call_watcher_stack (session, w);
+		}
+	}
+}
+
+struct rspamd_async_watcher*
+rspamd_session_get_watcher (struct rspamd_async_session *session)
+{
+	g_assert (session != NULL);
+
+	if (RSPAMD_SESSION_IS_WATCHING (session)) {
+		return session->cur_watcher;
+	}
+	else {
+		return NULL;
+	}
 }

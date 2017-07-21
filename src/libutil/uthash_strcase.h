@@ -1,52 +1,81 @@
-/* Copyright (c) 2014, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 #ifndef UTHASH_STRCASE_H_
 #define UTHASH_STRCASE_H_
-
-#include "xxhash.h"
 
 
 /* Utils for uthash tuning */
 #ifndef HASH_CASELESS
 #define HASH_FUNCTION(key,keylen,num_bkts,hashv,bkt) do {\
-	hashv = XXH32(key, keylen, 0); \
+	hashv = mum(key, keylen, 0xdeadbabe); \
 	bkt = (hashv) & (num_bkts-1); \
 } while (0)
 
 #define HASH_KEYCMP(a,b,len) memcmp(a,b,len)
 #else
 #define HASH_FUNCTION(key,keylen,num_bkts,hashv,bkt) do {\
-	XXH32_state_t xxh; \
-	XXH32_reset(&xxh, 0xdead);	\
-	unsigned char *p = (unsigned char *)key, t;	\
-	for (unsigned int i = 0; i < keylen; i ++) {	\
-		t = g_ascii_tolower(p[i]);	\
-		XXH32_update(&xxh, &t, 1);	\
-	}	\
-	hashv = XXH32_digest(&xxh);	\
-	bkt = (hashv) & (num_bkts-1);	\
+	unsigned _len = keylen; \
+	unsigned _leftover = keylen % 8; \
+	unsigned _fp, _i; \
+	const uint8_t* _s = (const uint8_t*)(key); \
+	union { \
+		struct { \
+			unsigned char c1, c2, c3, c4, c5, c6, c7, c8; \
+		} c; \
+		uint64_t pp; \
+	} _u; \
+	uint64_t _r; \
+	_fp = _len - _leftover; \
+	_r = 0xdeadbabe; \
+	for (_i = 0; _i != _fp; _i += 8) { \
+		_u.c.c1 = _s[_i], _u.c.c2 = _s[_i + 1], _u.c.c3 = _s[_i + 2], _u.c.c4 = _s[_i + 3]; \
+		_u.c.c5 = _s[_i + 4], _u.c.c6 = _s[_i + 5], _u.c.c7 = _s[_i + 6], _u.c.c8 = _s[_i + 7]; \
+		_u.c.c1 = lc_map[_u.c.c1]; \
+		_u.c.c2 = lc_map[_u.c.c2]; \
+		_u.c.c3 = lc_map[_u.c.c3]; \
+		_u.c.c4 = lc_map[_u.c.c4]; \
+		_u.c.c1 = lc_map[_u.c.c5]; \
+		_u.c.c2 = lc_map[_u.c.c6]; \
+		_u.c.c3 = lc_map[_u.c.c7]; \
+		_u.c.c4 = lc_map[_u.c.c8]; \
+		_r = mum_hash_step (_r, _u.pp); \
+	} \
+	_u.pp = 0; \
+	switch (_leftover) { \
+	case 7: \
+		_u.c.c7 = lc_map[(unsigned char)_s[_i++]]; \
+	case 6: \
+		_u.c.c6 = lc_map[(unsigned char)_s[_i++]]; \
+	case 5: \
+		_u.c.c5 = lc_map[(unsigned char)_s[_i++]]; \
+	case 4: \
+		_u.c.c4 = lc_map[(unsigned char)_s[_i++]]; \
+	case 3: \
+		_u.c.c3 = lc_map[(unsigned char)_s[_i++]]; \
+	case 2: \
+		_u.c.c2 = lc_map[(unsigned char)_s[_i++]]; \
+	case 1: \
+		_u.c.c1 = lc_map[(unsigned char)_s[_i]]; \
+		_r = mum_hash_step (_r, _u.pp); \
+		break; \
+	} \
+	hashv = mum_hash_finish (_r); \
+	bkt = (hashv) & (num_bkts-1); \
 } while (0)
-#define HASH_KEYCMP(a,b,len) strncasecmp(a,b,len)
+#define HASH_KEYCMP(a,b,len) rspamd_lc_cmp(a,b,len)
 #endif
 
 #include "uthash.h"

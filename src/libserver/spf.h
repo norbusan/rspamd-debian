@@ -3,11 +3,13 @@
 
 #include "config.h"
 #include "ref.h"
+#include "addr.h"
 
 struct rspamd_task;
 struct spf_resolved;
 
-typedef void (*spf_cb_t)(struct spf_resolved *record, struct rspamd_task *task);
+typedef void (*spf_cb_t)(struct spf_resolved *record,
+		struct rspamd_task *task, gpointer cbdata);
 
 typedef enum spf_mech_e {
 	SPF_FAIL,
@@ -29,10 +31,16 @@ typedef enum spf_action_e {
 
 #define RSPAMD_SPF_FLAG_IPV6 (1 << 0)
 #define RSPAMD_SPF_FLAG_IPV4 (1 << 1)
-#define RSPAMD_SPF_FLAG_ANY (1 << 2)
-#define RSPAMD_SPF_FLAG_PARSED (1 << 3)
-#define RSPAMD_SPF_FLAG_VALID (1 << 4)
-#define RSPAMD_SPF_FLAG_REFRENCE (1 << 5)
+#define RSPAMD_SPF_FLAG_PROCESSED (1 << 2)
+#define RSPAMD_SPF_FLAG_ANY (1 << 3)
+#define RSPAMD_SPF_FLAG_PARSED (1 << 4)
+#define RSPAMD_SPF_FLAG_INVALID (1 << 5)
+#define RSPAMD_SPF_FLAG_REFERENCE (1 << 6)
+#define RSPAMD_SPF_FLAG_REDIRECT (1 << 7)
+#define RSPAMD_SPF_FLAG_TEMPFAIL (1 << 8)
+#define RSPAMD_SPF_FLAG_NA (1 << 9)
+#define RSPAMD_SPF_FLAG_PERMFAIL (1 << 10)
+#define RSPAMD_SPF_FLAG_RESOLVED (1 << 11)
 
 struct spf_addr {
 	guchar addr6[sizeof (struct in6_addr)];
@@ -47,11 +55,15 @@ struct spf_addr {
 	guint flags;
 	spf_mech_t mech;
 	gchar *spf_string;
+	struct spf_addr *prev, *next;
 };
 
 struct spf_resolved {
 	gchar *domain;
 	guint ttl;
+	gboolean temp_failed;
+	gboolean na;
+	gboolean perm_failed;
 	GArray *elts; /* Flat list of struct spf_addr */
 	ref_entry_t ref; /* Refcounting */
 };
@@ -60,12 +72,13 @@ struct spf_resolved {
 /*
  * Resolve spf record for specified task and call a callback after resolution fails/succeed
  */
-gboolean resolve_spf (struct rspamd_task *task, spf_cb_t callback);
+gboolean rspamd_spf_resolve (struct rspamd_task *task, spf_cb_t callback,
+		gpointer cbdata);
 
 /*
  * Get a domain for spf for specified task
  */
-const gchar * get_spf_domain (struct rspamd_task *task);
+const gchar * rspamd_spf_get_domain (struct rspamd_task *task);
 
 
 /*

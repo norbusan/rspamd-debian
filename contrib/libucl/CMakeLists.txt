@@ -5,7 +5,9 @@ SET(UCLSRC            ucl_util.c
                       ucl_emitter_utils.c
                       ucl_hash.c
                       ucl_schema.c
-                      lua_ucl.c)
+                      lua_ucl.c
+					  ucl_msgpack.c
+					  ucl_sexp.c)
 
 
 SET (LIB_TYPE STATIC)

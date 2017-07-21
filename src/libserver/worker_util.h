@@ -1,24 +1,17 @@
-/* Copyright (c) 2014, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 #ifndef WORKER_UTIL_H_
 #define WORKER_UTIL_H_
@@ -26,13 +19,7 @@
 #include "config.h"
 #include "util.h"
 #include "http.h"
-
-/**
- * Return worker's control structure by its type
- * @param type
- * @return worker's control structure or NULL
- */
-worker_t * rspamd_get_worker_by_type (GQuark type);
+#include "rspamd.h"
 
 #ifndef HAVE_SA_SIGINFO
 typedef void (*rspamd_sig_handler_t) (gint);
@@ -41,6 +28,7 @@ typedef void (*rspamd_sig_handler_t) (gint, siginfo_t *, void *);
 #endif
 
 struct rspamd_worker;
+struct rspamd_worker_signal_handler;
 
 /**
  * Prepare worker's startup
@@ -52,7 +40,16 @@ struct rspamd_worker;
  */
 struct event_base *
 rspamd_prepare_worker (struct rspamd_worker *worker, const char *name,
-	void (*accept_handler)(int, short, void *));
+	void (*accept_handler)(int, short, void *), gboolean load_lua);
+
+/**
+ * Set special signal handler for a worker
+ */
+void rspamd_worker_set_signal_handler (int signo,
+		struct rspamd_worker *worker,
+		struct event_base *base,
+		void (*handler) (struct rspamd_worker_signal_handler *, void *),
+		void *handler_data);
 
 /**
  * Stop accepting new connections for a worker
@@ -71,6 +68,20 @@ struct rspamd_custom_controller_command {
 	gboolean privilleged;
 	gboolean require_message;
 	rspamd_controller_func_t handler;
+};
+
+struct rspamd_controller_worker_ctx;
+
+struct rspamd_controller_session {
+	struct rspamd_controller_worker_ctx *ctx;
+	struct rspamd_worker *wrk;
+	rspamd_mempool_t *pool;
+	struct rspamd_task *task;
+	gchar *classifier;
+	rspamd_inet_addr_t *from_addr;
+	struct rspamd_config *cfg;
+	gboolean is_spam;
+	gboolean is_enable;
 };
 
 /**
@@ -97,5 +108,90 @@ void rspamd_controller_send_string (struct rspamd_http_connection_entry *entry,
  */
 void rspamd_controller_send_ucl (struct rspamd_http_connection_entry *entry,
 	ucl_object_t *obj);
+
+/**
+ * Return worker's control structure by its type
+ * @param type
+ * @return worker's control structure or NULL
+ */
+worker_t * rspamd_get_worker_by_type (struct rspamd_config *cfg, GQuark type);
+
+void rspamd_worker_stop_accept (struct rspamd_worker *worker);
+
+/**
+ * Block signals before terminations
+ */
+void rspamd_worker_block_signals (void);
+
+/**
+ * Kill rspamd main and all workers
+ * @param rspamd_main
+ */
+void rspamd_hard_terminate (struct rspamd_main *rspamd_main) G_GNUC_NORETURN;
+
+/**
+ * Returns TRUE if a specific worker is normal worker
+ * @param w
+ * @return
+ */
+gboolean rspamd_worker_is_normal (struct rspamd_worker *w);
+
+/**
+ * Creates new session cache
+ * @param w
+ * @return
+ */
+void * rspamd_worker_session_cache_new (struct rspamd_worker *w,
+		struct event_base *ev_base);
+
+/**
+ * Adds a new session identified by pointer
+ * @param cache
+ * @param tag
+ * @param pref
+ * @param ptr
+ */
+void rspamd_worker_session_cache_add (void *cache, const gchar *tag,
+		guint *pref, void *ptr);
+
+/**
+ * Removes session from cache
+ * @param cache
+ * @param ptr
+ */
+void rspamd_worker_session_cache_remove (void *cache, void *ptr);
+
+/**
+ * Fork new worker with the specified configuration
+ */
+struct rspamd_worker *rspamd_fork_worker (struct rspamd_main *,
+		struct rspamd_worker_conf *, guint idx, struct event_base *ev_base);
+
+/**
+ * Initialise the main monitoring worker
+ * @param worker
+ * @param ev_base
+ * @param resolver
+ */
+void rspamd_worker_init_monitored (struct rspamd_worker *worker,
+		struct event_base *ev_base,
+		struct rspamd_dns_resolver *resolver);
+
+#define msg_err_main(...) rspamd_default_log_function (G_LOG_LEVEL_CRITICAL, \
+        rspamd_main->server_pool->tag.tagname, rspamd_main->server_pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+#define msg_warn_main(...)   rspamd_default_log_function (G_LOG_LEVEL_WARNING, \
+        rspamd_main->server_pool->tag.tagname, rspamd_main->server_pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+#define msg_info_main(...)   rspamd_default_log_function (G_LOG_LEVEL_INFO, \
+        rspamd_main->server_pool->tag.tagname, rspamd_main->server_pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+#define msg_debug_main(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
+        rspamd_main->server_pool->tag.tagname, rspamd_main->server_pool->tag.uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
 
 #endif /* WORKER_UTIL_H_ */

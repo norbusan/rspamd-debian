@@ -1,26 +1,18 @@
-/* Copyright (c) 2013, Vsevolod Stakhov
- * All rights reserved.
+/*-
+ * Copyright 2016 Vsevolod Stakhov
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *       * Redistributions of source code must retain the above copyright
- *         notice, this list of conditions and the following disclaimer.
- *       * Redistributions in binary form must reproduce the above copyright
- *         notice, this list of conditions and the following disclaimer in the
- *         documentation and/or other materials provided with the distribution.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * THIS SOFTWARE IS PROVIDED ''AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL AUTHOR BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 #ifndef CFG_RCL_H_
 #define CFG_RCL_H_
 
@@ -39,22 +31,30 @@ struct rspamd_rcl_section;
 struct rspamd_config;
 struct rspamd_rcl_default_handler_data;
 
+enum rspamd_rcl_flag {
+	RSPAMD_CL_FLAG_TIME_FLOAT = 0x1 << 0,
+	RSPAMD_CL_FLAG_TIME_TIMEVAL = 0x1 << 1,
+	RSPAMD_CL_FLAG_TIME_TIMESPEC = 0x1 << 2,
+	RSPAMD_CL_FLAG_TIME_INTEGER = 0x1 << 3,
+	RSPAMD_CL_FLAG_TIME_UINT_32 = 0x1 << 4,
+	RSPAMD_CL_FLAG_INT_16 = 0x1 << 5,
+	RSPAMD_CL_FLAG_INT_32 = 0x1 << 6,
+	RSPAMD_CL_FLAG_INT_64 = 0x1 << 7,
+	RSPAMD_CL_FLAG_UINT = 0x1 << 8,
+	RSPAMD_CL_FLAG_INT_SIZE = 0x1 << 9,
+	RSPAMD_CL_FLAG_STRING_PATH = 0x1 << 10,
+	RSPAMD_CL_FLAG_BOOLEAN_INVERSE = 0x1 << 11,
+	RSPAMD_CL_FLAG_STRING_LIST_HASH = 0x1 << 12,
+	RSPAMD_CL_FLAG_MULTIPLE = 0x1 << 13,
+	RSPAMD_CL_FLAG_SIGNKEY = 0x1 << 14,
+	RSPAMD_CL_FLAG_NISTKEY = 0x1 << 15,
+};
+
 struct rspamd_rcl_struct_parser {
+	struct rspamd_config *cfg;
 	gpointer user_struct;
 	goffset offset;
-	enum {
-		RSPAMD_CL_FLAG_TIME_FLOAT = 0x1 << 0,
-		RSPAMD_CL_FLAG_TIME_TIMEVAL = 0x1 << 1,
-		RSPAMD_CL_FLAG_TIME_TIMESPEC = 0x1 << 2,
-		RSPAMD_CL_FLAG_TIME_INTEGER = 0x1 << 3,
-		RSPAMD_CL_FLAG_TIME_UINT_32 = 0x1 << 4,
-		RSPAMD_CL_FLAG_INT_16 = 0x1 << 5,
-		RSPAMD_CL_FLAG_INT_32 = 0x1 << 6,
-		RSPAMD_CL_FLAG_INT_64 = 0x1 << 7,
-		RSPAMD_CL_FLAG_UINT = 0x1 << 8,
-		RSPAMD_CL_FLAG_INT_SIZE = 0x1 << 9,
-		RSPAMD_CL_FLAG_STRING_PATH = 0x1 << 10
-	} flags;
+	enum rspamd_rcl_flag flags;
 };
 
 /**
@@ -67,7 +67,16 @@ struct rspamd_rcl_struct_parser {
  */
 typedef gboolean (*rspamd_rcl_handler_t) (rspamd_mempool_t *pool,
 	const ucl_object_t *obj,
-	gpointer ud, struct rspamd_rcl_section *section, GError **err);
+	const gchar *key,
+	gpointer ud,
+	struct rspamd_rcl_section *section,
+	GError **err);
+
+typedef gboolean (*rspamd_rcl_default_handler_t) (rspamd_mempool_t *pool,
+	const ucl_object_t *obj,
+	gpointer ud,
+	struct rspamd_rcl_section *section,
+	GError **err);
 
 /**
  * A handler type that is called at the end of section parsing
@@ -85,33 +94,45 @@ typedef void (*rspamd_rcl_section_fin_t)(rspamd_mempool_t *pool, gpointer ud);
  * @param flags flags for the parser
  * @return newly created structure
  */
-struct rspamd_rcl_default_handler_data * rspamd_rcl_add_default_handler (
-	struct rspamd_rcl_section *section,
-	const gchar *name,
-	rspamd_rcl_handler_t handler,
-	gsize offset,
-	gint flags);
+struct rspamd_rcl_default_handler_data *rspamd_rcl_add_default_handler (
+		struct rspamd_rcl_section *section,
+		const gchar *name,
+		rspamd_rcl_default_handler_t handler,
+		goffset offset,
+		gint flags,
+		const gchar *doc_string);
 
 /**
  * Add new section to the configuration
  * @param top top section
  * @param name the name of the section
+ * @param key_attr name of the attribute that should be used as key attribute
  * @param handler handler function for all attributes
  * @param type type of object handled by a handler
  * @param required whether at least one of these sections is required
  * @param strict_type turn on strict check for types for this section
  * @return newly created structure
  */
-struct rspamd_rcl_section * rspamd_rcl_add_section (
-	struct rspamd_rcl_section **top,
-	const gchar *name, rspamd_rcl_handler_t handler,
-	enum ucl_type type, gboolean required, gboolean strict_type);
+struct rspamd_rcl_section *rspamd_rcl_add_section (
+		struct rspamd_rcl_section **top,
+		const gchar *name, const gchar *key_attr,
+		rspamd_rcl_handler_t handler,
+		enum ucl_type type, gboolean required, gboolean strict_type);
+
+struct rspamd_rcl_section *rspamd_rcl_add_section_doc (
+		struct rspamd_rcl_section **top,
+		const gchar *name, const gchar *key_attr,
+		rspamd_rcl_handler_t handler,
+		enum ucl_type type, gboolean required,
+		gboolean strict_type,
+		ucl_object_t *doc_target,
+		const gchar *doc_string);
 
 /**
  * Init common sections known to rspamd
  * @return top section
  */
-struct rspamd_rcl_section * rspamd_rcl_config_init (void);
+struct rspamd_rcl_section * rspamd_rcl_config_init (struct rspamd_config *cfg);
 
 /**
  * Get a section specified by path, it understand paths separated by '/' character
@@ -124,13 +145,17 @@ struct rspamd_rcl_section * rspamd_rcl_config_get_section (
 	const char *path);
 
 /**
- * Read RCL configuration and parse it to a config file
+ * Parse configuration
  * @param top top section
- * @param cfg target configuration
- * @param obj object to handle
- * @return TRUE if an object can be parsed
+ * @param cfg rspamd configuration
+ * @param ptr pointer to the target
+ * @param pool pool object
+ * @param obj ucl object to parse
+ * @param err error pointer
+ * @return
  */
 gboolean rspamd_rcl_parse (struct rspamd_rcl_section *top,
+		struct rspamd_config *cfg,
 		gpointer ptr, rspamd_mempool_t *pool,
 		const ucl_object_t *obj, GError **err);
 
@@ -144,9 +169,10 @@ gboolean rspamd_rcl_parse (struct rspamd_rcl_section *top,
  * @param err error ptr
  * @return TRUE if the object has been parsed
  */
-gboolean rspamd_rcl_section_parse_defaults (struct rspamd_rcl_section *section,
-	rspamd_mempool_t *pool, const ucl_object_t *obj, gpointer ptr,
-	GError **err);
+gboolean rspamd_rcl_section_parse_defaults (struct rspamd_config *cfg,
+		struct rspamd_rcl_section *section,
+		rspamd_mempool_t *pool, const ucl_object_t *obj, gpointer ptr,
+		GError **err);
 /**
  * Here is a section of common handlers that accepts rcl_struct_parser
  * which itself contains a struct pointer and the offset of a member in a
@@ -260,6 +286,21 @@ gboolean rspamd_rcl_parse_struct_keypair (rspamd_mempool_t *pool,
 	GError **err);
 
 /**
+ * Parse a pubkey field of a structure
+ * @param cfg config pointer
+ * @param obj object to parse
+ * @param ud struct_parser structure (flags mean the exact structure used)
+ * @param section the current section
+ * @param err error pointer
+ * @return TRUE if a value has been successfully parsed
+ */
+gboolean rspamd_rcl_parse_struct_pubkey (rspamd_mempool_t *pool,
+	const ucl_object_t *obj,
+	gpointer ud,
+	struct rspamd_rcl_section *section,
+	GError **err);
+
+/**
  * Parse a inet addr field of a structure
  * @param cfg config pointer
  * @param obj object to parse
@@ -290,6 +331,36 @@ gboolean rspamd_rcl_parse_struct_mime_addr (rspamd_mempool_t *pool,
 	GError **err);
 
 /**
+ * Parse a raw ucl object
+ * @param cfg config pointer
+ * @param obj object to parse
+ * @param ud struct_parser structure (flags mean the exact structure used)
+ * @param section the current section
+ * @param err error pointer
+ * @return TRUE if a value has been successfully parsed
+ */
+gboolean rspamd_rcl_parse_struct_ucl (rspamd_mempool_t *pool,
+	const ucl_object_t *obj,
+	gpointer ud,
+	struct rspamd_rcl_section *section,
+	GError **err);
+
+/**
+ * Parse IP list or map, accepts radix_tree_t ** as an argument
+ * @param cfg config pointer
+ * @param obj object to parse
+ * @param ud struct_parser structure (flags mean the exact structure used)
+ * @param section the current section
+ * @param err error pointer
+ * @return TRUE if a value has been successfully parsed
+ */
+gboolean rspamd_rcl_parse_struct_iplist (rspamd_mempool_t *pool,
+	const ucl_object_t *obj,
+	gpointer ud,
+	struct rspamd_rcl_section *section,
+	GError **err);
+
+/**
  * Utility functions
  */
 
@@ -303,15 +374,16 @@ gboolean rspamd_rcl_parse_struct_mime_addr (rspamd_mempool_t *pool,
  * @param offset offset inside a structure
  */
 void rspamd_rcl_register_worker_option (struct rspamd_config *cfg,
-	gint type,
-	const gchar *name,
-	rspamd_rcl_handler_t handler,
-	gpointer target,
-	gsize offset,
-	gint flags);
+		GQuark type,
+		const gchar *name,
+		rspamd_rcl_default_handler_t handler,
+		gpointer target,
+		glong offset,
+		gint flags,
+		const gchar *doc_string);
 
 /**
- * Regiester a default parser for a worker
+ * Register a default parser for a worker
  * @param cfg config structure
  * @param type type of worker (GQuark)
  * @param func handler function
@@ -319,4 +391,70 @@ void rspamd_rcl_register_worker_option (struct rspamd_config *cfg,
  */
 void rspamd_rcl_register_worker_parser (struct rspamd_config *cfg, gint type,
 	gboolean (*func)(ucl_object_t *, gpointer), gpointer ud);
+
+/**
+ * Adds new documentation object to the configuration
+ * @param doc_target target object where to insert documentation (top object is used if this is NULL)
+ * @param doc_object documentation object to insert
+ */
+ucl_object_t *rspamd_rcl_add_doc_obj (ucl_object_t *doc_target,
+		const char *doc_string,
+		const char *doc_name,
+		ucl_type_t type,
+		rspamd_rcl_default_handler_t handler,
+		gint flags,
+		const char *default_value,
+		gboolean required);
+
+/**
+ * Adds new documentation option specified by path `doc_path` that should be
+ * split by dots
+ */
+ucl_object_t *rspamd_rcl_add_doc_by_path (struct rspamd_config *cfg,
+		const gchar *doc_path,
+		const char *doc_string,
+		const char *doc_name,
+		ucl_type_t type,
+		rspamd_rcl_default_handler_t handler,
+		gint flags,
+		const char *default_value,
+		gboolean required);
+
+/**
+ * Parses example and adds documentation according to the example:
+ *
+ * ```
+ * section {
+ *   param1 = value; # explanation
+ *   param2 = value; # explanation
+ * }
+ * ```
+ *
+ * will produce the following documentation strings:
+ * section ->
+ *   section.param1 : explanation
+ *   section.param2 : explanation
+ *
+ * @param cfg
+ * @param root_path
+ * @param example_data
+ * @param example_len
+ * @return
+ */
+ucl_object_t *rspamd_rcl_add_doc_by_example (struct rspamd_config *cfg,
+		const gchar *root_path,
+		const gchar *doc_string,
+		const gchar *doc_name,
+		const gchar *example_data, gsize example_len);
+
+/**
+ * Add lua modules path
+ * @param cfg
+ * @param path
+ * @param err
+ * @return
+ */
+gboolean rspamd_rcl_add_lua_plugins_path (struct rspamd_config *cfg,
+		const gchar *path,
+		GError **err);
 #endif /* CFG_RCL_H_ */
