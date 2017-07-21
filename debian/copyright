@@ -1,6 +1,9 @@
 Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: rspamd
+Upstream-Contact: Vsevolod Stakhov <vsevolod@highsecure.ru>
 Source: https://github.com/vstakhov/rspamd
+Files-Excluded: debian/* .hgtags
+Comment: Do not ship upstream debian files
 
 Files: *
 Copyright: 2008-2015 Vsevolod Stakhov <vsevolod@highsecure.ru>
@@ -98,7 +101,7 @@ Files: doc/doxydown/*
 Copyright: 2014, Vsevolod Stakhov <vsevolod@highsecure.ru>
 License: MIT
 
-Files: interface/* 
+Files: interface/*
 Copyright: 2000-2012 The Apache Software Foundation
 License: Apache-2.0
 
