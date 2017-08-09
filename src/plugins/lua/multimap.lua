@@ -79,6 +79,9 @@ local value_types = {
   mempool = {
     get_value = function(val) return val end,
   },
+  symbol_options = {
+    get_value = function(val) return val end,
+  },
 }
 
 local function ip_to_rbl(ip, rbl)
@@ -344,6 +347,7 @@ local multimap_filters = {
   from = apply_addr_filter,
   rcpt = apply_addr_filter,
   helo = apply_hostname_filter,
+  symbol_options = apply_regexp_filter,
   header = apply_addr_filter,
   url = apply_url_filter,
   filename = apply_filename_filter,
@@ -377,18 +381,31 @@ local function multimap_callback(task, rule)
       end
       ret = r['cdb']:lookup(srch)
     elseif r['redis_key'] then
-      local srch = value
+      local srch = {value}
+      local cmd = 'HGET'
       if r['type'] == 'ip' or (r['type'] == 'received' and
         (r['filter'] == 'real_ip' or r['filter'] == 'from_ip' or not r['filter'])) then
-        srch = value:to_string()
+        srch = {value:to_string()}
+        cmd = 'HMGET'
+        local maxbits = 128
+        local minbits = 32
+        if value:get_version() == 4 then
+            maxbits = 32
+            minbits = 8
+        end
+        for i=maxbits,minbits,-1 do
+            local nip = value:apply_mask(i):to_string() .. "/" .. i
+            table.insert(srch, nip)
+        end
       end
+      table.insert(srch, 1, r['redis_key'])
       ret = rspamd_redis_make_request(task,
         redis_params, -- connect params
         r['redis_key'], -- hash key
         false, -- is write
         redis_map_cb, --callback
-        'HGET', -- command
-        {r['redis_key'], srch} -- arguments
+        cmd, -- command
+        srch -- arguments
       )
 
       return ret
@@ -470,6 +487,14 @@ local function multimap_callback(task, rule)
   local function match_rule(r, value)
     local function rule_callback(result)
       if result then
+        if type(result) == 'table' then
+          for _,rs in ipairs(result) do
+            if type(rs) ~= 'userdata' then
+              rule_callback(rs)
+            end
+          end
+          return
+        end
         local _,symbol,score = parse_ret(r, result)
         if symbol and r['symbols_set'] then
           if not r['symbols_set'][symbol] then
@@ -738,6 +763,14 @@ local function multimap_callback(task, rule)
         match_rule(rule, var)
       end
     end,
+    symbol_options = function()
+      local sym = task:get_symbol(rule['target_symbol'])
+      if sym and sym[1].options then
+        for _, o in ipairs(sym[1].options) do
+          match_rule(rule, o)
+        end
+      end
+    end,
     received = function()
       local hdrs = task:get_received_headers()
       if hdrs and hdrs[1] then
@@ -892,6 +925,7 @@ local function add_multimap_rule(key, newrule)
         or newrule['type'] == 'rcpt'
         or newrule['type'] == 'from'
         or newrule['type'] == 'helo'
+        or newrule['type'] == 'symbol_options'
         or newrule['type'] == 'filename'
         or newrule['type'] == 'url'
         or newrule['type'] == 'content'
@@ -938,6 +972,9 @@ local function add_multimap_rule(key, newrule)
   end
 
   if ret then
+    if newrule['type'] == 'symbol_options' then
+      rspamd_config:register_dependency(newrule['symbol'], newrule['target_symbol'])
+    end
     if newrule['require_symbols'] and not newrule['prefilter'] then
       local atoms = {}
 
