@@ -20,10 +20,17 @@ override_dh_auto_configure:
 		-DINCLUDEDIR=/usr/include \
 		-DSYSTEMDDIR=/lib/systemd/system \
 		-DNO_SHARED=ON \
+		-DCMAKE_BUILD_TYPE=ReleaseWithDebInfo \
 		-DDEBIAN_BUILD=1 \
 		-DINSTALL_EXAMPLES=ON \
 		-DFORCE_GMIME24=ON \
+		-DENABLE_JEMALLOC=ON \
+		-DENABLE_OPTIMIZATION=OFF \
+		-DENABLE_FULL_DEBUG=OFF \
+		-DENABLE_GD=ON \
+		-DENABLE_PCRE2=OFF \
 		-DENABLE_HIREDIS=ON \
+		-DENABLE_LUAJIT=ON \
 		-DWANT_SYSTEMD_UNITS=ON
 
 override_dh_makeshlibs:
@@ -36,3 +43,4 @@ override_dh_auto_clean:
 override_dh_fixperms:
 	dh_fixperms
 	chmod 750 $(CURDIR)/debian/rspamd/var/lib/rspamd
+	chmod 750 $(CURDIR)/debian/rspamd/var/log/rspamd
