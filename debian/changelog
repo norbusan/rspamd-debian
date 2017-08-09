@@ -1,3 +1,20 @@
+rspamd (1.6.3-1) UNRELEASED; urgency=medium
+
+  [ Jerome Lebleu ]
+  * d/compat: Bump to compat version 10
+  * d/source: Switch to 3.0 native to quilt source format
+  * d/control:
+    + Bump to Standards-Version 3.9.8 (no changes)
+    + Fix Vcs-* fields, use collab-maint
+  * d/rules:
+    + Enable hardening=+all (relro)
+    + Rely on default rules for systemd and sysv service setup
+    + Update configuration var. and fix permission on log dir
+  * d/rspamd.init: Use rspamd.conf as config. file and test it on start
+  * New upstream version 1.6.3 (Closes: #813222)
+
+ -- Jerome Lebleu <jerome@maroufle.fr>  Wed, 09 Aug 2017 21:38:20 +0200
+
 rspamd (0.6.10) unstable; urgency=low
 
   * Initial release (Closes: #683746)
