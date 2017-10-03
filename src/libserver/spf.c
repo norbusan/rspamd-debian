@@ -670,9 +670,14 @@ spf_record_dns_callback (struct rdns_reply *reply, gpointer arg)
 								cb->rec->requests_inflight++;
 							}
 						}
+						else {
+							cb->addr->flags |= RSPAMD_SPF_FLAG_RESOLVED;
+							cb->addr->flags &= ~RSPAMD_SPF_FLAG_PERMFAIL;
+						}
 					}
 					else {
 						cb->addr->flags |= RSPAMD_SPF_FLAG_RESOLVED;
+						cb->addr->flags &= ~RSPAMD_SPF_FLAG_PERMFAIL;
 						spf_record_process_addr (rec, addr, elt_data);
 					}
 					break;
@@ -1046,6 +1051,10 @@ parse_spf_ptr (struct spf_record *rec,
 
 	rspamd_mempool_add_destructor (task->task_pool, free, ptr);
 	msg_debug_spf ("resolve ptr %s for %s", ptr, host);
+
+	rec->ttl = 0;
+	msg_debug_spf ("disable SPF caching as there is PTR expansion");
+
 	if (make_dns_request_task_forced (task,
 			spf_record_dns_callback, (void *) cb, RDNS_REQUEST_PTR, ptr)) {
 		rec->requests_inflight++;
