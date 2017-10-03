@@ -1,6 +1,5 @@
-rspamd (1.6.3-1) UNRELEASED; urgency=medium
+rspamd (1.6.4-1) UNRELEASED; urgency=medium
 
-  [ Jerome Lebleu ]
   * d/compat: Bump to compat version 10
   * d/source: Switch to 3.0 native to quilt source format
   * d/control:
@@ -11,9 +10,9 @@ rspamd (1.6.3-1) UNRELEASED; urgency=medium
     + Rely on default rules for systemd and sysv service setup
     + Update configuration var. and fix permission on log dir
   * d/rspamd.init: Use rspamd.conf as config. file and test it on start
-  * New upstream version 1.6.3 (Closes: #813222)
+  * New upstream version 1.6.4 (Closes: #813222)
 
- -- Jerome Lebleu <jerome@maroufle.fr>  Wed, 09 Aug 2017 21:38:20 +0200
+ -- Jerome Lebleu <jerome@maroufle.fr>  Tue, 03 Oct 2017 21:36:50 +0200
 
 rspamd (0.6.10) unstable; urgency=low
 
