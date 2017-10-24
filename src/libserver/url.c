@@ -46,6 +46,8 @@
 #include "message.h"
 #include "multipattern.h"
 #include "contrib/uthash/utlist.h"
+#include <unicode/utf8.h>
+#include <unicode/uchar.h>
 
 typedef struct url_match_s {
 	const gchar *m_begin;
@@ -153,21 +155,17 @@ struct url_matcher static_matchers[] = {
 		/* Common prefixes */
 		{"file://",   "",          url_file_start,  url_file_end,
 				0, 0},
-		{"file:\\\\",   "",          url_file_start,  url_file_end,
+		{"file:\\\\",   "",        url_file_start,  url_file_end,
 				0, 0},
 		{"ftp://",    "",          url_web_start,   url_web_end,
 				0, 0},
-		{"ftp:\\\\",    "",          url_web_start,   url_web_end,
+		{"ftp:\\\\",    "",        url_web_start,   url_web_end,
 				0, 0},
 		{"sftp://",   "",          url_web_start,   url_web_end,
 				0, 0},
-		{"http://",   "",          url_web_start,   url_web_end,
+		{"http:",   "",            url_web_start,   url_web_end,
 				0, 0},
-		{"http:\\\\",   "",          url_web_start,   url_web_end,
-				0, 0},
-		{"https://",  "",          url_web_start,   url_web_end,
-				0, 0},
-		{"https:\\\\",  "",          url_web_start,   url_web_end,
+		{"https:",   "",           url_web_start,   url_web_end,
 				0, 0},
 		{"news://",   "",          url_web_start,   url_web_end,
 				0, 0},
@@ -231,7 +229,7 @@ static const unsigned int url_scanner_table[256] = {
 		IS_MAILSAFE /* ! */, IS_URLSAFE|IS_DOMAIN_END|IS_MAILSAFE /* " */,
 		IS_MAILSAFE /* # */, IS_MAILSAFE /* $ */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* % */, 0 /* & */, IS_MAILSAFE /* ' */,
-		IS_MAILSAFE /* ( */, IS_MAILSAFE /* ) */, IS_MAILSAFE /* * */,
+		0 /* ( */, 0 /* ) */, IS_MAILSAFE /* * */,
 		IS_MAILSAFE /* + */, IS_MAILSAFE /* , */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* - */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* . */, IS_DOMAIN_END|IS_MAILSAFE /* / */,
@@ -245,8 +243,8 @@ static const unsigned int url_scanner_table[256] = {
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* 7 */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* 8 */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* 9 */, IS_DOMAIN_END /* : */,
-		IS_MAILSAFE /* ; */, IS_URLSAFE|IS_DOMAIN_END|IS_MAILSAFE /* < */, 0 /* = */,
-		IS_URLSAFE|IS_DOMAIN_END|IS_MAILSAFE /* > */, IS_DOMAIN_END /* ? */, 0 /* @ */,
+		0 /* ; */, IS_URLSAFE|IS_DOMAIN_END /* < */, 0 /* = */,
+		IS_URLSAFE|IS_DOMAIN_END /* > */, IS_DOMAIN_END /* ? */, 0 /* @ */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* A */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* B */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* C */,
@@ -272,11 +270,11 @@ static const unsigned int url_scanner_table[256] = {
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* W */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* X */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* Y */,
-		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* Z */, IS_MAILSAFE /* [ */,
-		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* \ */, IS_MAILSAFE /* ] */,
+		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* Z */, 0 /* [ */,
+		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* \ */, 0 /* ] */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* ^ */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* _ */,
-		IS_URLSAFE|IS_DOMAIN_END|IS_MAILSAFE /* ` */,
+		IS_URLSAFE|IS_DOMAIN_END /* ` */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* a */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* b */,
 		IS_URLSAFE|IS_DOMAIN|IS_MAILSAFE /* c */,
@@ -550,7 +548,7 @@ is_url_end (gchar c)
 
 static gint
 rspamd_mailto_parse (struct http_parser_url *u, const gchar *str, gsize len,
-		gchar const **end, gboolean strict)
+		gchar const **end, gboolean strict, guint *flags)
 {
 	const gchar *p = str, *c = str, *last = str + len;
 	gchar t;
@@ -591,6 +589,7 @@ rspamd_mailto_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					p++;
 				}
 				else {
+					*flags |= RSPAMD_URL_FLAG_MISSINGSLASHES;
 					st = parse_slash_slash;
 				}
 				break;
@@ -704,11 +703,11 @@ rspamd_mailto_parse (struct http_parser_url *u, const gchar *str, gsize len,
 
 static gint
 rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
-		gchar const **end, gboolean strict, gboolean *obscured)
+		gchar const **end, gboolean strict, guint *flags)
 {
 	const gchar *p = str, *c = str, *last = str + len, *slash = NULL;
 	gchar t;
-	gunichar uc;
+	UChar32 uc;
 	glong pt;
 	gint ret = 1;
 	gboolean user_seen = FALSE;
@@ -766,6 +765,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 				}
 				else {
 					st = parse_slash_slash;
+					*(flags) |= RSPAMD_URL_FLAG_MISSINGSLASHES;
 				}
 				break;
 			case parse_slash:
@@ -833,15 +833,13 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 						/* We have multiple at in fact */
 						st = parse_multiple_at;
 						user_seen = TRUE;
-
-						if (obscured) {
-							*obscured = TRUE;
-						}
+						*flags |= RSPAMD_URL_FLAG_OBSCURED;
 
 						continue;
 					}
 
 					SET_U (u, UF_USERINFO);
+					*flags |= RSPAMD_URL_FLAG_HAS_USER;
 					st = parse_at;
 				}
 				else if (!g_ascii_isgraph (t)) {
@@ -867,6 +865,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 				if (t == '@') {
 					/* Empty password */
 					SET_U (u, UF_USERINFO);
+					*flags |= RSPAMD_URL_FLAG_HAS_USER;
 					st = parse_at;
 				}
 				else {
@@ -878,6 +877,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 			case parse_password:
 				if (t == '@') {
 					/* XXX: password is not stored */
+					*flags |= RSPAMD_URL_FLAG_HAS_USER;
 					SET_U (u, UF_USERINFO);
 					st = parse_at;
 				}
@@ -888,11 +888,18 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 				break;
 			case parse_at:
 				c = p;
-				st = parse_domain;
-				if (t == '[') {
+
+				if (t == '@') {
+					*flags |= RSPAMD_URL_FLAG_OBSCURED;
+					p ++;
+				}
+				else if (t == '[') {
 					st = parse_ipv6;
 					p++;
 					c = p;
+				}
+				else {
+					st = parse_domain;
 				}
 				break;
 			case parse_domain:
@@ -942,15 +949,33 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 						st = parse_user;
 					}
 					else if (*p != '.' && *p != '-' && *p != '_' && *p != '%') {
-						uc = g_utf8_get_char_validated (p, last - p);
+						if (*p & 0x80) {
+							*flags |= RSPAMD_URL_FLAG_IDN;
+							guint i = 0;
 
-						if (uc == (gunichar) -1) {
-							/* Bad utf8 */
-							goto out;
+							U8_NEXT (p, i, last - p, uc);
+
+							if (uc < 0) {
+								/* Bad utf8 */
+								goto out;
+							}
+
+							if (!u_isalnum (uc)) {
+								/* Bad symbol */
+								if (strict) {
+									goto out;
+								}
+								else {
+									goto set;
+								}
+							}
+
+							p = p + i;
 						}
-
-						if (!g_unichar_isalnum (uc)) {
-							/* Bad symbol */
+						else if (is_urlsafe (*p)) {
+							p ++;
+						}
+						else {
 							if (strict) {
 								goto out;
 							}
@@ -958,8 +983,6 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 								goto set;
 							}
 						}
-
-						p = g_utf8_next_char (p);
 					}
 					else {
 						p++;
@@ -992,6 +1015,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					}
 					if (u != NULL) {
 						u->port = pt;
+						*flags |= RSPAMD_URL_FLAG_HAS_PORT;
 					}
 					st = parse_suffix_slash;
 				}
@@ -1002,6 +1026,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					}
 					if (u != NULL) {
 						u->port = pt;
+						*flags |= RSPAMD_URL_FLAG_HAS_PORT;
 					}
 
 					c = p + 1;
@@ -1014,6 +1039,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					}
 					if (u != NULL) {
 						u->port = pt;
+						*flags |= RSPAMD_URL_FLAG_HAS_PORT;
 					}
 
 					c = p + 1;
@@ -1514,9 +1540,8 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 	struct http_parser_url u;
 	gchar *p, *comp;
 	const gchar *end;
-	guint i, complen, ret;
+	guint i, complen, ret, flags = 0;
 	gsize unquoted_len = 0;
-	gboolean obscured = FALSE;
 
 	memset (uri, 0, sizeof (*uri));
 	memset (&u, 0, sizeof (u));
@@ -1531,14 +1556,14 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 	if (len > sizeof ("mailto:") - 1) {
 		/* For mailto: urls we also need to add slashes to make it a valid URL */
 		if (g_ascii_strncasecmp (p, "mailto:", sizeof ("mailto:") - 1) == 0) {
-			ret = rspamd_mailto_parse (&u, uristring, len, &end, TRUE);
+			ret = rspamd_mailto_parse (&u, uristring, len, &end, TRUE, &flags);
 		}
 		else {
-			ret = rspamd_web_parse (&u, uristring, len, &end, TRUE, &obscured);
+			ret = rspamd_web_parse (&u, uristring, len, &end, TRUE, &flags);
 		}
 	}
 	else {
-		ret = rspamd_web_parse (&u, uristring, len, &end, TRUE, &obscured);
+		ret = rspamd_web_parse (&u, uristring, len, &end, TRUE, &flags);
 	}
 
 	if (ret != 0) {
@@ -1551,8 +1576,27 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 
 	uri->raw = p;
 	uri->rawlen = len;
-	uri->string = rspamd_mempool_alloc (pool, len + 1);
-	rspamd_strlcpy (uri->string, p, len + 1);
+
+	if (flags & RSPAMD_URL_FLAG_MISSINGSLASHES) {
+		len += 2;
+		uri->string = rspamd_mempool_alloc (pool, len + 1);
+		memcpy (uri->string, p, u.field_data[UF_SCHEMA].len);
+		memcpy (uri->string + u.field_data[UF_SCHEMA].len, "://", 3);
+		rspamd_strlcpy (uri->string + u.field_data[UF_SCHEMA].len + 3,
+			p + u.field_data[UF_SCHEMA].len + 1,
+				len - 1 - u.field_data[UF_SCHEMA].len);
+		/* Compensate slashes added */
+		for (i = UF_SCHEMA + 1; i < UF_MAX; i++) {
+			if (u.field_set & (1 << i)) {
+				u.field_data[i].off += 2;
+			}
+		}
+	}
+	else {
+		uri->string = rspamd_mempool_alloc (pool, len + 1);
+		rspamd_strlcpy (uri->string, p, len + 1);
+	}
+
 	uri->urllen = len;
 
 	for (i = 0; i < UF_MAX; i++) {
@@ -1591,13 +1635,10 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 	}
 
 	uri->port = u.port;
+	uri->flags = flags;
 
 	if (!uri->hostlen) {
 		return URI_ERRNO_HOST_MISSING;
-	}
-
-	if (obscured) {
-		uri->flags |= RSPAMD_URL_FLAG_OBSCURED;
 	}
 
 	/* Now decode url symbols */
@@ -1961,13 +2002,14 @@ url_web_end (struct url_callback_data *cb,
 {
 	const gchar *last = NULL;
 	gint len = cb->end - pos;
+	guint flags = 0;
 
 	if (match->newline_pos && match->st != '<') {
 		/* We should also limit our match end to the newline */
 		len = MIN (len, match->newline_pos - pos);
 	}
 
-	if (rspamd_web_parse (NULL, pos, len, &last, FALSE, NULL) != 0) {
+	if (rspamd_web_parse (NULL, pos, len, &last, FALSE, &flags) != 0) {
 		return FALSE;
 	}
 
@@ -2026,6 +2068,7 @@ url_email_end (struct url_callback_data *cb,
 	const gchar *last = NULL;
 	struct http_parser_url u;
 	gint len = cb->end - pos;
+	guint flags = 0;
 
 	if (match->newline_pos && match->st != '<') {
 		/* We should also limit our match end to the newline */
@@ -2034,7 +2077,7 @@ url_email_end (struct url_callback_data *cb,
 
 	if (!match->prefix || match->prefix[0] == '\0') {
 		/* We have mailto:// at the beginning */
-		if (rspamd_mailto_parse (&u, pos, len, &last, FALSE) != 0) {
+		if (rspamd_mailto_parse (&u, pos, len, &last, FALSE, &flags) != 0) {
 			return FALSE;
 		}
 
@@ -2068,7 +2111,14 @@ url_email_end (struct url_callback_data *cb,
 		}
 
 		c = pos - 1;
-		while (c > cb->begin && is_mailsafe (*c)) {
+		while (c > cb->begin) {
+			if (!is_mailsafe (*c)) {
+				break;
+			}
+			if (c == match->prev_newline_pos) {
+				break;
+			}
+
 			c --;
 		}
 		/* Rewind to the first alphanumeric character */
@@ -2079,14 +2129,20 @@ url_email_end (struct url_callback_data *cb,
 		/* Find the end of email */
 		p = pos + 1;
 		while (p < cb->end && is_domain (*p)) {
+			if (p == match->newline_pos) {
+				break;
+			}
+
 			p ++;
 		}
+
 		/* Rewind it again to avoid bad emails to be detected */
 		while (p > pos && p < cb->end && !g_ascii_isalnum (*p)) {
 			p --;
 		}
 
-		if (p < cb->end && g_ascii_isalnum (*p)) {
+		if (p < cb->end && g_ascii_isalnum (*p) &&
+				(match->newline_pos == NULL || p < match->newline_pos)) {
 			p ++;
 		}
 

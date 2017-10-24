@@ -231,10 +231,20 @@ rspamd_extract_words (struct rspamd_task *task,
 	}
 #endif
 	/* Ugly workaround */
-	part->normalized_words = rspamd_tokenize_text (part->content->data,
-			part->content->len, IS_PART_UTF (part), task->cfg,
-			part->exceptions, FALSE,
-			NULL);
+	if (IS_PART_HTML (part)) {
+		part->normalized_words = rspamd_tokenize_text (
+				part->stripped_content->data,
+				part->stripped_content->len, IS_PART_UTF (part), task->cfg,
+				part->exceptions, FALSE,
+				NULL);
+	}
+	else {
+		part->normalized_words = rspamd_tokenize_text (
+				part->stripped_content->data,
+				part->stripped_content->len, IS_PART_UTF (part), task->cfg,
+				part->exceptions, FALSE,
+				NULL);
+	}
 
 	if (part->normalized_words) {
 		part->normalized_hashes = g_array_sized_new (FALSE, FALSE,
@@ -258,14 +268,12 @@ rspamd_extract_words (struct rspamd_task *task,
 					temp_word = rspamd_mempool_alloc (task->task_pool, nlen);
 					memcpy (temp_word, r, nlen);
 
-#if 0
 					if (IS_PART_UTF (part)) {
 						rspamd_str_lc_utf8 (temp_word, nlen);
 					}
 					else {
 						rspamd_str_lc (temp_word, nlen);
 					}
-#endif
 
 					w->begin = temp_word;
 					w->len = nlen;
@@ -402,6 +410,8 @@ rspamd_strip_newlines_parse (const gchar *begin, const gchar *pe,
 				if (IS_PART_HTML (part) || g_ascii_ispunct (last_c)) {
 					g_byte_array_append (part->stripped_content,
 							(const guint8 *)" ", 1);
+					g_ptr_array_add (part->newlines,
+							(((gpointer) (goffset) (part->stripped_content->len))));
 					crlf_added = TRUE;
 				}
 				else {
@@ -469,6 +479,11 @@ rspamd_strip_newlines_parse (const gchar *begin, const gchar *pe,
 			case seen_cr:
 			case seen_lf:
 				part->nlines ++;
+
+				if (!crlf_added) {
+					g_ptr_array_add (part->newlines,
+							(((gpointer) (goffset) (part->stripped_content->len))));
+				}
 
 				/* Skip initial spaces */
 				if (G_UNLIKELY (*p == ' ')) {
