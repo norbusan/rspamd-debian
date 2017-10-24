@@ -18,8 +18,8 @@ Build-Depends: cmake,
                libpcre3-dev,
                libsqlite3-dev,
                libssl-dev (>= 1.0),
-               perl,
-               ragel
+               ragel,
+               zlib1g-dev
 Standards-Version: 4.1.1
 Homepage: https://rspamd.com
 Vcs-Git: https://anonscm.debian.org/git/collab-maint/rspamd.git
@@ -27,7 +27,7 @@ Vcs-Browser: https://anonscm.debian.org/cgit/collab-maint/rspamd.git
 
 Package: rspamd
 Architecture: any
-Depends: adduser, lsb-base, ca-certificates, ${misc:Depends}, ${shlibs:Depends}
+Depends: adduser, ca-certificates, lsb-base, ${misc:Depends}, ${shlibs:Depends}
 Description: Rapid spam filtering system
  Rspamd is a rapid, modular and lightweight spam filter. It is designed to work
  with big amount of mail and can be easily extended with own filters written in
