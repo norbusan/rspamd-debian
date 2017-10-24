@@ -394,6 +394,7 @@ rspamd_dkim_parse_hdrlist_common (struct rspamd_dkim_common_ctx *ctx,
 	gboolean from_found = FALSE;
 	guint count = 0;
 	struct rspamd_dkim_header *new;
+	gpointer found;
 	GHashTable *htb;
 
 	p = param;
@@ -417,29 +418,35 @@ rspamd_dkim_parse_hdrlist_common (struct rspamd_dkim_common_ctx *ctx,
 
 	while (p <= end) {
 		if ((p == end || *p == ':') && p - c > 0) {
+
 			h = rspamd_mempool_alloc (ctx->pool, p - c + 1);
 			rspamd_strlcpy (h, c, p - c + 1);
-			g_strstrip (h);
 
-			new = rspamd_mempool_alloc (ctx->pool,
-					sizeof (struct rspamd_dkim_header));
-			new->name = h;
-			new->count = 0;
+			g_strstrip (h);
 
 			/* Check mandatory from */
 			if (!from_found && g_ascii_strcasecmp (h, "from") == 0) {
 				from_found = TRUE;
 			}
 
+			new = rspamd_mempool_alloc (ctx->pool,
+					sizeof (struct rspamd_dkim_header));
+			new->name = h;
+			new->count = 0;
+
 			g_ptr_array_add (ctx->hlist, new);
 
-			if (g_hash_table_lookup (htb, h) != NULL) {
-				new->count++;
+			if ((found = g_hash_table_lookup (htb, h)) != NULL) {
+				count = GPOINTER_TO_UINT (found);
+				new->count = count;
+				count ++;
 			}
 			else {
-				/* Insert new header to the list */
-				g_hash_table_insert (htb, (gpointer)new->name, new);
+				/* Insert new header order to the list */
+				count = new->count + 1;
 			}
+
+			g_hash_table_insert (htb, h, GUINT_TO_POINTER (count));
 
 			c = p + 1;
 			p++;
@@ -1938,6 +1945,22 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 		ar = g_hash_table_lookup (task->raw_headers, header_name);
 
 		if (ar) {
+			/* Check uniqueness of the header */
+			rh = g_ptr_array_index (ar, 0);
+			if ((rh->type & RSPAMD_HEADER_UNIQUE) && ar->len > 1) {
+				guint64 random_cookie = ottery_rand_uint64 ();
+
+				msg_warn_dkim ("header %s is intended to be unique by"
+						" email standards, but we have %d headers of this"
+						" type, artificially break DKIM check", header_name,
+						ar->len);
+				rspamd_dkim_hash_update (ctx->headers_hash,
+						(const gchar *)&random_cookie,
+						sizeof (random_cookie));
+
+				return FALSE;
+			}
+
 			if (ar->len > count) {
 				/* Set skip count */
 				rh_num = ar->len - count - 1;
