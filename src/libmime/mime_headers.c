@@ -124,7 +124,7 @@ rspamd_mime_header_check_special (struct rspamd_task *task,
 		if (task->deliver_to == NULL) {
 			task->deliver_to = rh->decoded;
 		}
-		rh->type = RSPAMD_HEADER_DELIVERED_TO|RSPAMD_HEADER_UNIQUE;
+		rh->type = RSPAMD_HEADER_DELIVERED_TO;
 		break;
 	case 0x2EC3BFF3C393FC10ULL: /* date */
 	case 0xAC0DDB1A1D214CAULL: /* sender */
@@ -202,8 +202,7 @@ rspamd_mime_headers_process (struct rspamd_task *task, GHashTable *target,
 		case 1:
 			/* We got something like header's name */
 			if (*p == ':') {
-				nh =
-					rspamd_mempool_alloc0 (task->task_pool,
+				nh = rspamd_mempool_alloc0 (task->task_pool,
 						sizeof (struct rspamd_mime_header));
 				l = p - c;
 				tmp = rspamd_mempool_alloc (task->task_pool, l + 1);
@@ -357,16 +356,19 @@ rspamd_mime_headers_process (struct rspamd_task *task, GHashTable *target,
 
 			/* We also validate utf8 and replace all non-valid utf8 chars */
 			rspamd_mime_charset_utf_enforce (nh->decoded, strlen (nh->decoded));
-			rspamd_mime_header_add (task, target, order, nh, check_newlines);
 			nh->order = norder ++;
+			rspamd_mime_header_add (task, target, order, nh, check_newlines);
+			nh = NULL;
 			state = 0;
 			break;
 		case 5:
 			/* Header has only name, no value */
 			nh->value = "";
 			nh->decoded = "";
-			rspamd_mime_header_add (task, target, order, nh, check_newlines);
+			nh->raw_len = p - nh->raw_value;
 			nh->order = norder ++;
+			rspamd_mime_header_add (task, target, order, nh, check_newlines);
+			nh = NULL;
 			state = 0;
 			break;
 		case 99:
@@ -504,6 +506,20 @@ rspamd_mime_header_maybe_save_token (rspamd_mempool_t *pool, GString *out,
 	g_byte_array_set_size (token, 0);
 	/* Propagate charset */
 	memcpy (old_charset, new_charset, sizeof (*old_charset));
+}
+
+static void
+rspamd_mime_header_sanity_check (GString *str)
+{
+	gsize i;
+	gchar t;
+
+	for (i = 0; i < str->len; i ++) {
+		t = str->str[i];
+		if (!((t & 0x80) || g_ascii_isgraph (t) || t == ' ')) {
+			str->str[i] = '?';
+		}
+	}
 }
 
 gchar *
@@ -684,6 +700,7 @@ rspamd_mime_header_decode (rspamd_mempool_t *pool, const gchar *in,
 
 	g_byte_array_free (token, TRUE);
 	g_byte_array_free (decoded, TRUE);
+	rspamd_mime_header_sanity_check (out);
 	ret = g_string_free (out, FALSE);
 	rspamd_mempool_add_destructor (pool, g_free, ret);
 

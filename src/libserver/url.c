@@ -525,6 +525,7 @@ is_url_start (gchar c)
 {
 	if (c == '(' ||
 			c == '{' ||
+			c == '[' ||
 			c == '<' ||
 			c == '\'') {
 		return TRUE;
@@ -538,6 +539,7 @@ is_url_end (gchar c)
 {
 	if (c == ')' ||
 			c == '}' ||
+			c == ']' ||
 			c == '>' ||
 			c == '\'') {
 		return TRUE;
@@ -2444,6 +2446,7 @@ rspamd_url_text_part_callback (struct rspamd_url *url, gsize start_offset,
 	struct rspamd_task *task;
 	gchar *url_str = NULL;
 	struct rspamd_url *query_url, *existing;
+	GHashTable *target_tbl = NULL;
 	gint rc;
 
 	task = cbd->task;
@@ -2455,25 +2458,24 @@ rspamd_url_text_part_callback (struct rspamd_url *url, gsize start_offset,
 
 	if (url->protocol == PROTOCOL_MAILTO) {
 		if (url->userlen > 0) {
-			if ((existing = g_hash_table_lookup (task->emails, url)) == NULL) {
-				url->flags |= RSPAMD_URL_FLAG_FROM_TEXT;
-				g_hash_table_insert (task->emails, url,
-						url);
-			}
-			else {
-				existing->count ++;
-			}
+			target_tbl = task->emails;
 		}
 	}
 	else {
-		if ((existing = g_hash_table_lookup (task->urls, url)) == NULL) {
+		target_tbl = task->urls;
+	}
+
+	if (target_tbl) {
+		if ((existing = g_hash_table_lookup (target_tbl, url)) == NULL) {
 			url->flags |= RSPAMD_URL_FLAG_FROM_TEXT;
-			g_hash_table_insert (task->urls, url, url);
+			g_hash_table_insert (target_tbl, url, url);
 		}
 		else {
-			existing->count ++;
+			existing->count++;
 		}
 	}
+
+	target_tbl = NULL;
 
 	cbd->part->exceptions = g_list_prepend (
 			cbd->part->exceptions,
@@ -2492,19 +2494,27 @@ rspamd_url_text_part_callback (struct rspamd_url *url, gsize start_offset,
 					task->task_pool);
 
 			if (rc == URI_ERRNO_OK &&
-					url->hostlen > 0) {
+					query_url->hostlen > 0) {
 				msg_debug_task ("found url %s in query of url"
 						" %*s", url_str, url->querylen, url->query);
 
-				if ((existing = g_hash_table_lookup (task->urls,
-						query_url)) == NULL) {
-					query_url->flags |= RSPAMD_URL_FLAG_FROM_TEXT;
-					g_hash_table_insert (task->urls,
-							query_url,
-							query_url);
+				if (query_url->protocol == PROTOCOL_MAILTO) {
+					if (query_url->userlen > 0) {
+						target_tbl = task->emails;
+					}
 				}
 				else {
-					existing->count ++;
+					target_tbl = task->urls;
+				}
+
+				if (target_tbl) {
+					if ((existing = g_hash_table_lookup (target_tbl, query_url)) == NULL) {
+						url->flags |= RSPAMD_URL_FLAG_FROM_TEXT;
+						g_hash_table_insert (target_tbl, query_url, query_url);
+					}
+					else {
+						existing->count++;
+					}
 				}
 			}
 		}

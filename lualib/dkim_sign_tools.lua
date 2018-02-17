@@ -30,16 +30,16 @@ local function prepare_dkim_signing(N, task, settings)
     is_local = true
   end
 
-  if settings.auth_only and not auser then
-    if (settings.sign_networks and settings.sign_networks:get_key(ip)) then
-      is_sign_networks = true
-      rspamd_logger.debugm(N, task, 'mail is from address in sign_networks')
-    elseif settings.sign_local and is_local then
-      rspamd_logger.debugm(N, task, 'mail is from local address')
-    else
-      rspamd_logger.debugm(N, task, 'ignoring unauthenticated mail')
-      return false,{}
-    end
+  if settings.auth_only and auser then
+    rspamd_logger.debugm(N, task, 'user is authenticated')
+  elseif (settings.sign_networks and settings.sign_networks:get_key(ip)) then
+    is_sign_networks = true
+    rspamd_logger.debugm(N, task, 'mail is from address in sign_networks')
+  elseif settings.sign_local and is_local then
+    rspamd_logger.debugm(N, task, 'mail is from local address')
+  else
+    rspamd_logger.debugm(N, task, 'ignoring unauthenticated mail')
+    return false,{}
   end
 
   local efrom = task:get_from('smtp')
@@ -82,18 +82,21 @@ local function prepare_dkim_signing(N, task, settings)
 
   if settings.use_domain_sign_networks and is_sign_networks then
     dkim_domain = get_dkim_domain('use_domain_sign_networks')
+    rspamd_logger.debugm(N, task, 'sign_networks: use domain(%s) for signature: %s',
+      settings.use_domain_sign_networks, dkim_domain)
   elseif settings.use_domain_local and is_local then
     dkim_domain = get_dkim_domain('use_domain_local')
+    rspamd_logger.debugm(N, task, 'local: use domain(%s) for signature: %s',
+      settings.use_domain_local, dkim_domain)
   else
     dkim_domain = get_dkim_domain('use_domain')
+    rspamd_logger.debugm(N, task, 'use domain(%s) for signature: %s',
+      settings.use_domain, dkim_domain)
   end
 
   if not dkim_domain then
     rspamd_logger.debugm(N, task, 'could not extract dkim domain')
     return false,{}
-  else
-    rspamd_logger.debugm(N, task, 'use domain(%s) for signature: %s',
-      settings.use_domain, dkim_domain)
   end
 
   if settings.use_esld then
@@ -137,10 +140,41 @@ local function prepare_dkim_signing(N, task, settings)
     p.key = settings.domain[dkim_domain].path
   end
 
-  if not (p.key and p.selector) and not
-  (settings.try_fallback or settings.use_redis or settings.selector_map or settings.path_map) then
-    rspamd_logger.debugm(N, task, 'dkim unconfigured and fallback disabled')
-    return false,{}
+  if not p.key and p.selector then
+    local key_var = "dkim_key"
+    local selector_var = "dkim_selector"
+    if N == "arc" then
+      key_var = "arc_key"
+      selector_var = "arc_selector"
+    end
+
+    p.key = task:get_mempool():get_variable(key_var)
+    p.selector = task:get_mempool():get_variable(selector_var)
+
+    if (not p.key or not p.selector) and (not (settings.try_fallback or
+        settings.use_redis or settings.selector_map
+        or settings.path_map)) then
+      rspamd_logger.debugm(N, task, 'dkim unconfigured and fallback disabled')
+      return false,{}
+    end
+  end
+
+  if not p.selector and settings.selector_map then
+    local data = settings.selector_map:get_key(dkim_domain)
+    if data then
+      p.selector = data
+    elseif not settings.try_fallback then
+      return false,{}
+    end
+  end
+
+  if not p.key and settings.path_map then
+    local data = settings.path_map:get_key(dkim_domain)
+    if data then
+      p.key = data
+    elseif not settings.try_fallback then
+      return false,{}
+    end
   end
 
   if not p.key then
@@ -153,20 +187,6 @@ local function prepare_dkim_signing(N, task, settings)
     p.selector = settings.selector
   end
   p.domain = dkim_domain
-
-  if settings.selector_map then
-    local data = settings.selector_map:get_key(dkim_domain)
-    if data then
-      p.selector = data
-    end
-  end
-
-  if settings.path_map then
-    local data = settings.path_map:get_key(dkim_domain)
-    if data then
-      p.key = data
-    end
-  end
 
   return true,p
 end
