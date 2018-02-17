@@ -1,9 +1,7 @@
-rspamd (1.6.5-1) UNRELEASED; urgency=medium
+rspamd (1.6.6-1) UNRELEASED; urgency=medium
 
   [ Jerome Lebleu ]
-  * d/compat: Bump to compat version 10
   * d/source: Switch to 3.0 native to quilt source format
-  * d/control: Fix Vcs-* fields, use collab-maint
   * d/rules:
     + Enable hardening=+all (relro)
     + Rely on default rules for systemd and sysv service setup
@@ -11,11 +9,15 @@ rspamd (1.6.5-1) UNRELEASED; urgency=medium
   * d/rspamd.init: Use rspamd.conf as config. file and test it on start
 
   [ Sebastien Badia ]
-  * New upstream version 1.6.5 (Closes: #813222)
-  * d/control: Bump to Standards-Version 4.1.1 (no changes)
+  * New upstream version 1.6.6 (Closes: #813222)
+  * d/control:
+    + Bump to Standards-Version 4.1.1 (no changes)
+    + Use salsa.debian.org in Vcs-* fields
+    + Bump to Standards-Version 4.1.3 (no changes needed)
   * d/rules: Remove un-needed dh_systemd (it's now enabled by default)
+  * d/compat: Bump compat version to 11
 
- -- Sebastien Badia <sbadia@debian.org>  Tue, 24 Oct 2017 13:24:34 +0200
+ -- Sebastien Badia <sbadia@debian.org>  Sat, 17 Feb 2018 14:58:34 +0100
 
 rspamd (0.6.10) unstable; urgency=low
 
