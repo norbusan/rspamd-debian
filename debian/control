@@ -32,6 +32,7 @@ Depends: adduser,
          libjs-bootstrap,
          libjs-d3,
          libjs-jquery,
+         libjs-requirejs,
          lsb-base,
          ${misc:Depends},
          ${shlibs:Depends}
