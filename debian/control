@@ -27,7 +27,14 @@ Vcs-Browser: https://salsa.debian.org/debian/rspamd
 
 Package: rspamd
 Architecture: any
-Depends: adduser, ca-certificates, lsb-base, ${misc:Depends}, ${shlibs:Depends}
+Depends: adduser,
+         ca-certificates,
+         libjs-bootstrap,
+         libjs-d3,
+         libjs-jquery,
+         lsb-base,
+         ${misc:Depends},
+         ${shlibs:Depends}
 Description: Rapid spam filtering system
  Rspamd is a rapid, modular and lightweight spam filter. It is designed to work
  with big amount of mail and can be easily extended with own filters written in
