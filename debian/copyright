@@ -1,4 +1,4 @@
-Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: rspamd
 Upstream-Contact: Vsevolod Stakhov <vsevolod@highsecure.ru>
 Source: https://github.com/vstakhov/rspamd
