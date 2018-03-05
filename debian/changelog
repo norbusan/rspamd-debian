@@ -9,7 +9,12 @@ rspamd (1.6.6-1) UNRELEASED; urgency=medium
   * d/rspamd.init: Use rspamd.conf as config. file and test it on start
 
   [ Sebastien Badia ]
-  * New upstream version 1.6.6 (Closes: #813222)
+  * New upstream version 1.6.6 (Closes: #813222, #849396)
+  * Added upstream-metadata-file (refs: http://dep.debian.net/deps/dep12/)
+  * Depends on packaged js libs and import minified versions
+  * d/man: Added a manpage for rspamd_stats
+  * d/patches: Import upstream fix for missmatch typo
+  * d/copyright: Update copyritght years and use HTTPS for URI
   * d/control:
     + Bump to Standards-Version 4.1.1 (no changes)
     + Use salsa.debian.org in Vcs-* fields
