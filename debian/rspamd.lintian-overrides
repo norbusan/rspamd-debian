@@ -1,2 +1,4 @@
 rspamd: non-standard-dir-perm var/lib/rspamd/ 0750 != 0755
 rspamd: non-standard-dir-perm var/log/rspamd/ 0750 != 0755
+# fonts-glewlwyd isn't a standard font package
+rspamd: duplicate-font-file usr/share/rspamd/www/fonts/glyphicons-halflings-regular.ttf *
