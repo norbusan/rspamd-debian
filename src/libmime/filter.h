@@ -35,13 +35,13 @@ struct rspamd_symbol_result {
  * Result of metric processing
  */
 struct rspamd_metric_result {
-	struct rspamd_metric *metric;                   /**< pointer to metric structure			*/
 	double score;                                   /**< total score							*/
 	double grow_factor;								/**< current grow factor					*/
 	GHashTable *symbols;                            /**< symbols of metric						*/
 	GHashTable *sym_groups;							/**< groups of symbols						*/
 	gdouble actions_limits[METRIC_ACTION_MAX];		/**< set of actions for this metric			*/
-	enum rspamd_metric_action action;               /**< the current action						*/
+	guint changes;
+	enum rspamd_action_type action;               /**< the current action						*/
 };
 
 /**
@@ -102,7 +102,7 @@ double rspamd_factor_consolidation_func (struct rspamd_task *task,
 /*
  * Get action for specific metric
  */
-enum rspamd_metric_action rspamd_check_action_metric (struct rspamd_task *task,
+enum rspamd_action_type rspamd_check_action_metric (struct rspamd_task *task,
 	struct rspamd_metric_result *mres);
 
 #endif

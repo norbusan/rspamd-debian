@@ -73,7 +73,7 @@ rspamd_client_request_free (struct rspamd_client_request *req)
 			g_string_free (req->input, TRUE);
 		}
 
-		g_slice_free1 (sizeof (*req), req);
+		g_free (req);
 	}
 }
 
@@ -114,7 +114,7 @@ rspamd_client_finish_handler (struct rspamd_http_connection *conn,
 
 	if (!c->req_sent) {
 		c->req_sent = TRUE;
-		c->send_time = rspamd_get_ticks ();
+		c->send_time = rspamd_get_ticks (FALSE);
 		rspamd_http_connection_reset (c->http_conn);
 		rspamd_http_connection_read_message (c->http_conn,
 			c->req,
@@ -252,7 +252,7 @@ rspamd_client_init (struct event_base *ev_base, const gchar *name,
 		return NULL;
 	}
 
-	conn = g_slice_alloc0 (sizeof (struct rspamd_client_connection));
+	conn = g_malloc0 (sizeof (struct rspamd_client_connection));
 	conn->ev_base = ev_base;
 	conn->fd = fd;
 	conn->req_sent = FALSE;
@@ -310,7 +310,7 @@ rspamd_client_command (struct rspamd_client_connection *conn,
 	void *dict = NULL;
 	ZSTD_CCtx *zctx;
 
-	req = g_slice_alloc0 (sizeof (struct rspamd_client_request));
+	req = g_malloc0 (sizeof (struct rspamd_client_request));
 	req->conn = conn;
 	req->cb = cb;
 	req->ud = ud;
@@ -342,7 +342,7 @@ rspamd_client_command (struct rspamd_client_connection *conn,
 		if (ferror (in) != 0) {
 			g_set_error (err, RCLIENT_ERROR, ferror (
 					in), "input IO error: %s", strerror (ferror (in)));
-			g_slice_free1 (sizeof (struct rspamd_client_request), req);
+			g_free (req);
 			g_string_free (input, TRUE);
 			return FALSE;
 		}
@@ -360,7 +360,7 @@ rspamd_client_command (struct rspamd_client_connection *conn,
 							"cannot open dictionary %s: %s",
 							comp_dictionary,
 							strerror (errno));
-					g_slice_free1 (sizeof (struct rspamd_client_request), req);
+					g_free (req);
 					g_string_free (input, TRUE);
 
 					return FALSE;
@@ -373,7 +373,7 @@ rspamd_client_command (struct rspamd_client_connection *conn,
 							"cannot open dictionary %s: %s",
 							comp_dictionary,
 							strerror (errno));
-					g_slice_free1 (sizeof (struct rspamd_client_request), req);
+					g_free (req);
 					g_string_free (input, TRUE);
 					munmap (dict, dict_len);
 
@@ -393,7 +393,7 @@ rspamd_client_command (struct rspamd_client_connection *conn,
 			if (ZSTD_isError (body->len)) {
 				g_set_error (err, RCLIENT_ERROR, ferror (
 						in), "compression error");
-				g_slice_free1 (sizeof (struct rspamd_client_request), req);
+				g_free (req);
 				g_string_free (input, TRUE);
 				rspamd_fstring_free (body);
 				ZSTD_freeCCtx (zctx);
@@ -435,7 +435,7 @@ rspamd_client_command (struct rspamd_client_connection *conn,
 	req->msg->url = rspamd_fstring_append (req->msg->url, command, strlen (command));
 
 	conn->req = req;
-	conn->start_time = rspamd_get_ticks ();
+	conn->start_time = rspamd_get_ticks (FALSE);
 
 	if (compressed) {
 		rspamd_http_connection_write_message (conn->http_conn, req->msg, NULL,
@@ -466,6 +466,6 @@ rspamd_client_destroy (struct rspamd_client_connection *conn)
 			rspamd_keypair_unref (conn->keypair);
 		}
 		g_string_free (conn->server_name, TRUE);
-		g_slice_free1 (sizeof (struct rspamd_client_connection), conn);
+		g_free (conn);
 	}
 }

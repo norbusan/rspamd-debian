@@ -34,6 +34,26 @@ reconf['SUBJECT_NEEDS_ENCODING'] = {
   group = 'header'
 }
 
+local from_encoded_b64 = 'From=/=\\?\\S+\\?B\\?/iX'
+local from_encoded_qp = 'From=/=\\?\\S+\\?Q\\?/iX'
+local raw_from_needs_mime = 'From=/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f-\\xff]/X'
+reconf['FROM_NEEDS_ENCODING'] = {
+  re = string.format('!(%s) & !(%s) & (%s)', from_encoded_b64, from_encoded_qp, raw_from_needs_mime),
+  score = 1.0,
+  description = 'From header needs encoding',
+  group = 'header'
+}
+
+local to_encoded_b64 = 'To=/=\\?\\S+\\?B\\?/iX'
+local to_encoded_qp = 'To=/=\\?\\S+\\?Q\\?/iX'
+local raw_to_needs_mime = 'To=/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f-\\xff]/X'
+reconf['TO_NEEDS_ENCODING'] = {
+  re = string.format('!(%s) & !(%s) & (%s)', to_encoded_b64, to_encoded_qp, raw_to_needs_mime),
+  score = 1.0,
+  description = 'To header needs encoding',
+  group = 'header'
+}
+
 -- Detects that there is no space in From header (e.g. Some Name<some@host>)
 reconf['R_NO_SPACE_IN_FROM'] = {
   re = 'From=/\\S<[-\\w\\.]+\\@[-\\w\\.]+>/X',
@@ -145,13 +165,9 @@ reconf['TRACKER_ID'] = {
   group = 'header'
 }
 
-
--- From that contains encoded characters while base 64 is not needed as all symbols are 7bit
--- Regexp that checks that From header is encoded with base64 (search in raw headers)
-local from_encoded_b64 = 'From=/\\=\\?\\S+\\?B\\?/iX'
 -- From contains only 7bit characters (parsed headers are used)
 local from_needs_mime = 'From=/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f-\\xff]/Hr'
--- Final rule
+-- From that contains encoded characters while base 64 is not needed as all symbols are 7bit
 reconf['FROM_EXCESS_BASE64'] = {
   re = string.format('%s & !%s', from_encoded_b64, from_needs_mime),
   score = 1.5,
@@ -160,9 +176,6 @@ reconf['FROM_EXCESS_BASE64'] = {
 }
 
 -- From that contains encoded characters while quoted-printable is not needed as all symbols are 7bit
--- Regexp that checks that From header is encoded with quoted-printable (search in raw headers)
-local from_encoded_qp = 'From=/\\=\\?\\S+\\?Q\\?/iX'
--- Final rule
 reconf['FROM_EXCESS_QP'] = {
   re = string.format('%s & !%s', from_encoded_qp, from_needs_mime),
   score = 1.2,
@@ -170,12 +183,9 @@ reconf['FROM_EXCESS_QP'] = {
   group = 'excessqp'
 }
 
--- To that contains encoded characters while base 64 is not needed as all symbols are 7bit
--- Regexp that checks that To header is encoded with base64 (search in raw headers)
-local to_encoded_b64 = 'To=/\\=\\?\\S+\\?B\\?/iX'
 -- To contains only 7bit characters (parsed headers are used)
 local to_needs_mime = 'To=/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f-\\xff]/Hr'
--- Final rule
+-- To that contains encoded characters while base 64 is not needed as all symbols are 7bit
 reconf['TO_EXCESS_BASE64'] = {
   re = string.format('%s & !%s', to_encoded_b64, to_needs_mime),
   score = 1.5,
@@ -184,8 +194,6 @@ reconf['TO_EXCESS_BASE64'] = {
 }
 
 -- To that contains encoded characters while quoted-printable is not needed as all symbols are 7bit
--- Regexp that checks that To header is encoded with quoted-printable (search in raw headers)
-local to_encoded_qp = 'To=/\\=\\?\\S+\\?Q\\?/iX'
 -- Final rule
 reconf['TO_EXCESS_QP'] = {
   re = string.format('%s & !%s', to_encoded_qp, to_needs_mime),
@@ -613,7 +621,7 @@ local ua_pan = 'User-Agent=/^Pan/H'
 local ua_xnews = 'User-Agent=/^Xnews/H'
 local no_inr_yes_ref = string.format('(%s) | (%s) | (%s) | (%s) | (%s) | (%s) | (%s) | (%s) | (%s) | (%s) | (%s)', xm_gnus, xm_msoe5, xm_msoe6, xm_moz4, xm_skyri, xm_wwwmail, ua_gnus, ua_knode, ua_mutt, ua_pan, ua_xnews)
 local subj_re = 'Subject=/^R[eE]:/H'
-local has_ref = 'header_exists(References)'
+local has_ref = '(header_exists(References) | header_exists(In-Reply-To))'
 local missing_ref = string.format('!(%s)', has_ref)
 -- Fake reply (has RE in subject, but has not References header)
 reconf['FAKE_REPLY_C'] = {
@@ -862,14 +870,14 @@ reconf['SUBJECT_HAS_EXCLAIM'] = {
 }
 
 reconf['SUBJECT_ENDS_QUESTION'] = {
-  re = 'Subject=/\\?\\s*$/H',
+  re = 'Subject=/\\?\\s*$/Hu',
   description = 'Subject ends with a question',
   score = 1.0,
   group = 'headers'
 }
 
 reconf['SUBJECT_HAS_QUESTION'] = {
-  re = string.format('%s & !%s', 'Subject=/\\?/H', 'Subject=/\\?\\s*$/H'),
+  re = string.format('%s & !%s', 'Subject=/\\?/H', 'Subject=/\\?\\s*$/Hu'),
   description = 'Subject contains a question',
   score = 0.0,
   group = 'headers'

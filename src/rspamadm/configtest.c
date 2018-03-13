@@ -35,7 +35,8 @@ struct rspamadm_command configtest_command = {
 		.name = "configtest",
 		.flags = 0,
 		.help = rspamadm_configtest_help,
-		.run = rspamadm_configtest
+		.run = rspamadm_configtest,
+		.lua_subrs = NULL,
 };
 
 static GOptionEntry entries[] = {
@@ -146,7 +147,7 @@ rspamadm_configtest (gint argc, gchar **argv)
 		/* Do post-load actions */
 		rspamd_lua_post_load_config (cfg);
 
-		if (!rspamd_init_filters (rspamd_main->cfg, FALSE, ucl_vars)) {
+		if (!rspamd_init_filters (rspamd_main->cfg, FALSE)) {
 			ret = FALSE;
 		}
 

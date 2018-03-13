@@ -64,6 +64,15 @@ enum rspamd_log_type {
 	RSPAMD_LOG_FILE
 };
 
+enum rspamd_log_cfg_flags {
+	RSPAMD_LOG_FLAG_DEFAULT = 0,
+	RSPAMD_LOG_FLAG_SYSTEMD = (1 << 0),
+	RSPAMD_LOG_FLAG_COLOR = (1 << 1),
+	RSPAMD_LOG_FLAG_RE_CACHE = (1 << 2),
+	RSPAMD_LOG_FLAG_USEC = (1 << 3),
+	RSPAMD_LOG_FLAG_RSPAMADM = (1 << 4),
+};
+
 struct rspamd_worker_log_pipe {
 	gint fd;
 	gint type;
@@ -103,6 +112,7 @@ struct rspamd_symbols_group {
 
 #define RSPAMD_SYMBOL_FLAG_IGNORE (1 << 1)
 #define RSPAMD_SYMBOL_FLAG_ONEPARAM (1 << 2)
+#define RSPAMD_SYMBOL_FLAG_UNGROUPPED (1 << 3)
 
 /**
  * Symbol definition
@@ -227,12 +237,12 @@ enum rspamd_log_format_type {
 };
 
 enum rspamd_log_format_flags {
-	RSPAMD_LOG_FLAG_DEFAULT = 0,
-	RSPAMD_LOG_FLAG_OPTIONAL = (1 << 0),
-	RSPAMD_LOG_FLAG_MIME_ALTERNATIVE = (1 << 1),
-	RSPAMD_LOG_FLAG_CONDITION = (1 << 2),
-	RSPAMD_LOG_FLAG_SYMBOLS_SCORES = (1 << 3),
-	RSPAMD_LOG_FLAG_SYMBOLS_PARAMS = (1 << 4)
+	RSPAMD_LOG_FMT_FLAG_DEFAULT = 0,
+	RSPAMD_LOG_FMT_FLAG_OPTIONAL = (1 << 0),
+	RSPAMD_LOG_FMT_FLAG_MIME_ALTERNATIVE = (1 << 1),
+	RSPAMD_LOG_FMT_FLAG_CONDITION = (1 << 2),
+	RSPAMD_LOG_FMT_FLAG_SYMBOLS_SCORES = (1 << 3),
+	RSPAMD_LOG_FMT_FLAG_SYMBOLS_PARAMS = (1 << 4)
 };
 
 struct rspamd_log_format {
@@ -243,7 +253,7 @@ struct rspamd_log_format {
 	struct rspamd_log_format *prev, *next;
 };
 
-enum rspamd_metric_action {
+enum rspamd_action_type {
 	METRIC_ACTION_REJECT = 0,
 	METRIC_ACTION_SOFT_REJECT,
 	METRIC_ACTION_REWRITE_SUBJECT,
@@ -253,31 +263,18 @@ enum rspamd_metric_action {
 	METRIC_ACTION_MAX
 };
 
-struct metric_action {
-	enum rspamd_metric_action action;
+struct rspamd_action {
+	enum rspamd_action_type action;
 	gdouble score;
 	guint priority;
-};
-
-/**
- * Common definition of metric
- */
-struct rspamd_metric {
-	const gchar *name;                              /**< name of metric									*/
-	gchar *func_name;                               /**< name of consolidation function					*/
-	gboolean accept_unknown_symbols;                /**< if true unknown symbols are registered here	*/
-	gdouble unknown_weight;                         /**< weight of unknown symbols						*/
-	gdouble grow_factor;                            /**< grow factor for metric							*/
-	GHashTable *symbols;                            /**< weights of symbols in metric					*/
-	gchar *subject;                                 /**< subject rewrite string							*/
-	GHashTable * groups; 		                    /**< groups of symbols								*/
-	struct metric_action actions[METRIC_ACTION_MAX]; /**< all actions of the metric						*/
 };
 
 struct rspamd_config_post_load_script {
 	gint cbref;
 	struct rspamd_config_post_load_script *prev, *next;
 };
+
+struct rspamd_lang_detector;
 
 /**
  * Structure that stores all config data
@@ -294,21 +291,24 @@ struct rspamd_config {
 #ifdef WITH_GPERF_TOOLS
 	gchar *profile_path;
 #endif
+	gdouble unknown_weight;                         /**< weight of unknown symbols						*/
+	gdouble grow_factor;                            /**< grow factor for metric							*/
+	GHashTable *symbols;                            /**< weights of symbols in metric					*/
+	const gchar *subject;                           /**< subject rewrite string							*/
+	GHashTable * groups; 		                    /**< groups of symbols								*/
+	struct rspamd_action actions[METRIC_ACTION_MAX]; /**< all actions of the metric						*/
 
 	gboolean raw_mode;                              /**< work in raw mode instead of utf one				*/
 	gboolean one_shot_mode;                         /**< rules add only one symbol							*/
 	gboolean check_text_attachements;               /**< check text attachements as text					*/
-	gboolean convert_config;                        /**< convert config to XML format						*/
-	gboolean strict_protocol_headers;               /**< strictly check protocol headers					*/
 	gboolean check_all_filters;                     /**< check all filters									*/
 	gboolean allow_raw_input;                       /**< scan messages with invalid mime					*/
 	gboolean disable_hyperscan;                     /**< disable hyperscan usage							*/
 	gboolean vectorized_hyperscan;                  /**< use vectorized hyperscan matching					*/
 	gboolean enable_shutdown_workaround;            /**< enable workaround for legacy SA clients (exim)		*/
 	gboolean ignore_received;                       /**< Ignore data from the first received header			*/
-	gboolean check_local;				/** Don't disable any checks for local networks */
-	gboolean check_authed;				/** Don't disable any checks for authenticated users */
-	gboolean enable_sessions_cache;                 /**< Enable session cache for debug */
+	gboolean enable_sessions_cache;                 /**< Enable session cache for debug						*/
+	gboolean enable_experimental;                   /**< Enable experimental plugins						*/
 
 	gsize max_diff;                                 /**< maximum diff size for text parts					*/
 	gsize max_cores_size;                           /**< maximum size occupied by rspamd core files			*/
@@ -330,24 +330,12 @@ struct rspamd_config {
 	GList *debug_symbols;                           /**< symbols to debug									*/
 	GHashTable *debug_modules;                      /**< logging modules to debug							*/
 	struct rspamd_cryptobox_pubkey *log_encryption_key; /**< encryption key for logs						*/
-	gboolean log_color;                             /**< output colors for console output                   */
-	gboolean log_extended;                          /**< log extended information							*/
-	gboolean log_systemd;                           /**< special case for systemd logger					*/
-	gboolean log_re_cache;                          /**< show statistics about regexps						*/
+	guint log_flags;                                /**< logging flags										*/
 	guint log_error_elts;                           /**< number of elements in error logbuf					*/
 	guint log_error_elt_maxlen;                     /**< maximum size of error log element					*/
 	struct rspamd_worker_log_pipe *log_pipes;
 
-	gboolean mlock_statfile_pool;                   /**< use mlock (2) for locking statfiles				*/
 	gboolean compat_messages;                       /**< use old messages in the protocol (array) 			*/
-
-	gboolean delivery_enable;                       /**< is delivery agent is enabled						*/
-	gchar *deliver_host;                            /**< host for mail deliviring							*/
-	struct in_addr deliver_addr;                    /**< its address										*/
-	guint16 deliver_port;                           /**< port for deliviring								*/
-	guint16 deliver_family;                         /**< socket family for delivirnig						*/
-	gchar *deliver_agent_path;                      /**< deliver to pipe instead of socket					*/
-	gboolean deliver_lmtp;                          /**< use LMTP instead of SMTP							*/
 
 	GList *script_modules;                          /**< linked list of script modules to load				*/
 	GHashTable *explicit_modules;                   /**< modules that should be always loaded				*/
@@ -358,9 +346,6 @@ struct rspamd_config {
 	ucl_object_t *rcl_obj;                          /**< rcl object											*/
 	ucl_object_t *config_comments;                  /**< comments saved from the config						*/
 	ucl_object_t *doc_strings;                      /**< documentation strings for config options			*/
-	GHashTable * metrics;                           /**< hash of metrics indexed by metric name				*/
-	GList * metrics_list;                           /**< linked list of metrics								*/
-	GHashTable * metrics_symbols;                   /**< hash table of metrics indexed by symbol			*/
 	GHashTable * c_modules;                         /**< hash of c modules indexed by module name			*/
 	GHashTable * composite_symbols;                 /**< hash of composite symbols indexed by its name		*/
 	GList *classifiers;                             /**< list of all classifiers defined                    */
@@ -385,8 +370,6 @@ struct rspamd_config {
 	struct symbols_cache *cache;                    /**< symbols cache object								*/
 	gchar *cache_filename;                          /**< filename of cache file								*/
 	gdouble cache_reload_time;                      /**< how often cache reload should be performed			*/
-	struct rspamd_metric *default_metric;           /**< default metric										*/
-
 	gchar * checksum;                               /**< real checksum of config file						*/
 	gchar * dump_checksum;                          /**< dump checksum of config file						*/
 	gpointer lua_state;                             /**< pointer to lua state								*/
@@ -440,6 +423,8 @@ struct rspamd_config {
 	gchar *zstd_input_dictionary;					/**< path to zstd input dictionary						*/
 	gchar *zstd_output_dictionary;					/**< path to zstd output dictionary						*/
 	ucl_object_t *neighbours;						/**< other servers in the cluster						*/
+
+	struct rspamd_lang_detector *lang_det;			/**< language detector									*/
 
 	ref_entry_t ref;								/**< reference counter									*/
 };
@@ -536,14 +521,13 @@ struct rspamd_worker_conf * rspamd_config_new_worker (struct rspamd_config *cfg,
 /*
  * Return a new metric structure, setting default and non-conflicting attributes
  */
-struct rspamd_metric * rspamd_config_new_metric (struct rspamd_config *cfg,
-	struct rspamd_metric *c, const gchar *name);
+void rspamd_config_init_metric (struct rspamd_config *cfg);
 
 /*
  * Return new symbols group definition
  */
 struct rspamd_symbols_group * rspamd_config_new_group (
-		struct rspamd_config *cfg, struct rspamd_metric *metric,
+		struct rspamd_config *cfg,
 		const gchar *name);
 /*
  * Return a new statfile structure, setting default and non-conflicting attributes
@@ -551,14 +535,6 @@ struct rspamd_symbols_group * rspamd_config_new_group (
 struct rspamd_statfile_config * rspamd_config_new_statfile (
 	struct rspamd_config *cfg,
 	struct rspamd_statfile_config *c);
-
-/*
- * Read XML configuration file
- */
-gboolean rspamd_config_read (struct rspamd_config *cfg,
-	const gchar *filename, const gchar *convert_to,
-	rspamd_rcl_section_fin_t logger_fin, gpointer logger_ud,
-	GHashTable *vars);
 
 /*
  * Register symbols of classifiers inside metrics
@@ -588,8 +564,7 @@ void rspamd_ucl_add_conf_variables (struct ucl_parser *parser, GHashTable *vars)
  * @param reconfig
  * @return
  */
-gboolean rspamd_init_filters (struct rspamd_config *cfg, bool reconfig,
-		GHashTable *vars);
+gboolean rspamd_init_filters (struct rspamd_config *cfg, bool reconfig);
 
 /**
  * Add new symbol to the metric
@@ -605,8 +580,7 @@ gboolean rspamd_init_filters (struct rspamd_config *cfg, bool reconfig,
  * @param nshots means maximum number of hits for a symbol in metric (-1 for unlimited)
  * @return TRUE if symbol has been inserted or FALSE if symbol already exists with higher priority
  */
-gboolean rspamd_config_add_metric_symbol (struct rspamd_config *cfg,
-		const gchar *metric,
+gboolean rspamd_config_add_symbol (struct rspamd_config *cfg,
 		const gchar *symbol, gdouble score, const gchar *description,
 		const gchar *group, guint flags,
 		guint priority,
@@ -622,7 +596,6 @@ gboolean rspamd_config_add_metric_symbol (struct rspamd_config *cfg,
  * @return TRUE if symbol has been inserted or FALSE if action already exists with higher priority
  */
 gboolean rspamd_config_set_action_score (struct rspamd_config *cfg,
-		const gchar *metric,
 		const gchar *action_name,
 		gdouble score,
 		guint priority);
@@ -651,8 +624,8 @@ gboolean rspamd_action_from_str (const gchar *data, gint *result);
 /*
  * Return textual representation of action enumeration
  */
-const gchar * rspamd_action_to_str (enum rspamd_metric_action action);
-const gchar * rspamd_action_to_str_alt (enum rspamd_metric_action action);
+const gchar * rspamd_action_to_str (enum rspamd_action_type action);
+const gchar * rspamd_action_to_str_alt (enum rspamd_action_type action);
 
 /**
  * Parse radix tree or radix map from ucl object
@@ -684,9 +657,11 @@ gboolean rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
         cfg->cfg_pool->tag.tagname, cfg->checksum, \
         G_STRFUNC, \
         __VA_ARGS__)
-#define msg_debug_config(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
-        cfg->cfg_pool->tag.tagname, cfg->checksum, \
+extern guint rspamd_config_log_id;
+#define msg_debug_config(...)  rspamd_conditional_debug_fast (NULL, NULL, \
+        rspamd_config_log_id, "config", cfg->checksum, \
         G_STRFUNC, \
         __VA_ARGS__)
+
 
 #endif /* ifdef CFG_FILE_H */

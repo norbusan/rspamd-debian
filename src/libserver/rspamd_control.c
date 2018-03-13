@@ -166,12 +166,12 @@ rspamd_control_connection_close (struct rspamd_control_session *session)
 
 	DL_FOREACH_SAFE (session->replies, elt, telt) {
 		event_del (&elt->io_ev);
-		g_slice_free1 (sizeof (*elt), elt);
+		g_free (elt);
 	}
 
 	rspamd_http_connection_unref (session->conn);
 	close (session->fd);
-	g_slice_free1 (sizeof (*session), session);
+	g_free (session);
 }
 
 static void
@@ -397,6 +397,10 @@ rspamd_control_broadcast_cmd (struct rspamd_main *rspamd_main,
 	while (g_hash_table_iter_next (&it, &k, &v)) {
 		wrk = v;
 
+		if (wrk->control_pipe[0] == -1) {
+			continue;
+		}
+
 		memset (&msg, 0, sizeof (msg));
 
 		/* Attach fd to the message */
@@ -420,7 +424,7 @@ rspamd_control_broadcast_cmd (struct rspamd_main *rspamd_main,
 
 		if (r == sizeof (*cmd)) {
 
-			rep_elt = g_slice_alloc0 (sizeof (*rep_elt));
+			rep_elt = g_malloc0 (sizeof (*rep_elt));
 			rep_elt->wrk = wrk;
 			rep_elt->ud = ud;
 			event_set (&rep_elt->io_ev, wrk->control_pipe[0],
@@ -433,8 +437,12 @@ rspamd_control_broadcast_cmd (struct rspamd_main *rspamd_main,
 			DL_APPEND (res, rep_elt);
 		}
 		else {
-			msg_err ("cannot write request to the worker %P (%s): %s",
-					wrk->pid, g_quark_to_string (wrk->type), strerror (errno));
+			msg_err ("cannot write command %d(%z) to the worker %P(%s), fd: %d: %s",
+					(int)cmd->type, iov.iov_len,
+					wrk->pid,
+					g_quark_to_string (wrk->type),
+					wrk->control_pipe[0],
+					strerror (errno));
 		}
 	}
 
@@ -500,7 +508,7 @@ rspamd_control_process_client_socket (struct rspamd_main *rspamd_main,
 {
 	struct rspamd_control_session *session;
 
-	session = g_slice_alloc0 (sizeof (*session));
+	session = g_malloc0 (sizeof (*session));
 
 	session->fd = fd;
 	session->conn = rspamd_http_connection_new (NULL,
@@ -599,10 +607,10 @@ static void
 rspamd_control_default_worker_handler (gint fd, short what, gpointer ud)
 {
 	struct rspamd_worker_control_data *cd = ud;
-	struct rspamd_control_command cmd;
-	struct msghdr msg;
-	struct iovec iov;
-	guchar fdspace[CMSG_SPACE(sizeof (int))];
+	static struct rspamd_control_command cmd;
+	static struct msghdr msg;
+	static struct iovec iov;
+	static guchar fdspace[CMSG_SPACE(sizeof (int))];
 	gint rfd = -1;
 	gssize r;
 
@@ -663,7 +671,7 @@ rspamd_control_worker_add_default_handler (struct rspamd_worker *worker,
 {
 	struct rspamd_worker_control_data *cd;
 
-	cd = g_slice_alloc0 (sizeof (*cd));
+	cd = g_malloc0 (sizeof (*cd));
 	cd->worker = worker;
 	cd->ev_base = ev_base;
 
@@ -697,6 +705,7 @@ rspamd_control_worker_add_cmd_handler (struct rspamd_worker *worker,
 
 struct rspamd_srv_reply_data {
 	struct rspamd_worker *worker;
+	struct rspamd_main *srv;
 	gint fd;
 	struct rspamd_srv_reply rep;
 };
@@ -710,7 +719,7 @@ rspamd_control_hs_io_handler (gint fd, short what, gpointer ud)
 	/* At this point we just ignore replies from the workers */
 	(void)read (fd, &rep, sizeof (rep));
 	event_del (&elt->io_ev);
-	g_slice_free1 (sizeof (*elt), elt);
+	g_free (elt);
 }
 
 static void
@@ -722,20 +731,70 @@ rspamd_control_log_pipe_io_handler (gint fd, short what, gpointer ud)
 	/* At this point we just ignore replies from the workers */
 	(void) read (fd, &rep, sizeof (rep));
 	event_del (&elt->io_ev);
-	g_slice_free1 (sizeof (*elt), elt);
+	g_free (elt);
+}
+
+static void
+rspamd_control_handle_on_fork (struct rspamd_srv_command *cmd,
+		struct rspamd_main *srv)
+{
+	struct rspamd_worker *parent, *child;
+
+	parent = g_hash_table_lookup (srv->workers,
+			GSIZE_TO_POINTER (cmd->cmd.on_fork.ppid));
+
+	if (parent == NULL) {
+		msg_err ("cannot find parent for a forked process %P (%P child)",
+				cmd->cmd.on_fork.ppid, cmd->cmd.on_fork.cpid);
+
+		return;
+	}
+
+	if (cmd->cmd.on_fork.state == child_dead) {
+		/* We need to remove stale worker */
+		child = g_hash_table_lookup (srv->workers,
+				GSIZE_TO_POINTER (cmd->cmd.on_fork.cpid));
+
+		if (child == NULL) {
+			msg_err ("cannot find child for a forked process %P (%P parent)",
+					cmd->cmd.on_fork.cpid, cmd->cmd.on_fork.ppid);
+
+			return;
+		}
+
+		REF_RELEASE (child->cf);
+		g_hash_table_remove (srv->workers,
+				GSIZE_TO_POINTER (cmd->cmd.on_fork.cpid));
+		g_free (child);
+	}
+	else {
+		child = g_malloc0 (sizeof (struct rspamd_worker));
+		child->srv = srv;
+		child->type = parent->type;
+		child->pid = cmd->cmd.on_fork.cpid;
+		child->srv_pipe[0] = -1;
+		child->srv_pipe[1] = -1;
+		child->control_pipe[0] = -1;
+		child->control_pipe[1] = -1;
+		child->cf = parent->cf;
+		child->ppid = parent->pid;
+		REF_RETAIN (child->cf);
+		g_hash_table_insert (srv->workers,
+				GSIZE_TO_POINTER (cmd->cmd.on_fork.cpid), child);
+	}
 }
 
 static void
 rspamd_srv_handler (gint fd, short what, gpointer ud)
 {
 	struct rspamd_worker *worker;
-	struct rspamd_srv_command cmd;
+	static struct rspamd_srv_command cmd;
 	struct rspamd_main *srv;
 	struct rspamd_srv_reply_data *rdata;
 	struct msghdr msg;
 	struct cmsghdr *cmsg;
-	struct iovec iov;
-	guchar fdspace[CMSG_SPACE(sizeof (int))];
+	static struct iovec iov;
+	static guchar fdspace[CMSG_SPACE(sizeof (int))];
 	gint *spair, rfd = -1;
 	gchar *nid;
 	struct rspamd_control_command wcmd;
@@ -770,8 +829,9 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 					(gint) r);
 		}
 		else {
-			rdata = g_slice_alloc0 (sizeof (*rdata));
+			rdata = g_malloc0 (sizeof (*rdata));
 			rdata->worker = worker;
+			rdata->srv = srv;
 			rdata->rep.id = cmd.id;
 			rdata->rep.type = cmd.type;
 			rdata->fd = -1;
@@ -786,7 +846,7 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 				if (spair == NULL) {
 					spair = g_malloc (sizeof (gint) * 2);
 
-					if (rspamd_socketpair (spair) == -1) {
+					if (rspamd_socketpair (spair, 0) == -1) {
 						rdata->rep.reply.spair.code = errno;
 						msg_err ("cannot create socket pair: %s", strerror (errno));
 					}
@@ -834,6 +894,10 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 				rspamd_control_broadcast_cmd (srv, &wcmd, rfd,
 						rspamd_control_log_pipe_io_handler, NULL);
 				break;
+			case RSPAMD_SRV_ON_FORK:
+				rdata->rep.reply.on_fork.status = 0;
+				rspamd_control_handle_on_fork (&cmd, srv);
+				break;
 			default:
 				msg_err ("unknown command type: %d", cmd.type);
 				break;
@@ -857,7 +921,7 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 	else if (what == EV_WRITE) {
 		rdata = ud;
 		worker = rdata->worker;
-		srv = worker->srv;
+		srv = rdata->srv;
 
 		memset (&msg, 0, sizeof (msg));
 
@@ -885,7 +949,7 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 					strerror (errno));
 		}
 
-		g_slice_free1 (sizeof (*rdata), rdata);
+		g_free (rdata);
 		event_del (&worker->srv_ev);
 		event_set (&worker->srv_ev,
 				worker->srv_pipe[0],
@@ -897,7 +961,8 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 }
 
 void
-rspamd_srv_start_watching (struct rspamd_worker *worker,
+rspamd_srv_start_watching (struct rspamd_main *srv,
+		struct rspamd_worker *worker,
 		struct event_base *ev_base)
 {
 	g_assert (worker != NULL);
@@ -999,7 +1064,7 @@ cleanup:
 		rd->handler (rd->worker, &rd->rep, rfd, rd->ud);
 	}
 	event_del (&rd->io_ev);
-	g_slice_free1 (sizeof (*rd), rd);
+	g_free (rd);
 }
 
 void
@@ -1015,7 +1080,8 @@ rspamd_srv_send_command (struct rspamd_worker *worker,
 	g_assert (cmd != NULL);
 	g_assert (worker != NULL);
 
-	rd = g_slice_alloc0 (sizeof (*rd));
+	rd = g_malloc0 (sizeof (*rd));
+	cmd->id = ottery_rand_uint64 ();
 	memcpy (&rd->cmd, cmd, sizeof (rd->cmd));
 	rd->handler = handler;
 	rd->ud = ud;

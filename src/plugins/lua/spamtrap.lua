@@ -21,6 +21,7 @@ local rspamd_logger = require "rspamd_logger"
 local redis_params
 local use_redis = false;
 local M = 'spamtrap'
+local lutil = require "lua_util"
 
 local settings = {
   symbol = 'SPAMTRAP',
@@ -29,13 +30,23 @@ local settings = {
   learn_spam = false,
   fuzzy_flag = 1,
   fuzzy_weight = 10.0,
-  key_prefix = 'sptr_'
+  key_prefix = 'sptr_',
+  check_authed = true,
+  check_local = true,
 }
 
 local function spamtrap_cb(task)
   local rcpts = task:get_recipients('smtp')
+  local authed_user = task:get_user()
+  local ip_addr = task:get_ip()
   local called_for_domain = false
   local target
+
+  if ((not settings['check_authed'] and authed_user) or
+      (not settings['check_local'] and ip_addr and ip_addr:is_local())) then
+    rspamd_logger.infox(task, "skip spamtrap checks for local networks or authenticated user");
+    return
+  end
 
   local function do_action(rcpt)
     if settings['learn_fuzzy'] then
@@ -51,8 +62,19 @@ local function spamtrap_cb(task)
       rcpt)
 
     if settings['action'] then
-      task:set_pre_result(settings['action'],
-        string.format('spamtrap found: <%s>', rcpt))
+      rspamd_logger.infox(task, 'spamtrap found: <%s>', rcpt)
+      if settings.smtp_message then
+        task:set_pre_result(settings['action'],
+          lutil.template(settings.smtp_message, {rcpt = rcpt}))
+      else
+        local smtp_message = 'unknown error'
+        if settings.action == 'no action' then
+          smtp_message = 'message accepted'
+        elseif settings.action == 'reject' then
+          smtp_message = 'message rejected'
+        end
+        task:set_pre_result(settings['action'], smtp_message)
+      end
     end
   end
 

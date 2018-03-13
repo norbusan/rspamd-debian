@@ -46,7 +46,6 @@
 #define DEFAULT_SYMBOL_NA "R_DKIM_NA"
 #define DEFAULT_SYMBOL_PERMFAIL "R_DKIM_PERMFAIL"
 #define DEFAULT_CACHE_SIZE 2048
-#define DEFAULT_CACHE_MAXAGE 86400
 #define DEFAULT_TIME_JITTER 60
 #define DEFAULT_MAX_SIGS 5
 
@@ -288,7 +287,7 @@ dkim_module_config (struct rspamd_config *cfg)
 {
 	const ucl_object_t *value;
 	gint res = TRUE, cb_id = -1;
-	guint cache_size;
+	guint cache_size, sign_cache_size;
 	gboolean got_trusted = FALSE;
 
 	/* Register global methods */
@@ -312,16 +311,6 @@ dkim_module_config (struct rspamd_config *cfg)
 	}
 
 	lua_pop (cfg->lua_state, 1); /* Remove global function */
-
-	dkim_module_ctx->dkim_sign_hash = rspamd_lru_hash_new (
-			128,
-			g_free, /* Keys are just C-strings */
-			(GDestroyNotify)rspamd_dkim_sign_key_unref);
-
-	if (!rspamd_config_is_module_enabled (cfg, "dkim")) {
-		return TRUE;
-	}
-
 	dkim_module_ctx->whitelist_ip = radix_create_compressed ();
 
 	if ((value =
@@ -381,6 +370,15 @@ dkim_module_config (struct rspamd_config *cfg)
 	}
 	else {
 		cache_size = DEFAULT_CACHE_SIZE;
+	}
+
+	if ((value =
+			rspamd_config_get_module_opt (cfg, "dkim",
+					"sign_cache_size")) != NULL) {
+		sign_cache_size = ucl_object_toint (value);
+	}
+	else {
+		sign_cache_size = 128;
 	}
 
 	if ((value =
@@ -451,11 +449,24 @@ dkim_module_config (struct rspamd_config *cfg)
 		dkim_module_ctx->sign_headers = ucl_object_tostring (value);
 	}
 
+	dkim_module_ctx->dkim_hash = rspamd_lru_hash_new (
+			cache_size,
+			g_free,
+			dkim_module_key_dtor);
+	dkim_module_ctx->dkim_sign_hash = rspamd_lru_hash_new (
+			sign_cache_size,
+			g_free,
+			(GDestroyNotify)rspamd_dkim_sign_key_unref);
+
 	if (dkim_module_ctx->trusted_only && !got_trusted) {
 		msg_err_config (
 			"trusted_only option is set and no trusted domains are defined; disabling dkim module completely as it is useless in this case");
 	}
 	else {
+		if (!rspamd_config_is_module_enabled (cfg, "dkim")) {
+			return TRUE;
+		}
+
 		cb_id = rspamd_symbols_cache_add_symbol (cfg->cache,
 			dkim_module_ctx->symbol_reject,
 			0,
@@ -487,11 +498,6 @@ dkim_module_config (struct rspamd_config *cfg)
 			NULL, NULL,
 			SYMBOL_TYPE_VIRTUAL|SYMBOL_TYPE_FINE,
 			cb_id);
-
-		dkim_module_ctx->dkim_hash = rspamd_lru_hash_new (
-				cache_size,
-				g_free, /* Keys are just C-strings */
-				dkim_module_key_dtor);
 
 		msg_info_config ("init internal dkim module");
 #ifndef HAVE_OPENSSL
@@ -536,8 +542,11 @@ dkim_module_config (struct rspamd_config *cfg)
 								"DKIM_SIGN", dkim_module_ctx->symbol_reject);
 					}
 
-					rspamd_config_add_metric_symbol (cfg, DEFAULT_METRIC,
+					rspamd_config_add_symbol (cfg,
 							"DKIM_SIGN", 0.0, "DKIM signature fake symbol",
+							"dkim", RSPAMD_SYMBOL_FLAG_IGNORE, 1, 1);
+					rspamd_config_add_symbol (cfg,
+							"DKIM_TRACE", 0.0, "DKIM trace symbol",
 							"dkim", RSPAMD_SYMBOL_FLAG_IGNORE, 1, 1);
 
 				}
@@ -554,6 +563,40 @@ dkim_module_config (struct rspamd_config *cfg)
 	return res;
 }
 
+rspamd_dkim_sign_key_t *
+dkim_module_load_key_format (lua_State *L, struct rspamd_task *task,
+		const gchar *key, gsize keylen,
+		enum rspamd_dkim_sign_key_type kt)
+{
+	guchar h[rspamd_cryptobox_HASHBYTES],
+			hex_hash[rspamd_cryptobox_HASHBYTES * 2 + 1];
+	rspamd_dkim_sign_key_t *ret;
+	GError *err = NULL;
+
+	memset (hex_hash, 0, sizeof (hex_hash));
+	rspamd_cryptobox_hash (h, key, keylen, NULL, 0);
+	rspamd_encode_hex_buf (h, sizeof (h), hex_hash, sizeof (hex_hash));
+	ret = rspamd_lru_hash_lookup (dkim_module_ctx->dkim_sign_hash,
+				hex_hash, time (NULL));
+
+	if (ret == NULL) {
+			ret = rspamd_dkim_sign_key_load (key, keylen, kt, &err);
+
+			if (ret == NULL) {
+				msg_err_task ("cannot load private key: %e", err);
+				g_error_free (err);
+
+				return NULL;
+			}
+
+			rspamd_lru_hash_insert (dkim_module_ctx->dkim_sign_hash,
+					g_strdup (hex_hash), ret,
+					time (NULL), 0);
+		}
+
+	return ret;
+}
+
 static gint
 lua_dkim_sign_handler (lua_State *L)
 {
@@ -566,7 +609,7 @@ lua_dkim_sign_handler (lua_State *L)
 			*headers = NULL, *sign_type_str = NULL, *arc_cv = NULL;
 	rspamd_dkim_sign_context_t *ctx;
 	rspamd_dkim_sign_key_t *dkim_key;
-	gsize rawlen = 0;
+	gsize rawlen = 0, keylen = 0;
 	gboolean no_cache = FALSE;
 
 	luaL_argcheck (L, lua_type (L, 2) == LUA_TTABLE, 2, "'table' expected");
@@ -577,9 +620,10 @@ lua_dkim_sign_handler (lua_State *L)
 	 * - key
 	 */
 	if (!rspamd_lua_parse_table_arguments (L, 2, &err,
-			"key=S;rawkey=V;*domain=S;*selector=S;no_cache=B;headers=S;"
+			"key=V;rawkey=V;*domain=S;*selector=S;no_cache=B;headers=S;"
 					"sign_type=S;arc_idx=I;arc_cv=S;expire=I",
-			&key, &rawlen, &rawkey, &domain, &selector, &no_cache, &headers,
+			&keylen, &key, &rawlen, &rawkey, &domain,
+			&selector, &no_cache, &headers,
 			&sign_type_str, &arc_idx, &arc_cv, &expire)) {
 		msg_err_task ("invalid return value from sign condition: %e",
 				err);
@@ -600,54 +644,76 @@ lua_dkim_sign_handler (lua_State *L)
 				(GDestroyNotify)rspamd_dkim_sign_key_unref);
 	}
 
-	if (key) {
-		dkim_key = rspamd_lru_hash_lookup (dkim_module_ctx->dkim_sign_hash,
-				key, time (NULL));
+#define PEM_SIG "-----BEGIN"
 
-		if (dkim_key == NULL) {
-			dkim_key = rspamd_dkim_sign_key_load (key, strlen (key),
-					RSPAMD_DKIM_SIGN_KEY_FILE, &err);
+	if (key) {
+		if (key[0] == '.' || key[0] == '/') {
+			/* Likely raw path */
+			dkim_key = rspamd_lru_hash_lookup (dkim_module_ctx->dkim_sign_hash,
+					key, time (NULL));
 
 			if (dkim_key == NULL) {
-				msg_err_task ("cannot load dkim key %s: %e",
-						key, err);
-				g_error_free (err);
+				dkim_key = rspamd_dkim_sign_key_load (key, strlen (key),
+						RSPAMD_DKIM_SIGN_KEY_FILE, &err);
 
+				if (dkim_key == NULL) {
+					msg_err_task ("cannot load dkim key %s: %e",
+							key, err);
+					g_error_free (err);
+
+					lua_pushboolean (L, FALSE);
+					return 1;
+				}
+
+				rspamd_lru_hash_insert (dkim_module_ctx->dkim_sign_hash,
+						g_strdup (key), dkim_key,
+						time (NULL), 0);
+			}
+		}
+		else if (keylen > sizeof (PEM_SIG) &&
+				strncmp (key, PEM_SIG, sizeof (PEM_SIG) - 1) == 0) {
+			/* Pem header found */
+			dkim_key = dkim_module_load_key_format (L, task, key, keylen,
+					RSPAMD_DKIM_SIGN_KEY_PEM);
+
+			if (dkim_key == NULL) {
 				lua_pushboolean (L, FALSE);
 				return 1;
 			}
+		}
+		else {
+			dkim_key = dkim_module_load_key_format (L, task, key, keylen,
+					RSPAMD_DKIM_SIGN_KEY_BASE64);
 
-			rspamd_lru_hash_insert (dkim_module_ctx->dkim_sign_hash,
-					g_strdup (key), dkim_key,
-					time (NULL), 0);
+			if (dkim_key == NULL) {
+				lua_pushboolean (L, FALSE);
+				return 1;
+			}
 		}
 	}
 	else if (rawkey) {
-		guchar h[rspamd_cryptobox_HASHBYTES],
-			hex_hash[rspamd_cryptobox_HASHBYTES * 2 + 1];
+		key = rawkey;
+		keylen = rawlen;
 
-		memset (hex_hash, 0, sizeof (hex_hash));
-		rspamd_cryptobox_hash (h, rawkey, rawlen, NULL, 0);
-		rspamd_encode_hex_buf (h, sizeof (h), hex_hash, sizeof (hex_hash));
-		dkim_key = rspamd_lru_hash_lookup (dkim_module_ctx->dkim_sign_hash,
-				hex_hash, time (NULL));
-
-		if (dkim_key == NULL) {
-			dkim_key = rspamd_dkim_sign_key_load (rawkey, rawlen,
-					RSPAMD_DKIM_SIGN_KEY_PEM, &err);
+		if (keylen > sizeof (PEM_SIG) &&
+				strncmp (key, PEM_SIG, sizeof (PEM_SIG) - 1) == 0) {
+			/* Pem header found */
+			dkim_key = dkim_module_load_key_format (L, task, key, keylen,
+					RSPAMD_DKIM_SIGN_KEY_PEM);
 
 			if (dkim_key == NULL) {
-				msg_err_task ("cannot load dkim key %s: %e",
-						key, err);
-				g_error_free (err);
-
 				lua_pushboolean (L, FALSE);
 				return 1;
 			}
+		}
+		else {
+			dkim_key = dkim_module_load_key_format (L, task, key, keylen,
+					RSPAMD_DKIM_SIGN_KEY_BASE64);
 
-			rspamd_lru_hash_insert (dkim_module_ctx->dkim_sign_hash,
-					g_strdup (hex_hash), dkim_key,
-					time (NULL), 0);
+			if (dkim_key == NULL) {
+				lua_pushboolean (L, FALSE);
+				return 1;
+			}
 		}
 	}
 	else {
@@ -656,6 +722,8 @@ lua_dkim_sign_handler (lua_State *L)
 
 		return 1;
 	}
+
+#undef PEM_SIG
 
 	if (sign_type_str) {
 		if (strcmp (sign_type_str, "dkim") == 0) {
@@ -820,7 +888,7 @@ dkim_module_check (struct dkim_check_result *res)
 
 	if (all_done) {
 		DL_FOREACH (first, cur) {
-			const gchar *symbol = NULL;
+			const gchar *symbol = NULL, *trace = NULL;
 			int symbol_weight = 1;
 
 			if (cur->ctx == NULL) {
@@ -828,24 +896,41 @@ dkim_module_check (struct dkim_check_result *res)
 			}
 			if (cur->res == DKIM_REJECT) {
 				symbol = dkim_module_ctx->symbol_reject;
+				trace = "-";
 				symbol_weight = cur->mult_deny * 1.0;
 			}
 			else if (cur->res == DKIM_CONTINUE) {
 				symbol = dkim_module_ctx->symbol_allow;
+				trace = "+";
 				symbol_weight = cur->mult_allow * 1.0;
 			}
 			else if (cur->res == DKIM_PERM_ERROR) {
+				trace = "~";
 				symbol = dkim_module_ctx->symbol_permfail;
 			}
 			else if (cur->res == DKIM_TRYAGAIN) {
+				trace = "?";
 				symbol = dkim_module_ctx->symbol_tempfail;
 			}
 
 			if (symbol != NULL) {
+				const gchar *domain = rspamd_dkim_get_domain (cur->ctx);
+				gsize tracelen;
+				gchar *tracebuf;
+
+				tracelen = strlen (domain) + 3; /* :<trace>\0 */
+				tracebuf = rspamd_mempool_alloc (cur->task->task_pool,
+						tracelen);
+				rspamd_snprintf (tracebuf, tracelen, "%s:%s", domain, trace);
+
 				rspamd_task_insert_result (cur->task,
 						symbol,
 						symbol_weight,
-						rspamd_dkim_get_domain (cur->ctx));
+						domain);
+				rspamd_task_insert_result (cur->task,
+						"DKIM_TRACE",
+						0.0,
+						tracebuf);
 			}
 		}
 		rspamd_session_watcher_pop (res->task->s, res->w);

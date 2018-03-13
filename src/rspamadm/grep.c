@@ -17,7 +17,6 @@
 #include "config.h"
 #include "rspamadm.h"
 #include "lua/lua_common.h"
-#include "grep.lua.h"
 
 static gchar *string = NULL;
 static gchar *pattern = NULL;
@@ -34,7 +33,8 @@ struct rspamadm_command grep_command = {
 		.name = "grep",
 		.flags = 0,
 		.help = rspamadm_grep_help,
-		.run = rspamadm_grep
+		.run = rspamadm_grep,
+		.lua_subrs = NULL,
 };
 
 static GOptionEntry entries[] = {
@@ -115,6 +115,7 @@ rspamadm_grep (gint argc, gchar **argv)
 	}
 
 	L = rspamd_lua_init ();
+	rspamd_lua_set_path (L, NULL, ucl_vars);
 
 	obj = ucl_object_typed_new (UCL_OBJECT);
 	if (string) {
@@ -148,7 +149,7 @@ rspamadm_grep (gint argc, gchar **argv)
 			argc,
 			argv,
 			obj,
-			rspamadm_script_grep);
+			"grep");
 
 	lua_close (L);
 	ucl_object_unref (obj);

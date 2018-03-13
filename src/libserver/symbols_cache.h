@@ -40,6 +40,8 @@ enum rspamd_symbol_type {
 	SYMBOL_TYPE_EMPTY = (1 << 8), /* Allow execution on empty tasks */
 	SYMBOL_TYPE_PREFILTER = (1 << 9),
 	SYMBOL_TYPE_POSTFILTER = (1 << 10),
+	SYMBOL_TYPE_NOSTAT = (1 << 11), /* Skip as statistical symbol */
+	SYMBOL_TYPE_IDEMPOTENT = (1 << 12), /* Symbol cannot change metric */
 };
 
 /**
@@ -157,7 +159,7 @@ const gchar * rspamd_symbols_cache_symbol_by_id (struct symbols_cache *cache,
  * @param cache
  * @return number of symbols in the cache
  */
-guint rspamd_symbols_cache_symbols_count (struct symbols_cache *cache);
+guint rspamd_symbols_cache_stats_symbols_count (struct symbols_cache *cache);
 
 /**
  * Call function for cached symbol using saved callback
@@ -290,4 +292,15 @@ guint64 rspamd_symbols_cache_get_cksum (struct symbols_cache *cache);
  */
 gboolean rspamd_symbols_cache_is_symbol_enabled (struct rspamd_task *task,
 		struct symbols_cache *cache, const gchar *symbol);
+/**
+ * Process specific function for each cache element (in order they are added)
+ * @param cache
+ * @param func
+ * @param ud
+ */
+void rspamd_symbols_cache_foreach (struct symbols_cache *cache,
+		void (*func)(gint /* id */, const gchar * /* name */,
+				gint /* flags */, gpointer /* userdata */),
+		gpointer ud);
+
 #endif

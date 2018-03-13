@@ -23,6 +23,7 @@ end
 -- https://rspamd.com/doc/configuration/settings.html
 
 local rspamd_logger = require "rspamd_logger"
+local rspamd_maps = require "lua_maps"
 local redis_params
 
 local settings = {}
@@ -43,7 +44,9 @@ local function check_query_settings(task)
     local parser = ucl.parser()
     local res,err = parser:parse_string(tostring(query_set))
     if res then
-      task:set_settings(parser:get_object())
+      local settings_obj = parser:get_object()
+      task:set_settings(settings_obj)
+      task:cache_set('settings', settings_obj)
 
       return true
     else
@@ -71,6 +74,7 @@ local function check_query_settings(task)
       end
 
       task:set_settings(nset)
+      task:cache_set('settings', nset)
 
       return true
     end
@@ -83,6 +87,15 @@ local function check_query_settings(task)
     local elt = settings_ids[id_str]
     if elt and elt['apply'] then
       task:set_settings(elt['apply'])
+      task:cache_set('settings', elt['apply'])
+
+      if elt.apply['add_headers'] or elt.apply['remove_headers'] then
+        local rep = {
+          add_headers = elt.apply['add_headers'] or {},
+          remove_headers = elt.apply['remove_headers'] or {},
+        }
+        task:set_rmilter_reply(rep)
+      end
       rspamd_logger.infox(task, "applying settings id %s", id_str)
 
       return true
@@ -97,17 +110,17 @@ local function check_settings(task)
   local function check_addr_setting(rule, addr)
     local function check_specific_addr(elt)
       if rule['name'] then
-        if rule['name']:lower() == elt['addr']:lower() then
+        if rspamd_maps.rspamd_maybe_check_map(rule['name'], elt['addr']) then
           return true
         end
       end
       if rule['user'] then
-        if rule['user']:lower() == elt['user']:lower() then
+        if rspamd_maps.rspamd_maybe_check_map(rule['user'], elt['user']) then
           return true
         end
       end
       if rule['domain'] and elt['domain'] then
-        if rule['domain']:lower() == elt['domain']:lower() then
+        if rspamd_maps.rspamd_maybe_check_map(rule['domain'], elt['domain']) then
           return true
         end
       end
@@ -129,13 +142,19 @@ local function check_settings(task)
   end
 
   local function check_ip_setting(rule, ip)
-    if rule[2] ~= 0 then
-      local nip = ip:apply_mask(rule[2])
-      if nip and nip:to_string() == rule[1]:to_string() then
+    if not rule[2] then
+      if rspamd_maps.rspamd_maybe_check_map(rule[1], ip:to_string()) then
         return true
       end
-    elseif ip:to_string() == rule[1]:to_string() then
-      return true
+    else
+      if rule[2] ~= 0 then
+        local nip = ip:apply_mask(rule[2])
+        if nip and nip:to_string() == rule[1]:to_string() then
+          return true
+        end
+      elseif ip:to_string() == rule[1]:to_string() then
+        return true
+      end
     end
 
     return false
@@ -242,6 +261,29 @@ local function check_settings(task)
       end
     end
 
+    if rule['header'] then
+      for _, e in ipairs(rule['header']) do
+        for k, v in pairs(e) do
+          for _, p in ipairs(v) do
+            local h = task:get_header(k)
+            res = (h and p:match(h))
+            if res then
+              break
+            end
+          end
+          if res then
+            break
+          end
+        end
+        if res then
+          break
+        end
+      end
+      if not res then
+        return nil
+      end
+    end
+
     if res then
       if rule['whitelist'] then
         rule['apply'] = {whitelist = true}
@@ -294,6 +336,7 @@ local function check_settings(task)
             task:get_message_id(), s.name)
           if rule['apply'] then
             task:set_settings(rule['apply'])
+            task:cache_set('settings', rule['apply'])
             applied = true
           end
           if rule['symbols'] then
@@ -355,8 +398,8 @@ local function process_settings_table(tbl)
             out[1] = res
             out[2] = 0
           else
-            rspamd_logger.errx(rspamd_config, "bad IP address: " .. ip)
-            return nil
+            -- It can still be a map
+            out[1] = res
           end
         else
           local res = rspamd_ip.from_string(string.sub(ip, 1, slash - 1))
@@ -384,29 +427,34 @@ local function process_settings_table(tbl)
           table.insert(out, process_addr(v))
         end
       elseif type(addr) == "string" then
-        local start = string.sub(addr, 1, 1)
-        if start == '/' then
-          -- It is a regexp
-          local re = rspamd_regexp.create(addr)
-          if re then
-            out['regexp'] = re
-          else
-            rspamd_logger.errx(rspamd_config, "bad regexp: " .. addr)
-            return nil
-          end
-
-        elseif start == '@' then
-          -- It is a domain if form @domain
-          out['domain'] = string.sub(addr, 2)
+        if string.sub(addr, 1, 4) == "map:" then
+          -- It is map, don't apply any extra logic
+          out['name'] = addr
         else
-          -- Check user@domain parts
-          local at = string.find(addr, '@')
-          if at then
-            -- It is full address
-            out['name'] = addr
+          local start = string.sub(addr, 1, 1)
+          if start == '/' then
+            -- It is a regexp
+            local re = rspamd_regexp.create(addr)
+            if re then
+              out['regexp'] = re
+            else
+              rspamd_logger.errx(rspamd_config, "bad regexp: " .. addr)
+              return nil
+            end
+
+          elseif start == '@' then
+            -- It is a domain if form @domain
+            out['domain'] = string.sub(addr, 2)
           else
-            -- It is a user
-            out['user'] = addr
+            -- Check user@domain parts
+            local at = string.find(addr, '@')
+            if at then
+              -- It is full address
+              out['name'] = addr
+            else
+              -- It is a user
+              out['user'] = addr
+            end
           end
         end
       else
@@ -474,6 +522,35 @@ local function process_settings_table(tbl)
         end
       end
       out['request_header'] = rho
+    end
+    if elt['header'] then
+      if not elt['header'][1] and next(elt['header']) then
+        elt['header'] = {elt['header']}
+      end
+      for _, e in ipairs(elt['header']) do
+        local rho = {}
+        for k, v in pairs(e) do
+          if type(v) ~= 'table' then
+            v = {v}
+          end
+          for _, r in ipairs(v) do
+            local re = rspamd_regexp.get_cached(r)
+            if not re then
+              re = rspamd_regexp.create_cached(r)
+            end
+            if re then
+              if not out['header'] then out['header'] = {} end
+              if rho[k] then
+                table.insert(rho[k], re)
+              else
+                rho[k] = {re}
+              end
+            end
+          end
+        end
+        if not out['header'] then out['header'] = {} end
+        table.insert(out['header'], rho)
+      end
     end
 
     -- Now we must process actions
@@ -571,6 +648,7 @@ local function gen_redis_callback(handler, id)
               rspamd_logger.infox(task, "<%1> apply settings according to redis rule %2",
                 task:get_message_id(), id)
               task:set_settings(obj)
+              task:cache_set('settings', obj)
               break
             end
           end
@@ -636,7 +714,7 @@ if redis_section then
   fun.each(function(id, h)
     rspamd_config:register_symbol({
       name = 'REDIS_SETTINGS' .. tostring(id),
-      type = 'prefilter',
+      type = 'prefilter,nostat',
       callback = gen_redis_callback(h, id),
       priority = 10
     })
@@ -656,7 +734,7 @@ end
 
 rspamd_config:register_symbol({
   name = 'SETTINGS_CHECK',
-  type = 'prefilter',
+  type = 'prefilter,nostat',
   callback = check_settings,
   priority = 10
 })

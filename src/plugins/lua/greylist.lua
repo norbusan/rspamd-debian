@@ -26,7 +26,7 @@ greylist {
     "${CONFDIR}/dmarc_whitelist.inc",
     "${CONFDIR}/spf_dkim_whitelist.inc",
     "${CONFDIR}/surbl-whitelist.inc",
-    "https://rspamd.com/freemail/free.txt.zst"
+    "https://maps.rspamd.com/freemail/free.txt.zst"
   ];
 }
 Example config for exim users:
@@ -63,6 +63,7 @@ local rspamd_util = require "rspamd_util"
 local fun = require "fun"
 local hash = require "rspamd_cryptobox_hash"
 local rspamd_lua_utils = require "lua_util"
+local N = "greylist"
 
 local function data_key(task)
   local cached = task:get_mempool():get_variable("grey_bodyhash")
@@ -150,6 +151,24 @@ local function check_time(task, tm, type)
   end
 end
 
+local function greylist_message(task, end_time, why)
+  task:insert_result(settings['symbol'], 0.0, 'greylisted', end_time, why)
+
+  if rspamd_lua_utils.is_rspamc_or_controller(task) then return end
+  if settings.message_func then
+    task:set_pre_result(settings['action'],
+      settings.message_func(task, end_time))
+  else
+    local message = settings['message']
+    if settings.report_time then
+      message = string.format("%s: %s", message, end_time)
+    end
+    task:set_pre_result(settings['action'], message)
+  end
+
+  task:set_flag('greylisted')
+end
+
 local function greylist_check(task)
   local ip = task:get_ip()
 
@@ -203,23 +222,9 @@ local function greylist_check(task)
       elseif greylisted_body and greylisted_meta then
         local end_time = rspamd_util.time_to_string(rspamd_util.get_time() +
           settings['timeout'])
-        rspamd_logger.infox(task, 'greylisted until "%s" using %s key',
-          end_time, type)
-        task:insert_result(settings['symbol'], 0.0, 'greylisted', end_time)
-
-        if rspamd_lua_utils.is_rspamc_or_controller(task) then return end
-        if settings.message_func then
-          task:set_pre_result('soft reject',
-            settings.message_func(task, end_time))
-        else
-          local message = settings['message']
-          if settings.report_time then
-            message = string.format("%s: %s", message, end_time)
-          end
-          task:set_pre_result('soft reject', message)
-        end
-
-        task:set_flag('greylisted')
+        rspamd_logger.infox(task, 'greylisted until "%s"',
+          end_time)
+        greylist_message(task, end_time, 'too early')
       end
     elseif err then
       rspamd_logger.errx(task, 'got error while getting greylisting keys: %1', err)
@@ -284,7 +289,7 @@ local function greylist_set(task)
   -- Third and second level domains whitelist
   if not is_whitelisted and whitelist_domains_map then
     local hostname = task:get_hostname()
-    if hostname and hostname ~= 'unknown' then
+    if hostname then
       local domain = rspamd_util.get_tld(hostname)
       if whitelist_domains_map:get_key(hostname) or (domain and whitelist_domains_map:get_key(domain)) then
         is_whitelisted = 'meta'
@@ -305,7 +310,7 @@ local function greylist_set(task)
   local function redis_set_cb(err)
     if err then
       rspamd_logger.errx(task, 'got error %s when setting greylisting record on server %s',
-          err, upstream:get_addr())
+        err, upstream:get_addr())
     end
   end
 
@@ -346,11 +351,7 @@ local function greylist_set(task)
     local t = tostring(toint(rspamd_util.get_time()))
     local end_time = rspamd_util.time_to_string(t + settings['timeout'])
     rspamd_logger.infox(task, 'greylisted until "%s", new record', end_time)
-    task:insert_result(settings['symbol'], 0.0, 'greylisted', end_time,
-      'new record')
-
-    task:set_pre_result(settings['action'], settings['message'])
-    task:set_flag('greylisted')
+    greylist_message(task, end_time, 'new record')
     -- Create new record
     ret,conn,upstream = rspamd_redis_make_request(task,
       redis_params, -- connect params
@@ -374,30 +375,21 @@ local function greylist_set(task)
 
       if grey_res then
         -- We need to delay message, hence set a temporary result
-        task:insert_result(settings['symbol'], 0.0, grey_res, 'body')
         rspamd_logger.infox(task, 'greylisting delayed until "%s": body', grey_res)
+        greylist_message(task, grey_res, 'body')
       else
         grey_res = task:get_mempool():get_variable("grey_greylisted_meta")
-
         if grey_res then
-          task:insert_result(settings['symbol'], 0.0, grey_res, 'meta')
-          rspamd_logger.infox(task, 'greylisting delayed until "%s": meta', grey_res)
-        else
-          task:insert_result(settings['symbol'], 0.0, 'greylisted', 'redis fail')
-          return
+          greylist_message(task, grey_res, 'meta')
         end
       end
-      task:set_metric_action('default', settings['action'])
-      if is_rspamc then return end
-      task:set_pre_result(settings['action'], settings['message'])
-      task:set_flag('greylisted')
     else
       task:insert_result(settings['symbol'], 0.0, 'greylisted', 'passed')
     end
   end
 end
 
-local opts =  rspamd_config:get_all_opt('greylist')
+local opts = rspamd_config:get_all_opt('greylist')
 if opts then
   if opts['message_func'] then
     settings.message_func = assert(load(opts['message_func']))()
@@ -426,6 +418,7 @@ if opts then
   redis_params = rspamd_parse_redis_server('greylist')
   if not redis_params then
     rspamd_logger.infox(rspamd_config, 'no servers are specified, disabling module')
+    rspamd_lua_utils.disable_module(N, "redis")
   else
     rspamd_config:register_symbol({
       name = 'GREYLIST_SAVE',

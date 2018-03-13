@@ -122,35 +122,40 @@
 							</div>
 
 							<form id="graph_controls" action="#">
-								Select dataset:
+								Dataset:
 								<select id="selData" class="form-control">
 									<option value="hourly" selected>Hourly</option>
 									<option value="daily">Daily</option>
 									<option value="weekly">Weekly</option>
 									<option value="monthly">Monthly</option>
 								</select>
+								Y-scale:
+								<select id="selYScale" class="form-control">
+									<option value="lin" selected>Lin</option>
+									<option value="log">Log</option>
+								</select>
 								Convert to:
 								<select id="selConvert" class="form-control">
 									<option value="" selected>--</option>
 									<option value="percentage">percentage</option>
 								</select>
-								Select chart type:
+								Chart type:
 								<select id="selType" class="form-control">
 									<option value="line" selected>Line</option>
 									<option value="area">Stacked area</option>
 								</select>
-								Select <a title="View Mike Bostock's Block." href="https://bl.ocks.org/mbostock/4342190" target="_blank">interpolation mode</a>:
+								<a title="&ldquo;Curves&rdquo; section of &ldquo;d3-shape&rdquo; library documentation" href="https://github.com/d3/d3-shape#curves" target="_blank">Interpolation mode</a>:
 								<select id="selInterpolate" class="form-control">
-									<option value="linear" selected>linear</option>
-									<option value="step">step</option>
-									<option value="step-before">step-before</option>
-									<option value="step-after">step-after</option>
-									<option value="basis">basis</option>
-									<option value="basis-open">basis-open</option>
-									<option value="bundle">bundle</option>
-									<option value="cardinal">cardinal</option>
-									<option value="cardinal-open">cardinal-open</option>
-									<option value="monotone">monotone</option>
+									<option value="curveLinear" selected>linear</option>
+									<option value="curveStep">step</option>
+									<option value="curveStepBefore">stepBefore</option>
+									<option value="curveStepAfter">stepAfter</option>
+									<option value="curveBasis">basis</option>
+									<option value="curveBasisOpen">basisOpen</option>
+									<option value="curveBundle">bundle</option>
+									<option value="curveCardinal">cardinal</option>
+									<option value="curveCardinalOpen">cardinalOpen</option>
+									<option value="curveMonotoneX">monotoneX</option>
 								</select>
 							</form>
 						</div>

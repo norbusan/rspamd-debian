@@ -51,8 +51,9 @@ print_octets(ip6)
  */
 
 /***
- * @method ip:to_string()
+ * @method ip:to_string([pretty=false])
  * Converts valid IP address to string
+ * @param {bool} pretty print IP address with port and braces (for IPv6)
  * @return {string or nil} string representation of IP or `nil` if IP is invalid
  */
 LUA_FUNCTION_DEF (ip, to_string);
@@ -192,7 +193,7 @@ lua_ip_new (lua_State *L, struct rspamd_lua_ip *old)
 {
 	struct rspamd_lua_ip *ip, **pip;
 
-	ip = g_slice_alloc (sizeof (*ip));
+	ip = g_malloc0 (sizeof (*ip));
 
 	if (old != NULL && old->addr != NULL) {
 		ip->addr = rspamd_inet_address_copy (old->addr);
@@ -325,10 +326,15 @@ lua_ip_to_string (lua_State *L)
 	struct rspamd_lua_ip *ip = lua_check_ip (L, 1);
 
 	if (ip != NULL && ip->addr) {
-		lua_pushstring (L, rspamd_inet_address_to_string (ip->addr));
+		if (lua_isboolean (L, 2) && lua_toboolean (L, 2) == true) {
+			lua_pushstring (L, rspamd_inet_address_to_string_pretty (ip->addr));
+		}
+		else {
+			lua_pushstring (L, rspamd_inet_address_to_string (ip->addr));
+		}
 	}
 	else {
-		lua_pushnil (L);
+		luaL_error (L, "invalid arguments");
 	}
 
 	return 1;
@@ -406,7 +412,7 @@ lua_ip_destroy (lua_State *L)
 		if (ip->addr) {
 			rspamd_inet_address_free (ip->addr);
 		}
-		g_slice_free1 (sizeof (struct rspamd_lua_ip), ip);
+		g_free (ip);
 	}
 
 	return 0;
@@ -519,7 +525,7 @@ rspamd_lua_ip_push (lua_State *L, rspamd_inet_addr_t *addr)
 {
 	struct rspamd_lua_ip *ip, **pip;
 
-	ip = g_slice_alloc0 (sizeof (struct rspamd_lua_ip));
+	ip = g_malloc0 (sizeof (struct rspamd_lua_ip));
 	ip->addr = rspamd_inet_address_copy (addr);
 	pip = lua_newuserdata (L, sizeof (struct rspamd_lua_ip *));
 	rspamd_lua_setclass (L, "rspamd{ip}", -1);
@@ -535,7 +541,7 @@ rspamd_lua_ip_push_fromstring (lua_State *L, const gchar *ip_str)
 		lua_pushnil (L);
 	}
 	else {
-		ip = g_slice_alloc0 (sizeof (struct rspamd_lua_ip));
+		ip = g_malloc0 (sizeof (struct rspamd_lua_ip));
 
 		if (rspamd_parse_inet_address (&ip->addr, ip_str, 0)) {
 
@@ -544,7 +550,7 @@ rspamd_lua_ip_push_fromstring (lua_State *L, const gchar *ip_str)
 			*pip = ip;
 		}
 		else {
-			g_slice_free1 (sizeof (*ip), ip);
+			g_free (ip);
 			lua_pushnil (L);
 		}
 	}

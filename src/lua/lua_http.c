@@ -16,6 +16,7 @@
 #include "lua_common.h"
 #include "http_private.h"
 #include "unix-std.h"
+#include "zlib.h"
 
 /***
  * @module rspamd_http
@@ -74,6 +75,7 @@ struct lua_http_cbdata {
 	gint fd;
 	gint cbref;
 	gint bodyref;
+	gboolean gzip;
 };
 
 static const int default_http_timeout = 5000;
@@ -129,7 +131,7 @@ lua_http_fin (gpointer arg)
 		rspamd_pubkey_unref (cbd->peer_pk);
 	}
 
-	g_slice_free1 (sizeof (struct lua_http_cbdata), cbd);
+	g_free (cbd);
 }
 
 static void
@@ -206,9 +208,9 @@ lua_http_finish_handler (struct rspamd_http_connection *conn,
 		/*
 		 * Lowercase header name, as Lua cannot search in caseless matter
 		 */
-		rspamd_str_lc (h->combined->str, h->name->len);
-		lua_pushlstring (cbd->L, h->name->begin, h->name->len);
-		lua_pushlstring (cbd->L, h->value->begin, h->value->len);
+		rspamd_str_lc (h->combined->str, h->name.len);
+		lua_pushlstring (cbd->L, h->name.begin, h->name.len);
+		lua_pushlstring (cbd->L, h->value.begin, h->value.len);
 		lua_settable (cbd->L, -3);
 	}
 
@@ -314,16 +316,28 @@ static void
 lua_http_push_headers (lua_State *L, struct rspamd_http_message *msg)
 {
 	const char *name, *value;
+	gint i, sz;
 
 	lua_pushnil (L);
 	while (lua_next (L, -2) != 0) {
 
 		lua_pushvalue (L, -2);
 		name = lua_tostring (L, -1);
-		value = lua_tostring (L, -2);
-
-		if (name != NULL && value != NULL) {
-			rspamd_http_message_add_header (msg, name, value);
+		sz = rspamd_lua_table_size (L, -2);
+		if (sz != 0 && name != NULL) {
+			for (i = 1; i <= sz ; i++) {
+				lua_rawgeti (L, -2, i);
+				value = lua_tostring (L, -1);
+				if (value != NULL) {
+					rspamd_http_message_add_header (msg, name, value);
+				}
+				lua_pop (L, 1);
+			}
+		} else {
+			value = lua_tostring (L, -2);
+			if (name != NULL && value != NULL) {
+				rspamd_http_message_add_header (msg, name, value);
+			}
 		}
 		lua_pop (L, 2);
 	}
@@ -349,10 +363,6 @@ lua_http_push_headers (lua_State *L, struct rspamd_http_message *msg)
 static gint
 lua_http_request (lua_State *L)
 {
-	const gchar *url, *lua_body;
-	gchar *to_resolve;
-	gint cbref;
-	gsize bodylen;
 	struct event_base *ev_base;
 	struct rspamd_http_message *msg;
 	struct lua_http_cbdata *cbd;
@@ -363,10 +373,16 @@ lua_http_request (lua_State *L)
 	struct rspamd_config *cfg = NULL;
 	struct rspamd_cryptobox_pubkey *peer_key = NULL;
 	struct rspamd_cryptobox_keypair *local_kp = NULL;
+	const gchar *url, *lua_body;
+	rspamd_fstring_t *body = NULL;
+	gchar *to_resolve;
+	gint cbref;
+	gsize bodylen;
 	gdouble timeout = default_http_timeout;
 	gint flags = 0;
 	gchar *mime_type = NULL;
 	gsize max_size = 0;
+	gboolean gzip = FALSE;
 
 	if (lua_gettop (L) >= 2) {
 		/* url, callback and event_base format */
@@ -519,13 +535,13 @@ lua_http_request (lua_State *L)
 		lua_gettable (L, 1);
 		if (lua_type (L, -1) == LUA_TSTRING) {
 			lua_body = lua_tolstring (L, -1, &bodylen);
-			rspamd_http_message_set_body (msg, lua_body, bodylen);
+			body = rspamd_fstring_new_init (lua_body, bodylen);
 		}
 		else if (lua_type (L, -1) == LUA_TUSERDATA) {
 			t = lua_check_text (L, -1);
 			/* TODO: think about zero-copy possibilities */
 			if (t) {
-				rspamd_http_message_set_body (msg, t->start, t->len);
+				body = rspamd_fstring_new_init (t->start, t->len);
 			}
 		}
 		lua_pop (L, 1);
@@ -565,6 +581,15 @@ lua_http_request (lua_State *L)
 
 		lua_pop (L, 1);
 
+		lua_pushstring (L, "gzip");
+		lua_gettable (L, 1);
+
+		if (!!lua_toboolean (L, -1)) {
+			gzip = TRUE;
+		}
+
+		lua_pop (L, 1);
+
 		lua_pushstring (L, "no_ssl_verify");
 		lua_gettable (L, 1);
 
@@ -599,7 +624,7 @@ lua_http_request (lua_State *L)
 		return 1;
 	}
 
-	cbd = g_slice_alloc0 (sizeof (*cbd));
+	cbd = g_malloc0 (sizeof (*cbd));
 	cbd->L = L;
 	cbd->cbref = cbref;
 	cbd->msg = msg;
@@ -616,6 +641,21 @@ lua_http_request (lua_State *L)
 
 	if (msg->host) {
 		cbd->host = rspamd_fstring_cstr (msg->host);
+	}
+
+	if (body) {
+		if (gzip) {
+			if (rspamd_fstring_gzip (&body)) {
+				rspamd_http_message_add_header (msg, "Content-Encoding", "gzip");
+			}
+		}
+
+		rspamd_http_message_set_body_from_fstring_steal (msg, body);
+	}
+
+	if (gzip) {
+		cbd->gzip = TRUE;
+		/* TODO: Add client support for gzip */
 	}
 
 	if (session) {

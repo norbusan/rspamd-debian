@@ -68,8 +68,7 @@ static gboolean load_rspamd_config (struct rspamd_main *rspamd_main,
 		struct rspamd_config *cfg,
 		gboolean init_modules,
 		enum rspamd_post_load_options opts,
-		gboolean reload,
-		GHashTable *vars);
+		gboolean reload);
 
 /* Control socket */
 static gint control_fd;
@@ -289,7 +288,7 @@ reread_config (struct rspamd_main *rspamd_main)
 
 	if (!load_rspamd_config (rspamd_main, tmp_cfg, TRUE,
 			RSPAMD_CONFIG_INIT_VALIDATE|RSPAMD_CONFIG_INIT_SYMCACHE,
-			TRUE, ucl_vars)) {
+			TRUE)) {
 		rspamd_main->cfg = old_cfg;
 		rspamd_log_close_priv (rspamd_main->logger,
 					rspamd_main->workers_uid,
@@ -303,7 +302,7 @@ reread_config (struct rspamd_main *rspamd_main)
 		REF_RELEASE (tmp_cfg);
 	}
 	else {
-		msg_debug_main ("replacing config");
+		msg_info_main ("replacing config");
 		REF_RELEASE (old_cfg);
 		msg_info_main ("config has been reread successfully");
 	}
@@ -325,7 +324,7 @@ rspamd_fork_delayed_cb (gint signo, short what, gpointer arg)
 	rspamd_fork_worker (w->rspamd_main, w->cf, w->oldindex,
 			w->rspamd_main->ev_base);
 	REF_RELEASE (w->cf);
-	g_slice_free1 (sizeof (*w), w);
+	g_free (w);
 }
 
 static void
@@ -336,7 +335,7 @@ rspamd_fork_delayed (struct rspamd_worker_conf *cf,
 	struct waiting_worker *nw;
 	struct timeval tv;
 
-	nw = g_slice_alloc0 (sizeof (*nw));
+	nw = g_malloc0 (sizeof (*nw));
 	nw->cf = cf;
 	nw->oldindex = index;
 	nw->rspamd_main = rspamd_main;
@@ -364,7 +363,7 @@ create_listen_socket (GPtrArray *addrs, guint cnt,
 			fd = rspamd_inet_address_listen (g_ptr_array_index (addrs, i),
 					SOCK_STREAM, TRUE);
 			if (fd != -1) {
-				ls = g_slice_alloc0 (sizeof (*ls));
+				ls = g_malloc0 (sizeof (*ls));
 				ls->addr = g_ptr_array_index (addrs, i);
 				ls->fd = fd;
 				ls->type = RSPAMD_WORKER_SOCKET_TCP;
@@ -375,7 +374,7 @@ create_listen_socket (GPtrArray *addrs, guint cnt,
 			fd = rspamd_inet_address_listen (g_ptr_array_index (addrs, i),
 					SOCK_DGRAM, TRUE);
 			if (fd != -1) {
-				ls = g_slice_alloc0 (sizeof (*ls));
+				ls = g_malloc0 (sizeof (*ls));
 				ls->addr = g_ptr_array_index (addrs, i);
 				ls->fd = fd;
 				ls->type = RSPAMD_WORKER_SOCKET_UDP;
@@ -436,7 +435,7 @@ systemd_get_socket (struct rspamd_main *rspamd_main, gint number)
 				return NULL;
 			}
 
-			ls = g_slice_alloc0 (sizeof (*ls));
+			ls = g_malloc0 (sizeof (*ls));
 			ls->addr = rspamd_inet_address_from_sa (&addr_storage.sa, slen);
 			ls->fd = sock;
 
@@ -633,17 +632,7 @@ spawn_workers (struct rspamd_main *rspamd_main, struct event_base *ev_base)
 			}
 
 			if (!seen) {
-				cf = rspamd_mempool_alloc0 (rspamd_main->cfg->cfg_pool,
-						sizeof (struct rspamd_worker_conf));
-				cf->params = g_hash_table_new (rspamd_str_hash,
-						rspamd_str_equal);
-				cf->active_workers = g_queue_new ();
-				rspamd_mempool_add_destructor (rspamd_main->cfg->cfg_pool,
-						(rspamd_mempool_destruct_t) g_hash_table_destroy,
-						cf->params);
-				rspamd_mempool_add_destructor (rspamd_main->cfg->cfg_pool,
-						(rspamd_mempool_destruct_t) g_queue_free,
-						cf->active_workers);
+				cf = rspamd_config_new_worker (rspamd_main->cfg, NULL);
 				cf->count = 1;
 				cf->worker = wrk;
 				cf->type = g_quark_from_static_string (wrk->name);
@@ -684,15 +673,25 @@ wait_for_workers (gpointer key, gpointer value, gpointer unused)
 	struct rspamd_worker *w = value;
 	struct rspamd_main *rspamd_main;
 	gint res = 0;
+	gboolean nowait = FALSE;
 
 	rspamd_main = w->srv;
 
-	if (waitpid (w->pid, &res, WNOHANG) <= 0) {
+	if (w->ppid != getpid ()) {
+		nowait = TRUE;
+	}
+
+	if (nowait || waitpid (w->pid, &res, WNOHANG) <= 0) {
 		if (term_attempts < 0) {
 			if (w->cf->worker->flags & RSPAMD_WORKER_KILLABLE) {
 				msg_warn_main ("terminate worker %s(%P) with SIGKILL",
 						g_quark_to_string (w->type), w->pid);
-				kill (w->pid, SIGKILL);
+				if (kill (w->pid, SIGKILL) == -1) {
+					if (nowait && errno == ESRCH) {
+						/* We have actually killed the process */
+						goto finished;
+					}
+				}
 			}
 			else {
 				if (term_attempts > -(TERMINATION_ATTEMPTS * 2)) {
@@ -702,6 +701,10 @@ wait_for_workers (gpointer key, gpointer value, gpointer unused)
 								g_quark_to_string (w->type), w->pid,
 								(TERMINATION_ATTEMPTS * 2 + term_attempts) / 5);
 						kill (w->pid, SIGTERM);
+						if (nowait && errno == ESRCH) {
+							/* We have actually killed the process */
+							goto finished;
+						}
 					}
 				}
 				else {
@@ -709,18 +712,40 @@ wait_for_workers (gpointer key, gpointer value, gpointer unused)
 							"special worker %s(%P) with SIGKILL",
 							g_quark_to_string (w->type), w->pid);
 					kill (w->pid, SIGKILL);
+					if (nowait && errno == ESRCH) {
+						/* We have actually killed the process */
+						goto finished;
+					}
 				}
+			}
+		}
+		else if (nowait) {
+			kill (w->pid, 0);
+
+			if (errno != ESRCH) {
+				return FALSE;
+			}
+			else {
+				goto finished;
 			}
 		}
 
 		return FALSE;
 	}
 
+
+
+	finished:
 	msg_info_main ("%s process %P terminated %s",
 			g_quark_to_string (w->type), w->pid,
-			WTERMSIG (res) == SIGKILL ? "hardly" : "softly");
-	event_del (&w->srv_ev);
-	g_ptr_array_free (w->finish_actions, TRUE);
+			nowait ? "with no result available" :
+					(WTERMSIG (res) == SIGKILL ? "hardly" : "softly"));
+	if (w->srv_pipe[0] != -1) {
+		event_del (&w->srv_ev);
+	}
+	if (w->finish_actions) {
+		g_ptr_array_free (w->finish_actions, TRUE);
+	}
 	REF_RELEASE (w->cf);
 	g_free (w);
 
@@ -835,8 +860,7 @@ static gboolean
 load_rspamd_config (struct rspamd_main *rspamd_main,
 		struct rspamd_config *cfg, gboolean init_modules,
 		enum rspamd_post_load_options opts,
-		gboolean reload,
-		GHashTable *vars)
+		gboolean reload)
 {
 	cfg->compiled_modules = modules;
 	cfg->compiled_workers = workers;
@@ -865,7 +889,7 @@ load_rspamd_config (struct rspamd_main *rspamd_main,
 	rspamd_lua_post_load_config (cfg);
 
 	if (init_modules) {
-		rspamd_init_filters (cfg, reload, vars);
+		rspamd_init_filters (cfg, reload);
 	}
 
 	/* Do post-load actions */
@@ -950,7 +974,7 @@ rspamd_cld_handler (gint signo, short what, gpointer arg)
 	/* Turn off locking for logger */
 	rspamd_log_nolock (rspamd_main->logger);
 
-	msg_debug_main ("catch SIGCHLD signal, finding terminated workers");
+	msg_info_main ("catch SIGCHLD signal, finding terminated workers");
 	/* Remove dead child form children list */
 	while ((wrk = waitpid (0, &res, WNOHANG)) > 0) {
 		if ((cur =
@@ -1023,12 +1047,22 @@ rspamd_cld_handler (gint signo, short what, gpointer arg)
 				}
 			}
 
-			event_del (&cur->srv_ev);
-			/* We also need to clean descriptors left */
-			close (cur->control_pipe[0]);
-			close (cur->srv_pipe[0]);
+			if (cur->srv_pipe[0] != -1) {
+				event_del (&cur->srv_ev);
+			}
+
+			if (cur->control_pipe[0] != -1) {
+				/* We also need to clean descriptors left */
+				close (cur->control_pipe[0]);
+				close (cur->srv_pipe[0]);
+			}
+
 			REF_RELEASE (cur->cf);
-			g_ptr_array_free (cur->finish_actions, TRUE);
+
+			if (cur->finish_actions) {
+				g_ptr_array_free (cur->finish_actions, TRUE);
+			}
+
 			g_free (cur);
 		}
 		else {
@@ -1232,7 +1266,7 @@ main (gint argc, gchar **argv, gchar **env)
 
 	if (config_test || dump_cache) {
 		if (!load_rspamd_config (rspamd_main, rspamd_main->cfg, FALSE, 0,
-				FALSE, ucl_vars)) {
+				FALSE)) {
 			exit (EXIT_FAILURE);
 		}
 
@@ -1255,7 +1289,7 @@ main (gint argc, gchar **argv, gchar **env)
 
 	/* Load config */
 	if (!load_rspamd_config (rspamd_main, rspamd_main->cfg, TRUE,
-			RSPAMD_CONFIG_LOAD_ALL, FALSE, ucl_vars)) {
+			RSPAMD_CONFIG_LOAD_ALL, FALSE)) {
 		exit (EXIT_FAILURE);
 	}
 
@@ -1292,6 +1326,7 @@ main (gint argc, gchar **argv, gchar **env)
 			rspamd_main->cfg->libs_ctx->crypto_ctx->siphash_impl,
 			rspamd_main->cfg->libs_ctx->crypto_ctx->blake2_impl,
 			rspamd_main->cfg->libs_ctx->crypto_ctx->base64_impl);
+	msg_info_main ("libottery prf: %s", ottery_get_impl_name ());
 
 	/* Daemonize */
 	if (!no_fork && daemon (0, 0) == -1) {

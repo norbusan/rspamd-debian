@@ -16,7 +16,7 @@ limitations under the License.
 ]]--
 
 
--- Weight for checks_hellohost and checks_hello: 5 - very hard, 4 - hard, 3 - meduim, 2 - low, 1 - very low.
+-- Weight for checks_hellohost and checks_hello: 5 - very hard, 4 - hard, 3 - medium, 2 - low, 1 - very low.
 -- From HFILTER_HELO_* and HFILTER_HOSTNAME_* symbols the maximum weight is selected in case of their actuating.
 
 if confighelp then
@@ -25,6 +25,7 @@ end
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_regexp = require "rspamd_regexp"
+local lua_util = require "lua_util"
 local rspamc_local_helo = "rspamc.local"
 local checks_hellohost = [[
 /[0-9][.-]?nat/i 5
@@ -307,7 +308,7 @@ local function check_host(task, host, symbol_suffix, eq_ip, eq_host)
   end
 
   if check_fqdn(host) then
-    if eq_host == '' or eq_host ~= 'unknown' or eq_host ~= host then
+    if eq_host == '' or eq_host ~= host then
       task:get_resolver():resolve('a', {
         task=task,
         name = host,
@@ -462,17 +463,15 @@ local function hfilter(task)
   if config['hostname_enabled'] then
     if hostname then
       -- Check regexp HOSTNAME
-      if hostname == 'unknown' then
-        task:insert_result('HFILTER_HOSTNAME_UNKNOWN', 1.00)
-      else
-        local weights = checks_hellohost_map:get_key(hostname)
-        for _,weight in ipairs(weights or {}) do
-          weight = tonumber(weight) or 0
-          if weight > weight_hostname then
-            weight_hostname = weight
-          end
+      local weights = checks_hellohost_map:get_key(hostname)
+      for _,weight in ipairs(weights or {}) do
+        weight = tonumber(weight) or 0
+        if weight > weight_hostname then
+          weight_hostname = weight
         end
       end
+    else
+      task:insert_result('HFILTER_HOSTNAME_UNKNOWN', 1.00)
     end
   end
 
@@ -625,4 +624,6 @@ end
 --dumper(symbols_enabled)
 if #symbols_enabled > 0 then
   rspamd_config:register_symbols(hfilter, 1.0, "HFILTER", symbols_enabled);
+else
+  lua_util.disable_module(N, "config")
 end

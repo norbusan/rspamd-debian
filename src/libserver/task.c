@@ -26,6 +26,7 @@
 #include "utlist.h"
 #include "contrib/zstd/zstd.h"
 #include "libserver/mempool_vars_internal.h"
+#include "libmime/lang_detection.h"
 #include <math.h>
 
 /*
@@ -61,11 +62,12 @@ rspamd_request_header_dtor (gpointer p)
  */
 struct rspamd_task *
 rspamd_task_new (struct rspamd_worker *worker, struct rspamd_config *cfg,
-		rspamd_mempool_t *pool)
+		rspamd_mempool_t *pool,
+		struct rspamd_lang_detector *lang_det)
 {
 	struct rspamd_task *new_task;
 
-	new_task = g_slice_alloc0 (sizeof (struct rspamd_task));
+	new_task = g_malloc0 (sizeof (struct rspamd_task));
 	new_task->worker = worker;
 
 	if (cfg) {
@@ -80,8 +82,9 @@ rspamd_task_new (struct rspamd_worker *worker, struct rspamd_config *cfg,
 	}
 
 	gettimeofday (&new_task->tv, NULL);
-	new_task->time_real = rspamd_get_ticks ();
+	new_task->time_real = rspamd_get_ticks (FALSE);
 	new_task->time_virtual = rspamd_get_virtual_ticks ();
+	new_task->lang_det = lang_det;
 
 	if (pool == NULL) {
 		new_task->task_pool =
@@ -201,9 +204,9 @@ rspamd_task_free (struct rspamd_task *task)
 	struct rspamd_mime_part *p;
 	struct rspamd_mime_text_part *tp;
 	struct rspamd_email_address *addr;
+	struct rspamd_lua_cached_entry *entry;
 	GHashTableIter it;
 	gpointer k, v;
-	gint lua_ref;
 	guint i;
 
 	if (task) {
@@ -236,19 +239,25 @@ rspamd_task_free (struct rspamd_task *task)
 			if (tp->normalized_hashes) {
 				g_array_free (tp->normalized_hashes, TRUE);
 			}
+			if (tp->ucs32_words) {
+				g_array_free (tp->ucs32_words, TRUE);
+			}
+			if (tp->languages) {
+				g_ptr_array_free (tp->languages, TRUE);
+			}
 		}
 
 		if (task->rcpt_envelope) {
 			for (i = 0; i < task->rcpt_envelope->len; i ++) {
 				addr = g_ptr_array_index (task->rcpt_envelope, i);
-				rspamd_email_address_unref (addr);
+				rspamd_email_address_free (addr);
 			}
 
 			g_ptr_array_free (task->rcpt_envelope, TRUE);
 		}
 
 		if (task->from_envelope) {
-			rspamd_email_address_unref (task->from_envelope);
+			rspamd_email_address_free (task->from_envelope);
 		}
 
 		ucl_object_unref (task->messages);
@@ -292,9 +301,9 @@ rspamd_task_free (struct rspamd_task *task)
 				g_hash_table_iter_init (&it, task->lua_cache);
 
 				while (g_hash_table_iter_next (&it, &k, &v)) {
-					lua_ref = GPOINTER_TO_INT (v);
+					entry = (struct rspamd_lua_cached_entry *)v;
 					luaL_unref (task->cfg->lua_state,
-							LUA_REGISTRYINDEX, lua_ref);
+							LUA_REGISTRYINDEX, entry->ref);
 				}
 
 				g_hash_table_unref (task->lua_cache);
@@ -307,7 +316,7 @@ rspamd_task_free (struct rspamd_task *task)
 			rspamd_mempool_delete (task->task_pool);
 		}
 
-		g_slice_free1 (sizeof (struct rspamd_task), task);
+		g_free (task);
 	}
 }
 
@@ -472,36 +481,47 @@ rspamd_task_load_message (struct rspamd_task *task,
 			return FALSE;
 		}
 
-		fd = open (fp, O_RDONLY);
-
-		if (fd == -1) {
-			g_set_error (&task->err, rspamd_task_quark(), RSPAMD_PROTOCOL_ERROR,
-					"Cannot open file (%s): %s", fp, strerror (errno));
-			return FALSE;
+		if (G_UNLIKELY (st.st_size == 0)) {
+			/* Empty file */
+			task->flags |= RSPAMD_TASK_FLAG_EMPTY;
+			task->msg.begin = rspamd_mempool_strdup (task->task_pool, "");
+			task->msg.len = 0;
 		}
+		else {
+			fd = open (fp, O_RDONLY);
 
-		map = mmap (NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+			if (fd == -1) {
+				g_set_error (&task->err, rspamd_task_quark (),
+						RSPAMD_PROTOCOL_ERROR,
+						"Cannot open file (%s): %s", fp, strerror (errno));
+				return FALSE;
+			}
+
+			map = mmap (NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
 
 
-		if (map == MAP_FAILED) {
+			if (map == MAP_FAILED) {
+				close (fd);
+				g_set_error (&task->err, rspamd_task_quark (),
+						RSPAMD_PROTOCOL_ERROR,
+						"Cannot mmap file (%s): %s", fp, strerror (errno));
+				return FALSE;
+			}
+
 			close (fd);
-			g_set_error (&task->err, rspamd_task_quark(), RSPAMD_PROTOCOL_ERROR,
-					"Cannot mmap file (%s): %s", fp, strerror (errno));
-			return FALSE;
+			task->msg.begin = map;
+			task->msg.len = st.st_size;
+			m = rspamd_mempool_alloc (task->task_pool, sizeof (*m));
+			m->begin = map;
+			m->len = st.st_size;
+
+			rspamd_mempool_add_destructor (task->task_pool, rspamd_task_unmapper, m);
 		}
 
-		close (fd);
-		task->msg.begin = map;
-		task->msg.len = st.st_size;
 		task->msg.fpath = rspamd_mempool_strdup (task->task_pool, fp);
 		task->flags |= RSPAMD_TASK_FLAG_FILE;
 
 		msg_info_task ("loaded message from file %s", fp);
-		m = rspamd_mempool_alloc (task->task_pool, sizeof (*m));
-		m->begin = map;
-		m->len = st.st_size;
-
-		rspamd_mempool_add_destructor (task->task_pool, rspamd_task_unmapper, m);
 
 		return TRUE;
 	}
@@ -768,15 +788,29 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 
 					if (!(task->flags & RSPAMD_TASK_FLAG_LEARN_AUTO)) {
 						task->err = stat_error;
+						task->processed_stages |= RSPAMD_TASK_STAGE_DONE;
 					}
-					else if (stat_error) {
-						g_error_free (stat_error);
-					}
+					else {
+						/* Do not skip idempotent in case of learn error */
+						if (stat_error) {
+							g_error_free (stat_error);
+						}
 
-					task->processed_stages |= RSPAMD_TASK_STAGE_DONE;
+						task->processed_stages |= RSPAMD_TASK_STAGE_LEARN|
+								RSPAMD_TASK_STAGE_LEARN_PRE|
+								RSPAMD_TASK_STAGE_LEARN_POST;
+					}
 				}
 			}
 		}
+		break;
+	case RSPAMD_TASK_STAGE_COMPOSITES_POST:
+		/* Second run of composites processing before idempotent filters */
+		rspamd_make_composites (task);
+		break;
+	case RSPAMD_TASK_STAGE_IDEMPOTENT:
+		rspamd_symbols_cache_process_symbols (task, task->cfg->cache,
+				RSPAMD_TASK_STAGE_IDEMPOTENT);
 		break;
 
 	case RSPAMD_TASK_STAGE_DONE:
@@ -1043,11 +1077,11 @@ rspamd_task_log_metric_res (struct rspamd_task *task,
 					rspamd_printf_fstring (&symbuf, ",%s", sym->name);
 				}
 
-				if (lf->flags & RSPAMD_LOG_FLAG_SYMBOLS_SCORES) {
+				if (lf->flags & RSPAMD_LOG_FMT_FLAG_SYMBOLS_SCORES) {
 					rspamd_printf_fstring (&symbuf, "(%.2f)", sym->score);
 				}
 
-				if (lf->flags & RSPAMD_LOG_FLAG_SYMBOLS_PARAMS) {
+				if (lf->flags & RSPAMD_LOG_FMT_FLAG_SYMBOLS_PARAMS) {
 					rspamd_printf_fstring (&symbuf, "{");
 
 					if (sym->options) {
@@ -1402,7 +1436,7 @@ rspamd_task_write_log (struct rspamd_task *task)
 			break;
 		default:
 			/* We have a variable in log format */
-			if (lf->flags & RSPAMD_LOG_FLAG_CONDITION) {
+			if (lf->flags & RSPAMD_LOG_FMT_FLAG_CONDITION) {
 				if (!rspamd_task_log_check_condition (task, lf)) {
 					continue;
 				}
@@ -1431,7 +1465,7 @@ rspamd_task_get_required_score (struct rspamd_task *task, struct rspamd_metric_r
 		}
 	}
 
-	for (i = METRIC_ACTION_REJECT; i < METRIC_ACTION_MAX; i ++) {
+	for (i = METRIC_ACTION_REJECT; i < METRIC_ACTION_NOACTION; i ++) {
 		if (!isnan (m->actions_limits[i])) {
 			return m->actions_limits[i];
 		}

@@ -20,7 +20,6 @@
 #include "cfg_rcl.h"
 #include "rspamd.h"
 #include "lua/lua_common.h"
-#include "confighelp.lua.h"
 
 static gboolean json = FALSE;
 static gboolean compact = FALSE;
@@ -39,7 +38,8 @@ struct rspamadm_command confighelp_command = {
 		.name = "confighelp",
 		.flags = 0,
 		.help = rspamadm_confighelp_help,
-		.run = rspamadm_confighelp
+		.run = rspamadm_confighelp,
+		.lua_subrs = NULL,
 };
 
 static GOptionEntry entries[] = {
@@ -85,6 +85,7 @@ rspamadm_confighelp_show (struct rspamd_config *cfg, gint argc, gchar **argv,
 {
 	rspamd_fstring_t *out;
 
+	rspamd_lua_set_path (cfg->lua_state, NULL, ucl_vars);
 	out = rspamd_fstring_new ();
 
 	if (json) {
@@ -107,7 +108,7 @@ rspamadm_confighelp_show (struct rspamd_config *cfg, gint argc, gchar **argv,
 				argc,
 				argv,
 				obj,
-				rspamadm_script_confighelp);
+				"confighelp");
 
 		rspamd_fstring_free (out);
 		return;
@@ -235,7 +236,7 @@ rspamadm_confighelp (gint argc, gchar **argv)
 	/* Init modules to get documentation strings */
 	for (pmod = cfg->compiled_modules; pmod != NULL && *pmod != NULL; pmod++) {
 		mod = *pmod;
-		mod_ctx = g_slice_alloc0 (sizeof (struct module_ctx));
+		mod_ctx = g_malloc0 (sizeof (struct module_ctx));
 
 		if (mod->module_init_func (cfg, &mod_ctx) == 0) {
 			g_hash_table_insert (cfg->c_modules,
@@ -250,7 +251,8 @@ rspamadm_confighelp (gint argc, gchar **argv)
 	}
 
 	/* Init lua modules */
-	rspamd_init_lua_filters (cfg, TRUE, ucl_vars);
+	rspamd_lua_set_path (cfg->lua_state, cfg->rcl_obj, ucl_vars);
+	rspamd_init_lua_filters (cfg, TRUE);
 
 	if (argc > 1) {
 		for (i = 1; i < argc; i ++) {

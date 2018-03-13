@@ -25,6 +25,7 @@ GQuark rspamadm_error (void);
 
 typedef const gchar* (*rspamadm_help_func) (gboolean full_help);
 typedef void (*rspamadm_run_func) (gint argc, gchar **argv);
+typedef void (*rspamadm_lua_exports_func) (gpointer lua_state);
 
 #define RSPAMADM_FLAG_NOHELP (1 << 0)
 
@@ -33,6 +34,7 @@ struct rspamadm_command {
 	guint flags;
 	rspamadm_help_func help;
 	rspamadm_run_func run;
+	rspamadm_lua_exports_func lua_subrs;
 };
 
 extern const struct rspamadm_command *commands[];
@@ -41,6 +43,6 @@ extern struct rspamadm_command help_command;
 const struct rspamadm_command *rspamadm_search_command (const gchar *name);
 
 gboolean rspamadm_execute_lua_ucl_subr (gpointer L, gint argc, gchar **argv,
-		const ucl_object_t *res, const gchar *script);
+		const ucl_object_t *res, const gchar *script_name);
 
 #endif

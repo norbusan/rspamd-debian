@@ -37,6 +37,8 @@ enum rspamd_composite_policy {
  * Composite structure
  */
 struct rspamd_composite {
+	const gchar *str_expr;
+	const gchar *sym;
 	struct rspamd_expression *expr;
 	gint id;
 	enum rspamd_composite_policy policy;

@@ -25,6 +25,9 @@ globals = {
   'rspamd_str_split',
   'rspamd_version',
   'rspamd_map_add',
+  'rspamd_maps',
+  'rspamd_plugins_state',
+  'rspamadm',
 }
 
 ignore = {
@@ -40,6 +43,11 @@ files['/**/src/plugins/lua/spamassassin.lua'].globals = {
 
 files['/**/src/plugins/lua/greylist.lua'].globals = {
   'math.ifloor',
+}
+
+files['/**/lualib/lua_util.lua'].globals = {
+  'table.unpack',
+  'unpack',
 }
 
 files['/**/src/rspamadm/*'].globals = {

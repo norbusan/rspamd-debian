@@ -19,6 +19,7 @@
 #include "unix-std.h"
 #include "contrib/zstd/zstd.h"
 #include "libmime/email_addr.h"
+#include "linenoise.h"
 #include <math.h>
 #include <glob.h>
 
@@ -375,6 +376,49 @@ LUA_FUNCTION_DEF (util, is_utf_spoofed);
 LUA_FUNCTION_DEF (util, is_valid_utf8);
 
 /***
+ * @function util.readline([prompt])
+ * Returns string read from stdin with history and editing support
+ * @return {string} string read from the input (with line endings stripped)
+ */
+LUA_FUNCTION_DEF (util, readline);
+
+/***
+ * @function util.readpassphrase([prompt])
+ * Returns string read from stdin disabling echo
+ * @return {string} string read from the input (with line endings stripped)
+ */
+LUA_FUNCTION_DEF (util, readpassphrase);
+
+/***
+ * @function util.file_exists(file)
+ * Checks if a specified file exists and is available for reading
+ * @return {boolean} true if file exists
+ */
+LUA_FUNCTION_DEF (util, file_exists);
+
+/***
+ * @function util.mkdir(dir[, recursive])
+ * Creates a specified directory
+ * @return {boolean[,error]} true if directory has been created
+ */
+LUA_FUNCTION_DEF (util, mkdir);
+
+/***
+ * @function util.umask(mask)
+ * Sets new umask. Accepts either numeric octal string, e.g. '022' or a plain
+ * number, e.g. 0x12 (since Lua does not support octal integrals)
+ * @return {number} old umask
+ */
+LUA_FUNCTION_DEF (util, umask);
+
+/***
+ * @function util.isatty()
+ * Returns if stdout is a tty
+ * @return {boolean} true in case of output being tty
+ */
+LUA_FUNCTION_DEF (util, isatty);
+
+/***
  * @function util.pack(fmt, ...)
  *
  * Backport of Lua 5.3 `string.pack` function:
@@ -473,6 +517,7 @@ LUA_FUNCTION_DEF (util, caseless_hash_fast);
  */
 LUA_FUNCTION_DEF (util, get_hostname);
 
+
 static const struct luaL_reg utillib_f[] = {
 	LUA_INTERFACE_DEF (util, create_event_base),
 	LUA_INTERFACE_DEF (util, load_rspamd_config),
@@ -515,6 +560,12 @@ static const struct luaL_reg utillib_f[] = {
 	LUA_INTERFACE_DEF (util, caseless_hash_fast),
 	LUA_INTERFACE_DEF (util, is_utf_spoofed),
 	LUA_INTERFACE_DEF (util, is_valid_utf8),
+	LUA_INTERFACE_DEF (util, readline),
+	LUA_INTERFACE_DEF (util, readpassphrase),
+	LUA_INTERFACE_DEF (util, file_exists),
+	LUA_INTERFACE_DEF (util, mkdir),
+	LUA_INTERFACE_DEF (util, umask),
+	LUA_INTERFACE_DEF (util, isatty),
 	LUA_INTERFACE_DEF (util, get_hostname),
 	LUA_INTERFACE_DEF (util, pack),
 	LUA_INTERFACE_DEF (util, unpack),
@@ -648,8 +699,8 @@ lua_util_process_message (lua_State *L)
 
 	if (cfg != NULL && message != NULL) {
 		base = event_init ();
-		rspamd_init_filters (cfg, FALSE, NULL);
-		task = rspamd_task_new (NULL, cfg, NULL);
+		rspamd_init_filters (cfg, FALSE);
+		task = rspamd_task_new (NULL, cfg, NULL, NULL);
 		task->ev_base = base;
 		task->msg.begin = rspamd_mempool_alloc (task->task_pool, mlen);
 		rspamd_strlcpy ((gpointer)task->msg.begin, message, mlen);
@@ -951,7 +1002,7 @@ lua_util_tokenize_text (lua_State *L)
 				lua_pop (L, 1);
 
 				if (ex_len > 0) {
-					ex = g_slice_alloc (sizeof (*ex));
+					ex = g_malloc0 (sizeof (*ex));
 					ex->pos = pos;
 					ex->len = ex_len;
 					exceptions = g_list_prepend (exceptions, ex);
@@ -990,7 +1041,7 @@ lua_util_tokenize_text (lua_State *L)
 	cur = exceptions;
 	while (cur) {
 		ex = cur->data;
-		g_slice_free1 (sizeof (*ex), ex);
+		g_free (ex);
 		cur = g_list_next (cur);
 	}
 
@@ -1171,33 +1222,28 @@ lua_util_fold_header (lua_State *L)
 static gint
 lua_util_is_uppercase (lua_State *L)
 {
-	const gchar *str, *p;
-	gsize sz, remain;
-	gunichar uc;
+	const gchar *str;
+	gsize sz;
+	gint32 i = 0;
+	UChar32 uc;
 	guint nlc = 0, nuc = 0;
 
 	str = luaL_checklstring (L, 1, &sz);
-	remain = sz;
 
-	if (str && remain > 0) {
-		while (remain > 0) {
-			uc = g_utf8_get_char_validated (str, remain);
-			p = g_utf8_next_char (str);
+	if (str && sz > 0) {
+		while (i >= 0 && i < sz) {
+			U8_NEXT (str, i, sz, uc);
 
-			if (p - str > (gint) remain) {
+			if (uc < 0) {
 				break;
 			}
 
-			remain -= p - str;
-
-			if (g_unichar_isupper (uc)) {
+			if (u_isupper (uc)) {
 				nuc++;
 			}
-			else if (g_unichar_islower (uc)) {
+			else if (u_islower (uc)) {
 				nlc++;
 			}
-
-			str = p;
 		}
 	}
 
@@ -1434,8 +1480,13 @@ static gint
 lua_util_get_ticks (lua_State *L)
 {
 	gdouble ticks;
+	gboolean rdtsc = FALSE;
 
-	ticks = rspamd_get_ticks ();
+	if (lua_isboolean (L, 1)) {
+		rdtsc = lua_toboolean (L, 1);
+	}
+
+	ticks = rspamd_get_ticks (rdtsc);
 	lua_pushnumber (L, ticks);
 
 	return 1;
@@ -1742,11 +1793,11 @@ lua_util_random_hex (lua_State *L)
 static gint
 lua_util_zstd_compress (lua_State *L)
 {
-	struct rspamd_lua_text *t = NULL, *res;
+	struct rspamd_lua_text *t = NULL, *res, tmp;
 	gsize sz, r;
 
 	if (lua_type (L, 1) == LUA_TSTRING) {
-		t = g_alloca (sizeof (*t));
+		t = &tmp;
 		t->start = lua_tolstring (L, 1, &sz);
 		t->len = sz;
 	}
@@ -2071,6 +2122,178 @@ lua_util_is_valid_utf8 (lua_State *L)
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_util_readline (lua_State *L)
+{
+	const gchar *prompt = NULL;
+	gchar *input;
+
+	if (lua_type (L, 1) == LUA_TSTRING) {
+		prompt = lua_tostring (L, 1);
+	}
+
+	input = linenoise (prompt);
+
+	if (input) {
+		lua_pushstring (L, input);
+		linenoiseHistoryAdd (input);
+		linenoiseFree (input);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+static gint
+lua_util_readpassphrase (lua_State *L)
+{
+	const gchar *prompt = NULL;
+	gchar test_password[8192];
+	gsize r;
+
+	if (lua_type (L, 1) == LUA_TSTRING) {
+		prompt = lua_tostring (L, 1);
+	}
+
+	r = rspamd_read_passphrase (test_password, sizeof (test_password), 0, NULL);
+
+	if (r > 0) {
+		lua_pushlstring (L, test_password, r);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	/* In fact, we still pass it to Lua which is not very safe */
+	rspamd_explicit_memzero (test_password, sizeof (test_password));
+
+	return 1;
+}
+
+static gint
+lua_util_file_exists (lua_State *L)
+{
+	const gchar *fname = luaL_checkstring (L, 1);
+
+	if (fname) {
+		lua_pushboolean (L, access (fname, R_OK) != -1);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_util_mkdir (lua_State *L)
+{
+	const gchar *dname = luaL_checkstring (L, 1);
+	gboolean recursive = FALSE;
+	gint r = -1;
+
+	if (dname) {
+		if (lua_isboolean (L, 2)) {
+			recursive = lua_toboolean (L, 2);
+		}
+
+		if (recursive) {
+			char path[PATH_MAX];
+			gsize len, i;
+
+			len = rspamd_strlcpy (path, dname, sizeof (path));
+
+			/* Strip last / */
+			if (path[len - 1] == '/') {
+				path[len - 1] = '\0';
+				len --;
+			}
+
+			for (i = 1; i < len; i ++) {
+				if (path[i] == '/') {
+					path[i] = '\0';
+
+					errno = 0;
+					r = mkdir (path, S_IRWXU|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH);
+
+					if (r == -1 && errno != EEXIST) {
+						break;
+					}
+
+					path[i] = '/';
+				}
+			}
+
+			/* Final path component */
+			r = mkdir (path, S_IRWXU|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH);
+		}
+		else {
+			r = mkdir (dname, S_IRWXU|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH);
+		}
+
+		if (r == -1 && errno != EEXIST) {
+			lua_pushboolean (L, false);
+			lua_pushstring (L, strerror (errno));
+
+			return 2;
+		}
+
+		lua_pushboolean (L, true);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+
+static gint
+lua_util_umask (lua_State *L)
+{
+	mode_t mask = 0, old;
+
+	if (lua_type (L, 1) == LUA_TSTRING) {
+		const gchar *str = lua_tostring (L, 1);
+
+		if (str[0] == '0') {
+			/* e.g. '022' */
+			mask = strtol (str, NULL, 8);
+		}
+		else {
+			/* XXX: implement modestring parsing at some point */
+			return luaL_error (L, "invalid arguments");
+		}
+	}
+	else if (lua_type (L, 1) == LUA_TNUMBER) {
+		mask = lua_tonumber (L, 1);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	old = umask (mask);
+
+	lua_pushnumber (L, old);
+
+	return 1;
+}
+
+static gint
+lua_util_isatty (lua_State *L)
+{
+	if (isatty (STDOUT_FILENO)) {
+		lua_pushboolean (L, true);
+	}
+	else {
+		lua_pushboolean (L, false);
 	}
 
 	return 1;

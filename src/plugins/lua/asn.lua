@@ -17,6 +17,8 @@ limitations under the License.
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_regexp = require "rspamd_regexp"
+local lua_util = require "lua_util"
+local N = "asn"
 
 if confighelp then
   return
@@ -103,7 +105,7 @@ end
 if configure_asn_module() then
   local id = rspamd_config:register_symbol({
     name = 'ASN_CHECK',
-    type = 'prefilter',
+    type = 'prefilter,nostat',
     callback = asn_check,
     priority = 5,
   })
@@ -114,4 +116,6 @@ if configure_asn_module() then
       type = 'virtual'
     })
   end
+else
+  lua_util.disable_module(N, 'config')
 end

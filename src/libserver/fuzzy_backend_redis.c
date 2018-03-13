@@ -41,10 +41,12 @@
         "fuzzy_redis", session->backend->id, \
         G_STRFUNC, \
         __VA_ARGS__)
-#define msg_debug_redis_session(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
-        "fuzzy_redis", session->backend->id, \
+#define msg_debug_redis_session(...)  rspamd_conditional_debug_fast (NULL, NULL, \
+        rspamd_fuzzy_redis_log_id, "fuzzy_redis", session->backend->id, \
         G_STRFUNC, \
         __VA_ARGS__)
+
+INIT_LOG_MODULE(fuzzy_redis)
 
 struct rspamd_fuzzy_backend_redis {
 	struct upstream_list *read_servers;
@@ -86,6 +88,7 @@ struct rspamd_fuzzy_redis_session {
 	gchar **argv;
 	gsize *argv_lens;
 	struct upstream *up;
+	guchar found_digest[rspamd_cryptobox_HASHBYTES];
 };
 
 static inline void
@@ -123,7 +126,7 @@ rspamd_fuzzy_redis_session_dtor (struct rspamd_fuzzy_redis_session *session,
 	rspamd_fuzzy_redis_session_free_args (session);
 
 	REF_RELEASE (session->backend);
-	g_slice_free1 (sizeof (*session), session);
+	g_free (session);
 }
 
 static gboolean
@@ -223,7 +226,7 @@ rspamd_fuzzy_backend_redis_dtor (struct rspamd_fuzzy_backend_redis *backend)
 		g_free (backend->id);
 	}
 
-	g_slice_free1 (sizeof (*backend), backend);
+	g_free (backend);
 }
 
 void*
@@ -236,7 +239,7 @@ rspamd_fuzzy_backend_init_redis (struct rspamd_fuzzy_backend *bk,
 	guchar id_hash[rspamd_cryptobox_HASHBYTES];
 	rspamd_cryptobox_hash_state_t st;
 
-	backend = g_slice_alloc0 (sizeof (*backend));
+	backend = g_malloc0 (sizeof (*backend));
 
 	backend->timeout = REDIS_DEFAULT_TIMEOUT;
 	backend->redis_object = REDIS_DEFAULT_OBJECT;
@@ -265,7 +268,8 @@ rspamd_fuzzy_backend_init_redis (struct rspamd_fuzzy_backend *bk,
 
 	if (!ret) {
 		msg_err_config ("cannot init redis backend for fuzzy storage");
-		g_slice_free1 (sizeof (*backend), backend);
+		g_free (backend);
+
 		return NULL;
 	}
 
@@ -395,13 +399,13 @@ rspamd_fuzzy_redis_shingles_callback (redisAsyncContext *c, gpointer r,
 
 				if (max_found > RSPAMD_SHINGLE_SIZE / 2) {
 					session->prob = ((float)max_found) / RSPAMD_SHINGLE_SIZE;
-					rep.prob = session->prob;
+					rep.v1.prob = session->prob;
 
 					g_assert (sel != NULL);
 
 					/* Prepare new check command */
 					rspamd_fuzzy_redis_session_free_args (session);
-					session->nargs = 4;
+					session->nargs = 5;
 					session->argv = g_malloc (sizeof (gchar *) * session->nargs);
 					session->argv_lens = g_malloc (sizeof (gsize) * session->nargs);
 
@@ -415,7 +419,11 @@ rspamd_fuzzy_redis_shingles_callback (redisAsyncContext *c, gpointer r,
 					session->argv_lens[2] = 1;
 					session->argv[3] = g_strdup ("F");
 					session->argv_lens[3] = 1;
+					session->argv[4] = g_strdup ("C");
+					session->argv_lens[4] = 1;
 					g_string_free (key, FALSE); /* Do not free underlying array */
+					memcpy (session->found_digest, sel->digest,
+							sizeof (session->cmd->digest));
 
 					g_assert (session->ctx != NULL);
 					if (redisAsyncCommandArgv (session->ctx,
@@ -472,7 +480,7 @@ rspamd_fuzzy_backend_check_shingles (struct rspamd_fuzzy_redis_session *session)
 	struct rspamd_fuzzy_reply rep;
 	const struct rspamd_fuzzy_shingle_cmd *shcmd;
 	GString *key;
-	guint i;
+	guint i, init_len;
 
 	rspamd_fuzzy_redis_session_free_args (session);
 	/* First of all check digest */
@@ -483,10 +491,13 @@ rspamd_fuzzy_backend_check_shingles (struct rspamd_fuzzy_redis_session *session)
 
 	session->argv[0] = g_strdup ("MGET");
 	session->argv_lens[0] = 4;
+	init_len = strlen (session->backend->redis_object);
 
 	for (i = 0; i < RSPAMD_SHINGLE_SIZE; i ++) {
-		key = g_string_new (session->backend->redis_object);
-		rspamd_printf_gstring (key, "_%d_%uL", i, shcmd->sgl.hashes[i]);
+
+		key = g_string_sized_new (init_len + 2 + 2 + sizeof ("18446744073709551616"));
+		rspamd_printf_gstring (key, "%s_%d_%uL", session->backend->redis_object,
+				i, shcmd->sgl.hashes[i]);
 		session->argv[i + 1] = key->str;
 		session->argv_lens[i + 1] = key->len;
 		g_string_free (key, FALSE); /* Do not free underlying array */
@@ -534,12 +545,12 @@ rspamd_fuzzy_redis_check_callback (redisAsyncContext *c, gpointer r,
 	if (c->err == 0) {
 		rspamd_upstream_ok (session->up);
 
-		if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 2) {
+		if (reply->type == REDIS_REPLY_ARRAY && reply->elements >= 2) {
 			cur = reply->element[0];
 
 			if (cur->type == REDIS_REPLY_STRING) {
 				value = strtoul (cur->str, NULL, 10);
-				rep.value = value;
+				rep.v1.value = value;
 				found_elts ++;
 			}
 
@@ -547,12 +558,23 @@ rspamd_fuzzy_redis_check_callback (redisAsyncContext *c, gpointer r,
 
 			if (cur->type == REDIS_REPLY_STRING) {
 				value = strtoul (cur->str, NULL, 10);
-				rep.flag = value;
+				rep.v1.flag = value;
 				found_elts ++;
 			}
 
-			if (found_elts == 2) {
-				rep.prob = session->prob;
+			if (found_elts >= 2) {
+				rep.v1.prob = session->prob;
+				memcpy (rep.digest, session->found_digest, sizeof (rep.digest));
+			}
+
+			rep.ts = 0;
+
+			if (reply->elements > 2) {
+				cur = reply->element[2];
+
+				if (cur->type == REDIS_REPLY_STRING) {
+					rep.ts = strtoul (cur->str, NULL, 10);
+				}
 			}
 		}
 
@@ -606,7 +628,7 @@ rspamd_fuzzy_backend_check_redis (struct rspamd_fuzzy_backend *bk,
 
 	g_assert (backend != NULL);
 
-	session = g_slice_alloc0 (sizeof (*session));
+	session = g_malloc0 (sizeof (*session));
 	session->backend = backend;
 	REF_RETAIN (session->backend);
 
@@ -615,10 +637,12 @@ rspamd_fuzzy_backend_check_redis (struct rspamd_fuzzy_backend *bk,
 	session->command = RSPAMD_FUZZY_REDIS_COMMAND_CHECK;
 	session->cmd = cmd;
 	session->prob = 1.0;
+	memcpy (rep.digest, session->cmd->digest, sizeof (rep.digest));
+	memcpy (session->found_digest, session->cmd->digest, sizeof (rep.digest));
 	session->ev_base = rspamd_fuzzy_backend_event_base (bk);
 
 	/* First of all check digest */
-	session->nargs = 4;
+	session->nargs = 5;
 	session->argv = g_malloc (sizeof (gchar *) * session->nargs);
 	session->argv_lens = g_malloc (sizeof (gsize) * session->nargs);
 
@@ -632,6 +656,8 @@ rspamd_fuzzy_backend_check_redis (struct rspamd_fuzzy_backend *bk,
 	session->argv_lens[2] = 1;
 	session->argv[3] = g_strdup ("F");
 	session->argv_lens[3] = 1;
+	session->argv[4] = g_strdup ("C");
+	session->argv_lens[4] = 1;
 	g_string_free (key, FALSE); /* Do not free underlying array */
 
 	up = rspamd_upstream_get (backend->read_servers,
@@ -648,6 +674,7 @@ rspamd_fuzzy_backend_check_redis (struct rspamd_fuzzy_backend *bk,
 			rspamd_inet_address_get_port (addr));
 
 	if (session->ctx == NULL) {
+		rspamd_upstream_fail (up);
 		rspamd_fuzzy_redis_session_dtor (session, TRUE);
 
 		if (cb) {
@@ -737,7 +764,7 @@ rspamd_fuzzy_backend_count_redis (struct rspamd_fuzzy_backend *bk,
 
 	g_assert (backend != NULL);
 
-	session = g_slice_alloc0 (sizeof (*session));
+	session = g_malloc0 (sizeof (*session));
 	session->backend = backend;
 	REF_RETAIN (session->backend);
 
@@ -771,6 +798,7 @@ rspamd_fuzzy_backend_count_redis (struct rspamd_fuzzy_backend *bk,
 			rspamd_inet_address_get_port (addr));
 
 	if (session->ctx == NULL) {
+		rspamd_upstream_fail (up);
 		rspamd_fuzzy_redis_session_dtor (session, TRUE);
 
 		if (cb) {
@@ -859,7 +887,7 @@ rspamd_fuzzy_backend_version_redis (struct rspamd_fuzzy_backend *bk,
 
 	g_assert (backend != NULL);
 
-	session = g_slice_alloc0 (sizeof (*session));
+	session = g_malloc0 (sizeof (*session));
 	session->backend = backend;
 	REF_RETAIN (session->backend);
 
@@ -893,6 +921,7 @@ rspamd_fuzzy_backend_version_redis (struct rspamd_fuzzy_backend *bk,
 			rspamd_inet_address_get_port (addr));
 
 	if (session->ctx == NULL) {
+		rspamd_upstream_fail (up);
 		rspamd_fuzzy_redis_session_dtor (session, TRUE);
 
 		if (cb) {
@@ -959,8 +988,9 @@ rspamd_fuzzy_update_append_command (struct rspamd_fuzzy_backend *bk,
 
 	if (cmd->cmd == FUZZY_WRITE) {
 		/*
-		 * For each normal hash addition we do 3 redis commands:
+		 * For each normal hash addition we do 5 redis commands:
 		 * HSET <key> F <flag>
+		 * HSETNX <key> C <time>
 		 * HINCRBY <key> V <weight>
 		 * EXPIRE <key> <expire>
 		 * Where <key> is <prefix> || <digest>
@@ -980,6 +1010,33 @@ rspamd_fuzzy_update_append_command (struct rspamd_fuzzy_backend *bk,
 		session->argv_lens[cur_shift++] = key->len;
 		session->argv[cur_shift] = g_strdup ("F");
 		session->argv_lens[cur_shift++] = sizeof ("F") - 1;
+		session->argv[cur_shift] = value->str;
+		session->argv_lens[cur_shift++] = value->len;
+		g_string_free (key, FALSE);
+		g_string_free (value, FALSE);
+
+		if (redisAsyncCommandArgv (session->ctx, NULL, NULL,
+				4,
+				(const gchar **)&session->argv[cur_shift - 4],
+				&session->argv_lens[cur_shift - 4]) != REDIS_OK) {
+
+			return FALSE;
+		}
+
+		/* HSETNX */
+		klen = strlen (session->backend->redis_object) +
+				sizeof (cmd->digest) + 1;
+		key = g_string_sized_new (klen);
+		g_string_append (key, session->backend->redis_object);
+		g_string_append_len (key, cmd->digest, sizeof (cmd->digest));
+		value = g_string_sized_new (30);
+		rspamd_printf_gstring (value, "%L", (gint64)rspamd_get_calendar_ticks ());
+		session->argv[cur_shift] = g_strdup ("HSETNX");
+		session->argv_lens[cur_shift++] = sizeof ("HSETNX") - 1;
+		session->argv[cur_shift] = key->str;
+		session->argv_lens[cur_shift++] = key->len;
+		session->argv[cur_shift] = g_strdup ("C");
+		session->argv_lens[cur_shift++] = sizeof ("C") - 1;
 		session->argv[cur_shift] = value->str;
 		session->argv_lens[cur_shift++] = value->len;
 		g_string_free (key, FALSE);
@@ -1223,7 +1280,7 @@ rspamd_fuzzy_redis_update_callback (redisAsyncContext *c, gpointer r,
 
 void
 rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
-		GQueue *updates, const gchar *src,
+		GArray *updates, const gchar *src,
 		rspamd_fuzzy_update_cb cb, void *ud,
 		void *subr_ud)
 {
@@ -1232,7 +1289,7 @@ rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
 	struct upstream *up;
 	struct timeval tv;
 	rspamd_inet_addr_t *addr;
-	GList *cur;
+	guint i;
 	GString *key;
 	struct fuzzy_peer_cmd *io_cmd;
 	struct rspamd_fuzzy_cmd *cmd;
@@ -1240,7 +1297,7 @@ rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
 
 	g_assert (backend != NULL);
 
-	session = g_slice_alloc0 (sizeof (*session));
+	session = g_malloc0 (sizeof (*session));
 	session->backend = backend;
 	REF_RETAIN (session->backend);
 
@@ -1267,8 +1324,8 @@ rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
 	ncommands = 3; /* For MULTI + EXEC + INCR <src> */
 	nargs = 4;
 
-	for (cur = updates->head; cur != NULL; cur = g_list_next (cur)) {
-		io_cmd = cur->data;
+	for (i = 0; i < updates->len; i ++) {
+		io_cmd = &g_array_index (updates, struct fuzzy_peer_cmd, i);
 
 		if (io_cmd->is_shingle) {
 			cmd = &io_cmd->cmd.shingle.basic;
@@ -1278,8 +1335,8 @@ rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
 		}
 
 		if (cmd->cmd == FUZZY_WRITE) {
-			ncommands += 4;
-			nargs += 13;
+			ncommands += 5;
+			nargs += 17;
 
 			if (io_cmd->is_shingle) {
 				ncommands += RSPAMD_SHINGLE_SIZE;
@@ -1325,6 +1382,7 @@ rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
 			rspamd_inet_address_get_port (addr));
 
 	if (session->ctx == NULL) {
+		rspamd_upstream_fail (up);
 		rspamd_fuzzy_redis_session_dtor (session, TRUE);
 
 		if (cb) {
@@ -1352,8 +1410,8 @@ rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
 		/* Now split the rest of commands in packs and emit them command by command */
 		cur_shift = 1;
 
-		for (cur = updates->head; cur != NULL; cur = g_list_next (cur)) {
-			io_cmd = cur->data;
+		for (i = 0; i < updates->len; i ++) {
+			io_cmd = &g_array_index (updates, struct fuzzy_peer_cmd, i);
 
 			if (!rspamd_fuzzy_update_append_command (bk, session, io_cmd,
 					&cur_shift)) {

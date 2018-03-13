@@ -149,11 +149,11 @@ lua_redis_free_args (char **args, gsize *arglens, guint nargs)
 
 	if (args) {
 		for (i = 0; i < nargs; i ++) {
-			g_slice_free1 (arglens[i], args[i]);
+			g_free (args[i]);
 		}
 
-		g_slice_free1 (sizeof (gchar *) * nargs, args);
-		g_slice_free1 (sizeof (gsize) * nargs, arglens);
+		g_free (args);
+		g_free (arglens);
 	}
 }
 
@@ -194,7 +194,7 @@ lua_redis_dtor (struct lua_redis_ctx *ctx)
 				luaL_unref (ud->L, LUA_REGISTRYINDEX, cur->cbref);
 			}
 
-			g_slice_free1 (sizeof (*cur), cur);
+			g_free (cur);
 		}
 	}
 	else {
@@ -203,7 +203,7 @@ lua_redis_dtor (struct lua_redis_ctx *ctx)
 		}
 	}
 
-	g_slice_free1 (sizeof (*ctx), ctx);
+	g_free (ctx);
 }
 
 static gint
@@ -478,10 +478,10 @@ lua_redis_parse_args (lua_State *L, gint idx, const gchar *cmd,
 			lua_pop (L, 1);
 		}
 
-		args = g_slice_alloc ((top + 1) * sizeof (gchar *));
-		arglens = g_slice_alloc ((top + 1) * sizeof (gsize));
+		args = g_malloc ((top + 1) * sizeof (gchar *));
+		arglens = g_malloc ((top + 1) * sizeof (gsize));
 		arglens[0] = strlen (cmd);
-		args[0] = g_slice_alloc (arglens[0]);
+		args[0] = g_malloc (arglens[0]);
 		memcpy (args[0], cmd, arglens[0]);
 		top = 1;
 		lua_pushnil (L);
@@ -493,7 +493,7 @@ lua_redis_parse_args (lua_State *L, gint idx, const gchar *cmd,
 				const gchar *s;
 
 				s = lua_tolstring (L, -1, &arglens[top]);
-				args[top] = g_slice_alloc (arglens[top]);
+				args[top] = g_malloc (arglens[top]);
 				memcpy (args[top], s, arglens[top]);
 				top ++;
 			}
@@ -504,7 +504,7 @@ lua_redis_parse_args (lua_State *L, gint idx, const gchar *cmd,
 
 				if (t && t->start) {
 					arglens[top] = t->len;
-					args[top] = g_slice_alloc (arglens[top]);
+					args[top] = g_malloc (arglens[top]);
 					memcpy (args[top], t->start, arglens[top]);
 					top ++;
 				}
@@ -524,7 +524,7 @@ lua_redis_parse_args (lua_State *L, gint idx, const gchar *cmd,
 				}
 
 				arglens[top] = r;
-				args[top] = g_slice_alloc (arglens[top]);
+				args[top] = g_malloc (arglens[top]);
 				memcpy (args[top], numbuf, arglens[top]);
 				top ++;
 			}
@@ -537,10 +537,10 @@ lua_redis_parse_args (lua_State *L, gint idx, const gchar *cmd,
 	else {
 		/* Use merely cmd */
 
-		args = g_slice_alloc (sizeof (gchar *));
-		arglens = g_slice_alloc (sizeof (gsize));
+		args = g_malloc (sizeof (gchar *));
+		arglens = g_malloc (sizeof (gsize));
 		arglens[0] = strlen (cmd);
-		args[0] = g_slice_alloc (arglens[0]);
+		args[0] = g_malloc (arglens[0]);
 		memcpy (args[0], cmd, arglens[0]);
 		top = 1;
 	}
@@ -677,7 +677,7 @@ rspamd_lua_redis_prepare_connection (lua_State *L, gint *pcbref)
 
 
 		if (ret && addr != NULL) {
-			ctx = g_slice_alloc0 (sizeof (struct lua_redis_ctx));
+			ctx = g_malloc0 (sizeof (struct lua_redis_ctx));
 			REF_INIT_RETAIN (ctx, lua_redis_dtor);
 			ctx->flags |= flags | LUA_REDIS_ASYNC;
 			ud = &ctx->d.async;
@@ -764,7 +764,7 @@ lua_redis_make_request (lua_State *L)
 
 	if (ctx) {
 		ud = &ctx->d.async;
-		sp_ud = g_slice_alloc0 (sizeof (*sp_ud));
+		sp_ud = g_malloc0 (sizeof (*sp_ud));
 		sp_ud->cbref = cbref;
 		sp_ud->c = ud;
 		sp_ud->ctx = ctx;
@@ -1091,7 +1091,7 @@ lua_redis_connect_sync (lua_State *L)
 
 	if (ret) {
 		double_to_tv (timeout, &tv);
-		ctx = g_slice_alloc0 (sizeof (struct lua_redis_ctx));
+		ctx = g_malloc0 (sizeof (struct lua_redis_ctx));
 		REF_INIT_RETAIN (ctx, lua_redis_dtor);
 		ctx->flags = flags;
 
@@ -1124,6 +1124,7 @@ lua_redis_connect_sync (lua_State *L)
 			return 2;
 		}
 
+		lua_pushboolean (L, TRUE);
 		pctx = lua_newuserdata (L, sizeof (ctx));
 		*pctx = ctx;
 		rspamd_lua_setclass (L, "rspamd{redis}", -1);
@@ -1139,7 +1140,7 @@ lua_redis_connect_sync (lua_State *L)
 		return 2;
 	}
 
-	return 1;
+	return 2;
 }
 
 /***
@@ -1184,7 +1185,7 @@ lua_redis_add_cmd (lua_State *L)
 				return luaL_error (L, "invalid arguments");
 			}
 
-			sp_ud = g_slice_alloc0 (sizeof (*sp_ud));
+			sp_ud = g_malloc0 (sizeof (*sp_ud));
 			sp_ud->cbref = cbref;
 			sp_ud->c = &ctx->d.async;
 			sp_ud->ctx = ctx;
@@ -1277,7 +1278,7 @@ lua_redis_exec (lua_State *L)
 	struct lua_redis_ctx *ctx = lua_check_redis (L, 1);
 	redisReply *r;
 	gint ret;
-	guint i, nret = 0;
+	guint i, nret = 0, pending;
 
 	if (ctx == NULL) {
 		lua_error (L);
@@ -1298,10 +1299,14 @@ lua_redis_exec (lua_State *L)
 		}
 		else {
 			if (!lua_checkstack (L, (ctx->cmds_pending * 2) + 1)) {
-				return luaL_error (L, "cannot resiz stack to fit %d commands",
+				return luaL_error (L, "cannot resize stack to fit %d commands",
 					ctx->cmds_pending);
 			}
-			for (i = 0; i < ctx->cmds_pending; i ++) {
+
+			pending = ctx->cmds_pending;
+			ctx->cmds_pending = 0;
+
+			for (i = 0; i < pending; i ++) {
 				ret = redisGetReply (ctx->d.sync, (void **)&r);
 
 				if (ret == REDIS_OK) {
@@ -1314,6 +1319,7 @@ lua_redis_exec (lua_State *L)
 						lua_pushboolean (L, FALSE);
 						lua_pushlstring (L, r->str, r->len);
 					}
+
 					freeReplyObject (r);
 				}
 				else {

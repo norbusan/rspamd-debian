@@ -158,7 +158,7 @@ static GOptionEntry entries[] =
 };
 
 /* Copy to avoid linking with librspamdserver */
-enum rspamd_metric_action {
+enum rspamd_action_type {
 	METRIC_ACTION_REJECT = 0,
 	METRIC_ACTION_SOFT_REJECT,
 	METRIC_ACTION_REWRITE_SUBJECT,
@@ -410,45 +410,36 @@ read_cmd_line (gint *argc, gchar ***argv)
 }
 
 static gboolean
-rspamd_action_from_str (const gchar *data, gint *result)
+rspamd_action_from_str_rspamc (const gchar *data, gint *result)
 {
-	if (g_ascii_strncasecmp (data, "reject", sizeof ("reject") - 1) == 0) {
+	if (strcmp (data, "reject") == 0) {
 		*result = METRIC_ACTION_REJECT;
 	}
-	else if (g_ascii_strncasecmp (data, "greylist",
-			sizeof ("greylist") - 1) == 0) {
+	else if (strcmp (data, "greylist") == 0) {
 		*result = METRIC_ACTION_GREYLIST;
 	}
-	else if (g_ascii_strncasecmp (data, "add_header", sizeof ("add_header") -
-			1) == 0) {
+	else if (strcmp (data, "add_header") == 0) {
 		*result = METRIC_ACTION_ADD_HEADER;
 	}
-	else if (g_ascii_strncasecmp (data, "rewrite_subject",
-			sizeof ("rewrite_subject") - 1) == 0) {
+	else if (strcmp (data, "rewrite_subject") == 0) {
 		*result = METRIC_ACTION_REWRITE_SUBJECT;
 	}
-	else if (g_ascii_strncasecmp (data, "add header", sizeof ("add header") -
-			1) == 0) {
+	else if (strcmp (data, "add header") == 0) {
 		*result = METRIC_ACTION_ADD_HEADER;
 	}
-	else if (g_ascii_strncasecmp (data, "rewrite subject",
-			sizeof ("rewrite subject") - 1) == 0) {
+	else if (strcmp (data, "rewrite subject") == 0) {
 		*result = METRIC_ACTION_REWRITE_SUBJECT;
 	}
-	else if (g_ascii_strncasecmp (data, "soft_reject",
-			sizeof ("soft_reject") - 1) == 0) {
+	else if (strcmp (data, "soft_reject") == 0) {
 		*result = METRIC_ACTION_SOFT_REJECT;
 	}
-	else if (g_ascii_strncasecmp (data, "soft reject",
-			sizeof ("soft reject") - 1) == 0) {
+	else if (strcmp (data, "soft reject") == 0) {
 		*result = METRIC_ACTION_SOFT_REJECT;
 	}
-	else if (g_ascii_strncasecmp (data, "no_action",
-			sizeof ("soft_reject") - 1) == 0) {
+	else if (strcmp (data, "no_action") == 0) {
 		*result = METRIC_ACTION_NOACTION;
 	}
-	else if (g_ascii_strncasecmp (data, "no action",
-			sizeof ("soft reject") - 1) == 0) {
+	else if (strcmp (data, "no action") == 0) {
 		*result = METRIC_ACTION_NOACTION;
 	}
 	else {
@@ -774,7 +765,7 @@ rspamc_metric_output (FILE *out, const ucl_object_t *obj)
 
 	PRINT_PROTOCOL_STRING ("action", "Action");
 	/* Defined by previous macro */
-	if (elt && rspamd_action_from_str (ucl_object_tostring (elt), &action)) {
+	if (elt && rspamd_action_from_str_rspamc (ucl_object_tostring (elt), &action)) {
 		rspamd_fprintf (out, "Spam: %s\n", action < METRIC_ACTION_GREYLIST ?
 				"true" : "false");
 	}
@@ -1233,7 +1224,7 @@ rspamc_output_headers (FILE *out, struct rspamd_http_message *msg)
 	struct rspamd_http_header *h, *htmp;
 
 	HASH_ITER (hh, msg->headers, h, htmp) {
-		rspamd_fprintf (out, "%T: %T\n", h->name, h->value);
+		rspamd_fprintf (out, "%T: %T\n", &h->name, &h->value);
 	}
 
 	rspamd_fprintf (out, "\n");
@@ -1298,7 +1289,7 @@ rspamc_mime_output (FILE *out, ucl_object_t *result, GString *input,
 			required_score = ucl_object_todouble (res);
 		}
 
-		rspamd_action_from_str (action, &act);
+		rspamd_action_from_str_rspamc (action, &act);
 
 		if (act < METRIC_ACTION_GREYLIST) {
 			is_spam = TRUE;
@@ -1481,7 +1472,7 @@ rspamc_client_cb (struct rspamd_client_connection *conn,
 	struct rspamc_callback_data *cbdata = (struct rspamc_callback_data *)ud;
 	struct rspamc_command *cmd;
 	FILE *out = stdout;
-	gdouble finish = rspamd_get_ticks (), diff;
+	gdouble finish = rspamd_get_ticks (FALSE), diff;
 	const gchar *body;
 	gsize body_len;
 
@@ -1522,6 +1513,18 @@ rspamc_client_cb (struct rspamd_client_connection *conn,
 					rspamc_output_headers (out, msg);
 				}
 				if (raw || cmd->command_output_func == NULL) {
+					if (cmd->need_input) {
+						ucl_object_insert_key (result,
+								ucl_object_fromstring (cbdata->filename),
+								"filename", 0,
+								false);
+					}
+
+					ucl_object_insert_key (result,
+							ucl_object_fromdouble (diff),
+							"scan_time", 0,
+							false);
+
 					if (json) {
 						ucl_out = ucl_object_emit (result,
 								compact ? UCL_EMIT_JSON_COMPACT : UCL_EMIT_JSON);
@@ -1530,6 +1533,7 @@ rspamc_client_cb (struct rspamd_client_connection *conn,
 						ucl_out = ucl_object_emit (result,
 								compact ? UCL_EMIT_JSON_COMPACT : UCL_EMIT_CONFIG);
 					}
+
 					rspamd_fprintf (out, "%s", ucl_out);
 					free (ucl_out);
 				}
@@ -1559,7 +1563,7 @@ rspamc_client_cb (struct rspamd_client_connection *conn,
 
 	rspamd_client_destroy (conn);
 	g_free (cbdata->filename);
-	g_slice_free1 (sizeof (struct rspamc_callback_data), cbdata);
+	g_free (cbdata);
 }
 
 static void
@@ -1590,13 +1594,6 @@ rspamc_process_input (struct event_base *ev_base, struct rspamc_command *cmd,
 
 	p = strrchr (p, ':');
 
-	if (p != NULL) {
-		port = strtoul (p + 1, NULL, 10);
-	}
-	else {
-		port = cmd->is_controller ? DEFAULT_CONTROL_PORT : DEFAULT_PORT;
-	}
-
 	if (!hostbuf) {
 		if (p != NULL) {
 			hostbuf = g_malloc (p - connect_str + 1);
@@ -1607,10 +1604,31 @@ rspamc_process_input (struct event_base *ev_base, struct rspamc_command *cmd,
 		}
 	}
 
+	if (p != NULL) {
+		port = strtoul (p + 1, NULL, 10);
+	}
+	else {
+		/*
+		 * If we connect to localhost, 127.0.0.1 or ::1, then try controller
+		 * port first
+		 */
+
+		if (strcmp (hostbuf, "localhost") == 0 ||
+				strcmp (hostbuf, "127.0.0.1") == 0 ||
+				strcmp (hostbuf, "::1") == 0 ||
+				strcmp (hostbuf, "[::1]") == 0) {
+			port = DEFAULT_CONTROL_PORT;
+		}
+		else {
+			port = cmd->is_controller ? DEFAULT_CONTROL_PORT : DEFAULT_PORT;
+		}
+
+	}
+
 	conn = rspamd_client_init (ev_base, hostbuf, port, timeout, key);
 
 	if (conn != NULL) {
-		cbdata = g_slice_alloc (sizeof (struct rspamc_callback_data));
+		cbdata = g_malloc0 (sizeof (struct rspamc_callback_data));
 		cbdata->cmd = cmd;
 		cbdata->filename = g_strdup (name);
 
@@ -1676,26 +1694,17 @@ rspamc_process_dir (struct event_base *ev_base, struct rspamc_command *cmd,
 	const gchar *name, GQueue *attrs)
 {
 	DIR *d;
-	struct dirent *entry, *pentry;
+	struct dirent *pentry;
 	gint cur_req = 0;
 	gchar fpath[PATH_MAX];
 	FILE *in;
 	struct stat st;
 	gboolean is_reg, is_dir;
-	gsize len;
 
 	d = opendir (name);
 
 	if (d != NULL) {
-		/* Portably allocate struct direntry */
-		len = rspamd_dirent_size (d);
-		g_assert (len != (gsize)-1);
-		entry = g_malloc0 (len);
-
-		while (readdir_r (d, entry, &pentry) == 0 && pentry != NULL) {
-			if (pentry == NULL) {
-				break;
-			}
+		while ((pentry = readdir (d))!= NULL) {
 
 			if (pentry->d_name[0] == '.') {
 				continue;
@@ -1761,8 +1770,6 @@ rspamc_process_dir (struct event_base *ev_base, struct rspamc_command *cmd,
 				}
 			}
 		}
-
-		g_free (entry);
 	}
 	else {
 		fprintf (stderr, "cannot open directory %s: %s\n", name, strerror (errno));

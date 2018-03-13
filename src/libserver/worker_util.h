@@ -31,6 +31,12 @@ struct rspamd_worker;
 struct rspamd_worker_signal_handler;
 
 /**
+ * Init basic signals for a worker
+ * @param worker
+ * @param base
+ */
+void rspamd_worker_init_signals (struct rspamd_worker *worker, struct event_base *base);
+/**
  * Prepare worker's startup
  * @param worker worker structure
  * @param name name of the worker
@@ -40,7 +46,7 @@ struct rspamd_worker_signal_handler;
  */
 struct event_base *
 rspamd_prepare_worker (struct rspamd_worker *worker, const char *name,
-	void (*accept_handler)(int, short, void *), gboolean load_lua);
+	void (*accept_handler)(int, short, void *));
 
 /**
  * Set special signal handler for a worker
@@ -48,7 +54,7 @@ rspamd_prepare_worker (struct rspamd_worker *worker, const char *name,
 void rspamd_worker_set_signal_handler (int signo,
 		struct rspamd_worker *worker,
 		struct event_base *base,
-		void (*handler) (struct rspamd_worker_signal_handler *, void *),
+		rspamd_worker_signal_handler handler,
 		void *handler_data);
 
 /**
@@ -71,6 +77,7 @@ struct rspamd_custom_controller_command {
 };
 
 struct rspamd_controller_worker_ctx;
+struct rspamd_lang_detector;
 
 struct rspamd_controller_session {
 	struct rspamd_controller_worker_ctx *ctx;
@@ -80,6 +87,7 @@ struct rspamd_controller_session {
 	gchar *classifier;
 	rspamd_inet_addr_t *from_addr;
 	struct rspamd_config *cfg;
+	struct rspamd_lang_detector *lang_det;
 	gboolean is_spam;
 	gboolean is_enable;
 };
@@ -124,17 +132,29 @@ void rspamd_worker_stop_accept (struct rspamd_worker *worker);
 void rspamd_worker_block_signals (void);
 
 /**
+ * Unblock signals
+ */
+void rspamd_worker_unblock_signals (void);
+
+/**
  * Kill rspamd main and all workers
  * @param rspamd_main
  */
 void rspamd_hard_terminate (struct rspamd_main *rspamd_main) G_GNUC_NORETURN;
 
 /**
- * Returns TRUE if a specific worker is normal worker
+ * Returns TRUE if a specific worker is a scanner worker
  * @param w
  * @return
  */
-gboolean rspamd_worker_is_normal (struct rspamd_worker *w);
+gboolean rspamd_worker_is_scanner (struct rspamd_worker *w);
+
+/**
+ * Returns TRUE if a specific worker is a primary controller
+ * @param w
+ * @return
+ */
+gboolean rspamd_worker_is_primary_controller (struct rspamd_worker *w);
 
 /**
  * Creates new session cache
@@ -186,10 +206,6 @@ void rspamd_worker_init_monitored (struct rspamd_worker *worker,
         G_STRFUNC, \
         __VA_ARGS__)
 #define msg_info_main(...)   rspamd_default_log_function (G_LOG_LEVEL_INFO, \
-        rspamd_main->server_pool->tag.tagname, rspamd_main->server_pool->tag.uid, \
-        G_STRFUNC, \
-        __VA_ARGS__)
-#define msg_debug_main(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
         rspamd_main->server_pool->tag.tagname, rspamd_main->server_pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)

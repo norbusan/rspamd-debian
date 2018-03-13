@@ -32,24 +32,26 @@ my $download_target = "./";
 my $help            = 0;
 my $man             = 0;
 my $v4              = 1;
-my $v6              = 0;
+my $v6              = 1;
 my $parse           = 1;
 my $v4_zone         = "asn.rspamd.com";
 my $v6_zone         = "asn6.rspamd.com";
 my $v4_file         = "asn.zone";
 my $v6_file         = "asn6.zone";
+my $ns_servers      = ["asn-ns.rspamd.com", "asn-ns2.rspamd.com"];
 
 GetOptions(
   "download-asn" => \$download_asn,
   "download-bgp" => \$download_bgp,
   "4!"           => \$v4,
-  "6"            => \$v6,
+  "6!"           => \$v6,
   "parse!"       => \$parse,
   "target=s"     => \$download_target,
   "zone-v4=s"    => \$v4_zone,
   "zone-v6=s"    => \$v6_zone,
   "file-v4=s"    => \$v4_file,
   "file-v6=s"    => \$v6_file,
+  "ns-server=s@" => \$ns_servers,
   "help|?"       => \$help,
   "man"          => \$man
 ) or pod2usage(2);
@@ -89,14 +91,18 @@ my $v6_fh;
 if ($v4) {
   open( $v4_fh, ">", $v4_file ) or die "Cannot open $v4_file for writing: $!";
   print $v4_fh
-    "\$SOA 43200 ns1.$v4_zone support.rspamd.com 0 600 300 86400 300\n";
-  print $v4_fh "\$NS 43200 ns1.$v4_zone\n";
+    "\$SOA 43200 $ns_servers->[0] support.rspamd.com 0 600 300 86400 300\n";
+  foreach my $ns (@{$ns_servers}) {
+    print $v4_fh "\$NS 43200 $ns\n";
+  }
 }
 if ($v6) {
   open( $v6_fh, ">", $v6_file ) or die "Cannot open $v6_file for writing: $!";
   print $v6_fh
-    "\$SOA 43200 ns1.$v6_zone support.rspamd.com 0 600 300 86400 300\n";
-  print $v6_fh "\$NS 43200 ns1.$v6_zone\n";
+    "\$SOA 43200 $ns_servers->[0] support.rspamd.com 0 600 300 86400 300\n";
+  foreach my $ns (@{$ns_servers}) {
+    print $v6_fh "\$NS 43200 $ns\n";
+  }
 }
 
 # Now load BGP data
@@ -116,6 +122,10 @@ foreach my $u ( @{ $config{'bgp_sources'} } ) {
       my $net   = $dd->{'prefix'} . '/' . $dd->{'bits'};
       if ( $entry && $entry->{'AS_PATH'} ) {
         my $as = $entry->{'AS_PATH'}->[-1];
+        if (ref($as) eq "ARRAY") {
+          $as = @{$as}[0];
+        }
+
         if ( !$networks->{$as} ) {
           if ( $dd->{'subtype'} == 2 ) {
             $networks->{$as} = { nets_v4 => [$net], nets_v6 => [] };
@@ -153,9 +163,15 @@ foreach my $u ( @{ $config{'asn_sources'} } ) {
       my $as_end   = $as_start + int( $elts[4] );
 
       for ( my $as = $as_start ; $as < $as_end ; $as++ ) {
-        if ( $networks->{"$as"} ) {
-          $networks->{"$as"}->{'country'} = $elts[1];
-          $networks->{"$as"}->{'rir'}     = $elts[0];
+        my $real_as = $as;
+
+        if (ref($as) eq "ARRAY") {
+          $real_as = @{$as}[0];
+        }
+
+        if ( $networks->{"$real_as"} ) {
+          $networks->{"$real_as"}->{'country'} = $elts[1];
+          $networks->{"$real_as"}->{'rir'}     = $elts[0];
         }
       }
     }
@@ -201,8 +217,12 @@ asn.pl [options]
 
  Options:
    --download-asn         Download ASN data from RIR
-   --download-bgp       Download GeoIP data from Maxmind
+   --download-bgp         Download GeoIP data from Maxmind
    --target               Where to download files (default: current dir)
+   --zone-v4              IPv4 zone (default: asn.rspamd.com)
+   --zone-v6              IPv6 zone (default: asn6.rspamd.com)
+   --file-v4              IPv4 zone file (default: ./asn.zone)
+   --file-v6              IPv6 zone (default: ./asn6.zone)
    --help                 Brief help message
    --man                  Full documentation
 

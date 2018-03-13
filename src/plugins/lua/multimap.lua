@@ -27,6 +27,7 @@ local util = require "rspamd_util"
 local regexp = require "rspamd_regexp"
 local rspamd_expression = require "rspamd_expression"
 local rspamd_ip = require "rspamd_ip"
+local lua_util = require "lua_util"
 local redis_params
 local fun = require "fun"
 local N = 'multimap'
@@ -208,6 +209,14 @@ local function apply_url_filter(task, filter, url, r)
       else
         return nil
       end
+    end
+  elseif string.find(filter, '^template:') then
+    if not r['template'] then
+      r['template'] = string.match(filter, '^template:(.+)')
+    end
+
+    if r['template'] then
+      return lua_util.template(r['template'], url:to_table())
     end
   end
 
@@ -612,6 +621,21 @@ local function multimap_callback(task, rule)
           end
         end
       end
+      local match_flags = r['flags']
+      local nmatch_flags = r['nflags']
+      if match_flags or nmatch_flags then
+        local got_flags = h['flags']
+        if match_flags then
+          for _, flag in ipairs(match_flags) do
+            if not got_flags[flag] then return end
+          end
+        end
+        if nmatch_flags then
+          for _, flag in ipairs(nmatch_flags) do
+            if got_flags[flag] then return end
+          end
+        end
+      end
       if filter == 'real_ip' or filter == 'from_ip' then
         if type(v) == 'string' then
           v = rspamd_ip.from_string(v)
@@ -684,8 +708,15 @@ local function multimap_callback(task, rule)
       end
     end,
     header = function()
-      local hv = task:get_header_full(rule['header'])
-      match_list(rule, hv, {'decoded'})
+      if type(rule['header']) == 'table' then
+        for _,rh in ipairs(rule['header']) do
+          local hv = task:get_header_full(rh)
+          match_list(rule, hv, {'decoded'})
+        end
+      else
+        local hv = task:get_header_full(rule['header'])
+        match_list(rule, hv, {'decoded'})
+      end
     end,
     rcpt = function()
       if task:has_recipients('smtp') then
@@ -741,7 +772,7 @@ local function multimap_callback(task, rule)
     end,
     hostname = function()
       local hostname = task:get_hostname()
-      if hostname and hostname ~= 'unknown' then
+      if hostname then
         match_hostname(rule, hostname)
       end
     end,
@@ -883,6 +914,16 @@ local function add_multimap_rule(key, newrule)
             newrule['map'])
         end
       elseif newrule['type'] == 'received' then
+        if type(newrule['flags']) == 'table' and newrule['flags'][1] then
+          newrule['flags'] = newrule['flags']
+        elseif type(newrule['flags']) == 'string' then
+          newrule['flags'] = {newrule['flags']}
+        end
+        if type(newrule['nflags']) == 'table' and newrule['nflags'][1] then
+          newrule['nflags'] = newrule['nflags']
+        elseif type(newrule['nflags']) == 'string' then
+          newrule['nflags'] = {newrule['nflags']}
+        end
         local filter = newrule['filter'] or 'real_ip'
         if filter == 'real_ip' or filter == 'from_ip' then
           newrule['radix'] = rspamd_config:add_map ({
@@ -1079,4 +1120,8 @@ if opts and type(opts) == 'table' then
     })
   end,
   fun.filter(function(r) return r['prefilter'] end, rules))
+
+  if #rules == 0 then
+    lua_util.disable_module(N, "config")
+  end
 end

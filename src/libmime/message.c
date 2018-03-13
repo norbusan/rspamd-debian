@@ -24,6 +24,8 @@
 #include "smtp_parsers.h"
 #include "mime_parser.h"
 #include "mime_encoding.h"
+#include "lang_detection.h"
+#include "libutil/multipattern.h"
 #include "libserver/mempool_vars_internal.h"
 
 #ifdef WITH_SNOWBALL
@@ -35,8 +37,13 @@
 #define SET_PART_RAW(part) ((part)->flags &= ~RSPAMD_MIME_TEXT_PART_FLAG_UTF)
 #define SET_PART_UTF(part) ((part)->flags |= RSPAMD_MIME_TEXT_PART_FLAG_UTF)
 
-static const gchar gtube_pattern[] = "XJS*C4JDBQADN1.NSBN3*2IDNEN*"
+static const gchar gtube_pattern_reject[] = "XJS*C4JDBQADN1.NSBN3*2IDNEN*"
 		"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+static const gchar gtube_pattern_add_header[] = "YJS*C4JDBQADN1.NSBN3*2IDNEN*"
+		"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+static const gchar gtube_pattern_rewrite_subject[] = "ZJS*C4JDBQADN1.NSBN3*2IDNEN*"
+		"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+struct rspamd_multipattern *gtube_matcher = NULL;
 static const guint64 words_hash_seed = 0xdeadbabe;
 
 
@@ -47,150 +54,6 @@ free_byte_array_callback (void *pointer)
 	g_byte_array_free (arr, TRUE);
 }
 
-struct language_match {
-	const char *code;
-	const char *name;
-	GUnicodeScript script;
-};
-
-static int
-language_elts_cmp (const void *a, const void *b)
-{
-	GUnicodeScript sc = *(const GUnicodeScript *)a;
-	const struct language_match *bb = (const struct language_match *)b;
-
-	return (sc - bb->script);
-}
-
-static void
-detect_text_language (struct rspamd_mime_text_part *part)
-{
-	/* Keep sorted */
-	static const struct language_match language_codes[] = {
-			{ "", "english", G_UNICODE_SCRIPT_COMMON },
-			{ "", "", G_UNICODE_SCRIPT_INHERITED },
-			{ "ar", "arabic", G_UNICODE_SCRIPT_ARABIC },
-			{ "hy", "armenian", G_UNICODE_SCRIPT_ARMENIAN },
-			{ "bn", "chineese", G_UNICODE_SCRIPT_BENGALI },
-			{ "", "", G_UNICODE_SCRIPT_BOPOMOFO },
-			{ "chr", "", G_UNICODE_SCRIPT_CHEROKEE },
-			{ "cop", "",  G_UNICODE_SCRIPT_COPTIC  },
-			{ "ru", "russian",  G_UNICODE_SCRIPT_CYRILLIC },
-			/* Deseret was used to write English */
-			{ "", "",  G_UNICODE_SCRIPT_DESERET },
-			{ "hi", "",  G_UNICODE_SCRIPT_DEVANAGARI },
-			{ "am", "",  G_UNICODE_SCRIPT_ETHIOPIC },
-			{ "ka", "",  G_UNICODE_SCRIPT_GEORGIAN },
-			{ "", "",  G_UNICODE_SCRIPT_GOTHIC },
-			{ "el", "greek",  G_UNICODE_SCRIPT_GREEK },
-			{ "gu", "",  G_UNICODE_SCRIPT_GUJARATI },
-			{ "pa", "",  G_UNICODE_SCRIPT_GURMUKHI },
-			{ "han", "chineese",  G_UNICODE_SCRIPT_HAN },
-			{ "ko", "",  G_UNICODE_SCRIPT_HANGUL },
-			{ "he", "hebrew",  G_UNICODE_SCRIPT_HEBREW },
-			{ "ja", "",  G_UNICODE_SCRIPT_HIRAGANA },
-			{ "kn", "",  G_UNICODE_SCRIPT_KANNADA },
-			{ "ja", "",  G_UNICODE_SCRIPT_KATAKANA },
-			{ "km", "",  G_UNICODE_SCRIPT_KHMER },
-			{ "lo", "",  G_UNICODE_SCRIPT_LAO },
-			{ "en", "english",  G_UNICODE_SCRIPT_LATIN },
-			{ "ml", "",  G_UNICODE_SCRIPT_MALAYALAM },
-			{ "mn", "",  G_UNICODE_SCRIPT_MONGOLIAN },
-			{ "my", "",  G_UNICODE_SCRIPT_MYANMAR },
-			/* Ogham was used to write old Irish */
-			{ "", "",  G_UNICODE_SCRIPT_OGHAM },
-			{ "", "",  G_UNICODE_SCRIPT_OLD_ITALIC },
-			{ "or", "",  G_UNICODE_SCRIPT_ORIYA },
-			{ "", "",  G_UNICODE_SCRIPT_RUNIC },
-			{ "si", "",  G_UNICODE_SCRIPT_SINHALA },
-			{ "syr", "",  G_UNICODE_SCRIPT_SYRIAC },
-			{ "ta", "",  G_UNICODE_SCRIPT_TAMIL },
-			{ "te", "",  G_UNICODE_SCRIPT_TELUGU },
-			{ "dv", "",  G_UNICODE_SCRIPT_THAANA },
-			{ "th", "",  G_UNICODE_SCRIPT_THAI },
-			{ "bo", "",  G_UNICODE_SCRIPT_TIBETAN },
-			{ "iu", "",  G_UNICODE_SCRIPT_CANADIAN_ABORIGINAL },
-			{ "", "",  G_UNICODE_SCRIPT_YI },
-			{ "tl", "",  G_UNICODE_SCRIPT_TAGALOG },
-			/* Phillipino languages/scripts */
-			{ "hnn", "",  G_UNICODE_SCRIPT_HANUNOO },
-			{ "bku", "",  G_UNICODE_SCRIPT_BUHID },
-			{ "tbw", "",  G_UNICODE_SCRIPT_TAGBANWA },
-
-			{ "", "",  G_UNICODE_SCRIPT_BRAILLE },
-			{ "", "",  G_UNICODE_SCRIPT_CYPRIOT },
-			{ "", "",  G_UNICODE_SCRIPT_LIMBU },
-			/* Used for Somali (so) in the past */
-			{ "", "",  G_UNICODE_SCRIPT_OSMANYA },
-			/* The Shavian alphabet was designed for English */
-			{ "", "",  G_UNICODE_SCRIPT_SHAVIAN },
-			{ "", "",  G_UNICODE_SCRIPT_LINEAR_B },
-			{ "", "",  G_UNICODE_SCRIPT_TAI_LE },
-			{ "uga", "",  G_UNICODE_SCRIPT_UGARITIC },
-			{ "", "",  G_UNICODE_SCRIPT_NEW_TAI_LUE },
-			{ "bug", "",  G_UNICODE_SCRIPT_BUGINESE },
-			{ "", "",  G_UNICODE_SCRIPT_GLAGOLITIC },
-			/* Used for for Berber (ber), but Arabic script is more common */
-			{ "", "",  G_UNICODE_SCRIPT_TIFINAGH },
-			{ "syl", "",  G_UNICODE_SCRIPT_SYLOTI_NAGRI },
-			{ "peo", "",  G_UNICODE_SCRIPT_OLD_PERSIAN },
-			{ "", "",  G_UNICODE_SCRIPT_KHAROSHTHI },
-			{ "", "",  G_UNICODE_SCRIPT_UNKNOWN },
-			{ "", "",  G_UNICODE_SCRIPT_BALINESE },
-			{ "", "",  G_UNICODE_SCRIPT_CUNEIFORM },
-			{ "", "",  G_UNICODE_SCRIPT_PHOENICIAN },
-			{ "", "",  G_UNICODE_SCRIPT_PHAGS_PA },
-			{ "nqo", "", G_UNICODE_SCRIPT_NKO }
-	};
-	const struct language_match *lm;
-	const int max_chars = 32;
-
-	if (part != NULL) {
-		if (IS_PART_UTF (part)) {
-			/* Try to detect encoding by several symbols */
-			const gchar *p, *pp;
-			gunichar c;
-			gint32 remain = part->content->len, max = 0, processed = 0;
-			gint32 scripts[G_N_ELEMENTS (language_codes)];
-			GUnicodeScript scc, sel = G_UNICODE_SCRIPT_COMMON;
-
-			p = part->content->data;
-			memset (scripts, 0, sizeof (scripts));
-
-			while (remain > 0 && processed < max_chars) {
-				c = g_utf8_get_char_validated (p, remain);
-				if (c == (gunichar) -2 || c == (gunichar) -1) {
-					break;
-				}
-				if (g_unichar_isalpha (c)) {
-					scc = g_unichar_get_script (c);
-					if (scc < (gint)G_N_ELEMENTS (scripts)) {
-						scripts[scc]++;
-					}
-					processed ++;
-				}
-				pp = g_utf8_next_char (p);
-				remain -= pp - p;
-				p = pp;
-			}
-			for (remain = 0; remain < (gint)G_N_ELEMENTS (scripts); remain++) {
-				if (scripts[remain] > max) {
-					max = scripts[remain];
-					sel = remain;
-				}
-			}
-			part->script = sel;
-			lm = bsearch (&sel, language_codes, G_N_ELEMENTS (language_codes),
-					sizeof (language_codes[0]), &language_elts_cmp);
-
-			if (lm != NULL) {
-				part->lang_code = lm->code;
-				part->language = lm->name;
-			}
-		}
-	}
-}
-
 static void
 rspamd_extract_words (struct rspamd_task *task,
 		struct rspamd_mime_text_part *part)
@@ -198,38 +61,12 @@ rspamd_extract_words (struct rspamd_task *task,
 #ifdef WITH_SNOWBALL
 	struct sb_stemmer *stem = NULL;
 #endif
-	rspamd_stat_token_t *w;
+	rspamd_stat_token_t *w, ucs_w;
 	gchar *temp_word;
 	const guchar *r;
-	guint i, nlen, total_len = 0, short_len = 0;
+	guint i, nlen, total_len = 0, short_len = 0, ucs_len = 0;
+	gdouble avg_len = 0;
 
-#ifdef WITH_SNOWBALL
-	static GHashTable *stemmers = NULL;
-
-	if (part->language && part->language[0] != '\0' && IS_PART_UTF (part)) {
-
-		if (!stemmers) {
-			stemmers = g_hash_table_new (rspamd_strcase_hash,
-					rspamd_strcase_equal);
-		}
-
-		stem = g_hash_table_lookup (stemmers, part->language);
-
-		if (stem == NULL) {
-
-			stem = sb_stemmer_new (part->language, "UTF_8");
-
-			if (stem == NULL) {
-				msg_debug_task ("<%s> cannot create lemmatizer for %s language",
-						task->message_id, part->language);
-			}
-			else {
-				g_hash_table_insert (stemmers, g_strdup (part->language),
-						stem);
-			}
-		}
-	}
-#endif
 	/* Ugly workaround */
 	if (IS_PART_HTML (part)) {
 		part->normalized_words = rspamd_tokenize_text (
@@ -250,6 +87,66 @@ rspamd_extract_words (struct rspamd_task *task,
 		part->normalized_hashes = g_array_sized_new (FALSE, FALSE,
 				sizeof (guint64), part->normalized_words->len);
 
+		if (IS_PART_UTF (part) && task->lang_det) {
+			part->ucs32_words =  g_array_sized_new (FALSE, FALSE,
+					sizeof (rspamd_stat_token_t), part->normalized_words->len);
+		}
+
+		if (part->ucs32_words) {
+			struct rspamd_lang_detector_res *lang;
+
+			for (i = 0; i < part->normalized_words->len; i++) {
+				w = &g_array_index (part->normalized_words, rspamd_stat_token_t, i);
+
+				if (w->flags & RSPAMD_STAT_TOKEN_FLAG_TEXT) {
+					rspamd_language_detector_to_ucs (task->lang_det,
+							task->task_pool,
+							w, &ucs_w);
+					g_array_append_val (part->ucs32_words, ucs_w);
+					ucs_len += ucs_w.len;
+				}
+			}
+
+			part->languages = rspamd_language_detector_detect (task,
+					task->lang_det,
+					part->ucs32_words, ucs_len);
+
+			if (part->languages->len > 0) {
+				lang = g_ptr_array_index (part->languages, 0);
+				part->language = lang->lang;
+
+				msg_info_task ("detected part language: %s", part->language);
+			}
+
+#ifdef WITH_SNOWBALL
+			static GHashTable *stemmers = NULL;
+
+			if (part->language && part->language[0] != '\0' && IS_PART_UTF (part)) {
+
+				if (!stemmers) {
+					stemmers = g_hash_table_new (rspamd_strcase_hash,
+							rspamd_strcase_equal);
+				}
+
+				stem = g_hash_table_lookup (stemmers, part->language);
+
+				if (stem == NULL) {
+
+					stem = sb_stemmer_new (part->language, "UTF_8");
+
+					if (stem == NULL) {
+						msg_debug_task ("<%s> cannot create lemmatizer for %s language",
+								task->message_id, part->language);
+					}
+					else {
+						g_hash_table_insert (stemmers, g_strdup (part->language),
+								stem);
+					}
+				}
+			}
+#endif
+		}
+
 		for (i = 0; i < part->normalized_words->len; i ++) {
 			guint64 h;
 
@@ -262,6 +159,8 @@ rspamd_extract_words (struct rspamd_task *task,
 #endif
 
 			if (w->len > 0 && (w->flags & RSPAMD_STAT_TOKEN_FLAG_TEXT)) {
+				avg_len = avg_len + (w->len - avg_len) / (double)i;
+
 				if (r != NULL) {
 					nlen = strlen (r);
 					nlen = MIN (nlen, w->len);
@@ -461,7 +360,7 @@ rspamd_strip_newlines_parse (const gchar *begin, const gchar *pe,
 				if (G_UNLIKELY (*p) == ' ') {
 					part->spaces ++;
 
-					if (*(p - 1) == ' ') {
+					if (p > begin && *(p - 1) == ' ') {
 						part->double_spaces ++;
 					}
 				}
@@ -472,6 +371,13 @@ rspamd_strip_newlines_parse (const gchar *begin, const gchar *pe,
 						part->non_ascii_chars ++;
 					}
 					else {
+						if (g_ascii_isupper (*p)) {
+							part->capital_letters ++;
+						}
+						else if (g_ascii_isdigit (*p)) {
+							part->numeric_characters ++;
+						}
+
 						part->ascii_chars ++;
 					}
 				}
@@ -529,7 +435,7 @@ rspamd_strip_newlines_parse (const gchar *begin, const gchar *pe,
 				else {
 					part->non_spaces ++;
 
-					if (G_UNLIKELY (*p & 0x80)) {
+					if (G_UNLIKELY (*c & 0x80)) {
 						part->non_ascii_chars ++;
 					}
 					else {
@@ -643,27 +549,72 @@ rspamd_words_levenshtein_distance (struct rspamd_task *task,
 	return ret;
 }
 
-static gboolean
+static gint
+rspamd_multipattern_gtube_cb (struct rspamd_multipattern *mp,
+		guint strnum,
+		gint match_start,
+		gint match_pos,
+		const gchar *text,
+		gsize len,
+		void *context)
+{
+	return strnum + 1; /* To distinguish from zero */
+}
+
+static enum rspamd_action_type
 rspamd_check_gtube (struct rspamd_task *task, struct rspamd_mime_text_part *part)
 {
-	static const gsize max_check_size = 4 * 1024;
+	static const gsize max_check_size = 8 * 1024;
+	gint ret;
+	enum rspamd_action_type act = METRIC_ACTION_NOACTION;
 	g_assert (part != NULL);
 
-	if (part->content && part->content->len > sizeof (gtube_pattern) &&
-			part->content->len <= max_check_size) {
-		if (rspamd_substring_search (part->content->data,
-				part->content->len,
-				gtube_pattern, sizeof (gtube_pattern) - 1) != -1) {
-			task->flags |= RSPAMD_TASK_FLAG_SKIP;
-			task->flags |= RSPAMD_TASK_FLAG_GTUBE;
-			msg_info_task ("<%s>: gtube pattern has been found in part of length %ud",
-					task->message_id, part->content->len);
+	if (gtube_matcher == NULL) {
+		gtube_matcher = rspamd_multipattern_create (RSPAMD_MULTIPATTERN_DEFAULT);
 
-			return TRUE;
+		rspamd_multipattern_add_pattern (gtube_matcher,
+				gtube_pattern_reject,
+				RSPAMD_MULTIPATTERN_DEFAULT);
+		rspamd_multipattern_add_pattern (gtube_matcher,
+				gtube_pattern_add_header,
+				RSPAMD_MULTIPATTERN_DEFAULT);
+		rspamd_multipattern_add_pattern (gtube_matcher,
+				gtube_pattern_rewrite_subject,
+				RSPAMD_MULTIPATTERN_DEFAULT);
+
+		g_assert (rspamd_multipattern_compile (gtube_matcher, NULL));
+	}
+
+	if (part->content && part->content->len > sizeof (gtube_pattern_reject) &&
+			part->content->len <= max_check_size) {
+		if ((ret = rspamd_multipattern_lookup (gtube_matcher, part->content->data,
+				part->content->len,
+				rspamd_multipattern_gtube_cb, NULL, NULL)) > 0) {
+
+			switch (ret) {
+			case 1:
+				act = METRIC_ACTION_REJECT;
+				break;
+			case 2:
+				act = METRIC_ACTION_ADD_HEADER;
+				break;
+			case 3:
+				act = METRIC_ACTION_REWRITE_SUBJECT;
+				break;
+			}
+
+			if (act != METRIC_ACTION_NOACTION) {
+				task->flags |= RSPAMD_TASK_FLAG_SKIP;
+				task->flags |= RSPAMD_TASK_FLAG_GTUBE;
+				msg_info_task (
+						"<%s>: gtube %s pattern has been found in part of length %ud",
+						task->message_id, rspamd_action_to_str (act),
+						part->content->len);
+			}
 		}
 	}
 
-	return FALSE;
+	return act;
 }
 
 static gint
@@ -682,6 +633,7 @@ rspamd_message_process_text_part (struct rspamd_task *task,
 	rspamd_ftok_t html_tok, xhtml_tok;
 	GByteArray *part_content;
 	gboolean found_html = FALSE, found_txt = FALSE;
+	enum rspamd_action_type act;
 
 	if (IS_CT_TEXT (mime_part->ct)) {
 		html_tok.begin = "html";
@@ -694,7 +646,23 @@ rspamd_message_process_text_part (struct rspamd_task *task,
 			found_html = TRUE;
 		}
 		else {
-			found_txt = TRUE;
+			/*
+			 * We also need to apply heuristic for text parts that are actually
+			 * HTML.
+			 */
+			RSPAMD_FTOK_ASSIGN (&html_tok, "<!DOCTYPE html");
+			RSPAMD_FTOK_ASSIGN (&xhtml_tok, "<html");
+
+			if (rspamd_lc_cmp (mime_part->parsed_data.begin, html_tok.begin,
+					MIN (html_tok.len, mime_part->parsed_data.len)) == 0 ||
+					rspamd_lc_cmp (mime_part->parsed_data.begin, xhtml_tok.begin,
+							MIN (xhtml_tok.len, mime_part->parsed_data.len)) == 0) {
+				msg_info_task ("found html part pretending to be text/plain part");
+				found_html = TRUE;
+			}
+			else {
+				found_txt = TRUE;
+			}
 		}
 	}
 	else {
@@ -820,18 +788,25 @@ rspamd_message_process_text_part (struct rspamd_task *task,
 	mime_part->flags |= RSPAMD_MIME_PART_TEXT;
 	mime_part->specific.txt = text_part;
 
-	if (rspamd_check_gtube (task, text_part)) {
+	act = rspamd_check_gtube (task, text_part);
+	if (act != METRIC_ACTION_NOACTION) {
 		struct rspamd_metric_result *mres;
 
 		mres = rspamd_create_metric_result (task);
 
 		if (mres != NULL) {
-			mres->score = rspamd_task_get_required_score (task, mres);
-			mres->action = METRIC_ACTION_REJECT;
+			if (act == METRIC_ACTION_REJECT) {
+				mres->score = rspamd_task_get_required_score (task, mres);
+			}
+			else {
+				mres->score = mres->actions_limits[act];
+			}
+
+			mres->action = act;
 		}
 
 		task->result = mres;
-		task->pre_result.action = METRIC_ACTION_REJECT;
+		task->pre_result.action = act;
 		task->pre_result.str = "Gtube pattern";
 		ucl_object_insert_key (task->messages,
 				ucl_object_fromstring ("Gtube pattern"), "smtp_message", 0,
@@ -842,7 +817,6 @@ rspamd_message_process_text_part (struct rspamd_task *task,
 	}
 
 	/* Post process part */
-	detect_text_language (text_part);
 	rspamd_normalize_text_part (task, text_part);
 
 	if (!IS_PART_HTML (text_part)) {
@@ -926,7 +900,6 @@ rspamd_message_parse (struct rspamd_task *task)
 
 	if (RSPAMD_TASK_IS_EMPTY (task)) {
 		/* Don't do anything with empty task */
-
 		return TRUE;
 	}
 
@@ -972,10 +945,14 @@ rspamd_message_parse (struct rspamd_task *task)
 	rspamd_cryptobox_hash_init (&st, NULL, 0);
 
 	if (task->flags & RSPAMD_TASK_FLAG_MIME) {
+		enum rspamd_mime_parse_error ret;
 
 		debug_task ("construct mime parser from string length %d",
 				(gint) task->msg.len);
-		if (!rspamd_mime_parse_task (task, &err)) {
+		ret = rspamd_mime_parse_task (task, &err);
+
+		switch (ret) {
+		case RSPAMD_MIME_PARSE_FATAL:
 			msg_err_task ("cannot construct mime from stream: %e", err);
 
 			if (task->cfg && (!task->cfg->allow_raw_input)) {
@@ -990,6 +967,18 @@ rspamd_message_parse (struct rspamd_task *task)
 				task->flags &= ~RSPAMD_TASK_FLAG_MIME;
 				rspamd_message_from_data (task, p, len);
 			}
+			break;
+		case RSPAMD_MIME_PARSE_NESTING:
+			msg_warn_task ("cannot construct full mime from stream: %e", err);
+			task->flags |= RSPAMD_TASK_FLAG_BROKEN_HEADERS;
+			break;
+		case RSPAMD_MIME_PARSE_OK:
+		default:
+			break;
+		}
+
+		if (err) {
+			g_error_free (err);
 		}
 	}
 	else {

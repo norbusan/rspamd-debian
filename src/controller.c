@@ -28,6 +28,7 @@
 #include "fuzzy_wire.h"
 #include "unix-std.h"
 #include "utlist.h"
+#include "libmime/lang_detection.h"
 #include <math.h>
 
 /* 60 seconds for worker's IO */
@@ -73,10 +74,6 @@
         session->pool->tag.tagname, session->pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
-#define msg_debug_session(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
-        session->pool->tag.tagname, session->pool->tag.uid, \
-        G_STRFUNC, \
-        __VA_ARGS__)
 #define msg_err_ctx(...) rspamd_default_log_function(G_LOG_LEVEL_CRITICAL, \
         "controller", ctx->cfg->cfg_pool->tag.uid, \
         G_STRFUNC, \
@@ -89,10 +86,13 @@
         "controller", ctx->cfg->cfg_pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
-#define msg_debug_ctx(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
-        "controller", ctx->cfg->cfg_pool->tag.uid, \
+
+#define msg_debug_session(...)  rspamd_conditional_debug_fast (NULL, session->from_addr, \
+        rspamd_controller_log_id, "controller", session->pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
+
+INIT_LOG_MODULE(controller)
 
 /* Graph colors */
 #define COLOR_CLEAN "#58A458"
@@ -117,7 +117,8 @@ worker_t controller_worker = {
 	"controller",                   /* Name */
 	init_controller_worker,         /* Init function */
 	start_controller_worker,        /* Start function */
-	RSPAMD_WORKER_HAS_SOCKET | RSPAMD_WORKER_KILLABLE,
+	RSPAMD_WORKER_HAS_SOCKET | RSPAMD_WORKER_KILLABLE |
+			RSPAMD_WORKER_SCANNER | RSPAMD_WORKER_CONTROLLER,
 	RSPAMD_WORKER_SOCKET_TCP,       /* TCP socket */
 	RSPAMD_WORKER_VER       /* Version info */
 };
@@ -178,6 +179,8 @@ struct rspamd_controller_worker_ctx {
 
 	struct event *rrd_event;
 	struct rspamd_rrd_file *rrd;
+	struct event save_stats_event;
+	struct rspamd_lang_detector *lang_det;
 };
 
 struct rspamd_controller_plugin_cbdata {
@@ -773,7 +776,6 @@ rspamd_controller_handle_symbols (struct rspamd_http_connection_entry *conn_ent,
 	GHashTableIter it, sit;
 	struct rspamd_symbols_group *gr;
 	struct rspamd_symbol *sym;
-	struct rspamd_metric *metric;
 	ucl_object_t *obj, *top, *sym_obj, *group_symbols;
 	gpointer k, v;
 
@@ -784,9 +786,7 @@ rspamd_controller_handle_symbols (struct rspamd_http_connection_entry *conn_ent,
 	top = ucl_object_typed_new (UCL_ARRAY);
 
 	/* Go through all symbols groups in the default metric */
-	metric = g_hash_table_lookup (session->ctx->cfg->metrics, DEFAULT_METRIC);
-	g_assert (metric != NULL);
-	g_hash_table_iter_init (&it, metric->groups);
+	g_hash_table_iter_init (&it, session->cfg->groups);
 
 	while (g_hash_table_iter_next (&it, &k, &v)) {
 		gr = v;
@@ -855,8 +855,7 @@ rspamd_controller_handle_actions (struct rspamd_http_connection_entry *conn_ent,
 	struct rspamd_http_message *msg)
 {
 	struct rspamd_controller_session *session = conn_ent->ud;
-	struct rspamd_metric *metric;
-	struct metric_action *act;
+	struct rspamd_action *act;
 	gint i;
 	ucl_object_t *obj, *top;
 
@@ -867,19 +866,16 @@ rspamd_controller_handle_actions (struct rspamd_http_connection_entry *conn_ent,
 	top = ucl_object_typed_new (UCL_ARRAY);
 
 	/* Get actions for default metric */
-	metric = g_hash_table_lookup (session->ctx->cfg->metrics, DEFAULT_METRIC);
-	if (metric != NULL) {
-		for (i = METRIC_ACTION_REJECT; i < METRIC_ACTION_MAX; i++) {
-			act = &metric->actions[i];
-			if (act->score >= 0) {
-				obj = ucl_object_typed_new (UCL_OBJECT);
-				ucl_object_insert_key (obj,
+	for (i = METRIC_ACTION_REJECT; i < METRIC_ACTION_MAX; i++) {
+		act = &session->cfg->actions[i];
+		if (act->score >= 0) {
+			obj = ucl_object_typed_new (UCL_OBJECT);
+			ucl_object_insert_key (obj,
 					ucl_object_fromstring (rspamd_action_to_str (
-						act->action)), "action", 0, false);
-				ucl_object_insert_key (obj, ucl_object_fromdouble (
-						act->score), "value", 0, false);
-				ucl_array_append (top, obj);
-			}
+							act->action)), "action", 0, false);
+			ucl_object_insert_key (obj, ucl_object_fromdouble (
+					act->score), "value", 0, false);
+			ucl_array_append (top, obj);
 		}
 	}
 
@@ -1075,7 +1071,7 @@ rspamd_controller_handle_get_map (struct rspamd_http_connection_entry *conn_ent,
 }
 
 static ucl_object_t *
-rspamd_controller_pie_element (enum rspamd_metric_action action,
+rspamd_controller_pie_element (enum rspamd_action_type action,
 		const char *label, gdouble data)
 {
 	ucl_object_t *res = ucl_object_typed_new (UCL_OBJECT);
@@ -1357,14 +1353,14 @@ rspamd_controller_handle_legacy_history (
 {
 	struct roll_history_row *row, *copied_rows;
 	guint i, rows_proc, row_num;
-	struct tm *tm;
+	struct tm tm;
 	gchar timebuf[32];
 	ucl_object_t *top, *obj;
 
 	top = ucl_object_typed_new (UCL_ARRAY);
 
 	/* Set lock on history */
-	copied_rows = g_slice_alloc (sizeof (*copied_rows) * ctx->srv->history->nrows);
+	copied_rows = g_malloc (sizeof (*copied_rows) * ctx->srv->history->nrows);
 	memcpy (copied_rows, ctx->srv->history->rows,
 			sizeof (*copied_rows) * ctx->srv->history->nrows);
 
@@ -1378,8 +1374,8 @@ rspamd_controller_handle_legacy_history (
 		row = &copied_rows[row_num];
 		/* Get only completed rows */
 		if (row->completed) {
-			tm = localtime (&row->tv.tv_sec);
-			strftime (timebuf, sizeof (timebuf) - 1, "%Y-%m-%d %H:%M:%S", tm);
+			rspamd_localtime (row->tv.tv_sec, &tm);
+			strftime (timebuf, sizeof (timebuf) - 1, "%Y-%m-%d %H:%M:%S", &tm);
 			obj = ucl_object_typed_new (UCL_OBJECT);
 			ucl_object_insert_key (obj, ucl_object_fromstring (
 					timebuf),		  "time", 0, false);
@@ -1433,6 +1429,7 @@ rspamd_controller_handle_legacy_history (
 
 	rspamd_controller_send_ucl (conn_ent, top);
 	ucl_object_unref (top);
+	g_free (copied_rows);
 }
 
 static gboolean
@@ -1487,7 +1484,7 @@ rspamd_controller_handle_lua_history (lua_State *L,
 
 			if (lua_isfunction (L, -1)) {
 				task = rspamd_task_new (session->ctx->worker, session->cfg,
-						session->pool);
+						session->pool, ctx->lang_det);
 
 				task->resolver = ctx->resolver;
 				task->ev_base = ctx->ev_base;
@@ -1785,7 +1782,8 @@ rspamd_controller_handle_lua (struct rspamd_http_connection_entry *conn_ent,
 		return 0;
 	}
 
-	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool);
+	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool,
+			ctx->lang_det);
 
 	task->resolver = ctx->resolver;
 	task->ev_base = ctx->ev_base;
@@ -1968,7 +1966,8 @@ rspamd_controller_handle_learn_common (
 		return 0;
 	}
 
-	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool);
+	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool,
+			session->ctx->lang_det);
 
 	task->resolver = ctx->resolver;
 	task->ev_base = ctx->ev_base;
@@ -2068,7 +2067,8 @@ rspamd_controller_handle_scan (struct rspamd_http_connection_entry *conn_ent,
 		return 0;
 	}
 
-	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool);
+	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool,
+			ctx->lang_det);
 	task->ev_base = session->ctx->ev_base;
 
 	task->resolver = ctx->resolver;
@@ -2118,14 +2118,13 @@ rspamd_controller_handle_saveactions (
 {
 	struct rspamd_controller_session *session = conn_ent->ud;
 	struct ucl_parser *parser;
-	struct rspamd_metric *metric;
 	ucl_object_t *obj;
 	const ucl_object_t *cur;
 	struct rspamd_controller_worker_ctx *ctx;
 	const gchar *error;
 	gdouble score;
 	gint i, added = 0;
-	enum rspamd_metric_action act;
+	enum rspamd_action_type act;
 	ucl_object_iter_t it = NULL;
 
 	ctx = session->ctx;
@@ -2139,14 +2138,6 @@ rspamd_controller_handle_saveactions (
 		rspamd_controller_send_error (conn_ent,
 			400,
 			"Empty body is not permitted");
-		return 0;
-	}
-
-	metric = g_hash_table_lookup (ctx->cfg->metrics, DEFAULT_METRIC);
-	if (metric == NULL) {
-		msg_err_session ("cannot find default metric");
-		rspamd_controller_send_error (conn_ent, 500,
-			"Default metric is absent");
 		return 0;
 	}
 
@@ -2164,8 +2155,6 @@ rspamd_controller_handle_saveactions (
 		ucl_parser_free (parser);
 		return 0;
 	}
-
-
 
 	obj = ucl_parser_get_object (parser);
 	ucl_parser_free (parser);
@@ -2196,7 +2185,7 @@ rspamd_controller_handle_saveactions (
 			break;
 		}
 		score = ucl_object_todouble (cur);
-		if (metric->actions[act].score != score) {
+		if (session->cfg->actions[act].score != score) {
 			add_dynamic_action (ctx->cfg, DEFAULT_METRIC, act, score);
 			added ++;
 		}
@@ -2239,7 +2228,6 @@ rspamd_controller_handle_savesymbols (
 {
 	struct rspamd_controller_session *session = conn_ent->ud;
 	struct ucl_parser *parser;
-	struct rspamd_metric *metric;
 	ucl_object_t *obj;
 	const ucl_object_t *cur, *jname, *jvalue;
 	ucl_object_iter_t iter = NULL;
@@ -2260,14 +2248,6 @@ rspamd_controller_handle_savesymbols (
 		rspamd_controller_send_error (conn_ent,
 			400,
 			"Empty body is not permitted");
-		return 0;
-	}
-
-	metric = g_hash_table_lookup (ctx->cfg->metrics, DEFAULT_METRIC);
-	if (metric == NULL) {
-		msg_err_session ("cannot find default metric");
-		rspamd_controller_send_error (conn_ent, 500,
-			"Default metric is absent");
 		return 0;
 	}
 
@@ -2311,7 +2291,7 @@ rspamd_controller_handle_savesymbols (
 		jname = ucl_object_lookup (cur, "name");
 		jvalue = ucl_object_lookup (cur, "value");
 		val = ucl_object_todouble (jvalue);
-		sym = g_hash_table_lookup (metric->symbols, ucl_object_tostring (jname));
+		sym = g_hash_table_lookup (session->cfg->symbols, ucl_object_tostring (jname));
 
 		if (sym && fabs (*sym->weight_ptr - val) > 0.01) {
 			if (!add_dynamic_symbol (ctx->cfg, DEFAULT_METRIC,
@@ -2566,9 +2546,10 @@ rspamd_controller_handle_stat_common (
 	rspamd_mempool_stat (&mem_st);
 	memcpy (&stat_copy, session->ctx->worker->srv->stat, sizeof (stat_copy));
 	stat = &stat_copy;
-	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool);
-
 	ctx = session->ctx;
+
+	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool,
+			ctx->lang_det);
 	task->resolver = ctx->resolver;
 	task->ev_base = ctx->ev_base;
 	cbdata = rspamd_mempool_alloc0 (session->pool, sizeof (*cbdata));
@@ -2646,6 +2627,8 @@ rspamd_controller_handle_stat_common (
 	ucl_object_insert_key (top,
 		ucl_object_fromint (
 			mem_st.oversized_chunks), "chunks_oversized", 0, false);
+	ucl_object_insert_key (top,
+			ucl_object_fromint (mem_st.fragmented_size), "fragmented", 0, false);
 
 	if (do_reset) {
 		session->ctx->srv->stat->messages_scanned = 0;
@@ -2928,7 +2911,8 @@ rspamd_controller_handle_lua_plugin (struct rspamd_http_connection_entry *conn_e
 		return 0;
 	}
 
-	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool);
+	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool,
+			ctx->lang_det);
 
 	task->resolver = ctx->resolver;
 	task->ev_base = ctx->ev_base;
@@ -3005,7 +2989,7 @@ rspamd_controller_finish_handler (struct rspamd_http_connection_entry *conn_ent)
 		rspamd_mempool_delete (session->pool);
 	}
 
-	g_slice_free1 (sizeof (struct rspamd_controller_session), session);
+	g_free (session);
 }
 
 static void
@@ -3029,11 +3013,12 @@ rspamd_controller_accept_socket (gint fd, short what, void *arg)
 		return;
 	}
 
-	session = g_slice_alloc0 (sizeof (struct rspamd_controller_session));
+	session = g_malloc0 (sizeof (struct rspamd_controller_session));
 	session->pool = rspamd_mempool_new (rspamd_mempool_suggest_size (),
 			"csession");
 	session->ctx = ctx;
 	session->cfg = ctx->cfg;
+	session->lang_det = ctx->lang_det;
 	REF_RETAIN (session->cfg);
 
 	session->from_addr = addr;
@@ -3200,8 +3185,17 @@ rspamd_controller_store_saved_stats (struct rspamd_controller_worker_ctx *ctx)
 	ucl_object_emit_full (top, UCL_EMIT_JSON_COMPACT,
 			ucl_object_emit_fd_funcs (fd), NULL);
 
+	ucl_object_unref (top);
 	rspamd_file_unlock (fd, FALSE);
 	close (fd);
+}
+
+static void
+rspamd_controller_stats_save_periodic (int fd, short what, gpointer ud)
+{
+	struct rspamd_controller_worker_ctx *ctx = ud;
+
+	rspamd_controller_store_saved_stats (ctx);
 }
 
 static void
@@ -3495,6 +3489,7 @@ rspamd_plugin_cbdata_dtor (gpointer p)
 
 	g_free (cbd->plugin);
 	ucl_object_unref (cbd->obj); /* This also releases lua references */
+	g_free (cbd);
 }
 
 static void
@@ -3509,7 +3504,7 @@ rspamd_controller_register_plugin_path (lua_State *L,
 	const ucl_object_t *elt;
 	GString *full_path;
 
-	cbd = g_slice_alloc0 (sizeof (*cbd));
+	cbd = g_malloc0 (sizeof (*cbd));
 	cbd->L = L;
 	cbd->ctx = ctx;
 	cbd->handler = ucl_object_toclosure (handler);
@@ -3524,7 +3519,7 @@ rspamd_controller_register_plugin_path (lua_State *L,
 
 	elt = ucl_object_lookup (webui_data, "enable");
 
-	if (elt && !!ucl_object_toboolean (elt)) {
+	if (elt && ucl_object_toboolean (elt)) {
 		cbd->is_enable = TRUE;
 	}
 
@@ -3601,12 +3596,13 @@ start_controller_worker (struct rspamd_worker *worker)
 	GHashTableIter iter;
 	gpointer key, value;
 	struct rspamd_keypair_cache *cache;
+	struct timeval stv;
+	const guint save_stats_interval = 60 * 1000; /* 1 minute */
 	gpointer m;
 
 	ctx->ev_base = rspamd_prepare_worker (worker,
 			"controller",
-			rspamd_controller_accept_socket,
-			TRUE);
+			rspamd_controller_accept_socket);
 	msec_to_tv (ctx->timeout, &ctx->io_tv);
 
 	ctx->start_time = time (NULL);
@@ -3634,6 +3630,7 @@ start_controller_worker (struct rspamd_worker *worker)
 	g_ptr_array_add (worker->finish_actions,
 			(gpointer)rspamd_controller_on_terminate);
 	rspamd_controller_load_saved_stats (ctx);
+	ctx->lang_det = ctx->cfg->lang_det;
 
 	/* RRD collector */
 	if (ctx->cfg->rrd_file && worker->index == 0) {
@@ -3642,7 +3639,7 @@ start_controller_worker (struct rspamd_worker *worker)
 		ctx->rrd = rspamd_rrd_file_default (ctx->cfg->rrd_file, &rrd_err);
 
 		if (ctx->rrd) {
-			ctx->rrd_event = g_slice_alloc0 (sizeof (*ctx->rrd_event));
+			ctx->rrd_event = g_malloc0 (sizeof (*ctx->rrd_event));
 			evtimer_set (ctx->rrd_event, rspamd_controller_rrd_update, ctx);
 			event_base_set (ctx->ev_base, ctx->rrd_event);
 			event_add (ctx->rrd_event, &rrd_update_time);
@@ -3802,6 +3799,16 @@ start_controller_worker (struct rspamd_worker *worker)
 		rspamd_map_watch (worker->srv->cfg, ctx->ev_base, ctx->resolver, FALSE);
 	}
 
+	rspamd_lua_run_postloads (ctx->cfg->lua_state, ctx->cfg, ctx->ev_base, worker);
+
+	/* Schedule periodic stats saving, see #1823 */
+	evtimer_set (&ctx->save_stats_event, rspamd_controller_stats_save_periodic,
+			ctx);
+	event_base_set (ctx->ev_base, &ctx->save_stats_event);
+	msec_to_tv (save_stats_interval, &stv);
+	evtimer_add (&ctx->save_stats_event, &stv);
+
+	/* Start event loop */
 	event_base_loop (ctx->ev_base, 0);
 	rspamd_worker_block_signals ();
 

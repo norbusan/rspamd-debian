@@ -20,7 +20,6 @@ end
 
 -- IP score is a module that set ip score of specific ip, asn, country
 local rspamd_logger = require "rspamd_logger"
-local rspamd_regexp = require "rspamd_regexp"
 local rspamd_util = require "rspamd_util"
 local rspamd_lua_utils = require "lua_util"
 
@@ -30,6 +29,8 @@ local whitelist = nil
 local asn_cc_whitelist = nil
 local check_authed = false
 local check_local = false
+local M = "ip_score"
+local N = M
 
 local options = {
   actions = { -- how each action is treated in scoring
@@ -39,9 +40,9 @@ local options = {
     ['no action'] = 1.0
   },
   scores = { -- how each component is evaluated
-    ['asn'] = 0.5,
-    ['country'] = 0.1,
-    ['ipnet'] = 0.8,
+    ['asn'] = 0.4,
+    ['country'] = 0.01,
+    ['ipnet'] = 0.5,
     ['ip'] = 1.0
   },
   symbol = 'IP_SCORE', -- symbol to be inserted
@@ -56,8 +57,6 @@ local options = {
   max_score = nil,
   score_divisor = 1,
 }
-
-local asn_re = rspamd_regexp.create_cached("[\\|\\s]")
 
 local function ip_score_hash_key(asn, country, ipnet, ip)
   -- We use the most common attribute as hashing key
@@ -143,6 +142,11 @@ local ip_score_set = function(task)
         ipnet_score,total_ipnet,
         ip_score, total_ip = pool:get_variable('ip_score',
         'double,double,double,double,double,double,double,double')
+  rspamd_logger.debugm(M, task, "raw scores: asn: %s, total_asn: %s, country: %s, total_country: %s, ipnet: %s, total_ipnet: %s, ip:%s, total_ip: %s",
+    asn_score,total_asn,
+    country_score,total_country,
+    ipnet_score,total_ipnet,
+    ip_score, total_ip)
 
   local score_mult = 0
   if options['actions'][action] then
@@ -161,6 +165,11 @@ local ip_score_set = function(task)
   country_score,total_country = new_score_set(score, country_score, total_country)
   ipnet_score,total_ipnet = new_score_set(score, ipnet_score, total_ipnet)
   ip_score,total_ip = new_score_set(score, ip_score, total_ip)
+  rspamd_logger.debugm(M, task, "processed scores: asn: %s, total_asn: %s, country: %s, total_country: %s, ipnet: %s, total_ipnet: %s, ip:%s, total_ip: %s",
+    asn_score,total_asn,
+    country_score,total_country,
+    ipnet_score,total_ipnet,
+    ip_score, total_ip)
   local redis_args = {options['hash'],
     options['asn_prefix'] .. asn, string.format('%f|%d', asn_score, total_asn),
     options['country_prefix'] .. country, string.format('%f|%d', country_score, total_country),
@@ -231,7 +240,7 @@ local ip_score_check = function(task)
       -- XXX: upstreams
     end
     local function calculate_score(score)
-      local parts = asn_re:split(score)
+      local parts = rspamd_lua_utils.rspamd_str_split(score, '|')
       local rep = tonumber(parts[1])
       local total = tonumber(parts[2])
 
@@ -372,12 +381,16 @@ if redis_params then
   -- Register ip_score module
   rspamd_config:register_symbol({
     name = 'IPSCORE_SAVE',
-    type = 'postfilter',
+    type = 'postfilter,nostat',
     priority = 5,
     callback = ip_score_set,
   })
   rspamd_config:register_symbol({
     name = options['symbol'],
     callback = ip_score_check,
+    group = 'reputation',
+    score = 2.0
   })
+else
+  rspamd_lua_utils.disable_module(N, "redis")
 end

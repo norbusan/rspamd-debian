@@ -66,6 +66,12 @@ struct rspamd_http_map_cached_cbdata {
 	time_t last_checked;
 };
 
+guint rspamd_map_log_id = (guint)-1;
+RSPAMD_CONSTRUCTOR(rspamd_map_log_init)
+{
+	rspamd_map_log_id = rspamd_logger_add_debug_module("map");
+}
+
 /**
  * Write HTTP request
  */
@@ -99,11 +105,17 @@ write_http_request (struct http_callback_data *cbd)
 			msg->url = rspamd_fstring_append (msg->url,
 					cbd->data->path, strlen (cbd->data->path));
 
-			if (cbd->check &&
-					cbd->data->last_modified != 0 && cbd->stage == map_load_file) {
-				rspamd_http_date_format (datebuf, sizeof (datebuf),
-						cbd->data->last_modified);
-				rspamd_http_message_add_header (msg, "If-Modified-Since", datebuf);
+			if (cbd->check && cbd->stage == map_load_file) {
+				if (cbd->data->last_modified != 0) {
+					rspamd_http_date_format (datebuf, sizeof (datebuf),
+							cbd->data->last_modified);
+					rspamd_http_message_add_header (msg, "If-Modified-Since",
+							datebuf);
+				}
+				if (cbd->data->etag) {
+					rspamd_http_message_add_header_len (msg, "If-None-Match",
+							cbd->data->etag->str, cbd->data->etag->len);
+				}
 			}
 		}
 		else if (cbd->stage == map_load_pubkey) {
@@ -277,7 +289,7 @@ free_http_cbdata_common (struct http_callback_data *cbd, gboolean plan_new)
 
 	MAP_RELEASE (cbd->bk, "rspamd_map_backend");
 	MAP_RELEASE (periodic, "periodic");
-	g_slice_free1 (sizeof (struct http_callback_data), cbd);
+	g_free (cbd);
 }
 
 static void
@@ -344,9 +356,9 @@ rspamd_map_cache_cb (gint fd, short what, gpointer ud)
 		/* We have another update, so this cache element is obviously expired */
 		/* Important: we do not set cache availability to zero here */
 		MAP_RELEASE (cache_cbd->shm, "rspamd_http_map_cached_cbdata");
-		msg_debug_map ("cached data is now expired (gen missmatch) for %s", map->name);
+		msg_debug_map ("cached data is now expired (gen mismatch) for %s", map->name);
 		event_del (&cache_cbd->timeout);
-		g_slice_free1 (sizeof (*cache_cbd), cache_cbd);
+		g_free (cache_cbd);
 	}
 	else if (cache_cbd->data->last_checked > cache_cbd->last_checked) {
 		/*
@@ -363,8 +375,63 @@ rspamd_map_cache_cb (gint fd, short what, gpointer ud)
 		MAP_RELEASE (cache_cbd->shm, "rspamd_http_map_cached_cbdata");
 		msg_debug_map ("cached data is now expired for %s", map->name);
 		event_del (&cache_cbd->timeout);
-		g_slice_free1 (sizeof (*cache_cbd), cache_cbd);
+		g_free (cache_cbd);
 	}
+}
+
+static gboolean
+rspamd_http_check_pubkey (struct http_callback_data *cbd,
+		struct rspamd_http_message *msg)
+{
+	const rspamd_ftok_t *pubkey_hdr;
+
+	pubkey_hdr = rspamd_http_message_find_header (msg, "Pubkey");
+
+	if (pubkey_hdr) {
+		cbd->pk = rspamd_pubkey_from_base32 (pubkey_hdr->begin,
+				pubkey_hdr->len,
+				RSPAMD_KEYPAIR_SIGN, RSPAMD_CRYPTOBOX_MODE_25519);
+
+		return cbd->pk != NULL;
+	}
+
+	return FALSE;
+}
+
+static gboolean
+rspamd_http_check_signature (struct rspamd_map *map,
+		struct http_callback_data *cbd,
+		struct rspamd_http_message *msg)
+{
+	const rspamd_ftok_t *sig_hdr;
+	guchar *in;
+	size_t dlen;
+
+	sig_hdr = rspamd_http_message_find_header (msg, "Signature");
+
+	if (sig_hdr && cbd->pk) {
+		in = rspamd_shmem_xmap (cbd->shmem_data->shm_name, PROT_READ, &dlen);
+
+		if (in == NULL) {
+			msg_err_map ("cannot read tempfile %s: %s",
+					cbd->shmem_data->shm_name,
+					strerror (errno));
+			return FALSE;
+		}
+
+		if (!rspamd_map_check_sig_pk_mem (sig_hdr->begin, sig_hdr->len,
+				map, in,
+				cbd->data_len, cbd->pk)) {
+			munmap (in, dlen);
+			return FALSE;
+		}
+
+		munmap (in, dlen);
+
+		return TRUE;
+	}
+
+	return FALSE;
 }
 
 static int
@@ -376,7 +443,8 @@ http_map_finish (struct rspamd_http_connection *conn,
 	struct rspamd_map_backend *bk;
 	struct rspamd_http_map_cached_cbdata *cache_cbd;
 	struct timeval tv;
-	const rspamd_ftok_t *expires_hdr;
+	const rspamd_ftok_t *expires_hdr, *etag_hdr;
+	char next_check_date[128];
 	guchar *aux_data, *in = NULL;
 	gsize inlen = 0, dlen = 0;
 
@@ -408,17 +476,30 @@ http_map_finish (struct rspamd_http_connection *conn,
 			/* Maybe we need to check signature ? */
 			if (bk->is_signed) {
 
-				if (bk->trusted_pubkey) {
-					/* No need to load key */
-					cbd->stage = map_load_signature;
-					cbd->pk = rspamd_pubkey_ref (bk->trusted_pubkey);
-				}
-				else {
-					cbd->stage = map_load_pubkey;
-				}
-
 				cbd->shmem_data = rspamd_http_message_shmem_ref (msg);
 				cbd->data_len = msg->body_buf.len;
+
+				if (bk->trusted_pubkey) {
+					/* No need to load key */
+					cbd->pk = rspamd_pubkey_ref (bk->trusted_pubkey);
+					cbd->stage = map_load_signature;
+				}
+				else {
+					if (!rspamd_http_check_pubkey (cbd, msg)) {
+						cbd->stage = map_load_pubkey;
+					}
+					else {
+						cbd->stage = map_load_signature;
+					}
+				}
+
+				if (cbd->stage == map_load_signature) {
+					/* Try HTTP header */
+					if (rspamd_http_check_signature (map, cbd, msg)) {
+						goto read_data;
+					}
+				}
+
 				rspamd_http_connection_reset (cbd->conn);
 				write_http_request (cbd);
 				MAP_RELEASE (cbd, "http_callback_data");
@@ -557,6 +638,25 @@ read_data:
 			double_to_tv (map->poll_timeout * 2, &tv);
 		}
 
+		/* Check for etag */
+		etag_hdr = rspamd_http_message_find_header (msg, "ETag");
+
+		if (etag_hdr) {
+			if (cbd->data->etag) {
+				/* Remove old etag */
+				rspamd_fstring_free (cbd->data->etag);
+				cbd->data->etag = rspamd_fstring_new_init (etag_hdr->begin,
+						etag_hdr->len);
+			}
+		}
+		else {
+			if (cbd->data->etag) {
+				/* Remove and clear old etag */
+				rspamd_fstring_free (cbd->data->etag);
+				cbd->data->etag = NULL;
+			}
+		}
+
 		MAP_RETAIN (cbd->shmem_data, "shmem_data");
 		cbd->data->gen ++;
 		/*
@@ -568,7 +668,7 @@ read_data:
 				sizeof (map->cache->shmem_name));
 		map->cache->len = cbd->data_len;
 		map->cache->last_modified = cbd->data->last_modified;
-		cache_cbd = g_slice_alloc0 (sizeof (*cache_cbd));
+		cache_cbd = g_malloc0 (sizeof (*cache_cbd));
 		cache_cbd->shm = cbd->shmem_data;
 		cache_cbd->map = map;
 		cache_cbd->data = cbd->data;
@@ -580,6 +680,15 @@ read_data:
 				cache_cbd);
 		event_base_set (cbd->ev_base, &cache_cbd->timeout);
 		event_add (&cache_cbd->timeout, &tv);
+
+		if (map->next_check) {
+			rspamd_http_date_format (next_check_date, sizeof (next_check_date),
+					map->next_check);
+		}
+		else {
+			rspamd_http_date_format (next_check_date, sizeof (next_check_date),
+					time (NULL) + map->poll_timeout);
+		}
 
 
 		if (cbd->bk->is_compressed) {
@@ -630,18 +739,18 @@ read_data:
 
 			ZSTD_freeDStream (zstream);
 			msg_info_map ("%s(%s): read map data %z bytes compressed, "
-					"%z uncompressed",
+					"%z uncompressed, next check at %s",
 					cbd->bk->uri,
 					rspamd_inet_address_to_string_pretty (cbd->addr),
-					dlen, zout.pos);
+					dlen, zout.pos, next_check_date);
 			map->read_callback (out, zout.pos, &cbd->periodic->cbdata, TRUE);
 			g_free (out);
 		}
 		else {
-			msg_info_map ("%s(%s): read map data %z bytes",
+			msg_info_map ("%s(%s): read map data %z bytes, next check at %s",
 					cbd->bk->uri,
 					rspamd_inet_address_to_string_pretty (cbd->addr),
-					dlen);
+					dlen, next_check_date);
 			map->read_callback (in, cbd->data_len, &cbd->periodic->cbdata, TRUE);
 		}
 
@@ -652,9 +761,6 @@ read_data:
 		rspamd_map_periodic_callback (-1, EV_TIMEOUT, cbd->periodic);
 	}
 	else if (msg->code == 304 && (cbd->check && cbd->stage == map_load_file)) {
-		msg_debug_map ("data is not modified for server %s",
-				cbd->data->host);
-
 		cbd->data->last_checked = msg->date;
 
 		if (msg->last_modified) {
@@ -680,6 +786,28 @@ read_data:
 				map->next_check = hdate;
 			}
 		}
+
+		etag_hdr = rspamd_http_message_find_header (msg, "ETag");
+
+		if (etag_hdr) {
+			if (cbd->data->etag) {
+				/* Remove old etag */
+				rspamd_fstring_free (cbd->data->etag);
+				cbd->data->etag = rspamd_fstring_new_init (etag_hdr->begin,
+						etag_hdr->len);
+			}
+		}
+
+		if (map->next_check) {
+			rspamd_http_date_format (next_check_date, sizeof (next_check_date),
+					map->next_check);
+		}
+		else {
+			rspamd_http_date_format (next_check_date, sizeof (next_check_date),
+					time (NULL) + map->poll_timeout);
+		}
+		msg_info_map ("data is not modified for server %s, next check at %s",
+				cbd->data->host, next_check_date);
 
 		cbd->periodic->cur_backend ++;
 		rspamd_map_periodic_callback (-1, EV_TIMEOUT, cbd->periodic);
@@ -719,9 +847,17 @@ read_map_file (struct rspamd_map *map, struct file_map_data *data,
 
 	if (access (data->filename, R_OK) == -1) {
 		/* File does not exist, skipping */
-		msg_err_map ("%s: map file is unavailable for reading",
-				data->filename);
-		return TRUE;
+		if (errno != ENOENT) {
+			msg_err_map ("%s: map file is unavailable for reading: %s",
+					data->filename, strerror (errno));
+
+			return FALSE;
+		}
+		else {
+			msg_info_map ("%s: map file is not found",
+					data->filename);
+			return TRUE;
+		}
 	}
 
 	bytes = rspamd_file_xmap (data->filename, PROT_READ, &len, TRUE);
@@ -919,7 +1055,7 @@ rspamd_map_periodic_dtor (struct map_periodic_cbdata *periodic)
 		msg_debug_map ("unlocked map");
 	}
 
-	g_slice_free1 (sizeof (*periodic), periodic);
+	g_free (periodic);
 }
 
 static void
@@ -930,6 +1066,11 @@ rspamd_map_schedule_periodic (struct rspamd_map *map,
 	gdouble jittered_sec;
 	gdouble timeout;
 	struct map_periodic_cbdata *cbd;
+
+	if (map->scheduled_check) {
+		/* Do not schedule check if some check is already scheduled */
+		return;
+	}
 
 	if (map->next_check != 0) {
 		timeout = map->next_check - rspamd_get_calendar_ticks ();
@@ -970,12 +1111,13 @@ rspamd_map_schedule_periodic (struct rspamd_map *map,
 		jittered_sec = rspamd_time_jitter (timeout, 0);
 	}
 
-	cbd = g_slice_alloc0 (sizeof (*cbd));
+	cbd = g_malloc0 (sizeof (*cbd));
 	cbd->cbdata.state = 0;
 	cbd->cbdata.prev_data = *map->user_data;
 	cbd->cbdata.cur_data = NULL;
 	cbd->cbdata.map = map;
 	cbd->map = map;
+	map->scheduled_check = TRUE;
 	REF_INIT_RETAIN (cbd, rspamd_map_periodic_dtor);
 
 	evtimer_set (&cbd->ev, rspamd_map_periodic_callback, cbd);
@@ -985,7 +1127,6 @@ rspamd_map_schedule_periodic (struct rspamd_map *map,
 	msg_debug_map ("schedule new periodic event %p in %.2f seconds",
 			cbd, jittered_sec);
 	double_to_tv (jittered_sec, &map->tv);
-
 	evtimer_add (&cbd->ev, &map->tv);
 }
 
@@ -1044,6 +1185,8 @@ rspamd_map_dns_callback (struct rdns_reply *reply, void *arg)
 		else {
 			/* We could not resolve host, so cowardly fail here */
 			msg_err_map ("cannot resolve %s", cbd->data->host);
+			cbd->periodic->errored = 1;
+			rspamd_map_periodic_callback (-1, EV_TIMEOUT, cbd->periodic);
 		}
 	}
 
@@ -1198,7 +1341,7 @@ rspamd_map_common_http_callback (struct rspamd_map *map,
 	}
 
 check:
-	cbd = g_slice_alloc0 (sizeof (struct http_callback_data));
+	cbd = g_malloc0 (sizeof (struct http_callback_data));
 
 	cbd->ev_base = map->ev_base;
 	cbd->map = map;
@@ -1407,6 +1550,7 @@ rspamd_map_periodic_callback (gint fd, short what, void *ud)
 	struct rspamd_map *map;
 
 	map = cbd->map;
+	map->scheduled_check = FALSE;
 
 	if (!cbd->locked) {
 		if (!g_atomic_int_compare_and_exchange (cbd->map->locked, 0, 1)) {
@@ -1499,6 +1643,15 @@ rspamd_map_watch (struct rspamd_config *cfg, struct event_base *ev_base,
 
 		if (active_http) {
 			map->active_http = active_http;
+		}
+
+		if (!map->active_http) {
+			/* Check cached version more frequently as it is cheap */
+
+			if (map->poll_timeout >= cfg->map_timeout &&
+					cfg->map_file_watch_multiplier < 1.0) {
+				map->poll_timeout = map->poll_timeout * cfg->map_file_watch_multiplier;
+			}
 		}
 
 		rspamd_map_schedule_periodic (map, FALSE, TRUE, FALSE);
@@ -1672,7 +1825,7 @@ rspamd_map_backend_dtor (struct rspamd_map_backend *bk)
 	case MAP_PROTO_FILE:
 		if (bk->data.fd) {
 			g_free (bk->data.fd->filename);
-			g_slice_free1 (sizeof (*bk->data.fd), bk->data.fd);
+			g_free (bk->data.fd);
 		}
 		break;
 	case MAP_PROTO_STATIC:
@@ -1687,7 +1840,12 @@ rspamd_map_backend_dtor (struct rspamd_map_backend *bk)
 		if (bk->data.hd) {
 			g_free (bk->data.hd->host);
 			g_free (bk->data.hd->path);
-			g_slice_free1 (sizeof (*bk->data.hd), bk->data.hd);
+
+			if (bk->data.hd->etag) {
+				rspamd_fstring_free (bk->data.hd->etag);
+			}
+
+			g_free (bk->data.hd);
 		}
 		break;
 	}
@@ -1696,7 +1854,7 @@ rspamd_map_backend_dtor (struct rspamd_map_backend *bk)
 		rspamd_pubkey_unref (bk->trusted_pubkey);
 	}
 
-	g_slice_free1 (sizeof (*bk), bk);
+	g_free (bk);
 }
 
 static struct rspamd_map_backend *
@@ -1710,7 +1868,7 @@ rspamd_map_parse_backend (struct rspamd_config *cfg, const gchar *map_line)
 	const gchar *end, *p;
 	rspamd_ftok_t tok;
 
-	bk = g_slice_alloc0 (sizeof (*bk));
+	bk = g_malloc0 (sizeof (*bk));
 	REF_INIT_RETAIN (bk, rspamd_map_backend_dtor);
 
 	if (!rspamd_map_check_proto (cfg, map_line, bk)) {
@@ -1731,7 +1889,7 @@ rspamd_map_parse_backend (struct rspamd_config *cfg, const gchar *map_line)
 
 	/* Now check for each proto separately */
 	if (bk->protocol == MAP_PROTO_FILE) {
-		fdata = g_slice_alloc0 (sizeof (struct file_map_data));
+		fdata = g_malloc0 (sizeof (struct file_map_data));
 		fdata->st.st_mtime = -1;
 
 		if (access (bk->uri, R_OK) == -1) {
@@ -1749,7 +1907,7 @@ rspamd_map_parse_backend (struct rspamd_config *cfg, const gchar *map_line)
 		bk->data.fd = fdata;
 	}
 	else if (bk->protocol == MAP_PROTO_HTTP || bk->protocol == MAP_PROTO_HTTPS) {
-		hdata = g_slice_alloc0 (sizeof (struct http_map_data));
+		hdata = g_malloc0 (sizeof (struct http_map_data));
 
 		memset (&up, 0, sizeof (up));
 		if (http_parser_parse_url (bk->uri, strlen (bk->uri), FALSE,
@@ -1789,7 +1947,7 @@ rspamd_map_parse_backend (struct rspamd_config *cfg, const gchar *map_line)
 
 		bk->data.hd = hdata;
 	}else if (bk->protocol == MAP_PROTO_STATIC) {
-		sdata = g_slice_alloc0 (sizeof (*sdata));
+		sdata = g_malloc0 (sizeof (*sdata));
 		bk->data.sd = sdata;
 	}
 
@@ -1802,7 +1960,7 @@ err:
 	MAP_RELEASE (bk, "rspamd_map_backend");
 
 	if (hdata) {
-		g_slice_free1 (sizeof (*hdata), hdata);
+		g_free (hdata);
 	}
 
 	return NULL;
@@ -1930,7 +2088,8 @@ rspamd_map_add_from_ucl (struct rspamd_config *cfg,
 
 				if (bk != NULL) {
 					if (bk->protocol == MAP_PROTO_FILE) {
-						map->poll_timeout = (map->poll_timeout * cfg->map_file_watch_multiplier);
+						map->poll_timeout = (map->poll_timeout *
+								cfg->map_file_watch_multiplier);
 					}
 					g_ptr_array_add (map->backends, bk);
 
@@ -2063,7 +2222,7 @@ rspamd_map_add_from_ucl (struct rspamd_config *cfg,
 	}
 
 	rspamd_map_calculate_hash (map);
-	msg_info_map ("added map from ucl");
+	msg_debug_map ("added map from ucl");
 
 	cfg->maps = g_list_prepend (cfg->maps, map);
 
@@ -2578,7 +2737,7 @@ rspamd_regexp_map_create (struct rspamd_map *map,
 {
 	struct rspamd_regexp_map *re_map;
 
-	re_map = g_slice_alloc0 (sizeof (*re_map));
+	re_map = g_malloc0 (sizeof (*re_map));
 	re_map->values = g_ptr_array_new ();
 	re_map->regexps = g_ptr_array_new ();
 	re_map->map = map;
@@ -2624,7 +2783,7 @@ rspamd_regexp_map_destroy (struct rspamd_regexp_map *re_map)
 	}
 #endif
 
-	g_slice_free1 (sizeof (*re_map), re_map);
+	g_free (re_map);
 }
 
 static void

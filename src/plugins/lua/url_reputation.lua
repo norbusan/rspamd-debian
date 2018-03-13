@@ -24,7 +24,7 @@ end
 local E = {}
 local N = 'url_reputation'
 
-local whitelist, redis_params, redis_incr_script_sha
+local whitelist, redis_params, redis_incr_script_id
 local settings = {
   expire = 86400, -- 1 day
   key_prefix = 'Ur.',
@@ -63,58 +63,8 @@ local scale = {
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util = require "rspamd_util"
-
--- This function is used for taskless redis requests (to load scripts)
-local function redis_make_request(ev_base, cfg, key, is_write, callback, command, args)
-  if not ev_base or not redis_params or not callback or not command then
-    return false,nil,nil
-  end
-
-  local addr
-  local rspamd_redis = require "rspamd_redis"
-
-  if key then
-    if is_write then
-      addr = redis_params['write_servers']:get_upstream_by_hash(key)
-    else
-      addr = redis_params['read_servers']:get_upstream_by_hash(key)
-    end
-  else
-    if is_write then
-      addr = redis_params['write_servers']:get_upstream_master_slave(key)
-    else
-      addr = redis_params['read_servers']:get_upstream_round_robin(key)
-    end
-  end
-
-  if not addr then
-    rspamd_logger.errx(cfg, 'cannot select server to make redis request')
-  end
-
-  local options = {
-    ev_base = ev_base,
-    config = cfg,
-    callback = callback,
-    host = addr:get_addr(),
-    timeout = redis_params['timeout'],
-    cmd = command,
-    args = args
-  }
-
-  if redis_params['password'] then
-    options['password'] = redis_params['password']
-  end
-
-  if redis_params['db'] then
-    options['dbname'] = redis_params['db']
-  end
-
-  local ret,conn = rspamd_redis.make_request(options)
-  if not ret then
-    rspamd_logger.errx('cannot execute redis request')
-  end
-  return ret,conn,addr
-end
+local lua_util = require "lua_util"
+local rspamd_redis = require "lua_redis"
 
 local redis_incr_script = [[
 for _, k in ipairs(KEYS) do
@@ -124,21 +74,7 @@ end
 
 -- Function to load the script
 local function load_scripts(cfg, ev_base)
-  local function redis_incr_script_cb(err, data)
-    if err then
-      rspamd_logger.errx(cfg, 'Increment script loading failed: ' .. err)
-    else
-      redis_incr_script_sha = tostring(data)
-    end
-  end
-  redis_make_request(ev_base,
-    rspamd_config,
-    nil,
-    true, -- is write
-    redis_incr_script_cb, --callback
-    'SCRIPT', -- command
-    {'LOAD', redis_incr_script}
-  )
+  redis_incr_script_id = rspamd_redis.add_redis_script(redis_incr_script, redis_params)
 end
 
 -- Calculates URL reputation
@@ -225,8 +161,6 @@ local function url_reputation_check(task)
       if which then
         -- Update reputation for guilty domain only
         rk = {
-          redis_incr_script_sha,
-          2,
           settings.key_prefix .. which .. '_total',
           settings.key_prefix .. which .. '_' .. scale[reputation],
         }
@@ -298,7 +232,7 @@ local function url_reputation_check(task)
           end
         end
 
-        rk = {redis_incr_script_sha, 0}
+        rk = {}
         local added = 0
         if most_relevant then
           tlds = {most_relevant}
@@ -314,16 +248,11 @@ local function url_reputation_check(task)
           added = added + 1
         end
       end
-      if rk[3] then
-        rk[2] = (#rk - 2)
-        local ret = rspamd_redis_make_request(task,
-          redis_params,
-          rk[3],
-          true, -- is write
-          redis_incr_cb, --callback
-          'EVALSHA', -- command
-          rk
-        )
+      if rk[2] then
+        local ret = rspamd_redis.exec_redis_script(redis_incr_script_id,
+          {task = task, is_write = true},
+          redis_incr_cb,
+          rk)
         if not ret then
           rspamd_logger.errx(task, 'couldnt schedule increment')
         end
@@ -402,11 +331,16 @@ local function url_reputation_check(task)
   end
 end
 
+if not lua_util.check_experimental(N) then
+  return
+end
+
 local opts = rspamd_config:get_all_opt(N)
 if not opts then return end
 redis_params = rspamd_parse_redis_server(N)
 if not redis_params then
   rspamd_logger.warnx(rspamd_config, 'no servers are specified, disabling module')
+  lua_util.disable_module(N, "redis")
   return
 end
 for k, v in pairs(opts) do
@@ -427,6 +361,7 @@ for k, v in pairs(opts) do
 end
 if settings.threshold < 1 then
   rspamd_logger.errx(rspamd_config, 'threshold should be >= 1, disabling module')
+  lua_util.disable_module(N, "config")
   return
 end
 

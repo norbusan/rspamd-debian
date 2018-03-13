@@ -75,6 +75,12 @@ LUA_FUNCTION_DEF (logger, warn);
  */
 LUA_FUNCTION_DEF (logger, info);
 /***
+ * @function logger.message(msg)
+ * Log message as an notice message
+ * @param {string} msg string to be logged
+ */
+LUA_FUNCTION_DEF (logger, message);
+/***
  * @function logger.debug(msg)
  * Log message as a debug message
  * @param {string} msg string to be logged
@@ -101,6 +107,13 @@ LUA_FUNCTION_DEF (logger, warnx);
  * @param {any} args list of arguments to be replaced in %<number> positions
  */
 LUA_FUNCTION_DEF (logger, infox);
+/***
+ * @function logger.infox(fmt[, args)
+ * Extended interface to make an informational log message
+ * @param {string} fmt format string, arguments are encoded as %<number>
+ * @param {any} args list of arguments to be replaced in %<number> positions
+ */
+LUA_FUNCTION_DEF (logger, messagex);
 /***
  * @function logger.debugx(fmt[, args)
  * Extended interface to make a debug log message
@@ -130,11 +143,15 @@ LUA_FUNCTION_DEF (logger, slog);
 static const struct luaL_reg loggerlib_f[] = {
 		LUA_INTERFACE_DEF (logger, err),
 		LUA_INTERFACE_DEF (logger, warn),
+		LUA_INTERFACE_DEF (logger, message),
+		{"msg", lua_logger_message},
 		LUA_INTERFACE_DEF (logger, info),
 		LUA_INTERFACE_DEF (logger, debug),
 		LUA_INTERFACE_DEF (logger, errx),
 		LUA_INTERFACE_DEF (logger, warnx),
 		LUA_INTERFACE_DEF (logger, infox),
+		LUA_INTERFACE_DEF (logger, messagex),
+		{"msgx", lua_logger_messagex},
 		LUA_INTERFACE_DEF (logger, debugx),
 		LUA_INTERFACE_DEF (logger, debugm),
 		LUA_INTERFACE_DEF (logger, slog),
@@ -158,8 +175,8 @@ lua_common_log_line (GLogLevelFlags level, lua_State *L,
 			p++;
 		}
 
-		if (strlen (p) > 20) {
-			rspamd_snprintf (func_buf, sizeof (func_buf), "%10s...]:%d", p,
+		if (strlen (p) > 30) {
+			rspamd_snprintf (func_buf, sizeof (func_buf), "%27s...:%d", p,
 					d.currentline);
 		}
 		else {
@@ -237,6 +254,15 @@ lua_logger_info (lua_State *L)
 }
 
 static gint
+lua_logger_message (lua_State *L)
+{
+	const gchar *msg;
+	msg = luaL_checkstring (L, 1);
+	lua_common_log_line (G_LOG_LEVEL_MESSAGE, L, msg, NULL, NULL);
+	return 0;
+}
+
+static gint
 lua_logger_debug (lua_State *L)
 {
 	const gchar *msg;
@@ -248,11 +274,12 @@ lua_logger_debug (lua_State *L)
 static gsize
 lua_logger_out_str (lua_State *L, gint pos, gchar *outbuf, gsize len)
 {
-	const gchar *str = lua_tostring (L, pos);
+	gsize slen;
+	const gchar *str = lua_tolstring (L, pos, &slen);
 	gsize r = 0;
 
 	if (str) {
-		r = rspamd_strlcpy (outbuf, str, len + 1);
+		r = rspamd_strlcpy (outbuf, str, MIN (slen, len) + 1);
 	}
 
 	return r;
@@ -708,6 +735,12 @@ static gint
 lua_logger_infox (lua_State *L)
 {
 	return lua_logger_logx (L, G_LOG_LEVEL_INFO, FALSE);
+}
+
+static gint
+lua_logger_messagex (lua_State *L)
+{
+	return lua_logger_logx (L, G_LOG_LEVEL_MESSAGE, FALSE);
 }
 
 static gint

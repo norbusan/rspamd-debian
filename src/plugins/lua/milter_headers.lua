@@ -113,6 +113,10 @@ local settings = {
       },
       add_smtp_user = true,
     },
+    ['stat-signature'] = {
+      header = 'X-Stat-Signature',
+      remove = 1,
+    },
   },
 }
 
@@ -187,7 +191,7 @@ local function milter_headers(task)
         ' ', s.name, '(', string.format('%.2f', s.score), ')[', table.concat(s.options, ','), ']',
       }))
     end
-    add[settings.routines['x-spamd-result'].header] = table.concat(buf, '\n')
+    add[settings.routines['x-spamd-result'].header] = table.concat(buf, '\n\t')
   end
 
   routines['x-rspamd-queue-id'] = function()
@@ -346,7 +350,7 @@ local function milter_headers(task)
 
   routines['authentication-results'] = function()
     if skip_wanted('authentication-results') then return end
-    local ar = require "auth_results"
+    local ar = require "lua_auth_results"
 
     if settings.routines['authentication-results'].remove then
       remove[settings.routines['authentication-results'].header] =
@@ -361,6 +365,18 @@ local function milter_headers(task)
         value = res,
         order = 0
       }
+    end
+  end
+
+  routines['stat-signature'] = function()
+    if skip_wanted('stat-signature') then return end
+    if settings.routines['stat-signature'].remove then
+      remove[settings.routines['stat-signature'].header] =
+        settings.routines['stat-signature'].remove
+    end
+    local res = task:get_mempool():get_variable("stat_signature")
+    if res then
+      add[settings.routines['stat-signature'].header] = res
     end
   end
 
@@ -512,7 +528,7 @@ if type(opts['extended_headers_rcpt']) == 'table' and opts['extended_headers_rcp
 end
 rspamd_config:register_symbol({
   name = 'MILTER_HEADERS',
-  type = 'postfilter',
+  type = 'postfilter,idempotent',
   callback = milter_headers,
   priority = 10
 })

@@ -54,7 +54,7 @@ Subject: Report Domain: %s
 Date: %s
 MIME-Version: 1.0
 Message-ID: <%s>
-Content-Type: multipart/alternative;
+Content-Type: multipart/mixed;
 	boundary="----=_NextPart_000_024E_01CC9B0A.AFE54C00"
 
 This is a multipart message in MIME format.
@@ -134,7 +134,7 @@ local dmarc_actions = {}
 
 local E = {}
 
-local take_report_sha
+local take_report_id
 local take_report_script = [[
 local index_key = KEYS[1]
 local report_key = KEYS[2]
@@ -156,29 +156,6 @@ local function get_timezone_offset(ts)
 end
 
 local tz_offset = get_timezone_offset(os.time())
-
-local function load_scripts(cfg, ev_base)
-  local function redis_report_script_cb(err, data)
-    if err then
-      rspamd_logger.errx(cfg, 'DMARC report script loading failed: ' .. err)
-    else
-      take_report_sha = tostring(data)
-      rspamd_logger.infox(cfg, 'Loaded DMARC report script with SHA %s', take_report_sha)
-    end
-  end
-  local ret = rspamd_redis.redis_make_request_taskless(ev_base,
-    rspamd_config,
-    redis_params,
-    nil,
-    true, -- is write
-    redis_report_script_cb, --callback
-    'SCRIPT', -- command
-    {'LOAD', take_report_script}
-  )
-  if not ret then
-    rspamd_logger.errx(cfg, 'Unable to load DMARC report script')
-  end
-end
 
 local function gen_dmarc_grammar()
   local lpeg = require "lpeg"
@@ -259,9 +236,6 @@ local function dmarc_callback(task)
       rspamd_logger.infox(task, '<%1> dmarc report saved for %2',
         task:get_message_id(), hfromdom)
     else
-      if string.match(err, 'NOSCRIPT') then
-        load_scripts(rspamd_config, task:get_ev_base())
-      end
       rspamd_logger.errx(task, '<%1> dmarc report is not saved for %2: %3',
         task:get_message_id(), hfromdom, err)
     end
@@ -306,7 +280,7 @@ local function dmarc_callback(task)
 
     for _,r in ipairs(results) do
       if failed_policy then break end
-      (function()
+      local function try()
         local elts = dmarc_grammar:match(r)
         if not elts then
           return
@@ -381,7 +355,8 @@ local function dmarc_callback(task)
             rua = elts['rua']
           end
         end
-      end)()
+      end
+      try()
     end
 
     if not found_policy then
@@ -566,17 +541,8 @@ local function dmarc_callback(task)
       local idx_key = table.concat({redis_keys.index_prefix, period}, redis_keys.join_char)
 
       if report_data then
-        local ret = rspamd_redis.redis_make_request(task,
-          redis_params, -- connect params
-          hfromdom, -- hash key
-          true, -- is write
-          dmarc_report_cb, --callback
-          'EVALSHA', -- command
-          {take_report_sha, 2, idx_key, dmarc_domain_key, hfromdom, report_data} -- arguments
-        )
-        if not ret then
-          rspamd_logger.errx(task, 'Unable to schedule redis request')
-        end
+        rspamd_redis.exec_redis_script(take_report_id, {task = task, is_write = true}, dmarc_report_cb,
+          {idx_key, dmarc_domain_key}, {hfromdom, report_data})
       end
     end
 
@@ -624,9 +590,7 @@ if opts['reporting'] == true then
     rspamd_logger.errx(rspamd_config, 'cannot parse servers parameter')
   elseif not opts['send_reports'] then
     dmarc_reporting = true
-    rspamd_config:add_on_load(function(cfg, ev_base, worker)
-      load_scripts(cfg, ev_base)
-    end)
+    take_report_id = rspamd_redis.add_redis_script(take_report_script, redis_params)
   else
     dmarc_reporting = true
     if type(opts['report_settings']) == 'table' then
@@ -640,9 +604,9 @@ if opts['reporting'] == true then
         return
       end
     end
+    take_report_id = rspamd_redis.add_redis_script(take_report_script, redis_params)
     rspamd_config:add_on_load(function(cfg, ev_base, worker)
-      load_scripts(cfg, ev_base)
-      if not (worker:get_name() == 'controller' and worker:get_index() == 0) then return end
+      if not worker:is_primary_controller() then return end
       local rresolver = rspamd_resolver.init(ev_base, rspamd_config)
       rspamd_config:register_finish_script(function ()
         local stamp = pool:get_variable(VAR_NAME, 'double')
@@ -1225,7 +1189,7 @@ if type(opts['report_settings']) == 'table' then
     report_settings[k] = v
   end
 end
-if dmarc_reporting then
+if opts['send_reports'] then
   for _, e in ipairs({'email', 'domain', 'org_name'}) do
     if not report_settings[e] then
       rspamd_logger.errx(rspamd_config, 'Missing required setting: report_settings.%s', e)

@@ -41,15 +41,18 @@
         "milter", priv->pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
-#define msg_debug_milter(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
-        "milter", priv->pool->tag.uid, \
+#define msg_debug_milter(...)  rspamd_conditional_debug_fast (NULL, NULL, \
+        rspamd_milter_log_id, "milter", priv->pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
+
+INIT_LOG_MODULE(milter)
 
 struct rspamd_milter_context {
 	gchar *spam_header;
 	void *sessions_cache;
 	gboolean discard_on_reject;
+	gboolean quarantine_on_reject;
 };
 
 static struct rspamd_milter_context *milter_ctx = NULL;
@@ -99,6 +102,8 @@ rspamd_milter_session_reset (struct rspamd_milter_session *session,
 	guint i;
 
 	if (how & RSPAMD_MILTER_RESET_IO) {
+		msg_debug_milter ("cleanup IO on abort");
+
 		DL_FOREACH_SAFE (priv->out_chain, obuf, obuf_tmp) {
 			rspamd_milter_obuf_free (obuf);
 		}
@@ -111,39 +116,50 @@ rspamd_milter_session_reset (struct rspamd_milter_session *session,
 	}
 
 	if (how & RSPAMD_MILTER_RESET_COMMON) {
+		msg_debug_milter ("cleanup common data on abort");
+
 		if (session->message) {
 			session->message->len = 0;
+			msg_debug_milter ("cleanup message on abort");
 		}
 
 		if (session->rcpts) {
 			PTR_ARRAY_FOREACH (session->rcpts, i, cur) {
-				rspamd_email_address_unref (cur);
+				rspamd_email_address_free (cur);
 			}
+
+			msg_debug_milter ("cleanup %d recipients on abort",
+					(gint)session->rcpts->len);
 
 			g_ptr_array_free (session->rcpts, TRUE);
 			session->rcpts = NULL;
 		}
 
 		if (session->from) {
-			rspamd_email_address_unref (session->from);
+			msg_debug_milter ("cleanup from");
+			rspamd_email_address_free (session->from);
 			session->from = NULL;
 		}
 
 		if (session->helo) {
+			msg_debug_milter ("cleanup helo");
 			session->helo->len = 0;
 		}
 
 		if (session->hostname) {
+			msg_debug_milter ("cleanup hostname");
 			session->hostname->len = 0;
 		}
 
 		if (priv->headers) {
+			msg_debug_milter ("cleanup headers");
 			g_hash_table_remove_all (priv->headers);
 		}
 	}
 
 	if (how & RSPAMD_MILTER_RESET_ADDR) {
 		if (session->addr) {
+			msg_debug_milter ("cleanup addr");
 			rspamd_inet_address_free (session->addr);
 			session->addr = NULL;
 		}
@@ -151,6 +167,7 @@ rspamd_milter_session_reset (struct rspamd_milter_session *session,
 
 	if (how & RSPAMD_MILTER_RESET_MACRO) {
 		if (session->macros) {
+			msg_debug_milter ("cleanup macros");
 			g_hash_table_unref (session->macros);
 			session->macros = NULL;
 		}
@@ -1075,6 +1092,8 @@ rspamd_milter_handle_socket (gint fd, const struct timeval *tv,
 	priv->ev_base = ev_base;
 	priv->state = RSPAMD_MILTER_READ_MORE;
 	priv->pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), "milter");
+	priv->discard_on_reject = milter_ctx->discard_on_reject;
+	priv->quarantine_on_reject = milter_ctx->quarantine_on_reject;
 
 	if (pool) {
 		/* Copy tag */
@@ -1140,7 +1159,9 @@ rspamd_milter_send_action (struct rspamd_milter_session *session,
 	va_list ap;
 	guchar cmd, *pos;
 	rspamd_fstring_t *reply = NULL;
+	gsize len;
 	GString *name, *value;
+	const char *reason;
 	struct rspamd_milter_outbuf *obuf;
 	struct rspamd_milter_private *priv = session->priv;
 
@@ -1156,6 +1177,17 @@ rspamd_milter_send_action (struct rspamd_milter_session *session,
 	case RSPAMD_MILTER_TEMPFAIL:
 		/* No additional arguments */
 		SET_COMMAND (cmd, 0, reply, pos);
+		break;
+	case RSPAMD_MILTER_QUARANTINE:
+		reason = va_arg (ap, const char *);
+
+		if (reason == NULL) {
+			reason = "";
+		}
+
+		len = strlen (reason);
+		SET_COMMAND (cmd, len + 1, reply, pos);
+		memcpy (pos, reason, len + 1);
 		break;
 	case RSPAMD_MILTER_ADDHEADER:
 		name = va_arg (ap, GString *);
@@ -1185,6 +1217,7 @@ rspamd_milter_send_action (struct rspamd_milter_session *session,
 	case RSPAMD_MILTER_REPLYCODE:
 	case RSPAMD_MILTER_ADDRCPT:
 	case RSPAMD_MILTER_DELRCPT:
+	case RSPAMD_MILTER_CHGFROM:
 		/* Single GString * argument */
 		value = va_arg (ap, GString *);
 		SET_COMMAND (cmd, value->len + 1, reply, pos);
@@ -1316,6 +1349,11 @@ rspamd_milter_macro_http (struct rspamd_milter_session *session,
 	}
 
 	IF_MACRO("{auth_authen}") {
+		rspamd_http_message_add_header_len (msg, USER_HEADER,
+				found->begin, found->len);
+	}
+
+	IF_MACRO("{cert_subject}") {
 		rspamd_http_message_add_header_len (msg, USER_HEADER,
 				found->begin, found->len);
 	}
@@ -1471,6 +1509,7 @@ rspamd_milter_process_milter_block (struct rspamd_milter_session *session,
 {
 	const ucl_object_t *elt, *cur, *cur_elt;
 	ucl_object_iter_t it;
+	struct rspamd_milter_private *priv = session->priv;
 	GString *hname, *hvalue;
 	gint idx = -1;
 
@@ -1550,6 +1589,39 @@ rspamd_milter_process_milter_block (struct rspamd_milter_session *session,
 				}
 			}
 		}
+
+		elt = ucl_object_lookup (obj, "change_from");
+
+		if (elt && ucl_object_type (elt) == UCL_STRING) {
+			hvalue = g_string_new (ucl_object_tostring (elt));
+			rspamd_milter_send_action (session,
+					RSPAMD_MILTER_CHGFROM,
+					hvalue);
+			g_string_free (hvalue, TRUE);
+		}
+
+		elt = ucl_object_lookup (obj, "reject");
+
+		if (elt && ucl_object_type (elt) == UCL_STRING) {
+			if (strcmp (ucl_object_tostring (elt), "discard") == 0) {
+				priv->discard_on_reject = TRUE;
+				msg_info_milter ("discard message instead of rejection");
+			}
+			else if (strcmp (ucl_object_tostring (elt), "quarantine") == 0) {
+				priv->quarantine_on_reject = TRUE;
+				msg_info_milter ("quarantine message instead of rejection");
+			}
+			else {
+				priv->discard_on_reject = FALSE;
+				priv->quarantine_on_reject = FALSE;
+			}
+		}
+
+		elt = ucl_object_lookup (obj, "no_action");
+
+		if (elt && ucl_object_type (elt) == UCL_BOOLEAN) {
+			priv->no_action = ucl_object_toboolean (elt);
+		}
 	}
 
 	if (action == METRIC_ACTION_ADD_HEADER) {
@@ -1603,6 +1675,7 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 {
 	const ucl_object_t *elt;
 	struct rspamd_milter_private *priv = session->priv;
+	const gchar *str_action;
 	gint action = METRIC_ACTION_REJECT;
 	rspamd_fstring_t *xcode = NULL, *rcode = NULL, *reply = NULL;
 	GString *hname, *hvalue;
@@ -1612,7 +1685,7 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 		msg_err_milter ("cannot find scan results, tempfail");
 		rspamd_milter_send_action (session, RSPAMD_MILTER_TEMPFAIL);
 
-		return;
+		goto cleanup;
 	}
 
 	elt = ucl_object_lookup (results, "action");
@@ -1621,10 +1694,11 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 		msg_err_milter ("cannot find action in results, tempfail");
 		rspamd_milter_send_action (session, RSPAMD_MILTER_TEMPFAIL);
 
-		return;
+		goto cleanup;
 	}
 
-	rspamd_action_from_str (ucl_object_tostring (elt), &action);
+	str_action = ucl_object_tostring (elt);
+	rspamd_action_from_str (str_action, &action);
 
 	elt = ucl_object_lookup (results, "messages");
 	if (elt) {
@@ -1664,10 +1738,30 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 		goto cleanup;
 	}
 
+	if (priv->no_action) {
+		msg_info_milter ("do not apply action %s, no_action is set",
+				str_action);
+		hname = g_string_new (RSPAMD_MILTER_ACTION_HEADER);
+		hvalue = g_string_new (str_action);
+
+		rspamd_milter_send_action (session, RSPAMD_MILTER_ADDHEADER,
+				hname, hvalue);
+		g_string_free (hname, TRUE);
+		g_string_free (hvalue, TRUE);
+		rspamd_milter_send_action (session, RSPAMD_MILTER_ACCEPT);
+
+		goto cleanup;
+	}
+
 	switch (action) {
 	case METRIC_ACTION_REJECT:
-		if (milter_ctx->discard_on_reject) {
+		if (priv->discard_on_reject) {
 			rspamd_milter_send_action (session, RSPAMD_MILTER_DISCARD);
+		}
+		else if (priv->quarantine_on_reject) {
+			/* TODO: be more flexible about SMTP messages */
+			rspamd_milter_send_action (session, RSPAMD_MILTER_QUARANTINE,
+					RSPAMD_MILTER_QUARANTINE_MESSAGE);
 		}
 		else {
 			rcode = rspamd_fstring_new_init (RSPAMD_MILTER_RCODE_REJECT,
@@ -1681,7 +1775,6 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 			}
 
 			rspamd_milter_set_reply (session, rcode, xcode, reply);
-			rspamd_milter_send_action (session, RSPAMD_MILTER_REJECT);
 		}
 		break;
 	case METRIC_ACTION_SOFT_REJECT:
@@ -1696,7 +1789,6 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 		}
 
 		rspamd_milter_set_reply (session, rcode, xcode, reply);
-		rspamd_milter_send_action (session, RSPAMD_MILTER_REJECT);
 		break;
 
 	case METRIC_ACTION_REWRITE_SUBJECT:
@@ -1741,11 +1833,13 @@ cleanup:
 	rspamd_fstring_free (rcode);
 	rspamd_fstring_free (xcode);
 	rspamd_fstring_free (reply);
+
+	rspamd_milter_session_reset (session, RSPAMD_MILTER_RESET_ABORT);
 }
 
 void
 rspamd_milter_init_library (const gchar *spam_header, void *sessions_cache,
-		gboolean discard_on_reject)
+		gboolean discard_on_reject, gboolean quarantine_on_reject)
 {
 	if (milter_ctx) {
 		g_free (milter_ctx->spam_header);
@@ -1763,6 +1857,7 @@ rspamd_milter_init_library (const gchar *spam_header, void *sessions_cache,
 
 	milter_ctx->sessions_cache = sessions_cache;
 	milter_ctx->discard_on_reject = discard_on_reject;
+	milter_ctx->quarantine_on_reject = quarantine_on_reject;
 }
 
 rspamd_mempool_t *

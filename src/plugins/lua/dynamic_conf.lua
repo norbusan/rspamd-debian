@@ -18,6 +18,9 @@ local rspamd_logger = require "rspamd_logger"
 local redis_params
 local ucl = require "ucl"
 local fun = require "fun"
+local lua_util = require "lua_util"
+local rspamd_redis = require "lua_redis"
+local N = "dynamic_conf"
 
 if confighelp then
   return
@@ -45,54 +48,6 @@ local function alpha_cmp(v1, v2)
   end
 
   return false
-end
-
-local function redis_make_request(ev_base, cfg, key, is_write, callback, command, args)
-  if not ev_base or not redis_params or not callback or not command then
-    return false,nil,nil
-  end
-
-  local addr
-  local rspamd_redis = require "rspamd_redis"
-
-  if key then
-    if is_write then
-      addr = redis_params['write_servers']:get_upstream_by_hash(key)
-    else
-      addr = redis_params['read_servers']:get_upstream_by_hash(key)
-    end
-  else
-    if is_write then
-      addr = redis_params['write_servers']:get_upstream_master_slave(key)
-    else
-      addr = redis_params['read_servers']:get_upstream_round_robin(key)
-    end
-  end
-
-  if not addr then
-    rspamd_logger.errx(cfg, 'cannot select server to make redis request')
-  end
-
-  local options = {
-    ev_base = ev_base,
-    config = cfg,
-    callback = callback,
-    host = addr:get_addr(),
-    timeout = redis_params['timeout'],
-    cmd = command,
-    args = args
-  }
-
-  if redis_params['password'] then
-    options['password'] = redis_params['password']
-  end
-
-  if redis_params['db'] then
-    options['dbname'] = redis_params['db']
-  end
-
-  local ret,conn = rspamd_redis.make_request(options)
-  return ret,conn,addr
 end
 
 local function apply_dynamic_actions(_, acts)
@@ -184,8 +139,13 @@ local function update_dynamic_conf(cfg, ev_base, recv)
     if err then
       rspamd_logger.errx(cfg, "cannot save dynamic conf to redis: %s", err)
     else
-      redis_make_request(ev_base, cfg, settings.redis_key, true,
-        redis_version_set_cb, 'HINCRBY', {settings.redis_key, 'v', '1'})
+      rspamd_redis.redis_make_request_taskless(ev_base,
+          cfg,
+          redis_params,
+          settings.redis_key,
+          true,
+          redis_version_set_cb,
+          'HINCRBY', {settings.redis_key, 'v', '1'})
     end
   end
 
@@ -221,8 +181,9 @@ local function update_dynamic_conf(cfg, ev_base, recv)
     end
   end
   local newdata = ucl.to_format(cur_settings.data, 'json-compact')
-  redis_make_request(ev_base, cfg, settings.redis_key, true,
-          redis_data_set_cb, 'HSET', {settings.redis_key, 'd', newdata})
+  rspamd_redis.redis_make_request_taskless(ev_base, cfg, redis_params,
+      settings.redis_key, true,
+      redis_data_set_cb, 'HSET', {settings.redis_key, 'd', newdata})
 end
 
 local function check_dynamic_conf(cfg, ev_base)
@@ -255,8 +216,9 @@ local function check_dynamic_conf(cfg, ev_base)
         rspamd_logger.infox(cfg, "need to load fresh dynamic settings with version %s, local version is %s",
           rver, cur_settings.version)
         cur_settings.version = rver
-        redis_make_request(ev_base, cfg, settings.redis_key, false,
-          redis_load_cb, 'HGET', {settings.redis_key, 'd'})
+        rspamd_redis.redis_make_request_taskless(ev_base, cfg, redis_params,
+            settings.redis_key, false,
+            redis_load_cb, 'HGET', {settings.redis_key, 'd'})
       elseif cur_settings.updates.has_updates then
         -- Need to send our updates to Redis
         update_dynamic_conf(cfg, ev_base)
@@ -267,13 +229,14 @@ local function check_dynamic_conf(cfg, ev_base)
     end
   end
 
-  redis_make_request(ev_base, cfg, settings.redis_key, false,
-    redis_check_cb, 'HGET', {settings.redis_key, 'v'})
+  rspamd_redis.redis_make_request_taskless(ev_base, cfg, redis_params,
+      settings.redis_key, false,
+      redis_check_cb, 'HGET', {settings.redis_key, 'v'})
 end
 
 local section = rspamd_config:get_all_opt("dynamic_conf")
 if section then
-  redis_params = rspamd_parse_redis_server('dynamic_conf')
+  redis_params = rspamd_redis.parse_redis_server('dynamic_conf')
   if not redis_params then
     rspamd_logger.infox(rspamd_config, 'no servers are specified, disabling module')
     return
@@ -283,12 +246,14 @@ if section then
     settings[k] = v
   end
 
-  rspamd_config:add_on_load(function(_, ev_base)
-    rspamd_config:add_periodic(ev_base, 0.0,
-    function(cfg, _ev_base)
-      check_dynamic_conf(cfg, _ev_base)
-      return settings.redis_watch_interval
-    end, true)
+  rspamd_config:add_on_load(function(_, ev_base, worker)
+    if worker:is_scanner() then
+      rspamd_config:add_periodic(ev_base, 0.0,
+          function(cfg, _ev_base)
+            check_dynamic_conf(cfg, _ev_base)
+            return settings.redis_watch_interval
+          end, true)
+    end
   end)
 end
 
@@ -359,4 +324,5 @@ if redis_params then
     add_symbol = add_dynamic_symbol,
     add_action = add_dynamic_action,
   }
+  lua_util.disable_module(N, "redis")
 end

@@ -187,28 +187,45 @@ rspamadm_parse_ucl_var (const gchar *option_name,
 
 gboolean
 rspamadm_execute_lua_ucl_subr (gpointer pL, gint argc, gchar **argv,
-		const ucl_object_t *res, const gchar *script)
+		const ucl_object_t *res, const gchar *script_name)
 {
 	lua_State *L = pL;
 	gint err_idx, i, ret;
 	GString *tb;
+	gchar str[PATH_MAX];
+	const struct rspamadm_command **cmd;
 
-	g_assert (script != NULL);
+	g_assert (script_name != NULL);
 	g_assert (res != NULL);
 	g_assert (L != NULL);
 
-	if (luaL_dostring (L, script) != 0) {
-		msg_err ("cannot execute lua script: %s",
-				lua_tostring (L, -1));
+	/* Init internal rspamadm routines */
+	lua_newtable (L);
+	cmd = commands;
+
+	while (*cmd) {
+		if ((*cmd)->lua_subrs != NULL) {
+			(*cmd)->lua_subrs (L);
+		}
+
+		cmd ++;
+	}
+
+	lua_setglobal (L, "rspamadm");
+
+	rspamd_snprintf (str, sizeof (str), "return require \"%s.%s\"", "rspamadm",
+			script_name);
+
+	if (luaL_dostring (L, str) != 0) {
+		msg_err ("cannot execute lua script %s: %s",
+				str, lua_tostring (L, -1));
 		return FALSE;
 	}
 	else {
 		if (lua_type (L, -1) != LUA_TFUNCTION) {
 			msg_err ("lua script must return "
 					"function and not %s",
-					lua_typename (L,
-							lua_type (L, -1)));
-			lua_settop (L, 0);
+					lua_typename (L, lua_type (L, -1)));
 
 			return FALSE;
 		}
@@ -223,9 +240,9 @@ rspamadm_execute_lua_ucl_subr (gpointer pL, gint argc, gchar **argv,
 	/* Push argv */
 	lua_newtable (L);
 
-	for (i = 0; i < argc; i ++) {
+	for (i = 1; i < argc; i ++) {
 		lua_pushstring (L, argv[i]);
-		lua_rawseti (L, -2, i + 1);
+		lua_rawseti (L, -2, i);
 	}
 
 	/* Push results */
@@ -233,7 +250,7 @@ rspamadm_execute_lua_ucl_subr (gpointer pL, gint argc, gchar **argv,
 
 	if ((ret = lua_pcall (L, 2, 0, err_idx)) != 0) {
 		tb = lua_touserdata (L, -1);
-		msg_err ("call to adm lua script failed (%d): %v", ret, tb);
+		msg_err ("call to rspamadm lua script failed (%d): %v", ret, tb);
 
 		if (tb) {
 			g_string_free (tb, TRUE);
@@ -275,9 +292,17 @@ main (gint argc, gchar **argv, gchar **env)
 	rspamd_main->server_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (),
 			"rspamadm");
 
-	cfg->log_level = G_LOG_LEVEL_WARNING;
+	/* Setup logger */
+	if (verbose) {
+		cfg->log_level = G_LOG_LEVEL_DEBUG;
+	}
+	else {
+		cfg->log_level = G_LOG_LEVEL_MESSAGE;
+	}
 
 	cfg->log_type = RSPAMD_LOG_CONSOLE;
+	/* Avoid timestamps printing */
+	cfg->log_flags = RSPAMD_LOG_FLAG_RSPAMADM;
 	rspamd_set_logger (cfg, process_quark, &rspamd_main->logger,
 			rspamd_main->server_pool);
 	(void) rspamd_log_open (rspamd_main->logger);
@@ -285,14 +310,6 @@ main (gint argc, gchar **argv, gchar **env)
 	g_set_printerr_handler (rspamd_glib_printerr_function);
 	rspamd_config_post_load (cfg,
 			RSPAMD_CONFIG_INIT_LIBS|RSPAMD_CONFIG_INIT_URL|RSPAMD_CONFIG_INIT_NO_TLD);
-
-	/* Setup logger */
-	if (verbose) {
-		cfg->log_level = G_LOG_LEVEL_DEBUG;
-	}
-	else {
-		cfg->log_level = G_LOG_LEVEL_INFO;
-	}
 
 	gperf_profiler_init (cfg, "rspamadm");
 	setproctitle ("rspamdadm");

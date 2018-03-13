@@ -19,6 +19,7 @@ local rspamd_util = require "rspamd_util"
 local rspamd_regexp = require "rspamd_regexp"
 local tcp = require "rspamd_tcp"
 local upstream_list = require "rspamd_upstream_list"
+local lua_util = require "lua_util"
 local redis_params
 
 local N = "antivirus"
@@ -64,13 +65,24 @@ antivirus {
 end
 
 local function match_patterns(default_sym, found, patterns)
-  if not patterns then return default_sym end
-  for sym, pat in pairs(patterns) do
-    if pat:match(found) then
-      return sym
+  if type(patterns) ~= 'table' then return default_sym end
+  if not patterns[1] then
+    for sym, pat in pairs(patterns) do
+      if pat:match(found) then
+        return sym
+      end
     end
+    return default_sym
+  else
+    for _, p in ipairs(patterns) do
+      for sym, pat in pairs(p) do
+        if pat:match(found) then
+          return sym
+        end
+      end
+    end
+    return default_sym
   end
-  return default_sym
 end
 
 local function yield_result(task, rule, vname)
@@ -257,7 +269,11 @@ end
 local function message_not_too_large(task, rule)
   local max_size = tonumber(rule['max_size'])
   if not max_size then return true end
-  if task:get_size() > max_size then return false end
+  if task:get_size() > max_size then
+    rspamd_logger.infox("skip %s AV check as it is too large: %s (%s is allowed)",
+      rule.type, task:get_size(), max_size)
+    return false
+  end
   return true
 end
 
@@ -268,6 +284,9 @@ local function need_av_check(task, rule)
         return message_not_too_large(task, rule)
       end
     end
+
+    rspamd_logger.infox("skip %s AV check as there are no attachments in a message",
+      rule.type)
 
     return false
   else
@@ -743,6 +762,8 @@ local function add_antivirus_rule(sym, opts)
   end
 
   local rule = cfg.configure(opts)
+  rule.type = opts.type
+
 
   if not rule then
     rspamd_logger.errx(rspamd_config, 'cannot configure %s for %s',
@@ -750,10 +771,24 @@ local function add_antivirus_rule(sym, opts)
     return nil
   end
 
-  if opts['patterns'] then
+  if type(opts['patterns']) == 'table' then
     rule['patterns'] = {}
-    for k, v in pairs(opts['patterns']) do
-      rule['patterns'][k] = rspamd_regexp.create_cached(v)
+    if opts['patterns'][1] then
+      for i, p in ipairs(opts['patterns']) do
+        if type(p) == 'table' then
+          local new_set = {}
+          for k, v in pairs(p) do
+            new_set[k] = rspamd_regexp.create_cached(v)
+          end
+          rule['patterns'][i] = new_set
+        else
+          rule['patterns'][i] = {}
+        end
+      end
+    else
+      for k, v in pairs(opts['patterns']) do
+        rule['patterns'][k] = rspamd_regexp.create_cached(v)
+      end
     end
   end
 
@@ -770,6 +805,7 @@ end
 local opts = rspamd_config:get_all_opt('antivirus')
 if opts and type(opts) == 'table' then
   redis_params = rspamd_parse_redis_server('antivirus')
+  local has_valid = false
   for k, m in pairs(opts) do
     if type(m) == 'table' and m['type'] and m['servers'] then
       local cb = add_antivirus_rule(k, m)
@@ -781,13 +817,28 @@ if opts and type(opts) == 'table' then
           name = m['symbol'],
           callback = cb,
         })
-        if m['patterns'] then
-          for sym in pairs(m['patterns']) do
-            rspamd_config:register_symbol({
-              type = 'virtual',
-              name = sym,
-              parent = id
-            })
+        has_valid = true
+        if type(m['patterns']) == 'table' then
+          if m['patterns'][1] then
+            for _, p in ipairs(m['patterns']) do
+              if type(p) == 'table' then
+                for sym in pairs(p) do
+                  rspamd_config:register_symbol({
+                    type = 'virtual',
+                    name = sym,
+                    parent = id
+                  })
+                end
+              end
+            end
+          else
+            for sym in pairs(m['patterns']) do
+              rspamd_config:register_symbol({
+                type = 'virtual',
+                name = sym,
+                parent = id
+              })
+            end
           end
         end
         if m['score'] then
@@ -810,4 +861,9 @@ if opts and type(opts) == 'table' then
       end
     end
   end
+
+  if not has_valid then
+    lua_util.disable_module(N, 'config')
+  end
 end
+

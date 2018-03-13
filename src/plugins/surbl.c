@@ -55,16 +55,19 @@
         "surbl", task->task_pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
-#define msg_debug_surbl(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
-        "surbl", task->task_pool->tag.uid, \
+#define msg_debug_surbl(...)  rspamd_conditional_debug_fast (NULL, task->from_addr, \
+        rspamd_surbl_log_id, "surbl", task->task_pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
+
+INIT_LOG_MODULE(surbl)
 
 #define SURBL_REDIRECTOR_CALLBACK "SURBL_REDIRECTOR_CALLBACK"
 
 static struct surbl_ctx *surbl_module_ctx = NULL;
 static const guint64 rspamd_surbl_cb_magic = 0xe09b8536f80de0d1ULL;
 static const gchar *rspamd_surbl_default_monitored = "facebook.com";
+static const guint default_max_redirected_urls = 10;
 
 static void surbl_test_url (struct rspamd_task *task, void *user_data);
 static void surbl_test_redirector (struct rspamd_task *task, void *user_data);
@@ -110,7 +113,7 @@ exceptions_free_value (gpointer v)
 	rspamd_ftok_t *val = v;
 
 	g_free ((gpointer)val->begin);
-	g_slice_free1 (sizeof (*val), val);
+	g_free (val);
 }
 
 static void
@@ -134,7 +137,7 @@ exception_insert (gpointer st, gconstpointer key, gconstpointer value)
 		return;
 	}
 
-	val = g_slice_alloc (sizeof (rspamd_ftok_t));
+	val = g_malloc (sizeof (rspamd_ftok_t));
 	val->begin = g_strdup (key);
 	val->len = strlen (key);
 
@@ -214,7 +217,7 @@ redirector_insert (gpointer st, gconstpointer key, gconstpointer value)
 	}
 
 	pat = rspamd_fstring_new_init (begin, p - begin);
-	tok = g_slice_alloc (sizeof (*tok));
+	tok = g_malloc0 (sizeof (*tok));
 	tok->begin = pat->str;
 	tok->len = pat->len;
 
@@ -522,6 +525,8 @@ surbl_module_parse_rule (const ucl_object_t* value, struct rspamd_config* cfg)
 	ucl_object_t *ropts;
 
 	LL_FOREACH(value, cur_rule) {
+		monitored_domain = NULL;
+
 		cur = ucl_object_lookup (cur_rule, "enabled");
 		if (cur != NULL && cur->type == UCL_BOOLEAN) {
 			if (!ucl_object_toboolean (cur)) {
@@ -791,13 +796,17 @@ surbl_module_config (struct rspamd_config *cfg)
 	gint nrules = 0;
 	lua_State *L;
 
+	if (!rspamd_config_is_module_enabled (cfg, "surbl")) {
+		return TRUE;
+	}
+
 	/* Register global methods */
 	L = cfg->lua_state;
 	lua_getglobal (L, "rspamd_plugins");
 
 	if (lua_type (L, -1) == LUA_TTABLE) {
 		lua_pushstring (L, "surbl");
-		lua_createtable (L, 0, 2);
+		lua_createtable (L, 0, 3);
 		/* Set methods */
 		lua_pushstring (L, "register_redirect");
 		lua_pushcfunction (L, surbl_register_redirect_handler);
@@ -808,15 +817,11 @@ surbl_module_config (struct rspamd_config *cfg)
 		lua_pushstring (L, "is_redirector");
 		lua_pushcfunction (L, surbl_is_redirector_handler);
 		lua_settable (L, -3);
-		/* Finish fuzzy_check key */
+		/* Finish surbl key */
 		lua_settable (L, -3);
 	}
 
 	lua_pop (L, 1); /* Remove global function */
-
-	if (!rspamd_config_is_module_enabled (cfg, "surbl")) {
-		return TRUE;
-	}
 
 	(void)rspamd_symbols_cache_add_symbol (cfg->cache, SURBL_REDIRECTOR_CALLBACK,
 			0, surbl_test_redirector, NULL,
@@ -948,6 +953,13 @@ surbl_module_config (struct rspamd_config *cfg)
 			register_bit_symbols (cfg, cur_suffix, cur_suffix->callback_id);
 		}
 		cur_opt = g_list_next (cur_opt);
+	}
+
+	surbl_module_ctx->max_redirected_urls = default_max_redirected_urls;
+
+	if ((value =
+			rspamd_config_get_module_opt (cfg, "surbl", "max_redirected_urls")) != NULL) {
+		surbl_module_ctx->max_redirected_urls = ucl_obj_toint (value);
 	}
 
 	msg_info_config ("init internal surbls module, %d uribl rules loaded",
@@ -1637,6 +1649,16 @@ surbl_tree_redirector_callback (gpointer key, gpointer value, void *data)
 						found_tld);
 			}
 
+			if (param->redirector_requests >= surbl_module_ctx->max_redirected_urls) {
+				msg_info_surbl ("cannot register redirector request for url domain: "
+						"%s, max_redirected_urls is reached: %d",
+						found_tld, surbl_module_ctx->max_redirected_urls);
+
+				return;
+			}
+
+			param->redirector_requests ++;
+
 			if (surbl_module_ctx->redirector_cbid != -1) {
 				nparam = rspamd_mempool_alloc (task->task_pool,
 						sizeof (*nparam));
@@ -1767,6 +1789,7 @@ surbl_test_redirector (struct rspamd_task *task, void *user_data)
 	param = rspamd_mempool_alloc0 (task->task_pool, sizeof (*param));
 	param->task = task;
 	param->suffix = NULL;
+	param->redirector_requests = 0;
 	g_hash_table_foreach (task->urls, surbl_tree_redirector_callback, param);
 
 	/* We also need to check and process img URLs */

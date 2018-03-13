@@ -16,7 +16,13 @@
 #include "lua_common.h"
 #include "lptree.h"
 #include "utlist.h"
+#include "unix-std.h"
+#include "worker_util.h"
+#include "ottery.h"
+#include "rspamd_control.h"
 #include <math.h>
+#include <sys/wait.h>
+#include <src/libserver/rspamd_control.h>
 
 /* Lua module init function */
 #define MODULE_INIT_FUNC "module_init"
@@ -31,15 +37,23 @@ LUA_FUNCTION_DEF (worker, get_name);
 LUA_FUNCTION_DEF (worker, get_stat);
 LUA_FUNCTION_DEF (worker, get_index);
 LUA_FUNCTION_DEF (worker, get_pid);
+LUA_FUNCTION_DEF (worker, is_scanner);
+LUA_FUNCTION_DEF (worker, is_primary_controller);
+LUA_FUNCTION_DEF (worker, spawn_process);
 
 const luaL_reg worker_reg[] = {
 	LUA_INTERFACE_DEF (worker, get_name),
 	LUA_INTERFACE_DEF (worker, get_stat),
 	LUA_INTERFACE_DEF (worker, get_index),
 	LUA_INTERFACE_DEF (worker, get_pid),
+	LUA_INTERFACE_DEF (worker, spawn_process),
+	LUA_INTERFACE_DEF (worker, is_scanner),
+	LUA_INTERFACE_DEF (worker, is_primary_controller),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
 };
+
+static const char rspamd_modules_state_global[] = "rspamd_plugins_state";
 
 static GQuark
 lua_error_quark (void)
@@ -201,14 +215,22 @@ lua_add_actions_global (lua_State *L)
 	lua_setglobal (L, "rspamd_actions");
 }
 
+#ifndef __APPLE__
+#define OS_SO_SUFFIX ".so"
+#else
+#define OS_SO_SUFFIX ".dylib"
+#endif
+
 void
-rspamd_lua_set_path (lua_State *L, struct rspamd_config *cfg, GHashTable *vars)
+rspamd_lua_set_path (lua_State *L, const ucl_object_t *cfg_obj, GHashTable *vars)
 {
 	const gchar *old_path, *additional_path = NULL;
 	const ucl_object_t *opts;
 	const gchar *pluginsdir = RSPAMD_PLUGINSDIR,
 			*rulesdir = RSPAMD_RULESDIR,
-			*lualibdir = RSPAMD_LUALIBDIR;
+			*lualibdir = RSPAMD_LUALIBDIR,
+			*libdir = RSPAMD_LIBDIR;
+	const gchar *t;
 
 	gchar path_buf[PATH_MAX];
 
@@ -222,8 +244,8 @@ rspamd_lua_set_path (lua_State *L, struct rspamd_config *cfg, GHashTable *vars)
 		return;
 	}
 
-	if (cfg) {
-		opts = ucl_object_lookup (cfg->rcl_obj, "options");
+	if (cfg_obj) {
+		opts = ucl_object_lookup (cfg_obj, "options");
 		if (opts != NULL) {
 			opts = ucl_object_lookup (opts, "lua_path");
 			if (opts != NULL && ucl_object_type (opts) == UCL_STRING) {
@@ -232,9 +254,33 @@ rspamd_lua_set_path (lua_State *L, struct rspamd_config *cfg, GHashTable *vars)
 		}
 	}
 
-	if (vars) {
-		gchar *t;
+	/* Try environment */
+	t = getenv ("PLUGINSDIR");
+	if (t) {
+		pluginsdir = t;
+	}
 
+	t = getenv ("RULESDIR");
+	if (t) {
+		rulesdir = t;
+	}
+
+	t = getenv ("LUALIBDIR");
+	if (t) {
+		lualibdir = t;
+	}
+
+	t = getenv ("LIBDIR");
+	if (t) {
+		libdir = t;
+	}
+
+	t = getenv ("RSPAMD_LIBDIR");
+	if (t) {
+		libdir = t;
+	}
+
+	if (vars) {
 		t = g_hash_table_lookup (vars, "PLUGINSDIR");
 		if (t) {
 			pluginsdir = t;
@@ -249,18 +295,39 @@ rspamd_lua_set_path (lua_State *L, struct rspamd_config *cfg, GHashTable *vars)
 		if (t) {
 			lualibdir = t;
 		}
+
+		t = g_hash_table_lookup (vars, "LIBDIR");
+		if (t) {
+			libdir = t;
+		}
+
+		t = g_hash_table_lookup (vars, "RSPAMD_LIBDIR");
+		if (t) {
+			libdir = t;
+		}
 	}
 
 	if (additional_path) {
 		rspamd_snprintf (path_buf, sizeof (path_buf),
-				"%s/lua/?.lua;%s/lua/?.lua;%s/?.lua;%s/?.lua;%s/?.so;%s;%s",
+				"%s/lua/?.lua;"
+						"%s/lua/?.lua;"
+						"%s/?.lua;"
+						"%s/?.lua;"
+						"%s/?/init.lua;"
+						"%s;"
+						"%s",
 				pluginsdir, RSPAMD_CONFDIR, rulesdir,
 				lualibdir, lualibdir,
 				additional_path, old_path);
 	}
 	else {
 		rspamd_snprintf (path_buf, sizeof (path_buf),
-				"%s/lua/?.lua;%s/lua/?.lua;%s/?.lua;%s/?.lua;%s/?.so;%s",
+				"%s/lua/?.lua;"
+						"%s/lua/?.lua;"
+						"%s/?.lua;"
+						"%s/?.lua;"
+						"%s/?/init.lua;"
+						"%s",
 				pluginsdir, RSPAMD_CONFDIR, rulesdir,
 				lualibdir, lualibdir,
 				old_path);
@@ -269,6 +336,22 @@ rspamd_lua_set_path (lua_State *L, struct rspamd_config *cfg, GHashTable *vars)
 	lua_pop (L, 1);
 	lua_pushstring (L, path_buf);
 	lua_setfield (L, -2, "path");
+
+	lua_getglobal (L, "package");
+	lua_getfield (L, -1, "cpath");
+	old_path = luaL_checkstring (L, -1);
+
+
+	rspamd_snprintf (path_buf, sizeof (path_buf),
+					"%s/?%s;"
+					"%s",
+			libdir,
+			OS_SO_SUFFIX,
+			old_path);
+	lua_pop (L, 1);
+	lua_pushstring (L, path_buf);
+	lua_setfield (L, -2, "cpath");
+
 	lua_pop (L, 1);
 }
 
@@ -309,7 +392,6 @@ rspamd_lua_init ()
 	luaopen_fann (L);
 	luaopen_sqlite3 (L);
 	luaopen_cryptobox (L);
-	luaopen_lpeg (L);
 
 	luaL_newmetatable (L, "rspamd{ev_base}");
 	lua_pushstring (L, "class");
@@ -324,6 +406,8 @@ rspamd_lua_init ()
 	lua_pop (L, 1);
 
 	rspamd_lua_new_class (L, "rspamd{worker}", worker_reg);
+	rspamd_lua_add_preload (L, "lpeg", luaopen_lpeg);
+	luaopen_ucl (L);
 	rspamd_lua_add_preload (L, "ucl", luaopen_ucl);
 
 	/* Add plugins global */
@@ -338,6 +422,34 @@ rspamd_lua_init ()
 	lua_pcall (L, 1, 0, 0);
 	lua_pop (L, 1); /* math table */
 
+	/* Modules state */
+	lua_newtable (L);
+	/*
+	 * rspamd_plugins_state = {
+	 *   enabled = {},
+	 *   disabled_unconfigured = {},
+	 *   disabled_redis = {},
+	 *   disabled_explicitly = {},
+	 *   disabled_failed = {},
+	 *   disabled_experimental = {},
+	 * }
+	 */
+#define ADD_TABLE(name) do { \
+	lua_pushstring (L, #name); \
+	lua_newtable (L); \
+	lua_settable (L, -3); \
+} while (0)
+
+	ADD_TABLE (enabled);
+	ADD_TABLE (disabled_unconfigured);
+	ADD_TABLE (disabled_redis);
+	ADD_TABLE (disabled_explicitly);
+	ADD_TABLE (disabled_failed);
+	ADD_TABLE (disabled_experimental);
+
+#undef ADD_TABLE
+	lua_setglobal (L, rspamd_modules_state_global);
+
 	return L;
 }
 
@@ -349,13 +461,12 @@ rspamd_init_lua_locked (struct rspamd_config *cfg)
 {
 	struct lua_locked_state *new;
 
-	new = g_slice_alloc (sizeof (struct lua_locked_state));
+	new = g_malloc0 (sizeof (struct lua_locked_state));
 	new->L = rspamd_lua_init ();
 	new->m = rspamd_mutex_new ();
 
 	return new;
 }
-
 
 /**
  * Free locked state structure
@@ -369,12 +480,25 @@ rspamd_free_lua_locked (struct lua_locked_state *st)
 
 	rspamd_mutex_free (st->m);
 
-	g_slice_free1 (sizeof (struct lua_locked_state), st);
+	g_free (st);
+}
+
+
+void
+rspamd_plugins_table_push_elt (lua_State *L, const gchar *field_name,
+		const gchar *new_elt)
+{
+	lua_getglobal (L, rspamd_modules_state_global);
+	lua_pushstring (L, field_name);
+	lua_gettable (L, -2);
+	lua_pushstring (L, new_elt);
+	lua_newtable (L);
+	lua_settable (L, -3);
+	lua_pop (L, 2); /* Global + element */
 }
 
 gboolean
-rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load,
-		GHashTable *vars)
+rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load)
 {
 	struct rspamd_config **pcfg;
 	GList *cur;
@@ -383,11 +507,11 @@ rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load,
 	GString *tb;
 	gint err_idx;
 
-	rspamd_lua_set_path (L, cfg, vars);
 	cur = g_list_first (cfg->script_modules);
 
 	while (cur) {
 		module = cur->data;
+
 		if (module->path) {
 			if (!force_load) {
 				if (!rspamd_config_is_module_enabled (cfg, module->name)) {
@@ -402,8 +526,12 @@ rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load,
 			if (luaL_loadfile (L, module->path) != 0) {
 				msg_err_config ("load of %s failed: %s", module->path,
 					lua_tostring (L, -1));
-				cur = g_list_next (cur);
 				lua_pop (L, 1); /*  Error function */
+
+				rspamd_plugins_table_push_elt (L, "disabled_failed",
+						module->name);
+
+				cur = g_list_next (cur);
 				continue;
 			}
 
@@ -418,9 +546,14 @@ rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load,
 				msg_err_config ("init of %s failed: %v",
 						module->path,
 						tb);
-				cur = g_list_next (cur);
+
 				g_string_free (tb, TRUE);
 				lua_pop (L, 2); /* Result and error function */
+
+				rspamd_plugins_table_push_elt (L, "disabled_failed",
+						module->name);
+
+				cur = g_list_next (cur);
 				continue;
 			}
 
@@ -430,6 +563,7 @@ rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load,
 
 			lua_pop (L, 1); /* Error function */
 		}
+
 		cur = g_list_next (cur);
 	}
 
@@ -1138,9 +1272,14 @@ rspamd_lua_run_postloads (lua_State *L, struct rspamd_config *cfg,
 	struct rspamd_config **pcfg;
 	struct event_base **pev_base;
 	struct rspamd_worker **pw;
+	gint err_idx;
+	GString *tb;
 
 	/* Execute post load scripts */
 	LL_FOREACH (cfg->on_load, sc) {
+		lua_pushcfunction (L, &rspamd_lua_traceback);
+		err_idx = lua_gettop (L);
+
 		lua_rawgeti (cfg->lua_state, LUA_REGISTRYINDEX, sc->cbref);
 		pcfg = lua_newuserdata (cfg->lua_state, sizeof (*pcfg));
 		*pcfg = cfg;
@@ -1154,13 +1293,16 @@ rspamd_lua_run_postloads (lua_State *L, struct rspamd_config *cfg,
 		*pw = w;
 		rspamd_lua_setclass (cfg->lua_state, "rspamd{worker}", -1);
 
-		if (lua_pcall (cfg->lua_state, 3, 0, 0) != 0) {
-			msg_err_config ("error executing post load code: %s",
-					lua_tostring (cfg->lua_state, -1));
-			lua_pop (cfg->lua_state, 1);
+		if (lua_pcall (cfg->lua_state, 3, 0, err_idx) != 0) {
+			tb = lua_touserdata (L, -1);
+			msg_err_config ("error executing post load code: %v", tb);
+			g_string_free (tb, TRUE);
+			lua_pop (L, 2);
 
 			return FALSE;
 		}
+
+		lua_pop (L, 1); /* Error function */
 	}
 
 	return TRUE;
@@ -1302,6 +1444,431 @@ lua_worker_get_pid (lua_State *L)
 
 	return 1;
 }
+
+
+static gint
+lua_worker_is_scanner (lua_State *L)
+{
+	struct rspamd_worker *w = lua_check_worker (L, 1);
+
+	if (w) {
+		lua_pushboolean (L, rspamd_worker_is_scanner (w));
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_worker_is_primary_controller (lua_State *L)
+{
+	struct rspamd_worker *w = lua_check_worker (L, 1);
+
+	if (w) {
+		lua_pushboolean (L, rspamd_worker_is_primary_controller (w));
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+struct rspamd_lua_process_cbdata {
+	gint sp[2];
+	gint func_cbref;
+	gint cb_cbref;
+	gboolean replied;
+	gboolean is_error;
+	pid_t cpid;
+	lua_State *L;
+	guint64 sz;
+	GString *io_buf;
+	GString *out_buf;
+	goffset out_pos;
+	struct rspamd_worker *wrk;
+	struct event_base *ev_base;
+	struct event ev;
+};
+
+static void
+rspamd_lua_execute_lua_subprocess (lua_State *L,
+		struct rspamd_lua_process_cbdata *cbdata)
+{
+	gint err_idx, r;
+	GString *tb;
+	guint64 wlen = 0;
+	const gchar *ret;
+	gsize retlen;
+
+	lua_pushcfunction (L, &rspamd_lua_traceback);
+	err_idx = lua_gettop (L);
+
+	lua_rawgeti (L, LUA_REGISTRYINDEX, cbdata->func_cbref);
+
+	if (lua_pcall (L, 0, 1, err_idx) != 0) {
+		tb = lua_touserdata (L, -1);
+		msg_err ("call to subprocess failed: %v", tb);
+		/* Indicate error */
+		wlen = (1ULL << 63) + tb->len;
+		g_string_free (tb, TRUE);
+
+		r = write (cbdata->sp[1], &wlen, sizeof (wlen));
+		if (r == -1) {
+			msg_err ("write failed: %s", strerror (errno));
+		}
+
+		r = write (cbdata->sp[1], tb->str, tb->len);
+		if (r == -1) {
+			msg_err ("write failed: %s", strerror (errno));
+		}
+
+		lua_pop (L, 1);
+	}
+	else {
+		ret = lua_tolstring (L, -1, &retlen);
+		wlen = retlen;
+
+		r = write (cbdata->sp[1], &wlen, sizeof (wlen));
+		if (r == -1) {
+			msg_err ("write failed: %s", strerror (errno));
+		}
+
+		r = write (cbdata->sp[1], ret, retlen);
+		if (r == -1) {
+			msg_err ("write failed: %s", strerror (errno));
+		}
+	}
+
+	lua_pop (L, 1); /* Error function */
+}
+
+static void
+rspamd_lua_call_on_complete (lua_State *L,
+		struct rspamd_lua_process_cbdata *cbdata,
+		const gchar *err_msg,
+		const gchar *data, gsize datalen)
+{
+	gint err_idx;
+	GString *tb;
+
+	lua_pushcfunction (L, &rspamd_lua_traceback);
+	err_idx = lua_gettop (L);
+
+	lua_rawgeti (L, LUA_REGISTRYINDEX, cbdata->cb_cbref);
+
+	if (err_msg) {
+		lua_pushstring (L, err_msg);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	if (data) {
+		lua_pushlstring (L, data, datalen);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	if (lua_pcall (L, 2, 0, err_idx) != 0) {
+		tb = lua_touserdata (L, -1);
+		msg_err ("call to subprocess callback script failed: %v", tb);
+		lua_pop (L, 1);
+	}
+
+	lua_pop (L, 1); /* Error function */
+}
+
+static gboolean
+rspamd_lua_cld_handler (struct rspamd_worker_signal_handler *sigh, void *ud)
+{
+	struct rspamd_lua_process_cbdata *cbdata = ud;
+	struct rspamd_srv_command srv_cmd;
+	lua_State *L;
+	pid_t died;
+	gint res = 0;
+
+	/* Are we called by a correct children ? */
+	died = waitpid (cbdata->cpid, &res, WNOHANG);
+
+	if (died <= 0) {
+		/* Wait more */
+		return TRUE;
+	}
+
+	L = cbdata->L;
+	msg_info ("handled SIGCHLD from %p", cbdata->cpid);
+
+	if (!cbdata->replied) {
+		/* We still need to call on_complete callback */
+		rspamd_lua_call_on_complete (cbdata->L, cbdata,
+				"Worker has died without reply", NULL, 0);
+		event_del (&cbdata->ev);
+	}
+
+	/* Free structures */
+	close (cbdata->sp[0]);
+	luaL_unref (L, LUA_REGISTRYINDEX, cbdata->func_cbref);
+	luaL_unref (L, LUA_REGISTRYINDEX, cbdata->cb_cbref);
+	g_string_free (cbdata->io_buf, TRUE);
+
+	if (cbdata->out_buf) {
+		g_string_free (cbdata->out_buf, TRUE);
+	}
+
+	/* Notify main */
+	memset (&srv_cmd, 0, sizeof (srv_cmd));
+	srv_cmd.type = RSPAMD_SRV_ON_FORK;
+	srv_cmd.cmd.on_fork.state = child_dead;
+	srv_cmd.cmd.on_fork.cpid = cbdata->cpid;
+	srv_cmd.cmd.on_fork.ppid = getpid ();
+	rspamd_srv_send_command (cbdata->wrk, cbdata->ev_base, &srv_cmd, -1,
+			NULL, NULL);
+	g_free (cbdata);
+
+	/* We are done with this SIGCHLD */
+	return FALSE;
+}
+
+static void
+rspamd_lua_subprocess_io (gint fd, short what, gpointer ud)
+{
+	struct rspamd_lua_process_cbdata *cbdata = ud;
+	gssize r;
+
+	if (cbdata->sz == (guint64)-1) {
+		guint64 sz;
+
+		/* We read size of reply + flags first */
+		r = read (cbdata->sp[0], cbdata->io_buf->str + cbdata->io_buf->len,
+				sizeof (guint64) - cbdata->io_buf->len);
+
+		if (r == 0) {
+			rspamd_lua_call_on_complete (cbdata->L, cbdata,
+					"Unexpected EOF", NULL, 0);
+			event_del (&cbdata->ev);
+			cbdata->replied = TRUE;
+			kill (cbdata->cpid, SIGTERM);
+
+			return;
+		}
+		else if (r == -1) {
+			if (errno == EAGAIN || errno == EINTR) {
+				return;
+			}
+			else {
+				rspamd_lua_call_on_complete (cbdata->L, cbdata,
+						strerror (errno), NULL, 0);
+				event_del (&cbdata->ev);
+				cbdata->replied = TRUE;
+				kill (cbdata->cpid, SIGTERM);
+
+				return;
+			}
+		}
+
+		cbdata->io_buf->len += r;
+
+		if (cbdata->io_buf->len == sizeof (guint64)) {
+			memcpy ((guchar *)&sz, cbdata->io_buf->str, sizeof (sz));
+
+			if (sz & (1ULL << 63)) {
+				cbdata->is_error = TRUE;
+				sz &= ~(1ULL << 63);
+			}
+
+			cbdata->io_buf->len = 0;
+			cbdata->sz = sz;
+			g_string_set_size (cbdata->io_buf, sz + 1);
+			cbdata->io_buf->len = 0;
+		}
+	}
+	else {
+		/* Read data */
+		r = read (cbdata->sp[0], cbdata->io_buf->str + cbdata->io_buf->len,
+				cbdata->sz - cbdata->io_buf->len);
+
+		if (r == 0) {
+			rspamd_lua_call_on_complete (cbdata->L, cbdata,
+					"Unexpected EOF", NULL, 0);
+			event_del (&cbdata->ev);
+			cbdata->replied = TRUE;
+			kill (cbdata->cpid, SIGTERM);
+
+			return;
+		}
+		else if (r == -1) {
+			if (errno == EAGAIN || errno == EINTR) {
+				return;
+			}
+			else {
+				rspamd_lua_call_on_complete (cbdata->L, cbdata,
+						strerror (errno), NULL, 0);
+				event_del (&cbdata->ev);
+				cbdata->replied = TRUE;
+				kill (cbdata->cpid, SIGTERM);
+
+				return;
+			}
+		}
+
+		cbdata->io_buf->len += r;
+
+		if (cbdata->io_buf->len == cbdata->sz) {
+			gchar rep[4];
+
+			/* Finished reading data */
+			if (cbdata->is_error) {
+				cbdata->io_buf->str[cbdata->io_buf->len] = '\0';
+				rspamd_lua_call_on_complete (cbdata->L, cbdata,
+						cbdata->io_buf->str, NULL, 0);
+			}
+			else {
+				rspamd_lua_call_on_complete (cbdata->L, cbdata,
+						NULL, cbdata->io_buf->str, cbdata->io_buf->len);
+			}
+
+			event_del (&cbdata->ev);
+			cbdata->replied = TRUE;
+
+			/* Write reply to the child */
+			rspamd_socket_blocking (cbdata->sp[0]);
+			memset (rep, 0, sizeof (rep));
+			(void)write (cbdata->sp[0], rep, sizeof (rep));
+		}
+	}
+}
+
+static gint
+lua_worker_spawn_process (lua_State *L)
+{
+	struct rspamd_worker *w = lua_check_worker (L, 1);
+	struct rspamd_lua_process_cbdata *cbdata;
+	struct rspamd_abstract_worker_ctx *actx;
+	struct rspamd_srv_command srv_cmd;
+	const gchar *cmdline = NULL, *input = NULL;
+	gsize inputlen = 0;
+	pid_t pid;
+	GError *err = NULL;
+	gint func_cbref, cb_cbref;
+
+	if (!rspamd_lua_parse_table_arguments (L, 2, &err,
+		"func=F;exec=S;stdin=V;*on_complete=F", &func_cbref,
+			&cmdline, &inputlen, &input, &cb_cbref)) {
+		msg_err ("cannot get parameters list: %e", err);
+
+		if (err) {
+			g_error_free (err);
+		}
+
+		return 0;
+	}
+
+	cbdata = g_malloc0 (sizeof (*cbdata));
+	cbdata->cb_cbref = cb_cbref;
+	cbdata->func_cbref = func_cbref;
+
+	if (input) {
+		cbdata->out_buf = g_string_new_len (input, inputlen);
+		cbdata->out_pos = 0;
+	}
+
+	if (rspamd_socketpair (cbdata->sp, TRUE) == -1) {
+		msg_err ("cannot spawn socketpair: %s", strerror (errno));
+		g_free (cbdata);
+		luaL_unref (L, LUA_REGISTRYINDEX, cbdata->func_cbref);
+		luaL_unref (L, LUA_REGISTRYINDEX, cbdata->cb_cbref);
+
+		return 0;
+	}
+
+	actx = w->ctx;
+	cbdata->wrk = w;
+	cbdata->L = L;
+	cbdata->ev_base = actx->ev_base;
+	cbdata->sz = (guint64)-1;
+
+	pid = fork ();
+
+	if (pid == -1) {
+		msg_err ("cannot spawn process: %s", strerror (errno));
+		close (cbdata->sp[0]);
+		close (cbdata->sp[1]);
+		luaL_unref (L, LUA_REGISTRYINDEX, cbdata->func_cbref);
+		luaL_unref (L, LUA_REGISTRYINDEX, cbdata->cb_cbref);
+		g_free (cbdata);
+
+		return 0;
+	}
+	else if (pid == 0) {
+		/* Child */
+		gint rc;
+		gchar inbuf[4];
+
+		rspamd_log_update_pid (w->cf->type, w->srv->logger);
+		rc = ottery_init (w->srv->cfg->libs_ctx->ottery_cfg);
+
+		if (rc != OTTERY_ERR_NONE) {
+			msg_err ("cannot initialize PRNG: %d", rc);
+			abort ();
+		}
+		rspamd_random_seed_fast ();
+#ifdef HAVE_EVUTIL_RNG_INIT
+		evutil_secure_rng_init ();
+#endif
+
+		close (cbdata->sp[0]);
+		/* Here we assume that we can block on writing results */
+		rspamd_socket_blocking (cbdata->sp[1]);
+		event_reinit (cbdata->ev_base);
+		g_hash_table_remove_all (w->signal_events);
+		rspamd_worker_unblock_signals ();
+		rspamd_lua_execute_lua_subprocess (L, cbdata);
+
+		/* Wait for parent to reply and exit */
+		rc = read (cbdata->sp[1], inbuf, sizeof (inbuf));
+
+		if (memcmp (inbuf, "\0\0\0\0", 4) == 0) {
+			exit (EXIT_SUCCESS);
+		}
+		else {
+			msg_err ("got invalid reply from parent");
+
+			exit (EXIT_FAILURE);
+		}
+
+	}
+
+	cbdata->cpid = pid;
+	cbdata->io_buf = g_string_sized_new (8);
+	/* Notify main */
+	memset (&srv_cmd, 0, sizeof (srv_cmd));
+	srv_cmd.type = RSPAMD_SRV_ON_FORK;
+	srv_cmd.cmd.on_fork.state = child_create;
+	srv_cmd.cmd.on_fork.cpid = pid;
+	srv_cmd.cmd.on_fork.ppid = getpid ();
+	rspamd_srv_send_command (w, cbdata->ev_base, &srv_cmd, -1, NULL, NULL);
+
+	close (cbdata->sp[1]);
+	rspamd_socket_nonblocking (cbdata->sp[0]);
+	/* Parent */
+	rspamd_worker_set_signal_handler (SIGCHLD, w, cbdata->ev_base,
+			rspamd_lua_cld_handler,
+			cbdata);
+
+	/* Add result pipe waiting */
+	event_set (&cbdata->ev, cbdata->sp[0], EV_READ | EV_PERSIST,
+			rspamd_lua_subprocess_io, cbdata);
+	event_base_set (cbdata->ev_base, &cbdata->ev);
+	/* TODO: maybe add timeout? */
+	event_add (&cbdata->ev, NULL);
+
+	return 0;
+}
+
 
 struct rspamd_lua_ref_cbdata {
 	lua_State *L;
