@@ -25,11 +25,12 @@ local E = {}
 local N = 'force_actions'
 
 local fun = require "fun"
+local lua_util = require "lua_util"
 local rspamd_cryptobox_hash = require "rspamd_cryptobox_hash"
 local rspamd_expression = require "rspamd_expression"
 local rspamd_logger = require "rspamd_logger"
 
-local function gen_cb(expr, act, pool, message, subject, raction, honor)
+local function gen_cb(expr, act, pool, message, subject, raction, honor, limit)
 
   local function parse_atom(str)
     local atom = table.concat(fun.totable(fun.take_while(function(c)
@@ -44,7 +45,12 @@ local function gen_cb(expr, act, pool, message, subject, raction, honor)
   local function process_atom(atom, task)
     local f_ret = task:has_symbol(atom)
     if f_ret then
-      return 1
+      f_ret = math.abs(task:get_symbol(atom)[1].score)
+      if f_ret < 0.001 then
+        -- Adjust some low score to distinguish from pure zero
+        f_ret = 0.001
+      end
+      return f_ret
     end
     return 0
   end
@@ -67,7 +73,8 @@ local function gen_cb(expr, act, pool, message, subject, raction, honor)
       return false
     end
 
-    if e:process(task) == 1 then
+    local ret = e:process(task)
+    if ret > limit then
       if subject then
         task:set_metric_subject(subject)
       end
@@ -81,24 +88,6 @@ local function gen_cb(expr, act, pool, message, subject, raction, honor)
 
   end, e:atoms()
 
-end
-
-local function list_to_hash(list)
-  if type(list) == 'table' then
-    if list[1] then
-      local h = {}
-      for _, e in ipairs(list) do
-        h[e] = true
-      end
-      return h
-    else
-      return list
-    end
-  elseif type(list) == 'string' then
-    local h = {}
-    h[list] = true
-    return h
-  end
 end
 
 local function configure_module()
@@ -146,9 +135,11 @@ local function configure_module()
       if action and expr then
         local subject = sett.subject
         local message = sett.message
-        local raction = list_to_hash(sett.require_action)
-        local honor = list_to_hash(sett.honor_action)
-        local cb, atoms = gen_cb(expr, action, rspamd_config:get_mempool(), message, subject, raction, honor)
+        local lim = sett.limit or 0
+        local raction = lua_util.list_to_hash(sett.require_action)
+        local honor = lua_util.list_to_hash(sett.honor_action)
+        local cb, atoms = gen_cb(expr, action, rspamd_config:get_mempool(),
+          message, subject, raction, honor, lim)
         if cb and atoms then
           local t = {}
           if (raction or honor) then

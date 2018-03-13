@@ -66,6 +66,9 @@ struct rspamd_milter_private {
 	void *ud;
 	enum rspamd_milter_io_state state;
 	int fd;
+	gboolean discard_on_reject;
+	gboolean quarantine_on_reject;
+	gboolean no_action;
 };
 
 enum rspamd_milter_io_cmd {
@@ -122,10 +125,12 @@ enum rspamd_milter_io_cmd {
 #define RSPAMD_MILTER_FLAG_ADDRCPT	(1L<<2)	/* filter may add recipients */
 #define RSPAMD_MILTER_FLAG_DELRCPT	(1L<<3)	/* filter may delete recipients */
 #define RSPAMD_MILTER_FLAG_CHGHDRS	(1L<<4)	/* filter may change/delete headers */
+#define RSPAMD_MILTER_FLAG_QUARANTINE	(1L<<5)	/* filter may request quarantine */
 
 #define RSPAMD_MILTER_ACTIONS_MASK \
 	(RSPAMD_MILTER_FLAG_ADDHDRS | RSPAMD_MILTER_FLAG_ADDRCPT | \
-	RSPAMD_MILTER_FLAG_DELRCPT | RSPAMD_MILTER_FLAG_CHGHDRS)
+	RSPAMD_MILTER_FLAG_DELRCPT | RSPAMD_MILTER_FLAG_CHGHDRS | \
+	RSPAMD_MILTER_FLAG_QUARANTINE)
 
 enum rspamd_milter_connect_proto {
 	RSPAMD_MILTER_CONN_UNKNOWN = 'U',
@@ -148,7 +153,9 @@ enum rspamd_milter_connect_proto {
 #define RSPAMD_MILTER_XCODE_REJECT "5.7.1"
 #define RSPAMD_MILTER_XCODE_TEMPFAIL "4.7.1"
 #define RSPAMD_MILTER_REJECT_MESSAGE "Spam message rejected"
+#define RSPAMD_MILTER_QUARANTINE_MESSAGE "Spam message quarantined"
 #define RSPAMD_MILTER_TEMPFAIL_MESSAGE "Try again later"
 #define RSPAMD_MILTER_SPAM_HEADER "X-Spam"
 #define RSPAMD_MILTER_DKIM_HEADER "DKIM-Signature"
+#define RSPAMD_MILTER_ACTION_HEADER "X-Rspamd-Action"
 #endif

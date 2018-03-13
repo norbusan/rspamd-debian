@@ -124,6 +124,7 @@ struct rspamd_http_connection_entry {
 	struct rspamd_http_connection *conn;
 	gpointer ud;
 	gboolean is_reply;
+	gboolean support_gzip;
 	struct rspamd_http_connection_entry *prev, *next;
 };
 
@@ -279,7 +280,7 @@ struct rspamd_http_message * rspamd_http_connection_steal_msg (
  * @return
  */
 struct rspamd_http_message * rspamd_http_connection_copy_msg (
-		struct rspamd_http_message *msg);
+		struct rspamd_http_message *msg, GError **err);
 
 /**
  * Create new HTTP message

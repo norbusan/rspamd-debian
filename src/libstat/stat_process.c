@@ -298,11 +298,15 @@ rspamd_stat_process_tokenize (struct rspamd_stat_ctx *st_ctx,
 		struct rspamd_task *task)
 {
 	struct rspamd_mime_text_part *part;
+	rspamd_cryptobox_hash_state_t hst;
 	rspamd_stat_token_t *tok;
+	rspamd_token_t *st_tok;
 	GArray *words;
 	gchar *sub = NULL;
 	guint i, reserved_len = 0;
 	gdouble *pdiff;
+	guchar hout[rspamd_cryptobox_HASHBYTES];
+	gchar *b32_hout;
 
 	for (i = 0; i < task->text_parts->len; i++) {
 		part = g_ptr_array_index (task->text_parts, i);
@@ -363,6 +367,24 @@ rspamd_stat_process_tokenize (struct rspamd_stat_ctx *st_ctx,
 	}
 
 	rspamd_stat_tokenize_parts_metadata (st_ctx, task);
+
+	/* Produce signature */
+	rspamd_cryptobox_hash_init (&hst, NULL, 0);
+
+	PTR_ARRAY_FOREACH (task->tokens, i, st_tok) {
+		rspamd_cryptobox_hash_update (&hst, (guchar *)&st_tok->data,
+				sizeof (st_tok->data));
+	}
+
+	rspamd_cryptobox_hash_final (&hst, hout);
+	b32_hout = rspamd_encode_base32 (hout, sizeof (hout));
+	/*
+	 * We need to strip it to 32 characters providing ~160 bits of
+	 * hash distribution
+	 */
+	b32_hout[32] = '\0';
+	rspamd_mempool_set_variable (task->task_pool, RSPAMD_MEMPOOL_STAT_SIGNATURE,
+			b32_hout, g_free);
 }
 
 static void
@@ -434,7 +456,7 @@ rspamd_stat_backends_process (struct rspamd_stat_ctx *st_ctx,
 	}
 }
 
-static void
+static gboolean
 rspamd_stat_backends_post_process (struct rspamd_stat_ctx *st_ctx,
 		struct rspamd_task *task)
 {
@@ -456,9 +478,13 @@ rspamd_stat_backends_post_process (struct rspamd_stat_ctx *st_ctx,
 		bk_run = g_ptr_array_index (task->stat_runtimes, i);
 
 		if (bk_run != NULL) {
-			st->backend->finalize_process (task, bk_run, st_ctx);
+			if (!st->backend->finalize_process (task, bk_run, st_ctx)) {
+				return FALSE;
+			}
 		}
 	}
+
+	return TRUE;
 }
 
 static void
@@ -589,8 +615,10 @@ rspamd_stat_classify (struct rspamd_task *task, lua_State *L, guint stage,
 	}
 	else if (stage == RSPAMD_TASK_STAGE_CLASSIFIERS_POST) {
 		/* Process classifiers */
-		rspamd_stat_backends_post_process (st_ctx, task);
-		rspamd_stat_classifiers_process (st_ctx, task);
+		if (rspamd_stat_backends_post_process (st_ctx, task)) {
+			rspamd_stat_classifiers_process (st_ctx, task);
+		}
+		/* Do not process classifiers on backend failures */
 	}
 
 	task->processed_stages |= stage;
@@ -916,8 +944,9 @@ end:
 static gboolean
 rspamd_stat_backends_post_learn (struct rspamd_stat_ctx *st_ctx,
 		struct rspamd_task *task,
-		 const gchar *classifier,
-		 gboolean spam)
+		const gchar *classifier,
+		gboolean spam,
+		GError **err)
 {
 	struct rspamd_classifier *cl;
 	struct rspamd_statfile *st;
@@ -933,11 +962,6 @@ rspamd_stat_backends_post_learn (struct rspamd_stat_ctx *st_ctx,
 		if (classifier != NULL && (cl->cfg->name == NULL ||
 				g_ascii_strcasecmp (classifier, cl->cfg->name) != 0)) {
 			continue;
-		}
-
-		if (cl->cache) {
-			cache_run = cl->cache->runtime (task, cl->cachecf, TRUE);
-			cl->cache->learn (task, spam, cache_run);
 		}
 
 		if (cl->cfg->flags & RSPAMD_FLAG_CLASSIFIER_NO_BACKEND) {
@@ -957,7 +981,14 @@ rspamd_stat_backends_post_learn (struct rspamd_stat_ctx *st_ctx,
 				continue;
 			}
 
-			st->backend->finalize_learn (task, bk_run, st_ctx);
+			if (!st->backend->finalize_learn (task, bk_run, st_ctx, err)) {
+				return RSPAMD_STAT_PROCESS_ERROR;
+			}
+		}
+
+		if (cl->cache) {
+			cache_run = cl->cache->runtime (task, cl->cachecf, TRUE);
+			cl->cache->learn (task, spam, cache_run);
 		}
 	}
 
@@ -1007,7 +1038,7 @@ rspamd_stat_learn (struct rspamd_task *task,
 		}
 	}
 	else if (stage == RSPAMD_TASK_STAGE_LEARN_POST) {
-		if (!rspamd_stat_backends_post_learn (st_ctx, task, classifier, spam)) {
+		if (!rspamd_stat_backends_post_learn (st_ctx, task, classifier, spam, err)) {
 			return RSPAMD_STAT_PROCESS_ERROR;
 		}
 	}
@@ -1118,7 +1149,7 @@ rspamd_stat_check_autolearn (struct rspamd_task *task)
 				if ((ucl_object_type (elt1) == UCL_FLOAT ||
 						ucl_object_type (elt1) == UCL_INT) &&
 					(ucl_object_type (elt2) == UCL_FLOAT ||
-						ucl_object_type (elt1) == UCL_INT)) {
+						ucl_object_type (elt2) == UCL_INT)) {
 					ham_score = ucl_object_todouble (elt1);
 					spam_score = ucl_object_todouble (elt2);
 

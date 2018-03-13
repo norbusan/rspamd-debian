@@ -52,6 +52,7 @@ end
 /* Upstream list functions */
 LUA_FUNCTION_DEF (upstream_list, create);
 LUA_FUNCTION_DEF (upstream_list, destroy);
+LUA_FUNCTION_DEF (upstream_list, all_upstreams);
 LUA_FUNCTION_DEF (upstream_list, get_upstream_by_hash);
 LUA_FUNCTION_DEF (upstream_list, get_upstream_round_robin);
 LUA_FUNCTION_DEF (upstream_list, get_upstream_master_slave);
@@ -61,6 +62,7 @@ static const struct luaL_reg upstream_list_m[] = {
 	LUA_INTERFACE_DEF (upstream_list, get_upstream_by_hash),
 	LUA_INTERFACE_DEF (upstream_list, get_upstream_round_robin),
 	LUA_INTERFACE_DEF (upstream_list, get_upstream_master_slave),
+	LUA_INTERFACE_DEF (upstream_list, all_upstreams),
 	{"__tostring", rspamd_lua_class_tostring},
 	{"__gc", lua_upstream_list_destroy},
 	{NULL, NULL}
@@ -169,17 +171,28 @@ static gint
 lua_upstream_list_create (lua_State *L)
 {
 	struct upstream_list *new = NULL, **pnew;
-	struct rspamd_config *cfg = lua_check_config (L, 1);
+	struct rspamd_config *cfg = NULL;
 	const gchar *def;
 	guint default_port = 0;
+	gint top;
 
-	def = luaL_checkstring (L, 2);
-	if (def && cfg) {
-		if (lua_gettop (L) >= 3) {
-			default_port = luaL_checknumber (L, 3);
-		}
 
-		new = rspamd_upstreams_create (cfg->ups_ctx);
+	if (lua_type (L, 1) == LUA_TUSERDATA) {
+		cfg = lua_check_config (L, 1);
+		top = 2;
+	}
+	else {
+		top = 1;
+	}
+
+	if (lua_gettop (L) >= top + 1) {
+		default_port = luaL_checknumber (L, top + 1);
+	}
+
+	if (lua_type (L, top) == LUA_TSTRING) {
+		def = luaL_checkstring (L, top);
+
+		new = rspamd_upstreams_create (cfg ? cfg->ups_ctx : NULL);
 
 		if (rspamd_upstreams_parse_line (new, def, default_port, NULL)) {
 			pnew = lua_newuserdata (L, sizeof (struct upstream_list *));
@@ -191,8 +204,26 @@ lua_upstream_list_create (lua_State *L)
 			lua_pushnil (L);
 		}
 	}
+	else if (lua_type (L, top) == LUA_TTABLE) {
+		new = rspamd_upstreams_create (cfg ? cfg->ups_ctx : NULL);
+		pnew = lua_newuserdata (L, sizeof (struct upstream_list *));
+		rspamd_lua_setclass (L, "rspamd{upstream_list}", -1);
+		*pnew = new;
+
+		lua_pushvalue (L, top);
+
+		for (lua_pushnil (L); lua_next (L, -2); lua_pop (L, 1)) {
+			def = lua_tostring (L, -1);
+
+			if (!def || !rspamd_upstreams_parse_line (new, def, default_port, NULL)) {
+				msg_warn ("cannot parse upstream %s", def);
+			}
+		}
+
+		lua_pop (L, 1);
+	}
 	else {
-		lua_error (L);
+		return luaL_error (L, "invalid arguments");
 	}
 
 	return 1;
@@ -309,6 +340,39 @@ lua_upstream_list_get_upstream_master_slave (lua_State *L)
 		else {
 			lua_pushnil (L);
 		}
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+static void lua_upstream_inserter (struct upstream *up, guint idx, void *ud)
+{
+	struct upstream **pup;
+	lua_State *L = (lua_State *)ud;
+
+	pup = lua_newuserdata (L, sizeof (struct upstream *));
+	rspamd_lua_setclass (L, "rspamd{upstream}", -1);
+	*pup = up;
+
+	lua_rawseti (L, -2, idx + 1);
+}
+/***
+ * @method upstream_list:all_upstreams()
+ * Returns all upstreams for this list
+ * @return {table|upstream} all upstreams defined
+ */
+static gint
+lua_upstream_list_all_upstreams (lua_State *L)
+{
+	struct upstream_list *upl;
+
+	upl = lua_check_upstream_list (L);
+	if (upl) {
+		lua_createtable (L, rspamd_upstreams_count (upl), 0);
+		rspamd_upstreams_foreach (upl, lua_upstream_inserter, L);
 	}
 	else {
 		lua_pushnil (L);

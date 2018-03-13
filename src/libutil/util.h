@@ -75,7 +75,7 @@ GList * rspamd_sockets_list (const gchar *credits,
 /*
  * Create socketpair
  */
-gboolean rspamd_socketpair (gint pair[2]);
+gboolean rspamd_socketpair (gint pair[2], gboolean is_stream);
 
 /*
  * Write pid to file
@@ -190,6 +190,10 @@ void g_queue_free_full (GQueue *queue, GDestroyNotify free_func);
 #if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION < 40))
 void g_ptr_array_insert (GPtrArray *array, gint index_, gpointer data);
 #endif
+#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION < 30))
+GPtrArray* g_ptr_array_new_full (guint reserved_size,
+		GDestroyNotify element_free_func);
+#endif
 
 /*
  * Convert milliseconds to timeval fields
@@ -207,6 +211,7 @@ void g_ptr_array_insert (GPtrArray *array, gint index_, gpointer data);
 #define tv_to_double(tv) ((double)(tv)->tv_sec + (tv)->tv_usec / 1.0e6)
 #define ts_to_usec(ts) ((ts)->tv_sec * 1000000LLU +							\
 	(ts)->tv_nsec / 1000LLU)
+#define ts_to_double(tv) ((double)(tv)->tv_sec + (tv)->tv_nsec / 1.0e9)
 
 /**
  * Try to allocate a file on filesystem (using fallocate or posix_fallocate)
@@ -227,14 +232,6 @@ typedef struct rspamd_mutex_s {
 	GStaticMutex mtx;
 #endif
 } rspamd_mutex_t;
-
-typedef struct rspamd_rwlock_s {
-#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION > 30))
-	GRWLock rwlock;
-#else
-	GStaticRWLock rwlock;
-#endif
-} rspamd_rwlock_t;
 
 
 /**
@@ -260,52 +257,6 @@ void rspamd_mutex_unlock (rspamd_mutex_t *mtx);
  * @param mtx
  */
 void rspamd_mutex_free (rspamd_mutex_t *mtx);
-
-/**
- * Create new rwloc
- * @return
- */
-rspamd_rwlock_t * rspamd_rwlock_new (void);
-
-/**
- * Lock rwlock for writing
- * @param mtx
- */
-void rspamd_rwlock_writer_lock (rspamd_rwlock_t *mtx);
-
-/**
- * Lock rwlock for reading
- * @param mtx
- */
-void rspamd_rwlock_reader_lock (rspamd_rwlock_t *mtx);
-
-/**
- * Unlock rwlock from writing
- * @param mtx
- */
-void rspamd_rwlock_writer_unlock (rspamd_rwlock_t *mtx);
-
-/**
- * Unlock rwlock from reading
- * @param mtx
- */
-void rspamd_rwlock_reader_unlock (rspamd_rwlock_t *mtx);
-
-/**
- * Free rwlock
- * @param mtx
- */
-void rspamd_rwlock_free (rspamd_rwlock_t *mtx);
-
-static inline void
-rspamd_cond_wait (GCond *cond, rspamd_mutex_t *mtx)
-{
-#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION > 30))
-	g_cond_wait (cond, &mtx->mtx);
-#else
-	g_cond_wait (cond, g_static_mutex_get_mutex (&mtx->mtx));
-#endif
-}
 
 /**
  * Create new named thread
@@ -348,7 +299,7 @@ gint rspamd_read_passphrase (gchar *buf, gint size, gint rwflag, gpointer key);
  * Portably return the current clock ticks as seconds
  * @return
  */
-gdouble rspamd_get_ticks (void);
+gdouble rspamd_get_ticks (gboolean rdtsc_ok);
 
 /**
  * Portably return the current virtual clock ticks as seconds
@@ -378,6 +329,12 @@ void rspamd_array_free_hard (gpointer p);
  * @param p
  */
 void rspamd_gstring_free_hard (gpointer p);
+
+/**
+ * Special utility to help GError freeing in rspamd_mempool
+ * @param p
+ */
+void rspamd_gerror_free_maybe (gpointer p);
 
 /**
  * Special utility to help GString freeing (without freeing the memory segment) in rspamd_mempool
@@ -517,7 +474,28 @@ gdouble rspamd_normalize_probability (gdouble x, gdouble bias);
  */
 guint64 rspamd_tm_to_time (const struct tm *tm, glong tz);
 
+/**
+ * Splits unix timestamp into struct tm using GMT timezone
+ * @param ts
+ * @param dest
+ */
+void rspamd_gmtime (gint64 ts, struct tm *dest);
+
+/**
+ * Split unix timestamp into struct tm using local timezone
+ * @param ts
+ * @param dest
+ */
+void rspamd_localtime (gint64 ts, struct tm *dest);
+
 #define PTR_ARRAY_FOREACH(ar, i, cur) for ((i) = 0; (ar) != NULL && (i) < (ar)->len && (((cur) = g_ptr_array_index((ar), (i))) || 1); ++(i))
 
+/**
+ * Compresses the input string using gzip+zlib. Old string is replaced and freed
+ * if compressed. If not compressed it is untouched.
+ * @param in
+ * @return TRUE if a string has been compressed
+ */
+gboolean rspamd_fstring_gzip (rspamd_fstring_t **in);
 
 #endif

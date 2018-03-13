@@ -17,8 +17,6 @@
  * Rspamd worker implementation
  */
 
-#include <libserver/rspamd_control.h>
-#include <src/libserver/rspamd_control.h>
 #include "config.h"
 #include "libutil/util.h"
 #include "libutil/map.h"
@@ -36,7 +34,7 @@
 #include "worker_private.h"
 #include "utlist.h"
 #include "libutil/http_private.h"
-#include "monitored.h"
+#include "libmime/lang_detection.h"
 #include "unix-std.h"
 
 #include "lua/lua_common.h"
@@ -53,7 +51,7 @@ worker_t normal_worker = {
 		"normal",                   /* Name */
 		init_worker,                /* Init function */
 		start_worker,               /* Start function */
-		RSPAMD_WORKER_HAS_SOCKET|RSPAMD_WORKER_KILLABLE,
+		RSPAMD_WORKER_HAS_SOCKET|RSPAMD_WORKER_KILLABLE|RSPAMD_WORKER_SCANNER,
 		RSPAMD_WORKER_SOCKET_TCP,   /* TCP socket */
 		RSPAMD_WORKER_VER           /* Version info */
 };
@@ -67,10 +65,6 @@ worker_t normal_worker = {
         G_STRFUNC, \
         __VA_ARGS__)
 #define msg_info_ctx(...)   rspamd_default_log_function (G_LOG_LEVEL_INFO, \
-        "controller", ctx->cfg->cfg_pool->tag.uid, \
-        G_STRFUNC, \
-        __VA_ARGS__)
-#define msg_debug_ctx(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
         "controller", ctx->cfg->cfg_pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
@@ -103,7 +97,7 @@ rspamd_worker_call_finish_handlers (struct rspamd_worker *worker)
 	if (cfg->finish_callbacks) {
 		ctx = worker->ctx;
 		/* Create a fake task object for async events */
-		task = rspamd_task_new (worker, cfg, NULL);
+		task = rspamd_task_new (worker, cfg, NULL, NULL);
 		task->resolver = ctx->resolver;
 		task->ev_base = ctx->ev_base;
 		task->flags |= RSPAMD_TASK_FLAG_PROCESSING;
@@ -370,7 +364,7 @@ accept_socket (gint fd, short what, void *arg)
 		return;
 	}
 
-	task = rspamd_task_new (worker, ctx->cfg, NULL);
+	task = rspamd_task_new (worker, ctx->cfg, NULL, ctx->lang_det);
 
 	msg_info_task ("accepted connection from %s port %d, task ptr: %p",
 		rspamd_inet_address_to_string (addr),
@@ -468,7 +462,7 @@ rspamd_worker_log_pipe_handler (struct rspamd_main *rspamd_main,
 	rep.type = RSPAMD_CONTROL_LOG_PIPE;
 
 	if (attached_fd != -1) {
-		lp = g_slice_alloc0 (sizeof (*lp));
+		lp = g_malloc0 (sizeof (*lp));
 		lp->fd = attached_fd;
 		lp->type = cmd->cmd.log_pipe.type;
 
@@ -641,7 +635,8 @@ rspamd_worker_on_terminate (struct rspamd_worker *worker)
 void
 rspamd_worker_init_scanner (struct rspamd_worker *worker,
 		struct event_base *ev_base,
-		struct rspamd_dns_resolver *resolver)
+		struct rspamd_dns_resolver *resolver,
+		struct rspamd_lang_detector **plang_det)
 {
 	rspamd_stat_init (worker->srv->cfg, ev_base);
 	g_ptr_array_add (worker->finish_actions,
@@ -660,6 +655,8 @@ rspamd_worker_init_scanner (struct rspamd_worker *worker,
 			RSPAMD_CONTROL_MONITORED_CHANGE,
 			rspamd_worker_monitored_handler,
 			worker->srv->cfg);
+
+	*plang_det = worker->srv->cfg->lang_det;
 }
 
 /*
@@ -671,7 +668,7 @@ start_worker (struct rspamd_worker *worker)
 	struct rspamd_worker_ctx *ctx = worker->ctx;
 
 	ctx->cfg = worker->srv->cfg;
-	ctx->ev_base = rspamd_prepare_worker (worker, "normal", accept_socket, TRUE);
+	ctx->ev_base = rspamd_prepare_worker (worker, "normal", accept_socket);
 	msec_to_tv (ctx->timeout, &ctx->io_tv);
 	rspamd_symbols_cache_start_refresh (worker->srv->cfg->cache, ctx->ev_base,
 			worker);
@@ -685,7 +682,10 @@ start_worker (struct rspamd_worker *worker)
 
 	/* XXX: stupid default */
 	ctx->keys_cache = rspamd_keypair_cache_new (256);
-	rspamd_worker_init_scanner (worker, ctx->ev_base, ctx->resolver);
+	rspamd_worker_init_scanner (worker, ctx->ev_base, ctx->resolver,
+			&ctx->lang_det);
+	rspamd_lua_run_postloads (ctx->cfg->lua_state, ctx->cfg, ctx->ev_base,
+			worker);
 
 	event_base_loop (ctx->ev_base, 0);
 	rspamd_worker_block_signals ();

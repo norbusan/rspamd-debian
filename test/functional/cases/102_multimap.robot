@@ -13,6 +13,8 @@ ${REDIS_SCOPE}  Suite
 ${RSPAMD_SCOPE}  Suite
 ${RCVD1}        ${TESTDIR}/messages/received1.eml
 ${RCVD2}        ${TESTDIR}/messages/received2.eml
+${RCVD3}        ${TESTDIR}/messages/received3.eml
+${RCVD4}        ${TESTDIR}/messages/received4.eml
 ${URL1}         ${TESTDIR}/messages/url1.eml
 ${URL2}         ${TESTDIR}/messages/url2.eml
 ${URL3}         ${TESTDIR}/messages/url3.eml
@@ -148,6 +150,15 @@ MAP - REDIS - HOSTNAME MISS
   ${result} =  Scan Message With Rspamc  ${MESSAGE}  --ip  127.0.0.1  --hostname  rspamd.com
   Check Rspamc  ${result}  REDIS_HOSTNAME  inverse=1
 
+MAP - REDIS - HOSTNAME - EXPANSION - HIT
+  Redis HSET  127.0.0.1.foo.com  redistest.example.net  ${EMPTY}
+  ${result} =  Scan Message With Rspamc  ${MESSAGE}  --ip  127.0.0.1  --hostname  redistest.example.net  --rcpt  bob@foo.com
+  Check Rspamc  ${result}  REDIS_HOSTNAME_EXPANSION
+
+MAP - REDIS - HOSTNAME - EXPANSION - MISS
+  ${result} =  Scan Message With Rspamc  ${MESSAGE}  --ip  127.0.0.1  --hostname  redistest.example.net  --rcpt  bob@bar.com
+  Check Rspamc  ${result}  REDIS_HOSTNAME_EXPANSION  inverse=1
+
 MAP - REDIS - IP
   Redis HSET  ipaddr  127.0.0.1  ${EMPTY}
   ${result} =  Scan Message With Rspamc  ${MESSAGE}  --ip  127.0.0.1
@@ -261,15 +272,25 @@ MAP - RECEIVED - IP MINMAX POS - ONE
   Check Rspamc  ${result}  RCVD_TEST_01
   Check Rspamc  ${result}  RCVD_TEST_02  inverse=1
 
-MAP - RECEIVED - IP MINMAX POS - TWO
+MAP - RECEIVED - IP MINMAX POS - TWO / RCVD_AUTHED_ONE HIT
   ${result} =  Scan Message With Rspamc  ${RCVD2}
   Check Rspamc  ${result}  RCVD_TEST_02
-  Check Rspamc  ${result}  RCVD_TEST_01  inverse=1
+  Should Not Contain  ${result.stdout}  RCVD_TEST_01
+  Should Contain  ${result.stdout}  RCVD_AUTHED_ONE
 
 MAP - RECEIVED - REDIS
   Redis HSET  RCVD_TEST  2a01:7c8:aab6:26d:5054:ff:fed1:1da2  ${EMPTY}
   ${result} =  Scan Message With Rspamc  ${RCVD1}
   Check Rspamc  ${result}  RCVD_TEST_REDIS_01
+
+RCVD_AUTHED_ONE & RCVD_AUTHED_TWO - MISS
+  ${result} =  Scan Message With Rspamc  ${RCVD3}
+  Check Rspamc  ${result}  RCVD_AUTHED_  inverse=1
+
+RCVD_AUTHED_TWO HIT / RCVD_AUTHED_ONE MISS
+  ${result} =  Scan Message With Rspamc  ${RCVD4}
+  Check Rspamc  ${result}  RCVD_AUTHED_TWO
+  Should Not Contain  ${result.stdout}  RCVD_AUTHED_ONE
 
 *** Keywords ***
 Multimap Setup

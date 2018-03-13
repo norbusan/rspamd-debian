@@ -18,6 +18,7 @@
 #include "stat_internal.h"
 #include "upstream.h"
 #include "lua/lua_common.h"
+#include "libserver/mempool_vars_internal.h"
 
 #ifdef WITH_HIREDIS
 #include "hiredis.h"
@@ -46,6 +47,7 @@ struct redis_stat_ctx {
 	gboolean enable_users;
 	gboolean store_tokens;
 	gboolean new_schema;
+	gboolean enable_signatures;
 	guint expiry;
 	gint cbref_user;
 };
@@ -70,6 +72,7 @@ struct redis_stat_runtime {
 	guint64 learned;
 	gint id;
 	gboolean has_event;
+	GError *err;
 };
 
 /* Used to get statistics from redis */
@@ -599,6 +602,85 @@ rspamd_redis_tokens_to_query (struct rspamd_task *task,
 }
 
 static void
+rspamd_redis_store_stat_signature (struct rspamd_task *task,
+		struct redis_stat_runtime *rt,
+		GPtrArray *tokens,
+		const gchar *prefix)
+{
+	gchar *sig, keybuf[512], nbuf[64];
+	rspamd_token_t *tok;
+	guint i, blen, klen;
+	rspamd_fstring_t *out;
+
+	out = rspamd_fstring_sized_new (1024);
+	sig = rspamd_mempool_get_variable (task->task_pool,
+			RSPAMD_MEMPOOL_STAT_SIGNATURE);
+
+	if (sig == NULL) {
+		msg_err_task ("cannot get bayes signature");
+		return;
+	}
+
+	klen = rspamd_snprintf (keybuf, sizeof (keybuf), "%s_%s_%s",
+			prefix, sig, rt->stcf->is_spam ? "S" : "H");
+
+	out->len = 0;
+
+	/* Cleanup key */
+	rspamd_printf_fstring (&out, ""
+					"*2\r\n"
+					"$3\r\n"
+					"DEL\r\n"
+					"$%d\r\n"
+					"%s\r\n",
+			klen, keybuf);
+	redisAsyncFormattedCommand (rt->redis, NULL, NULL,
+			out->str, out->len);
+	out->len = 0;
+
+	rspamd_printf_fstring (&out, ""
+					"*%d\r\n"
+					"$5\r\n"
+					"LPUSH\r\n"
+					"$%d\r\n"
+					"%s\r\n",
+			tokens->len + 2,
+			klen, keybuf);
+
+	PTR_ARRAY_FOREACH (tokens, i, tok) {
+		blen = rspamd_snprintf (nbuf, sizeof (nbuf), "%uL", tok->data);
+		rspamd_printf_fstring (&out, ""
+				"$%d\r\n"
+				"%s\r\n", blen, nbuf);
+	}
+
+	redisAsyncFormattedCommand (rt->redis, NULL, NULL,
+			out->str, out->len);
+	out->len = 0;
+
+	if (rt->ctx->expiry > 0) {
+		out->len = 0;
+		blen = rspamd_snprintf (nbuf, sizeof (nbuf), "%d",
+				rt->ctx->expiry);
+
+		rspamd_printf_fstring (&out, ""
+						"*3\r\n"
+						"$6\r\n"
+						"EXPIRE\r\n"
+						"$%d\r\n"
+						"%s\r\n"
+						"$%d\r\n"
+						"%s\r\n",
+				klen, keybuf,
+				blen, nbuf);
+		redisAsyncFormattedCommand (rt->redis, NULL, NULL,
+				out->str, out->len);
+	}
+
+	rspamd_fstring_free (out);
+}
+
+static void
 rspamd_redis_async_cbdata_cleanup (struct rspamd_redis_stat_cbdata *cbdata)
 {
 	guint i;
@@ -636,7 +718,7 @@ rspamd_redis_async_cbdata_cleanup (struct rspamd_redis_stat_cbdata *cbdata)
 			ucl_object_unref (cbdata->cur);
 		}
 
-		g_slice_free1 (sizeof (*cbdata), cbdata);
+		g_free (cbdata);
 	}
 }
 
@@ -761,14 +843,25 @@ rspamd_redis_stat_keys (redisAsyncContext *c, gpointer r, gpointer priv)
 					k = (gchar *)g_ptr_array_index (cbdata->cur_keys, i);
 
 					if (k) {
+						const gchar *learned_key = "learns";
+
+						if (cbdata->elt->ctx->new_schema) {
+							if (cbdata->elt->ctx->stcf->is_spam) {
+								learned_key = "learns_spam";
+							}
+							else {
+								learned_key = "learns_ham";
+							}
+						}
+
 						redisAsyncCommand (cbdata->redis, rspamd_redis_stat_key,
 								cbdata,
 								"HLEN %s",
 								k);
 						redisAsyncCommand (cbdata->redis, rspamd_redis_stat_learns,
 								cbdata,
-								"HGET %s learns",
-								k);
+								"HGET %s %s",
+								k, learned_key);
 						cbdata->inflight += 2;
 					}
 				}
@@ -832,7 +925,7 @@ rspamd_redis_async_stat_cb (struct rspamd_stat_async_elt *elt, gpointer d)
 	/* Disable further events unless needed */
 	elt->enabled = FALSE;
 
-	cbdata = g_slice_alloc0 (sizeof (*cbdata));
+	cbdata = g_malloc0 (sizeof (*cbdata));
 	cbdata->selected = rspamd_upstream_get (ctx->read_servers,
 					RSPAMD_UPSTREAM_ROUND_ROBIN,
 					NULL,
@@ -937,6 +1030,10 @@ rspamd_redis_timeout (gint fd, short what, gpointer d)
 		/* This calls for all callbacks pending */
 		redisAsyncFree (redis);
 	}
+
+	g_set_error (&rt->err, rspamd_redis_stat_quark (), ETIMEDOUT,
+			"error getting reply from redis server %s: timeout",
+			rspamd_upstream_name (rt->selected));
 }
 
 /* Called when we have connected to the redis server and got stats */
@@ -984,6 +1081,10 @@ rspamd_redis_connected (redisAsyncContext *c, gpointer r, gpointer priv)
 		msg_err_task ("error getting reply from redis server %s: %s",
 				rspamd_upstream_name (rt->selected), c->errstr);
 		rspamd_upstream_fail (rt->selected);
+
+		g_set_error (&rt->err, rspamd_redis_stat_quark (), c->err,
+				"error getting reply from redis server %s: %s",
+				rspamd_upstream_name (rt->selected), c->errstr);
 	}
 
 }
@@ -1066,6 +1167,9 @@ rspamd_redis_processed (redisAsyncContext *c, gpointer r, gpointer priv)
 		if (rt->redis) {
 			rspamd_upstream_fail (rt->selected);
 		}
+		g_set_error (&rt->err, rspamd_redis_stat_quark (), c->err,
+				"cannot get values: error getting reply from redis server %s: %s",
+				rspamd_upstream_name (rt->selected), c->errstr);
 	}
 
 	if (rt->has_event) {
@@ -1092,6 +1196,10 @@ rspamd_redis_learned (redisAsyncContext *c, gpointer r, gpointer priv)
 		if (rt->redis) {
 			rspamd_upstream_fail (rt->selected);
 		}
+
+		g_set_error (&rt->err, rspamd_redis_stat_quark (), c->err,
+				"cannot get learned: error getting reply from redis server %s: %s",
+				rspamd_upstream_name (rt->selected), c->errstr);
 	}
 
 	if (rt->has_event) {
@@ -1244,6 +1352,18 @@ rspamd_redis_parse_classifier_opts (struct redis_stat_ctx *backend,
 	}
 	else {
 		backend->new_schema = FALSE;
+
+		msg_warn_config ("you are using old bayes schema for redis statistics, "
+				"please consider converting it to a new one "
+				"by using 'rspamadm configwizard statistics'");
+	}
+
+	elt = ucl_object_lookup (obj, "signatures");
+	if (elt) {
+		backend->enable_signatures = ucl_object_toboolean (elt);
+	}
+	else {
+		backend->enable_signatures = FALSE;
 	}
 
 	elt = ucl_object_lookup_any (obj, "expiry", "expire", NULL);
@@ -1265,7 +1385,7 @@ rspamd_redis_init (struct rspamd_stat_ctx *ctx,
 	const ucl_object_t *obj;
 	gboolean ret = FALSE;
 
-	backend = g_slice_alloc0 (sizeof (*backend));
+	backend = g_malloc0 (sizeof (*backend));
 
 	/* First search in backend configuration */
 	obj = ucl_object_lookup (st->classifier->cfg->opts, "backend");
@@ -1306,7 +1426,7 @@ rspamd_redis_init (struct rspamd_stat_ctx *ctx,
 
 	if (!ret) {
 		msg_err_config ("cannot init redis backend for %s", stf->symbol);
-		g_slice_free1 (sizeof (*backend), backend);
+		g_free (backend);
 		return NULL;
 	}
 
@@ -1314,7 +1434,7 @@ rspamd_redis_init (struct rspamd_stat_ctx *ctx,
 	stf->clcf->flags |= RSPAMD_FLAG_CLASSIFIER_INCREMENTING_BACKEND;
 	backend->stcf = stf;
 
-	st_elt = g_slice_alloc0 (sizeof (*st_elt));
+	st_elt = g_malloc0 (sizeof (*st_elt));
 	st_elt->ev_base = ctx->ev_base;
 	st_elt->ctx = backend;
 	backend->stat_elt = rspamd_stat_ctx_register_async (
@@ -1364,6 +1484,8 @@ rspamd_redis_runtime (struct rspamd_task *task,
 	}
 
 	rt = rspamd_mempool_alloc0 (task->task_pool, sizeof (*rt));
+	rspamd_mempool_add_destructor (task->task_pool,
+			rspamd_gerror_free_maybe, &rt->err);
 	rspamd_redis_expand_object (ctx->redis_object, ctx, task,
 			&rt->redis_object_expanded);
 	rt->selected = up;
@@ -1406,7 +1528,7 @@ rspamd_redis_close (gpointer p)
 		rspamd_upstreams_destroy (ctx->write_servers);
 	}
 
-	g_slice_free1 (sizeof (*ctx), ctx);
+	g_free (ctx);
 }
 
 gboolean
@@ -1418,6 +1540,8 @@ rspamd_redis_process_tokens (struct rspamd_task *task,
 	rspamd_fstring_t *query;
 	struct timeval tv;
 	gint ret;
+	const gchar *learned_key = "learns";
+
 
 	if (tokens == NULL || tokens->len == 0 || rt->redis == NULL) {
 		return FALSE;
@@ -1425,8 +1549,17 @@ rspamd_redis_process_tokens (struct rspamd_task *task,
 
 	rt->id = id;
 
+	if (rt->ctx->new_schema) {
+		if (rt->ctx->stcf->is_spam) {
+			learned_key = "learns_spam";
+		}
+		else {
+			learned_key = "learns_ham";
+		}
+	}
+
 	if (redisAsyncCommand (rt->redis, rspamd_redis_connected, rt, "HGET %s %s",
-			rt->redis_object_expanded, "learns") == REDIS_OK) {
+			rt->redis_object_expanded, learned_key) == REDIS_OK) {
 
 		rspamd_session_add_event (task->s, rspamd_redis_fin, rt,
 				rspamd_redis_stat_quark ());
@@ -1462,7 +1595,7 @@ rspamd_redis_process_tokens (struct rspamd_task *task,
 	return FALSE;
 }
 
-void
+gboolean
 rspamd_redis_finalize_process (struct rspamd_task *task, gpointer runtime,
 		gpointer ctx)
 {
@@ -1478,6 +1611,12 @@ rspamd_redis_finalize_process (struct rspamd_task *task, gpointer runtime,
 		rt->redis = NULL;
 		redisAsyncFree (redis);
 	}
+
+	if (rt->err) {
+		return FALSE;
+	}
+
+	return TRUE;
 }
 
 gboolean
@@ -1493,6 +1632,7 @@ rspamd_redis_learn_tokens (struct rspamd_task *task, GPtrArray *tokens,
 	rspamd_token_t *tok;
 	gint ret;
 	goffset off;
+	const gchar *learned_key = "learns";
 
 	up = rspamd_upstream_get (rt->ctx->write_servers,
 			RSPAMD_UPSTREAM_MASTER_SLAVE,
@@ -1505,6 +1645,15 @@ rspamd_redis_learn_tokens (struct rspamd_task *task, GPtrArray *tokens,
 	}
 
 	rt->selected = up;
+
+	if (rt->ctx->new_schema) {
+		if (rt->ctx->stcf->is_spam) {
+			learned_key = "learns_spam";
+		}
+		else {
+			learned_key = "learns_ham";
+		}
+	}
 
 	addr = rspamd_upstream_addr (up);
 	g_assert (addr != NULL);
@@ -1557,12 +1706,14 @@ rspamd_redis_learn_tokens (struct rspamd_task *task, GPtrArray *tokens,
 				"HINCRBY\r\n"
 				"$%d\r\n"
 				"%s\r\n"
-				"$6\r\n"
-				"learns\r\n"
+				"$%d\r\n"
+				"%s\r\n" /* Learned key */
 				"$1\r\n"
 				"1\r\n",
 				(gint)strlen (rt->redis_object_expanded),
-				rt->redis_object_expanded);
+				rt->redis_object_expanded,
+				(gint)strlen (learned_key),
+				learned_key);
 	}
 	else {
 		rspamd_printf_fstring (&query, ""
@@ -1571,12 +1722,14 @@ rspamd_redis_learn_tokens (struct rspamd_task *task, GPtrArray *tokens,
 				"HINCRBY\r\n"
 				"$%d\r\n"
 				"%s\r\n"
-				"$6\r\n"
-				"learns\r\n"
+				"$%d\r\n"
+				"%s\r\n" /* Learned key */
 				"$2\r\n"
 				"-1\r\n",
 				(gint)strlen (rt->redis_object_expanded),
-				rt->redis_object_expanded);
+				rt->redis_object_expanded,
+				(gint)strlen (learned_key),
+				learned_key);
 	}
 
 	ret = redisAsyncFormattedCommand (rt->redis, NULL, NULL,
@@ -1593,10 +1746,17 @@ rspamd_redis_learn_tokens (struct rspamd_task *task, GPtrArray *tokens,
 	ret = rspamd_printf_fstring (&query, "*1\r\n$4\r\nEXEC\r\n");
 	ret = redisAsyncFormattedCommand (rt->redis, rspamd_redis_learned, rt,
 			query->str + off, ret);
-
 	rspamd_mempool_add_destructor (task->task_pool,
 			(rspamd_mempool_destruct_t)rspamd_fstring_free, query);
+
 	if (ret == REDIS_OK) {
+
+		/* Add signature if needed */
+		if (rt->ctx->enable_signatures) {
+			rspamd_redis_store_stat_signature (task, rt, tokens,
+					"RSIG");
+		}
+
 		rspamd_session_add_event (task->s, rspamd_redis_fin_learn, rt,
 				rspamd_redis_stat_quark ());
 		rt->has_event = TRUE;
@@ -1620,9 +1780,9 @@ rspamd_redis_learn_tokens (struct rspamd_task *task, GPtrArray *tokens,
 }
 
 
-void
+gboolean
 rspamd_redis_finalize_learn (struct rspamd_task *task, gpointer runtime,
-		gpointer ctx)
+		gpointer ctx, GError **err)
 {
 	struct redis_stat_runtime *rt = REDIS_RUNTIME (runtime);
 	redisAsyncContext *redis;
@@ -1636,6 +1796,15 @@ rspamd_redis_finalize_learn (struct rspamd_task *task, gpointer runtime,
 		rt->redis = NULL;
 		redisAsyncFree (redis);
 	}
+
+	if (rt->err) {
+		g_propagate_error (err, rt->err);
+		rt->err = NULL;
+
+		return FALSE;
+	}
+
+	return TRUE;
 }
 
 gulong

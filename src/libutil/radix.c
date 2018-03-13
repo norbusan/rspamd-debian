@@ -31,10 +31,12 @@
         "radix", tree->pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
-#define msg_debug_radix(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
-        "radix", tree->pool->tag.uid, \
+#define msg_debug_radix(...)  rspamd_conditional_debug_fast (NULL, NULL, \
+        rspamd_radix_log_id, "radix", tree->pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
+
+INIT_LOG_MODULE(radix)
 
 struct radix_tree_compressed {
 	rspamd_mempool_t *pool;
@@ -114,7 +116,7 @@ radix_create_compressed (void)
 {
 	radix_compressed_t *tree;
 
-	tree = g_slice_alloc (sizeof (*tree));
+	tree = g_malloc0 (sizeof (*tree));
 	if (tree == NULL) {
 		return NULL;
 	}
@@ -131,7 +133,7 @@ radix_destroy_compressed (radix_compressed_t *tree)
 {
 	if (tree) {
 		rspamd_mempool_delete (tree->pool);
-		g_slice_free1 (sizeof (*tree), tree);
+		g_free (tree);
 	}
 }
 

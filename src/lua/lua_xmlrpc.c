@@ -26,9 +26,41 @@ static const struct luaL_reg xmlrpclib_m[] = {
 	{NULL, NULL}
 };
 
+#define msg_debug_xmlrpc(...)  rspamd_conditional_debug_fast (NULL, NULL, \
+        rspamd_xmlrpc_log_id, "xmlrpc", "", \
+        G_STRFUNC, \
+        __VA_ARGS__)
+
+INIT_LOG_MODULE(xmlrpc)
+
+enum lua_xmlrpc_state {
+	read_method_responce = 0,
+	read_params = 1,
+	read_param = 2,
+	read_param_value = 3,
+	read_param_element = 4,
+	read_struct = 5,
+	read_struct_member_name = 6,
+	read_struct_member_value = 7,
+	read_struct_element = 8,
+	read_string = 9,
+	read_int = 10,
+	read_double = 11,
+	read_array = 12,
+	read_array_value = 13,
+	read_array_element = 14,
+	error_state = 99,
+	success_state = 100,
+};
+
+enum lua_xmlrpc_stack {
+	st_array = 1,
+	st_struct = 2,
+};
+
 struct lua_xmlrpc_ud {
-	gint parser_state;
-	gint depth;
+	enum lua_xmlrpc_state parser_state;
+	GQueue *st;
 	gint param_count;
 	gboolean got_text;
 	lua_State *L;
@@ -76,140 +108,219 @@ xmlrpc_start_element (GMarkupParseContext *context,
 	GError **error)
 {
 	struct lua_xmlrpc_ud *ud = user_data;
-	int last_state;
+	enum lua_xmlrpc_state last_state;
 
 	last_state = ud->parser_state;
 
+	msg_debug_xmlrpc ("got start element %s on state %d", name, last_state);
+
 	switch (ud->parser_state) {
-	case 0:
+	case read_method_responce:
 		/* Expect tag methodResponse */
 		if (g_ascii_strcasecmp (name, "methodResponse") == 0) {
-			ud->parser_state = 1;
+			ud->parser_state = read_params;
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 1:
+	case read_params:
 		/* Expect tag params */
 		if (g_ascii_strcasecmp (name, "params") == 0) {
-			ud->parser_state = 2;
+			ud->parser_state = read_param;
 			/* result -> table of params indexed by int */
 			lua_newtable (ud->L);
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 2:
+	case read_param:
 		/* Expect tag param */
 		if (g_ascii_strcasecmp (name, "param") == 0) {
-			ud->parser_state = 3;
+			ud->parser_state = read_param_value;
 			/* Create new param */
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 3:
+	case read_param_value:
 		/* Expect tag value */
 		if (g_ascii_strcasecmp (name, "value") == 0) {
-			ud->parser_state = 4;
+			ud->parser_state = read_param_element;
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 4:
+	case read_param_element:
 		/* Expect tag struct */
 		if (g_ascii_strcasecmp (name, "struct") == 0) {
-			ud->parser_state = 5;
+			ud->parser_state = read_struct;
 			/* Create new param of table type */
 			lua_newtable (ud->L);
-			ud->depth++;
+			g_queue_push_head (ud->st, GINT_TO_POINTER (st_struct));
+			msg_debug_xmlrpc ("push struct");
+		}
+		else if (g_ascii_strcasecmp (name, "array") == 0) {
+			ud->parser_state = read_array;
+			/* Create new param of table type */
+			lua_newtable (ud->L);
+			g_queue_push_head (ud->st, GINT_TO_POINTER (st_array));
+			msg_debug_xmlrpc ("push array");
 		}
 		else if (g_ascii_strcasecmp (name, "string") == 0) {
-			ud->parser_state = 11;
+			ud->parser_state = read_string;
 			ud->got_text = FALSE;
 		}
 		else if (g_ascii_strcasecmp (name, "int") == 0) {
-			ud->parser_state = 12;
+			ud->parser_state = read_int;
 			ud->got_text = FALSE;
 		}
 		else if (g_ascii_strcasecmp (name, "double") == 0) {
-			ud->parser_state = 13;
+			ud->parser_state = read_double;
 			ud->got_text = FALSE;
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 5:
+	case read_struct:
 		/* Parse structure */
 		/* Expect tag member */
 		if (g_ascii_strcasecmp (name, "member") == 0) {
-			ud->parser_state = 6;
+			ud->parser_state = read_struct_member_name;
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 6:
+	case read_struct_member_name:
 		/* Expect tag name */
 		if (g_ascii_strcasecmp (name, "name") == 0) {
-			ud->parser_state = 7;
+			ud->parser_state = read_struct_member_value;
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 7:
+	case read_struct_member_value:
 		/* Accept value */
 		if (g_ascii_strcasecmp (name, "value") == 0) {
-			ud->parser_state = 8;
+			ud->parser_state = read_struct_element;
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 8:
+	case read_struct_element:
 		/* Parse any values */
 		/* Primitives */
 		if (g_ascii_strcasecmp (name, "string") == 0) {
-			ud->parser_state = 11;
+			ud->parser_state = read_string;
 			ud->got_text = FALSE;
 		}
 		else if (g_ascii_strcasecmp (name, "int") == 0) {
-			ud->parser_state = 12;
+			ud->parser_state = read_int;
 			ud->got_text = FALSE;
 		}
 		else if (g_ascii_strcasecmp (name, "double") == 0) {
-			ud->parser_state = 13;
+			ud->parser_state = read_double;
 			ud->got_text = FALSE;
 		}
 		/* Structure */
 		else if (g_ascii_strcasecmp (name, "struct") == 0) {
-			ud->parser_state = 5;
+			ud->parser_state = read_struct;
 			/* Create new param of table type */
 			lua_newtable (ud->L);
-			ud->depth++;
+			g_queue_push_head (ud->st, GINT_TO_POINTER (st_struct));
+			msg_debug_xmlrpc ("push struct");
+		}
+		else if (g_ascii_strcasecmp (name, "array") == 0) {
+			ud->parser_state = read_array;
+			/* Create new param of table type */
+			lua_newtable (ud->L);
+			g_queue_push_head (ud->st, GINT_TO_POINTER (st_array));
+			msg_debug_xmlrpc ("push array");
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
+		break;
+	case read_array:
+		/* Parse array */
+		/* Expect data */
+		if (g_ascii_strcasecmp (name, "data") == 0) {
+			ud->parser_state = read_array_value;
+		}
+		else {
+			/* Error state */
+			ud->parser_state = error_state;
+		}
+		break;
+	case read_array_value:
+		/* Accept array value */
+		if (g_ascii_strcasecmp (name, "value") == 0) {
+			ud->parser_state = read_array_element;
+		}
+		else {
+			/* Error state */
+			ud->parser_state = error_state;
+		}
+		break;
+	case read_array_element:
+		/* Parse any values */
+		/* Primitives */
+		if (g_ascii_strcasecmp (name, "string") == 0) {
+			ud->parser_state = read_string;
+			ud->got_text = FALSE;
+		}
+		else if (g_ascii_strcasecmp (name, "int") == 0) {
+			ud->parser_state = read_int;
+			ud->got_text = FALSE;
+		}
+		else if (g_ascii_strcasecmp (name, "double") == 0) {
+			ud->parser_state = read_double;
+			ud->got_text = FALSE;
+		}
+		/* Structure */
+		else if (g_ascii_strcasecmp (name, "struct") == 0) {
+			ud->parser_state = read_struct;
+			/* Create new param of table type */
+			lua_newtable (ud->L);
+			g_queue_push_head (ud->st, GINT_TO_POINTER (st_struct));
+			msg_debug_xmlrpc ("push struct");
+		}
+		else if (g_ascii_strcasecmp (name, "array") == 0) {
+			ud->parser_state = read_array;
+			/* Create new param of table type */
+			lua_newtable (ud->L);
+			g_queue_push_head (ud->st, GINT_TO_POINTER (st_array));
+			msg_debug_xmlrpc ("push array");
+		}
+		else {
+			/* Error state */
+			ud->parser_state = error_state;
+		}
+		break;
+	default:
 		break;
 	}
 
-	if (ud->parser_state == 99) {
+	msg_debug_xmlrpc ("switched state on start tag %d->%d", last_state,
+			ud->parser_state);
+
+	if (ud->parser_state == error_state) {
 		g_set_error (error,
 			xmlrpc_error_quark (), 1, "xmlrpc parse error on state: %d, while parsing start tag: %s",
 			last_state, name);
@@ -223,108 +334,132 @@ xmlrpc_end_element (GMarkupParseContext *context,
 	GError **error)
 {
 	struct lua_xmlrpc_ud *ud = user_data;
-	int last_state;
+	enum lua_xmlrpc_state last_state;
+	int last_queued;
 
 	last_state = ud->parser_state;
 
+	msg_debug_xmlrpc ("got end element %s on state %d", name, last_state);
+
 	switch (ud->parser_state) {
-	case 0:
-		ud->parser_state = 99;
+	case read_method_responce:
+		ud->parser_state = error_state;
 		break;
-	case 1:
+	case read_params:
 		/* Got methodResponse */
 		if (g_ascii_strcasecmp (name, "methodResponse") == 0) {
 			/* End processing */
-			ud->parser_state = 100;
+			ud->parser_state = success_state;
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 2:
+	case read_param:
 		/* Got tag params */
 		if (g_ascii_strcasecmp (name, "params") == 0) {
-			ud->parser_state = 1;
+			ud->parser_state = read_params;
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 3:
+	case read_param_value:
 		/* Got tag param */
 		if (g_ascii_strcasecmp (name, "param") == 0) {
-			ud->parser_state = 2;
+			ud->parser_state = read_param;
 			lua_rawseti (ud->L, -2, ++ud->param_count);
+			msg_debug_xmlrpc ("set param element idx: %d", ud->param_count);
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 4:
+	case read_param_element:
 		/* Got tag value */
 		if (g_ascii_strcasecmp (name, "value") == 0) {
-			if (ud->depth == 0) {
-				ud->parser_state = 3;
+			if (g_queue_get_length (ud->st) == 0) {
+				ud->parser_state = read_param_value;
 			}
 			else {
-				/* Parse other members */
-				ud->parser_state = 6;
+				if (GPOINTER_TO_INT (g_queue_peek_head (ud->st)) == st_struct) {
+					ud->parser_state = read_struct_member_name;
+				}
+				else {
+					ud->parser_state = read_array_value;
+				}
 			}
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 5:
+	case read_struct:
 		/* Got tag struct */
 		if (g_ascii_strcasecmp (name, "struct") == 0) {
-			ud->parser_state = 4;
-			ud->depth--;
+			g_assert (GPOINTER_TO_INT (g_queue_pop_head (ud->st)) == st_struct);
+
+			if (g_queue_get_length (ud->st) == 0) {
+				ud->parser_state = read_param_element;
+			}
+			else {
+				last_queued = GPOINTER_TO_INT (g_queue_peek_head (ud->st));
+				if (last_queued == st_struct) {
+					ud->parser_state = read_struct_element;
+				}
+				else {
+					ud->parser_state = read_array_element;
+				}
+			}
+
+			msg_debug_xmlrpc ("pop struct");
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 6:
+	case read_struct_member_name:
 		/* Got tag member */
 		if (g_ascii_strcasecmp (name, "member") == 0) {
-			ud->parser_state = 5;
+			ud->parser_state = read_struct;
 			/* Set table */
+			msg_debug_xmlrpc ("set struct element idx: %s",
+					lua_tostring (ud->L, -2));
 			lua_settable (ud->L, -3);
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 7:
+	case read_struct_member_value:
 		/* Got tag name */
 		if (g_ascii_strcasecmp (name, "name") == 0) {
-			ud->parser_state = 7;
+			ud->parser_state = read_struct_member_value;
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 8:
+	case read_struct_element:
 		/* Got tag value */
 		if (g_ascii_strcasecmp (name, "value") == 0) {
-			ud->parser_state = 6;
+			ud->parser_state = read_struct_member_name;
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
 		break;
-	case 11:
-	case 12:
-	case 13:
+	case read_string:
+	case read_int:
+	case read_double:
 		/* Parse any values */
 		/* Handle empty tags */
 		if (!ud->got_text) {
@@ -334,23 +469,77 @@ xmlrpc_end_element (GMarkupParseContext *context,
 			ud->got_text = FALSE;
 		}
 		/* Primitives */
-		if (g_ascii_strcasecmp (name, "string") == 0) {
-			ud->parser_state = 8;
-		}
-		else if (g_ascii_strcasecmp (name, "int") == 0) {
-			ud->parser_state = 8;
-		}
-		else if (g_ascii_strcasecmp (name, "double") == 0) {
-			ud->parser_state = 8;
+		if (g_ascii_strcasecmp (name, "string") == 0 ||
+				g_ascii_strcasecmp (name, "int") == 0 ||
+				g_ascii_strcasecmp (name, "double") == 0) {
+			if (GPOINTER_TO_INT (g_queue_peek_head (ud->st)) == st_struct) {
+				ud->parser_state = read_struct_element;
+			}
+			else {
+				ud->parser_state = read_array_element;
+			}
 		}
 		else {
 			/* Error state */
-			ud->parser_state = 99;
+			ud->parser_state = error_state;
 		}
+		break;
+	case read_array:
+		/* Got tag array */
+		if (g_ascii_strcasecmp (name, "array") == 0) {
+			g_assert (GPOINTER_TO_INT (g_queue_pop_head (ud->st)) == st_array);
+
+			if (g_queue_get_length (ud->st) == 0) {
+				ud->parser_state = read_param_element;
+			}
+			else {
+				last_queued = GPOINTER_TO_INT (g_queue_peek_head (ud->st));
+				if (last_queued == st_struct) {
+					ud->parser_state = read_struct_element;
+				}
+				else {
+					ud->parser_state = read_array_element;
+				}
+			}
+
+			msg_debug_xmlrpc ("pop array");
+		}
+		else {
+			/* Error state */
+			ud->parser_state = error_state;
+		}
+		break;
+	case read_array_value:
+		/* Got tag data */
+		if (g_ascii_strcasecmp (name, "data") == 0) {
+			ud->parser_state = read_array;
+		}
+		else {
+			/* Error state */
+			ud->parser_state = error_state;
+		}
+		break;
+	case read_array_element:
+		/* Got tag value */
+		if (g_ascii_strcasecmp (name, "value") == 0) {
+			guint tbl_len = rspamd_lua_table_size (ud->L, -2);
+			lua_rawseti (ud->L, -2, tbl_len + 1);
+			msg_debug_xmlrpc ("set array element idx: %d", tbl_len + 1);
+			ud->parser_state = read_array_value;
+		}
+		else {
+			/* Error state */
+			ud->parser_state = error_state;
+		}
+		break;
+	default:
 		break;
 	}
 
-	if (ud->parser_state == 99) {
+	msg_debug_xmlrpc ("switched state on end tag %d->%d",
+			last_state, ud->parser_state);
+
+	if (ud->parser_state == error_state) {
 		g_set_error (error,
 			xmlrpc_error_quark (), 1, "xmlrpc parse error on state: %d, while parsing end tag: %s",
 			last_state, name);
@@ -365,7 +554,7 @@ xmlrpc_text (GMarkupParseContext *context,
 	GError **error)
 {
 	struct lua_xmlrpc_ud *ud = user_data;
-	gint num;
+	gulong num;
 	gdouble dnum;
 
 	/* Strip line */
@@ -378,25 +567,27 @@ xmlrpc_text (GMarkupParseContext *context,
 	}
 
 	if (text_len > 0) {
-
+		msg_debug_xmlrpc ("got data on state %d", ud->parser_state);
 		switch (ud->parser_state) {
-		case 7:
+		case read_struct_member_value:
 			/* Push key */
 			lua_pushlstring (ud->L, text, text_len);
 			break;
-		case 11:
+		case read_string:
 			/* Push string value */
 			lua_pushlstring (ud->L, text, text_len);
 			break;
-		case 12:
+		case read_int:
 			/* Push integer value */
-			num = strtoul (text, NULL, 10);
+			rspamd_strtoul (text, text_len, &num);
 			lua_pushnumber (ud->L, num);
 			break;
-		case 13:
+		case read_double:
 			/* Push integer value */
 			dnum = strtod (text, NULL);
 			lua_pushnumber (ud->L, dnum);
+			break;
+		default:
 			break;
 		}
 		ud->got_text = TRUE;
@@ -423,9 +614,9 @@ lua_xmlrpc_parse_reply (lua_State *L)
 
 	if (data != NULL) {
 		ud.L = L;
-		ud.parser_state = 0;
-		ud.depth = 0;
+		ud.parser_state = read_method_responce;
 		ud.param_count = 0;
+		ud.st = g_queue_new ();
 
 		ctx = g_markup_parse_context_new (&xmlrpc_parser,
 				G_MARKUP_TREAT_CDATA_AS_TEXT, &ud, NULL);

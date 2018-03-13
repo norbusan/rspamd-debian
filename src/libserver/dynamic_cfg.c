@@ -37,7 +37,6 @@ apply_dynamic_conf (const ucl_object_t *top, struct rspamd_config *cfg)
 	gint test_act;
 	const ucl_object_t *cur_elt, *cur_nm, *it_val;
 	ucl_object_iter_t it = NULL;
-	struct rspamd_metric *real_metric;
 	const gchar *name;
 	gdouble nscore;
 	static const guint priority = 3;
@@ -52,12 +51,6 @@ apply_dynamic_conf (const ucl_object_t *top, struct rspamd_config *cfg)
 		if (!cur_nm || ucl_object_type (cur_nm) != UCL_STRING) {
 			msg_err (
 					"loaded json metric object element has no 'metric' attribute");
-			continue;
-		}
-		real_metric = g_hash_table_lookup (cfg->metrics,
-							ucl_object_tostring (cur_nm));
-		if (real_metric == NULL) {
-			msg_warn ("cannot find metric %s", ucl_object_tostring (cur_nm));
 			continue;
 		}
 
@@ -79,7 +72,7 @@ apply_dynamic_conf (const ucl_object_t *top, struct rspamd_config *cfg)
 					/*
 					 * We use priority = 3 here
 					 */
-					rspamd_config_add_metric_symbol (cfg, real_metric->name,
+					rspamd_config_add_symbol (cfg,
 							ucl_object_tostring (n), nscore, NULL, NULL,
 							0, priority, cfg->default_max_shots);
 				}
@@ -114,8 +107,7 @@ apply_dynamic_conf (const ucl_object_t *top, struct rspamd_config *cfg)
 					}
 					nscore = ucl_object_todouble (ucl_object_lookup (it_val,
 							"value"));
-					rspamd_config_set_action_score (cfg, real_metric->name,
-							name, nscore, priority);
+					rspamd_config_set_action_score (cfg, name, nscore, priority);
 				}
 				else {
 					msg_info (
@@ -147,7 +139,7 @@ json_config_read_cb (gchar * chunk,
 	g_assert (pd != NULL);
 
 	if (data->cur_data == NULL) {
-		jb = g_slice_alloc (sizeof (*jb));
+		jb = g_malloc0 (sizeof (*jb));
 		jb->cfg = pd->cfg;
 		jb->buf = pd->buf;
 		data->cur_data = jb;
@@ -176,7 +168,7 @@ json_config_fin_cb (struct map_cb_data *data)
 	if (data->prev_data) {
 		jb = data->prev_data;
 		/* Clean prev data */
-		g_slice_free1 (sizeof (*jb), jb);
+		g_free (jb);
 	}
 
 	/* Now parse json */
@@ -230,7 +222,7 @@ init_dynamic_config (struct rspamd_config *cfg)
 	}
 
 	/* Now try to add map with json data */
-	jb = g_slice_alloc (sizeof (struct config_json_buf));
+	jb = g_malloc (sizeof (struct config_json_buf));
 	pjb = g_malloc (sizeof (struct config_json_buf *));
 	jb->buf = NULL;
 	jb->cfg = cfg;

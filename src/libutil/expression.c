@@ -20,12 +20,14 @@
 #include "util.h"
 #include "utlist.h"
 #include "ottery.h"
+#include <math.h>
 
 #define RSPAMD_EXPR_FLAG_NEGATE (1 << 0)
 #define RSPAMD_EXPR_FLAG_PROCESSED (1 << 1)
 
 #define MIN_RESORT_EVALS 50
 #define MAX_RESORT_EVALS 150
+#define DOUBLE_EPSILON 1e-9
 
 enum rspamd_expression_elt_type {
 	ELT_OP = 0,
@@ -38,14 +40,12 @@ struct rspamd_expression_elt {
 	union {
 		rspamd_expression_atom_t *atom;
 		enum rspamd_expression_op op;
-		struct {
-			gint val;
-			gint op_idx;
-		} lim;
+		gdouble lim;
 	} p;
+
 	gint flags;
-	gint value;
 	gint priority;
+	gdouble value;
 };
 
 struct rspamd_expression {
@@ -364,7 +364,7 @@ rspamd_expression_destroy (struct rspamd_expression *expr)
 			g_node_destroy (expr->ast);
 		}
 
-		g_slice_free1 (sizeof (*expr), expr);
+		g_free (expr);
 	}
 }
 
@@ -591,12 +591,13 @@ rspamd_parse_expression (const gchar *line, gsize len,
 	}
 
 	memset (&elt, 0, sizeof (elt));
-	num_re = rspamd_regexp_cache_create (NULL, "/^\\d+(?:\\s+|[)]|$)/", NULL, NULL);
+	num_re = rspamd_regexp_cache_create (NULL,
+			"/^(?:[+-]?([0-9]*[.])?[0-9]+)(?:\\s+|[)]|$)/", NULL, NULL);
 
 	p = line;
 	c = line;
 	end = line + len;
-	e = g_slice_alloc (sizeof (*e));
+	e = g_malloc0 (sizeof (*e));
 	e->expressions = g_array_new (FALSE, FALSE,
 			sizeof (struct rspamd_expression_elt));
 	operand_stack = g_ptr_array_sized_new (32);
@@ -687,7 +688,8 @@ rspamd_parse_expression (const gchar *line, gsize len,
 			}
 			break;
 		case PARSE_LIM:
-			if (g_ascii_isdigit (*p) && p != end - 1) {
+			if ((g_ascii_isdigit (*p) || *p == '-' || *p == '.')
+					&& p < end - 1) {
 				p ++;
 			}
 			else {
@@ -697,7 +699,7 @@ rspamd_parse_expression (const gchar *line, gsize len,
 
 				if (p - c > 0) {
 					elt.type = ELT_LIMIT;
-					elt.p.lim.val = strtoul (c, NULL, 10);
+					elt.p.lim = strtod (c, NULL);
 					g_array_append_val (e->expressions, elt);
 					rspamd_expr_stack_elt_push (operand_stack,
 							g_node_new (rspamd_expr_dup_elt (pool, &elt)));
@@ -879,7 +881,7 @@ err:
 
 static gboolean
 rspamd_ast_node_done (struct rspamd_expression_elt *elt,
-		struct rspamd_expression_elt *parelt, gint acc, gint lim)
+		struct rspamd_expression_elt *parelt, gdouble acc, gdouble lim)
 {
 	gboolean ret = FALSE;
 
@@ -939,17 +941,17 @@ rspamd_ast_node_done (struct rspamd_expression_elt *elt,
 	return ret;
 }
 
-static gint
-rspamd_ast_do_op (struct rspamd_expression_elt *elt, gint val,
-		gint acc, gint lim, gboolean first_elt)
+static gdouble
+rspamd_ast_do_op (struct rspamd_expression_elt *elt, gdouble val,
+		gdouble acc, gdouble lim, gboolean first_elt)
 {
-	gint ret = val;
+	gdouble ret = val;
 
 	g_assert (elt->type == ELT_OP);
 
 	switch (elt->p.op) {
 	case OP_NOT:
-		ret = !val;
+		ret = fabs (val) > DOUBLE_EPSILON ? 0.0 : 1.0;
 		break;
 	case OP_PLUS:
 		ret = acc + val;
@@ -968,10 +970,10 @@ rspamd_ast_do_op (struct rspamd_expression_elt *elt, gint val,
 		break;
 	case OP_MULT:
 	case OP_AND:
-		ret = first_elt ? (val) : (acc && val);
+		ret = first_elt ? (val) : (acc * val);
 		break;
 	case OP_OR:
-		ret = first_elt ? (val) : (acc || val);
+		ret = first_elt ? (val) : (acc + val);
 		break;
 	default:
 		g_assert (0);
@@ -981,14 +983,14 @@ rspamd_ast_do_op (struct rspamd_expression_elt *elt, gint val,
 	return ret;
 }
 
-static gint
+static gdouble
 rspamd_ast_process_node (struct rspamd_expression *expr, gint flags, GNode *node,
 		gpointer data, GPtrArray *track)
 {
 	struct rspamd_expression_elt *elt, *celt, *parelt = NULL;
 	GNode *cld;
-	gint acc = G_MININT, lim = G_MININT, val;
-	gdouble t1, t2;
+	gdouble acc = NAN, lim = 0;
+	gdouble t1, t2, val;
 	gboolean calc_ticks = FALSE;
 
 	elt = node->data;
@@ -1005,12 +1007,12 @@ rspamd_ast_process_node (struct rspamd_expression *expr, gint flags, GNode *node
 			 */
 			if ((expr->evals & 0x1F) == (GPOINTER_TO_UINT (node) >> 4 & 0x1F)) {
 				calc_ticks = TRUE;
-				t1 = rspamd_get_ticks ();
+				t1 = rspamd_get_ticks (TRUE);
 			}
 
 			elt->value = expr->subr->process (data, elt->p.atom);
 
-			if (elt->value) {
+			if (fabs (elt->value) > 1e-9) {
 				elt->p.atom->hits ++;
 
 				if (track) {
@@ -1019,7 +1021,7 @@ rspamd_ast_process_node (struct rspamd_expression *expr, gint flags, GNode *node
 			}
 
 			if (calc_ticks) {
-				t2 = rspamd_get_ticks ();
+				t2 = rspamd_get_ticks (TRUE);
 				elt->p.atom->avg_ticks += ((t2 - t1) - elt->p.atom->avg_ticks) /
 						(expr->evals);
 			}
@@ -1027,15 +1029,14 @@ rspamd_ast_process_node (struct rspamd_expression *expr, gint flags, GNode *node
 			elt->flags |= RSPAMD_EXPR_FLAG_PROCESSED;
 		}
 
-		return elt->value;
+		acc = elt->value;
 		break;
 	case ELT_LIMIT:
 
-		return elt->p.lim.val;
+		acc = elt->p.lim;
 		break;
 	case ELT_OP:
 		g_assert (node->children != NULL);
-		cld = node->children;
 
 		/* Try to find limit at the parent node */
 		if (node->parent) {
@@ -1043,7 +1044,7 @@ rspamd_ast_process_node (struct rspamd_expression *expr, gint flags, GNode *node
 			celt = node->parent->children->data;
 
 			if (celt->type == ELT_LIMIT) {
-				lim = celt->p.lim.val;
+				lim = celt->p.lim;
 			}
 		}
 
@@ -1052,13 +1053,13 @@ rspamd_ast_process_node (struct rspamd_expression *expr, gint flags, GNode *node
 
 			/* Save limit if we've found it */
 			if (celt->type == ELT_LIMIT) {
-				lim = celt->p.lim.val;
+				lim = celt->p.lim;
 				continue;
 			}
 
 			val = rspamd_ast_process_node (expr, flags, cld, data, track);
 
-			if (acc == G_MININT) {
+			if (isnan (acc)) {
 				acc = rspamd_ast_do_op (elt, val, 0, lim, TRUE);
 			}
 			else {
@@ -1088,11 +1089,11 @@ rspamd_ast_cleanup_traverse (GNode *n, gpointer d)
 	return FALSE;
 }
 
-gint
+gdouble
 rspamd_process_expression_track (struct rspamd_expression *expr, gint flags,
 		gpointer data, GPtrArray *track)
 {
-	gint ret = 0;
+	gdouble ret = 0;
 
 	g_assert (expr != NULL);
 	/* Ensure that stack is empty at this point */
@@ -1122,7 +1123,7 @@ rspamd_process_expression_track (struct rspamd_expression *expr, gint flags,
 	return ret;
 }
 
-gint
+gdouble
 rspamd_process_expression (struct rspamd_expression *expr, gint flags,
 		gpointer data)
 {
@@ -1143,7 +1144,7 @@ rspamd_ast_string_traverse (GNode *n, gpointer d)
 				(int)elt->p.atom->len, elt->p.atom->str);
 	}
 	else if (elt->type == ELT_LIMIT) {
-		rspamd_printf_gstring (res, "%d", elt->p.lim.val);
+		rspamd_printf_gstring (res, "%f", elt->p.lim);
 	}
 	else {
 		op_str = rspamd_expr_op_to_str (elt->p.op);

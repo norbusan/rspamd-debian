@@ -41,7 +41,7 @@ struct upstream {
 	gint active_idx;
 	gchar *name;
 	struct event ev;
-	struct timeval tv;
+	gdouble last_fail;
 	gpointer ud;
 	struct upstream_list *ls;
 	GList *ctx_pos;
@@ -146,7 +146,7 @@ rspamd_upstream_ctx_dtor (struct upstream_ctx *ctx)
 
 	g_queue_free (ctx->upstreams);
 	rspamd_mempool_delete (ctx->pool);
-	g_slice_free1 (sizeof (*ctx), ctx);
+	g_free (ctx);
 }
 
 void
@@ -160,7 +160,7 @@ rspamd_upstreams_library_init (void)
 {
 	struct upstream_ctx *ctx;
 
-	ctx = g_slice_alloc0 (sizeof (*ctx));
+	ctx = g_malloc0 (sizeof (*ctx));
 	ctx->error_time = default_error_time;
 	ctx->max_errors = default_max_errors;
 	ctx->dns_retransmits = default_dns_retransmits;
@@ -226,18 +226,20 @@ rspamd_upstream_addr_elt_dtor (gpointer a)
 {
 	struct upstream_addr_elt *elt = a;
 
-	rspamd_inet_address_free (elt->addr);
-	g_slice_free1 (sizeof (*elt), elt);
+	if (elt) {
+		rspamd_inet_address_free (elt->addr);
+		g_free (elt);
+	}
 }
 
 static void
 rspamd_upstream_update_addrs (struct upstream *up)
 {
-	guint16 port;
-	guint addr_cnt;
+	guint addr_cnt, i, port;
+	gboolean seen_addr, reset_errors = FALSE;
 	struct upstream_inet_addr_entry *cur, *tmp;
 	GPtrArray *new_addrs;
-	struct upstream_addr_elt *addr_elt;
+	struct upstream_addr_elt *addr_elt, *naddr;
 
 	/*
 	 * We need first of all get the saved port, since DNS gives us no
@@ -249,24 +251,48 @@ rspamd_upstream_update_addrs (struct upstream *up)
 		addr_elt = g_ptr_array_index (up->addrs.addr, 0);
 		port = rspamd_inet_address_get_port (addr_elt->addr);
 
-		/* Free old addresses */
-		g_ptr_array_free (up->addrs.addr, TRUE);
-
 		/* Now calculate new addrs count */
 		addr_cnt = 0;
 		LL_FOREACH (up->new_addrs, cur) {
 			addr_cnt++;
 		}
+
+		/* At 10% probability reset errors on addr elements */
+		if (rspamd_random_double_fast () > 0.9) {
+			reset_errors = TRUE;
+		}
+
 		new_addrs = g_ptr_array_new_full (addr_cnt, rspamd_upstream_addr_elt_dtor);
 
 		/* Copy addrs back */
 		LL_FOREACH (up->new_addrs, cur) {
+			seen_addr = FALSE;
+			naddr = NULL;
+			/* Ports are problematic, set to compare in the next block */
 			rspamd_inet_address_set_port (cur->addr, port);
-			addr_elt = g_slice_alloc (sizeof (*addr_elt));
-			addr_elt->addr = cur->addr;
-			addr_elt->errors = 0;
-			g_ptr_array_add (new_addrs, addr_elt);
+
+			PTR_ARRAY_FOREACH (up->addrs.addr, i, addr_elt) {
+				if (rspamd_inet_address_compare (addr_elt->addr, cur->addr) == 0) {
+					naddr = g_malloc0 (sizeof (*naddr));
+					naddr->addr = cur->addr;
+					naddr->errors = reset_errors ? 0 : addr_elt->errors;
+					seen_addr = TRUE;
+
+					break;
+				}
+			}
+
+			if (!seen_addr) {
+				naddr = g_malloc0 (sizeof (*naddr));
+				naddr->addr = cur->addr;
+				naddr->errors = 0;
+			}
+
+			g_ptr_array_add (new_addrs, naddr);
 		}
+
+		/* Free old addresses */
+		g_ptr_array_free (up->addrs.addr, TRUE);
 
 		up->addrs.cur = 0;
 		up->addrs.addr = new_addrs;
@@ -277,8 +303,8 @@ rspamd_upstream_update_addrs (struct upstream *up)
 		/* Do not free inet address pointer since it has been transferred to up */
 		g_free (cur);
 	}
-	up->new_addrs = NULL;
 
+	up->new_addrs = NULL;
 	RSPAMD_UPSTREAM_UNLOCK (up->lock);
 }
 
@@ -371,6 +397,7 @@ rspamd_upstream_set_inactive (struct upstream_list *ls, struct upstream *up)
 	gdouble ntim;
 	guint i;
 	struct upstream *cur;
+	struct timeval tv;
 
 	RSPAMD_UPSTREAM_LOCK (ls->lock);
 	g_ptr_array_remove_index (ls->alive, up->active_idx);
@@ -382,17 +409,20 @@ rspamd_upstream_set_inactive (struct upstream_list *ls, struct upstream *up)
 		cur->active_idx = i;
 	}
 
-	rspamd_upstream_resolve_addrs (ls, up);
+	if (up->ctx) {
+		rspamd_upstream_resolve_addrs (ls, up);
 
-	REF_RETAIN (up);
-	evtimer_set (&up->ev, rspamd_upstream_revive_cb, up);
-	if (up->ctx->ev_base != NULL && up->ctx->configured) {
-		event_base_set (up->ctx->ev_base, &up->ev);
+		REF_RETAIN (up);
+		evtimer_set (&up->ev, rspamd_upstream_revive_cb, up);
+		if (up->ctx->ev_base != NULL && up->ctx->configured) {
+			event_base_set (up->ctx->ev_base, &up->ev);
+		}
+
+		ntim = rspamd_time_jitter (up->ctx->revive_time,
+				up->ctx->revive_jitter);
+		double_to_tv (ntim, &tv);
+		event_add (&up->ev, &tv);
 	}
-
-	ntim = rspamd_time_jitter (up->ctx->revive_time, up->ctx->revive_jitter);
-	double_to_tv (ntim, &up->tv);
-	event_add (&up->ev, &up->tv);
 
 	RSPAMD_UPSTREAM_UNLOCK (ls->lock);
 }
@@ -400,30 +430,29 @@ rspamd_upstream_set_inactive (struct upstream_list *ls, struct upstream *up)
 void
 rspamd_upstream_fail (struct upstream *up)
 {
-	struct timeval tv;
 	gdouble error_rate, max_error_rate;
 	gdouble sec_last, sec_cur;
 	struct upstream_addr_elt *addr_elt;
 
-	if (up->active_idx != -1) {
-		gettimeofday (&tv, NULL);
+	if (up->ctx && up->active_idx != -1) {
+		sec_cur = rspamd_get_ticks (FALSE);
 
 		RSPAMD_UPSTREAM_LOCK (up->lock);
 		if (up->errors == 0) {
 			/* We have the first error */
-			up->tv = tv;
+			up->last_fail = sec_cur;
 			up->errors = 1;
 		}
 		else {
-			sec_last = tv_to_double (&up->tv);
-			sec_cur = tv_to_double (&tv);
+			sec_last = up->last_fail;
 
 			if (sec_cur >= sec_last) {
 				up->errors ++;
 
 				if (sec_cur > sec_last) {
 					error_rate = ((gdouble)up->errors) / (sec_cur - sec_last);
-					max_error_rate = ((gdouble)up->ctx->max_errors) / up->ctx->error_time;
+					max_error_rate = ((gdouble)up->ctx->max_errors) /
+							up->ctx->error_time;
 				}
 				else {
 					error_rate = 1;
@@ -438,7 +467,10 @@ rspamd_upstream_fail (struct upstream *up)
 					}
 					else {
 						/* Just re-resolve addresses */
-						rspamd_upstream_resolve_addrs (up->ls, up);
+						if (sec_cur - sec_last > up->ctx->revive_time) {
+							up->errors = 0;
+							rspamd_upstream_resolve_addrs (up->ls, up);
+						}
 					}
 				}
 			}
@@ -488,7 +520,7 @@ rspamd_upstreams_create (struct upstream_ctx *ctx)
 {
 	struct upstream_list *ls;
 
-	ls = g_slice_alloc0 (sizeof (*ls));
+	ls = g_malloc0 (sizeof (*ls));
 	ls->hash_seed = SEED_CONSTANT;
 	ls->ups = g_ptr_array_new ();
 	ls->alive = g_ptr_array_new ();
@@ -536,7 +568,7 @@ rspamd_upstream_dtor (struct upstream *up)
 		REF_RELEASE (up->ctx);
 	}
 
-	g_slice_free1 (sizeof (*up), up);
+	g_free (up);
 }
 
 rspamd_inet_addr_t*
@@ -573,18 +605,24 @@ rspamd_upstreams_add_upstream (struct upstream_list *ups, const gchar *str,
 	rspamd_inet_addr_t *addr;
 	gboolean ret = FALSE;
 
-	up = g_slice_alloc0 (sizeof (*up));
+	up = g_malloc0 (sizeof (*up));
 
 	switch (parse_type) {
 	case RSPAMD_UPSTREAM_PARSE_DEFAULT:
 		ret = rspamd_parse_host_port_priority (str, &addrs,
 				&up->weight,
-				&up->name, def_port, ups->ctx->pool);
+				&up->name, def_port, ups->ctx ? ups->ctx->pool : NULL);
 		break;
 	case RSPAMD_UPSTREAM_PARSE_NAMESERVER:
 		addrs = g_ptr_array_sized_new (1);
-
 		ret = rspamd_parse_inet_address (&addr, str, strlen (str));
+
+		if (ups->ctx) {
+			up->name = rspamd_mempool_strdup (ups->ctx->pool, str);
+		}
+		else {
+			up->name = g_strdup (str);
+		}
 
 		if (ret) {
 			if (rspamd_inet_address_get_port (addr) == 0) {
@@ -592,12 +630,15 @@ rspamd_upstreams_add_upstream (struct upstream_list *ups, const gchar *str,
 			}
 
 			g_ptr_array_add (addrs, addr);
-			rspamd_mempool_add_destructor (ups->ctx->pool,
-					(rspamd_mempool_destruct_t)rspamd_inet_address_free,
-					addr);
-			rspamd_mempool_add_destructor (ups->ctx->pool,
-					(rspamd_mempool_destruct_t)rspamd_ptr_array_free_hard,
-					addrs);
+
+			if (ups->ctx) {
+				rspamd_mempool_add_destructor (ups->ctx->pool,
+						(rspamd_mempool_destruct_t) rspamd_inet_address_free,
+						addr);
+				rspamd_mempool_add_destructor (ups->ctx->pool,
+						(rspamd_mempool_destruct_t) rspamd_ptr_array_free_hard,
+						addrs);
+			}
 		}
 		else {
 			g_ptr_array_free (addrs, TRUE);
@@ -607,7 +648,7 @@ rspamd_upstreams_add_upstream (struct upstream_list *ups, const gchar *str,
 	}
 
 	if (!ret) {
-		g_slice_free1 (sizeof (*up), up);
+		g_free (up);
 		return FALSE;
 	}
 	else {
@@ -632,9 +673,13 @@ rspamd_upstreams_add_upstream (struct upstream_list *ups, const gchar *str,
 	REF_INIT_RETAIN (up, rspamd_upstream_dtor);
 	up->lock = rspamd_mutex_new ();
 	up->ctx = ups->ctx;
-	REF_RETAIN (ups->ctx);
-	g_queue_push_tail (ups->ctx->upstreams, up);
-	up->ctx_pos = g_queue_peek_tail_link (ups->ctx->upstreams);
+
+	if (up->ctx) {
+		REF_RETAIN (ups->ctx);
+		g_queue_push_tail (ups->ctx->upstreams, up);
+		up->ctx_pos = g_queue_peek_tail_link (ups->ctx->upstreams);
+	}
+
 	g_ptr_array_sort (up->addrs.addr, rspamd_upstream_addr_sort_func);
 
 	rspamd_upstream_set_active (ups, up);
@@ -667,7 +712,7 @@ rspamd_upstream_add_addr (struct upstream *up, rspamd_inet_addr_t *addr)
 		up->addrs.addr = g_ptr_array_new_full (8, rspamd_upstream_addr_elt_dtor);
 	}
 
-	elt = g_slice_alloc0 (sizeof (*elt));
+	elt = g_malloc0 (sizeof (*elt));
 	elt->addr = addr;
 	g_ptr_array_add (up->addrs.addr, elt);
 	g_ptr_array_sort (up->addrs.addr, rspamd_upstream_addr_sort_func);
@@ -777,7 +822,7 @@ rspamd_upstreams_destroy (struct upstream_list *ups)
 
 		g_ptr_array_free (ups->ups, TRUE);
 		rspamd_mutex_free (ups->lock);
-		g_slice_free1 (sizeof (*ups), ups);
+		g_free (ups);
 	}
 }
 

@@ -44,6 +44,7 @@
 #define DEFAULT_MAX_PIC (1 * 1024 * 1024)
 #define DEFAULT_MAX_SHOTS 100
 #define DEFAULT_MAX_SESSIONS 100
+#define DEFAULT_MAX_WORKERS 4
 
 struct rspamd_ucl_map_cbdata {
 	struct rspamd_config *cfg;
@@ -54,6 +55,12 @@ static gchar * rspamd_ucl_read_cb (gchar * chunk,
 	struct map_cb_data *data,
 	gboolean final);
 static void rspamd_ucl_fin_cb (struct map_cb_data *data);
+
+guint rspamd_config_log_id = (guint)-1;
+RSPAMD_CONSTRUCTOR(rspamd_config_log_init)
+{
+	rspamd_config_log_id = rspamd_logger_add_debug_module("config");
+}
 
 gboolean
 rspamd_parse_bind_line (struct rspamd_config *cfg,
@@ -109,8 +116,9 @@ rspamd_config_new (void)
 {
 	struct rspamd_config *cfg;
 
-	cfg = g_slice_alloc0 (sizeof (*cfg));
-	cfg->cfg_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), "cfg");
+	cfg = g_malloc0 (sizeof (*cfg));
+	/* Allocate larger pool for cfg */
+	cfg->cfg_pool = rspamd_mempool_new (8 * 1024 * 1024, "cfg");
 	cfg->dns_timeout = 1000;
 	cfg->dns_retransmits = 5;
 	/* After 20 errors do throttling for 10 seconds */
@@ -122,15 +130,13 @@ rspamd_config_new (void)
 	/* 20 Kb */
 	cfg->max_diff = 20480;
 
-	cfg->metrics = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
+	rspamd_config_init_metric (cfg);
 	cfg->c_modules = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
 	cfg->composite_symbols =
 		g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
 	cfg->classifiers_symbols = g_hash_table_new (rspamd_str_hash,
 			rspamd_str_equal);
 	cfg->cfg_params = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
-	cfg->metrics_symbols = g_hash_table_new_full (rspamd_str_hash, rspamd_str_equal,
-			NULL, (GDestroyNotify)g_list_free);
 	cfg->debug_modules = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
 	cfg->explicit_modules = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
 	cfg->wrk_parsers = g_hash_table_new (g_int_hash, g_int_equal);
@@ -141,7 +147,7 @@ rspamd_config_new (void)
 	cfg->map_file_watch_multiplier = DEFAULT_MAP_FILE_WATCH_MULTIPLIER;
 
 	cfg->log_level = G_LOG_LEVEL_WARNING;
-	cfg->log_extended = TRUE;
+	cfg->log_flags = RSPAMD_LOG_FLAG_DEFAULT;
 
 	cfg->check_text_attachements = TRUE;
 
@@ -201,12 +207,12 @@ rspamd_config_free (struct rspamd_config *cfg)
 
 	DL_FOREACH_SAFE (cfg->finish_callbacks, sc, sctmp) {
 		luaL_unref (cfg->lua_state, LUA_REGISTRYINDEX, sc->cbref);
-		g_slice_free1 (sizeof (*sc), sc);
+		g_free (sc);
 	}
 
 	DL_FOREACH_SAFE (cfg->on_load, sc, sctmp) {
 		luaL_unref (cfg->lua_state, LUA_REGISTRYINDEX, sc->cbref);
-		g_slice_free1 (sizeof (*sc), sc);
+		g_free (sc);
 	}
 
 	if (cfg->monitored_ctx) {
@@ -214,7 +220,6 @@ rspamd_config_free (struct rspamd_config *cfg)
 	}
 
 	g_list_free (cfg->classifiers);
-	g_list_free (cfg->metrics_list);
 	g_list_free (cfg->workers);
 	rspamd_symbols_cache_destroy (cfg->cache);
 #ifdef WITH_HIREDIS
@@ -226,14 +231,11 @@ rspamd_config_free (struct rspamd_config *cfg)
 	ucl_object_unref (cfg->config_comments);
 	ucl_object_unref (cfg->doc_strings);
 	ucl_object_unref (cfg->neighbours);
-	g_hash_table_remove_all (cfg->metrics);
-	g_hash_table_unref (cfg->metrics);
 	g_hash_table_unref (cfg->c_modules);
 	g_hash_table_remove_all (cfg->composite_symbols);
 	g_hash_table_unref (cfg->composite_symbols);
 	g_hash_table_remove_all (cfg->cfg_params);
 	g_hash_table_unref (cfg->cfg_params);
-	g_hash_table_destroy (cfg->metrics_symbols);
 	g_hash_table_unref (cfg->classifiers_symbols);
 	g_hash_table_unref (cfg->debug_modules);
 	g_hash_table_unref (cfg->explicit_modules);
@@ -252,10 +254,10 @@ rspamd_config_free (struct rspamd_config *cfg)
 
 	DL_FOREACH_SAFE (cfg->log_pipes, lp, ltmp) {
 		close (lp->fd);
-		g_slice_free1 (sizeof (*lp), lp);
+		g_free (lp);
 	}
 
-	g_slice_free1 (sizeof (*cfg), cfg);
+	g_free (cfg);
 }
 
 const ucl_object_t *
@@ -340,7 +342,7 @@ rspamd_config_process_var (struct rspamd_config *cfg, const rspamd_ftok_t *var,
 	g_assert (var != NULL);
 
 	if (var->len > 3 && rspamd_lc_cmp (var->begin, "if_", 3) == 0) {
-		flags |= RSPAMD_LOG_FLAG_CONDITION;
+		flags |= RSPAMD_LOG_FMT_FLAG_CONDITION;
 		tok.begin = var->begin + 3;
 		tok.len = var->len - 3;
 	}
@@ -373,15 +375,15 @@ rspamd_config_process_var (struct rspamd_config *cfg, const rspamd_ftok_t *var,
 	}
 	else if (rspamd_ftok_cstr_equal (&tok, "symbols_scores", TRUE)) {
 		type = RSPAMD_LOG_SYMBOLS;
-		flags |= RSPAMD_LOG_FLAG_SYMBOLS_SCORES;
+		flags |= RSPAMD_LOG_FMT_FLAG_SYMBOLS_SCORES;
 	}
 	else if (rspamd_ftok_cstr_equal (&tok, "symbols_params", TRUE)) {
 		type = RSPAMD_LOG_SYMBOLS;
-		flags |= RSPAMD_LOG_FLAG_SYMBOLS_PARAMS;
+		flags |= RSPAMD_LOG_FMT_FLAG_SYMBOLS_PARAMS;
 	}
 	else if (rspamd_ftok_cstr_equal (&tok, "symbols_scores_params", TRUE)) {
 		type = RSPAMD_LOG_SYMBOLS;
-		flags |= RSPAMD_LOG_FLAG_SYMBOLS_PARAMS|RSPAMD_LOG_FLAG_SYMBOLS_SCORES;
+		flags |= RSPAMD_LOG_FMT_FLAG_SYMBOLS_PARAMS|RSPAMD_LOG_FMT_FLAG_SYMBOLS_SCORES;
 	}
 	else if (rspamd_ftok_cstr_equal (&tok, "ip", TRUE)) {
 		type = RSPAMD_LOG_IP;
@@ -649,7 +651,6 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 #ifdef HAVE_CLOCK_GETTIME
 	struct timespec ts;
 #endif
-	struct rspamd_metric *def_metric;
 	gboolean ret = TRUE;
 
 #ifdef HAVE_CLOCK_GETTIME
@@ -660,6 +661,7 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 # else
 	clock_getres (CLOCK_REALTIME,			&ts);
 # endif
+	rspamd_logger_configure_modules (cfg->debug_modules);
 
 	cfg->clock_res = log10 (1000000. / ts.tv_nsec);
 	if (cfg->clock_res < 0) {
@@ -691,12 +693,6 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 		}
 	}
 #endif
-
-	if ((def_metric =
-		g_hash_table_lookup (cfg->metrics, DEFAULT_METRIC)) == NULL) {
-		def_metric = rspamd_config_new_metric (cfg, NULL, DEFAULT_METRIC);
-		def_metric->actions[METRIC_ACTION_REJECT].score = DEFAULT_SCORE;
-	}
 
 	if (opts & RSPAMD_CONFIG_INIT_URL) {
 		if (cfg->tld_file == NULL) {
@@ -770,25 +766,24 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 	if (opts & RSPAMD_CONFIG_INIT_VALIDATE) {
 		/* Check for actions sanity */
 		int i, prev_act = 0;
-		struct rspamd_metric *metric = cfg->default_metric;
 		gdouble prev_score = NAN;
 		gboolean seen_controller = FALSE;
 		GList *cur;
 		struct rspamd_worker_conf *wcf;
 
 		for (i = METRIC_ACTION_REJECT; i < METRIC_ACTION_MAX; i ++) {
-			if (!isnan (prev_score) && !isnan (metric->actions[i].score)) {
-				if (prev_score <= isnan (metric->actions[i].score)) {
+			if (!isnan (prev_score) && !isnan (cfg->actions[i].score)) {
+				if (prev_score <= isnan (cfg->actions[i].score)) {
 					msg_warn_config ("incorrect metrics scores: action %s"
 							" has lower score: %.2f than action %s: %.2f",
 							rspamd_action_to_str (prev_act), prev_score,
-							rspamd_action_to_str (i), metric->actions[i].score);
+							rspamd_action_to_str (i), cfg->actions[i].score);
 					ret = FALSE;
 				}
 			}
 
-			if (!isnan (metric->actions[i].score)) {
-				prev_score = metric->actions[i].score;
+			if (!isnan (cfg->actions[i].score)) {
+				prev_score = cfg->actions[i].score;
 				prev_act = i;
 			}
 		}
@@ -946,47 +941,32 @@ rspamd_config_new_statfile (struct rspamd_config *cfg,
 	return c;
 }
 
-struct rspamd_metric *
-rspamd_config_new_metric (struct rspamd_config *cfg, struct rspamd_metric *c,
-		const gchar *name)
+void
+rspamd_config_init_metric (struct rspamd_config *cfg)
 {
 	int i;
 
-	if (c == NULL) {
-		c = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (struct rspamd_metric));
-		c->grow_factor = 1.0;
-		c->symbols = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
-		c->groups = g_hash_table_new (rspamd_strcase_hash, rspamd_strcase_equal);
+	cfg->grow_factor = 1.0;
+	cfg->symbols = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
+	cfg->groups = g_hash_table_new (rspamd_strcase_hash, rspamd_strcase_equal);
 
-		for (i = METRIC_ACTION_REJECT; i < METRIC_ACTION_MAX; i++) {
-			c->actions[i].score = NAN;
-			c->actions[i].action = i;
-			c->actions[i].priority = 0;
-		}
-
-		c->subject = SPAM_SUBJECT;
-		c->name = rspamd_mempool_strdup (cfg->cfg_pool, name);
-		rspamd_mempool_add_destructor (cfg->cfg_pool,
-			(rspamd_mempool_destruct_t) g_hash_table_unref,
-			c->symbols);
-		rspamd_mempool_add_destructor (cfg->cfg_pool,
-			(rspamd_mempool_destruct_t) g_hash_table_unref,
-			c->groups);
-
-		g_hash_table_insert (cfg->metrics, (void *)c->name, c);
-		cfg->metrics_list = g_list_prepend (cfg->metrics_list, c);
-
-		if (strcmp (c->name, DEFAULT_METRIC) == 0) {
-			cfg->default_metric = c;
-		}
+	for (i = METRIC_ACTION_REJECT; i < METRIC_ACTION_MAX; i++) {
+		cfg->actions[i].score = NAN;
+		cfg->actions[i].action = i;
+		cfg->actions[i].priority = 0;
 	}
 
-	return c;
+	cfg->subject = SPAM_SUBJECT;
+	rspamd_mempool_add_destructor (cfg->cfg_pool,
+			(rspamd_mempool_destruct_t) g_hash_table_unref,
+			cfg->symbols);
+	rspamd_mempool_add_destructor (cfg->cfg_pool,
+			(rspamd_mempool_destruct_t) g_hash_table_unref,
+			cfg->groups);
 }
 
 struct rspamd_symbols_group *
-rspamd_config_new_group (struct rspamd_config *cfg, struct rspamd_metric *metric,
-		const gchar *name)
+rspamd_config_new_group (struct rspamd_config *cfg, const gchar *name)
 {
 	struct rspamd_symbols_group *gr;
 
@@ -997,7 +977,7 @@ rspamd_config_new_group (struct rspamd_config *cfg, struct rspamd_metric *metric
 			(rspamd_mempool_destruct_t)g_hash_table_unref, gr->symbols);
 	gr->name = rspamd_mempool_strdup (cfg->cfg_pool, name);
 
-	g_hash_table_insert (metric->groups, gr->name, gr);
+	g_hash_table_insert (cfg->groups, gr->name, gr);
 
 	return gr;
 }
@@ -1009,7 +989,7 @@ rspamd_worker_conf_dtor (struct rspamd_worker_conf *wcf)
 		ucl_object_unref (wcf->options);
 		g_queue_free (wcf->active_workers);
 		g_hash_table_unref (wcf->params);
-		g_slice_free1 (sizeof (*wcf), wcf);
+		g_free (wcf);
 	}
 }
 
@@ -1026,13 +1006,14 @@ rspamd_config_new_worker (struct rspamd_config *cfg,
 	struct rspamd_worker_conf *c)
 {
 	if (c == NULL) {
-		c = g_slice_alloc0 (sizeof (struct rspamd_worker_conf));
+		c = g_malloc0 (sizeof (struct rspamd_worker_conf));
 		c->params = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
 		c->active_workers = g_queue_new ();
 #ifdef HAVE_SC_NPROCESSORS_ONLN
-		c->count = sysconf (_SC_NPROCESSORS_ONLN);
+		c->count = MIN (DEFAULT_MAX_WORKERS,
+				MAX (1, sysconf (_SC_NPROCESSORS_ONLN) - 2));
 #else
-		c->count = DEFAULT_WORKERS_NUM;
+		c->count = DEFAULT_MAX_WORKERS;
 #endif
 		c->rlimit_nofile = 0;
 		c->rlimit_maxcore = 0;
@@ -1137,6 +1118,14 @@ rspamd_ucl_add_conf_variables (struct ucl_parser *parser, GHashTable *vars)
 	ucl_parser_register_variable (parser, RSPAMD_BRANCH_VERSION_MACRO,
 			RSPAMD_VERSION_BRANCH);
 
+#if defined(WITH_TORCH) && defined(WITH_LUAJIT) && defined(__x86_64__)
+	ucl_parser_register_variable (parser, "HAS_TORCH",
+			"yes");
+#else
+	ucl_parser_register_variable (parser, "HAS_TORCH",
+			"no");
+#endif
+
 	if (vars != NULL) {
 		g_hash_table_iter_init (&it, vars);
 
@@ -1163,7 +1152,7 @@ symbols_classifiers_callback (gpointer key, gpointer value, gpointer ud)
 
 	/* Actually, statistics should act like any ordinary symbol */
 	rspamd_symbols_cache_add_symbol (cfg->cache, key, 0, NULL, NULL,
-			SYMBOL_TYPE_CLASSIFIER, -1);
+			SYMBOL_TYPE_CLASSIFIER|SYMBOL_TYPE_NOSTAT, -1);
 }
 
 void
@@ -1381,7 +1370,7 @@ rspamd_check_worker (struct rspamd_config *cfg, worker_t *wrk)
 }
 
 gboolean
-rspamd_init_filters (struct rspamd_config *cfg, bool reconfig, GHashTable *vars)
+rspamd_init_filters (struct rspamd_config *cfg, bool reconfig)
 {
 	GList *cur;
 	module_t *mod, **pmod;
@@ -1393,7 +1382,7 @@ rspamd_init_filters (struct rspamd_config *cfg, bool reconfig, GHashTable *vars)
 			mod = *pmod;
 
 			if (rspamd_check_module (cfg, mod)) {
-				mod_ctx = g_slice_alloc0 (sizeof (struct module_ctx));
+				mod_ctx = g_malloc0 (sizeof (struct module_ctx));
 
 				if (mod->module_init_func (cfg, &mod_ctx) == 0) {
 					g_hash_table_insert (cfg->c_modules,
@@ -1410,12 +1399,11 @@ rspamd_init_filters (struct rspamd_config *cfg, bool reconfig, GHashTable *vars)
 
 	while (cur) {
 		/* Perform modules configuring */
-		mod_ctx = NULL;
 		mod_ctx = g_hash_table_lookup (cfg->c_modules, cur->data);
 
 		if (mod_ctx) {
 			mod = mod_ctx->mod;
-			mod_ctx->enabled = TRUE;
+			mod_ctx->enabled = rspamd_config_is_module_enabled (cfg, mod->name);
 
 			if (reconfig) {
 				(void)mod->module_reconfig_func (cfg);
@@ -1433,18 +1421,16 @@ rspamd_init_filters (struct rspamd_config *cfg, bool reconfig, GHashTable *vars)
 		cur = g_list_next (cur);
 	}
 
-	return rspamd_init_lua_filters (cfg, 0, vars);
+	return rspamd_init_lua_filters (cfg, 0);
 }
 
 static void
-rspamd_config_new_metric_symbol (struct rspamd_config *cfg,
-		struct rspamd_metric *metric, const gchar *symbol,
+rspamd_config_new_symbol (struct rspamd_config *cfg, const gchar *symbol,
 		gdouble score, const gchar *description, const gchar *group,
 		guint flags, guint priority, gint nshots)
 {
 	struct rspamd_symbols_group *sym_group;
 	struct rspamd_symbol *sym_def;
-	GList *metric_list;
 	gdouble *score_ptr;
 
 	sym_def =
@@ -1463,32 +1449,24 @@ rspamd_config_new_metric_symbol (struct rspamd_config *cfg,
 		sym_def->description = rspamd_mempool_strdup (cfg->cfg_pool, description);
 	}
 
-	msg_debug_config ("registered symbol %s with weight %.2f in metric %s and group %s",
-			sym_def->name, score, metric->name, group);
+	msg_debug_config ("registered symbol %s with weight %.2f in and group %s",
+			sym_def->name, score, group);
 
-	g_hash_table_insert (metric->symbols, sym_def->name, sym_def);
-
-	if ((metric_list =
-			g_hash_table_lookup (cfg->metrics_symbols, sym_def->name)) == NULL) {
-		metric_list = g_list_prepend (NULL, metric);
-		g_hash_table_insert (cfg->metrics_symbols, sym_def->name, metric_list);
-	}
-	else {
-		/* Slow but keep start element of list in safe */
-		if (!g_list_find (metric_list, metric)) {
-			metric_list = g_list_append (metric_list, metric);
-		}
-	}
+	g_hash_table_insert (cfg->symbols, sym_def->name, sym_def);
 
 	/* Search for symbol group */
 	if (group == NULL) {
 		group = "ungrouped";
 	}
 
-	sym_group = g_hash_table_lookup (metric->groups, group);
+	if (strcmp (group, "ungrouped") == 0) {
+		sym_def->flags |= RSPAMD_SYMBOL_FLAG_UNGROUPPED;
+	}
+
+	sym_group = g_hash_table_lookup (cfg->groups, group);
 	if (sym_group == NULL) {
 		/* Create new group */
-		sym_group = rspamd_config_new_group (cfg, metric, group);
+		sym_group = rspamd_config_new_group (cfg, group);
 	}
 
 	sym_def->gr = sym_group;
@@ -1497,33 +1475,35 @@ rspamd_config_new_metric_symbol (struct rspamd_config *cfg,
 
 
 gboolean
-rspamd_config_add_metric_symbol (struct rspamd_config *cfg,
-		const gchar *metric_name, const gchar *symbol,
+rspamd_config_add_symbol (struct rspamd_config *cfg,
+		const gchar *symbol,
 		gdouble score, const gchar *description, const gchar *group,
 		guint flags, guint priority, gint nshots)
 {
 	struct rspamd_symbol *sym_def;
-	struct rspamd_metric *metric;
-
 	g_assert (cfg != NULL);
 	g_assert (symbol != NULL);
+	struct rspamd_symbols_group *sym_group;
 
-	if (metric_name == NULL) {
-		metric_name = DEFAULT_METRIC;
-	}
-
-	metric = g_hash_table_lookup (cfg->metrics, metric_name);
-
-	if (metric == NULL) {
-		msg_err_config ("metric %s has not been found", metric_name);
-		return FALSE;
-	}
-
-	sym_def = g_hash_table_lookup (metric->symbols, symbol);
+	sym_def = g_hash_table_lookup (cfg->symbols, symbol);
 
 	if (sym_def != NULL) {
+		if (sym_def->flags & RSPAMD_SYMBOL_FLAG_UNGROUPPED && group != NULL) {
+			/* Non-empty group has a priority over non-groupped one */
+			sym_group = g_hash_table_lookup (cfg->groups, group);
+
+			if (sym_group == NULL) {
+				/* Create new group */
+				sym_group = rspamd_config_new_group (cfg, group);
+			}
+
+			sym_def->gr = sym_group;
+			g_hash_table_insert (sym_group->symbols, sym_def->name, sym_def);
+			sym_def->flags &= ~(RSPAMD_SYMBOL_FLAG_UNGROUPPED);
+		}
+
 		if (sym_def->priority > priority) {
-			msg_info_config ("symbol %s has been already registered with "
+			msg_debug_config ("symbol %s has been already registered with "
 					"priority %ud, do not override (new priority: %ud)",
 					symbol,
 					sym_def->priority,
@@ -1537,7 +1517,7 @@ rspamd_config_add_metric_symbol (struct rspamd_config *cfg,
 			return FALSE;
 		}
 		else {
-			msg_info_config ("symbol %s has been already registered with "
+			msg_debug_config ("symbol %s has been already registered with "
 					"priority %ud, override it with new priority: %ud, "
 					"old score: %.2f, new score: %.2f",
 					symbol,
@@ -1558,11 +1538,29 @@ rspamd_config_add_metric_symbol (struct rspamd_config *cfg,
 
 			sym_def->priority = priority;
 
+			/* We also check group information in this case */
+			if (group != NULL && sym_def->gr != NULL &&
+					strcmp (group, sym_def->gr->name) != 0) {
+				msg_debug_config ("move symbol %s from group %s to %s",
+						sym_def->gr->name, group);
+
+				g_hash_table_remove (sym_def->gr->symbols, sym_def->name);
+				sym_group = g_hash_table_lookup (cfg->groups, group);
+
+				if (sym_group == NULL) {
+					/* Create new group */
+					sym_group = rspamd_config_new_group (cfg, group);
+				}
+
+				sym_def->gr = sym_group;
+				g_hash_table_insert (sym_group->symbols, sym_def->name, sym_def);
+			}
+
 			return TRUE;
 		}
 	}
 
-	rspamd_config_new_metric_symbol (cfg, metric, symbol, score, description,
+	rspamd_config_new_symbol (cfg, symbol, score, description,
 			group, flags, priority, nshots);
 
 	return TRUE;
@@ -1573,12 +1571,10 @@ rspamd_config_is_module_enabled (struct rspamd_config *cfg,
 		const gchar *module_name)
 {
 	gboolean is_c = FALSE;
-	struct rspamd_metric *metric;
 	const ucl_object_t *conf, *enabled;
 	GList *cur;
 	struct rspamd_symbols_group *gr;
-
-	metric = cfg->default_metric;
+	lua_State *L = cfg->lua_state;
 
 	if (g_hash_table_lookup (cfg->c_modules, module_name)) {
 		is_c = TRUE;
@@ -1586,6 +1582,8 @@ rspamd_config_is_module_enabled (struct rspamd_config *cfg,
 
 	if (g_hash_table_lookup (cfg->explicit_modules, module_name) != NULL) {
 		/* Always load module */
+		rspamd_plugins_table_push_elt (L, "enabled", module_name);
+
 		return TRUE;
 	}
 
@@ -1606,6 +1604,8 @@ rspamd_config_is_module_enabled (struct rspamd_config *cfg,
 		if (!found) {
 			msg_info_config ("internal module %s is disable in `filters` line",
 					module_name);
+			rspamd_plugins_table_push_elt (L,
+					"disabled_explicitly", module_name);
 
 			return FALSE;
 		}
@@ -1614,6 +1614,8 @@ rspamd_config_is_module_enabled (struct rspamd_config *cfg,
 	conf = ucl_object_lookup (cfg->rcl_obj, module_name);
 
 	if (conf == NULL) {
+		rspamd_plugins_table_push_elt (L, "disabled_unconfigured", module_name);
+
 		msg_info_config ("%s module %s is enabled but has not been configured",
 				is_c ? "internal" : "lua", module_name);
 
@@ -1625,56 +1627,77 @@ rspamd_config_is_module_enabled (struct rspamd_config *cfg,
 	else {
 		enabled = ucl_object_lookup (conf, "enabled");
 
-		if (enabled && ucl_object_type (enabled) == UCL_BOOLEAN) {
-			if (!ucl_object_toboolean (enabled)) {
-				msg_info_config ("%s module %s is disabled in the configuration",
-						is_c ? "internal" : "lua", module_name);
-				return FALSE;
+		if (enabled) {
+			if (ucl_object_type (enabled) == UCL_BOOLEAN) {
+				if (!ucl_object_toboolean (enabled)) {
+					rspamd_plugins_table_push_elt (L,
+							"disabled_explicitly", module_name);
+
+					msg_info_config (
+							"%s module %s is disabled in the configuration",
+							is_c ? "internal" : "lua", module_name);
+					return FALSE;
+				}
+			}
+			else if (ucl_object_type (enabled) == UCL_STRING) {
+				gint ret;
+
+				ret = rspamd_config_parse_flag (ucl_object_tostring (enabled), 0);
+
+				if (ret == 0) {
+					rspamd_plugins_table_push_elt (L,
+							"disabled_explicitly", module_name);
+
+					msg_info_config (
+							"%s module %s is disabled in the configuration",
+							is_c ? "internal" : "lua", module_name);
+					return FALSE;
+				}
+				else if (ret == -1) {
+					rspamd_plugins_table_push_elt (L,
+							"disabled_failed", module_name);
+
+					msg_info_config (
+							"%s module %s has wrong enabled flag (%s) in the configuration",
+							is_c ? "internal" : "lua", module_name,
+							ucl_object_tostring (enabled));
+					return FALSE;
+				}
 			}
 		}
 	}
 
-	if (metric) {
-		/* Now we check symbols group */
-		gr = g_hash_table_lookup (metric->groups, module_name);
+	/* Now we check symbols group */
+	gr = g_hash_table_lookup (cfg->groups, module_name);
 
-		if (gr) {
-			if (gr->disabled) {
-				msg_info_config ("%s module %s is disabled in the configuration as "
-						"its group has been disabled",
-						is_c ? "internal" : "lua", module_name);
-				return FALSE;
-			}
+	if (gr) {
+		if (gr->disabled) {
+			rspamd_plugins_table_push_elt (L,
+					"disabled_explicitly", module_name);
+			msg_info_config ("%s module %s is disabled in the configuration as "
+					"its group has been disabled",
+					is_c ? "internal" : "lua", module_name);
+
+			return FALSE;
 		}
 	}
+
+	rspamd_plugins_table_push_elt (L, "enabled", module_name);
 
 	return TRUE;
 }
 
 gboolean
 rspamd_config_set_action_score (struct rspamd_config *cfg,
-		const gchar *metric_name,
 		const gchar *action_name,
 		gdouble score,
 		guint priority)
 {
-	struct metric_action *act;
-	struct rspamd_metric *metric;
+	struct rspamd_action *act;
 	gint act_num;
 
 	g_assert (cfg != NULL);
 	g_assert (action_name != NULL);
-
-	if (metric_name == NULL) {
-		metric_name = DEFAULT_METRIC;
-	}
-
-	metric = g_hash_table_lookup (cfg->metrics, metric_name);
-
-	if (metric == NULL) {
-		msg_err_config ("metric %s has not been found", metric_name);
-		return FALSE;
-	}
 
 	if (!rspamd_action_from_str (action_name, &act_num)) {
 		msg_err_config ("invalid action name: %s", action_name);
@@ -1683,7 +1706,7 @@ rspamd_config_set_action_score (struct rspamd_config *cfg,
 
 	g_assert (act_num >= METRIC_ACTION_REJECT && act_num < METRIC_ACTION_MAX);
 
-	act = &metric->actions[act_num];
+	act = &cfg->actions[act_num];
 
 	if (isnan (act->score)) {
 		act->score = score;
@@ -1843,7 +1866,7 @@ rspamd_action_from_str (const gchar *data, gint *result)
 }
 
 const gchar *
-rspamd_action_to_str (enum rspamd_metric_action action)
+rspamd_action_to_str (enum rspamd_action_type action)
 {
 	switch (action) {
 	case METRIC_ACTION_REJECT:
@@ -1866,7 +1889,7 @@ rspamd_action_to_str (enum rspamd_metric_action action)
 }
 
 const gchar *
-rspamd_action_to_str_alt (enum rspamd_metric_action action)
+rspamd_action_to_str_alt (enum rspamd_action_type action)
 {
 	switch (action) {
 	case METRIC_ACTION_REJECT:

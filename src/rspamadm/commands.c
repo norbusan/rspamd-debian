@@ -28,6 +28,9 @@ extern struct rspamadm_command grep_command;
 extern struct rspamadm_command signtool_command;
 extern struct rspamadm_command lua_command;
 extern struct rspamadm_command dkim_keygen_command;
+extern struct rspamadm_command configwizard_command;
+extern struct rspamadm_command corpus_test_command;
+extern struct rspamadm_command rescore_command;
 
 const struct rspamadm_command *commands[] = {
 	&help_command,
@@ -44,6 +47,9 @@ const struct rspamadm_command *commands[] = {
 	&signtool_command,
 	&lua_command,
 	&dkim_keygen_command,
+	&configwizard_command,
+	&corpus_test_command,
+	&rescore_command,
 	NULL
 };
 

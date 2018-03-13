@@ -111,6 +111,11 @@ struct rspamd_lua_map {
 	} data;
 };
 
+struct rspamd_lua_cached_entry {
+	gint ref;
+	guint id;
+};
+
 /* Common utility functions */
 
 /**
@@ -159,12 +164,22 @@ gpointer rspamd_lua_check_class (lua_State *L, gint index, const gchar *name);
  */
 lua_State *rspamd_lua_init (void);
 
+
+/**
+ * Sets field in a global variable
+ * @param L
+ * @param global_name
+ * @param field_name
+ * @param new_elt
+ */
+void
+rspamd_plugins_table_push_elt (lua_State *L, const gchar *field_name,
+		const gchar *new_elt);
 /**
  * Load and initialize lua plugins
  */
 gboolean
-rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load,
-		GHashTable *vars);
+rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load);
 
 /**
  * Initialize new locked lua_State structure
@@ -280,7 +295,7 @@ gboolean rspamd_lua_check_condition (struct rspamd_config *cfg,
 void rspamd_lua_dumpstack (lua_State *L);
 
 /* Set lua path according to the configuration */
-void rspamd_lua_set_path (lua_State *L, struct rspamd_config *cfg,
+void rspamd_lua_set_path (lua_State *L, const ucl_object_t *cfg_obj,
 		GHashTable *vars);
 
 struct memory_pool_s * rspamd_lua_check_mempool (lua_State * L, gint pos);

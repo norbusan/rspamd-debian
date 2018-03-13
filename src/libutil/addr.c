@@ -109,10 +109,10 @@ rspamd_inet_addr_create (gint af)
 {
 	rspamd_inet_addr_t *addr;
 
-	addr = g_slice_alloc0 (sizeof (rspamd_inet_addr_t));
+	addr = g_malloc0 (sizeof (rspamd_inet_addr_t));
 
 	if (af == AF_UNIX) {
-		addr->u.un = g_slice_alloc0 (sizeof (*addr->u.un));
+		addr->u.un = g_malloc0 (sizeof (*addr->u.un));
 		addr->slen = sizeof (addr->u.un->addr);
 	}
 
@@ -129,10 +129,10 @@ rspamd_inet_address_free (rspamd_inet_addr_t *addr)
 	if (addr) {
 		if (addr->af == AF_UNIX) {
 			if (addr->u.un) {
-				g_slice_free1 (sizeof (*addr->u.un), addr->u.un);
+				g_free (addr->u.un);
 			}
 		}
-		g_slice_free1 (sizeof (rspamd_inet_addr_t), addr);
+		g_free (addr);
 	}
 }
 
@@ -344,8 +344,9 @@ rspamd_parse_unix_path (rspamd_inet_addr_t **target, const char *src)
 	struct passwd pw, *ppw;
 	struct group gr, *pgr;
 	rspamd_inet_addr_t *addr;
+	bool has_group = false;
 
-	tokens = g_strsplit_set (src, " ", -1);
+	tokens = g_strsplit_set (src, " ,", -1);
 
 	addr = rspamd_inet_addr_create (AF_UNIX);
 
@@ -369,7 +370,7 @@ rspamd_parse_unix_path (rspamd_inet_addr_t **target, const char *src)
 	pwlen = 8192;
 #endif
 
-	pwbuf = g_alloca (pwlen);
+	pwbuf = g_malloc0 (pwlen);
 
 	while (*cur_tok) {
 		if (g_ascii_strncasecmp (*cur_tok, "mode=", sizeof ("mode=") - 1) == 0) {
@@ -395,7 +396,10 @@ rspamd_parse_unix_path (rspamd_inet_addr_t **target, const char *src)
 				goto err;
 			}
 			addr->u.un->owner = pw.pw_uid;
-			addr->u.un->group = pw.pw_gid;
+
+			if (!has_group) {
+				addr->u.un->group = pw.pw_gid;
+			}
 		}
 		else if (g_ascii_strncasecmp (*cur_tok, "group=",
 				sizeof ("group=") - 1) == 0) {
@@ -408,10 +412,14 @@ rspamd_parse_unix_path (rspamd_inet_addr_t **target, const char *src)
 				}
 				goto err;
 			}
+
+			has_group = true;
 			addr->u.un->group = gr.gr_gid;
 		}
 		cur_tok ++;
 	}
+
+	g_free (pwbuf);
 
 	if (target) {
 		rspamd_ip_validate_af (addr);
@@ -425,6 +433,7 @@ rspamd_parse_unix_path (rspamd_inet_addr_t **target, const char *src)
 
 err:
 
+	g_free (pwbuf);
 	rspamd_inet_address_free (addr);
 	return FALSE;
 }
@@ -707,8 +716,7 @@ rspamd_parse_inet_address (rspamd_inet_addr_t **target,
 
 		rspamd_strlcpy (ipbuf, src + 1, iplen + 1);
 
-		if (ipv6_status == RSPAMD_IPV6_SUPPORTED &&
-				rspamd_parse_inet_address_ip6 (ipbuf, iplen,
+		if (rspamd_parse_inet_address_ip6 (ipbuf, iplen,
 						&su.s6.sin6_addr)) {
 			addr = rspamd_inet_address_v6_maybe_map (&su.s6);
 			ret = TRUE;
@@ -726,7 +734,6 @@ rspamd_parse_inet_address (rspamd_inet_addr_t **target,
 			/* This is either port number and ipv4 addr or ipv6 addr */
 			/* Search for another semicolon */
 			if (memchr (end + 1, ':', srclen - (end - src + 1)) &&
-					ipv6_status == RSPAMD_IPV6_SUPPORTED &&
 					rspamd_parse_inet_address_ip6 (src, srclen, &su.s6.sin6_addr)) {
 				addr = rspamd_inet_address_v6_maybe_map (&su.s6);
 				ret = TRUE;
@@ -760,8 +767,7 @@ rspamd_parse_inet_address (rspamd_inet_addr_t **target,
 						sizeof (struct in_addr));
 				ret = TRUE;
 			}
-			else if (ipv6_status == RSPAMD_IPV6_SUPPORTED &&
-					rspamd_parse_inet_address_ip6 (src, srclen, &su.s6.sin6_addr)) {
+			else if (rspamd_parse_inet_address_ip6 (src, srclen, &su.s6.sin6_addr)) {
 				addr = rspamd_inet_address_v6_maybe_map (&su.s6);
 				ret = TRUE;
 			}
@@ -1096,7 +1102,7 @@ rspamd_inet_address_recvfrom (gint fd, void *buf, gsize len, gint fl,
 		addr->slen = slen;
 
 		if (addr->af == AF_UNIX) {
-			addr->u.un = g_slice_alloc (sizeof (*addr->u.un));
+			addr->u.un = g_malloc (sizeof (*addr->u.un));
 			memcpy (&addr->u.un->addr, &su.su, sizeof (struct sockaddr_un));
 		}
 		else {

@@ -17,6 +17,7 @@
 #include "lua_common.h"
 #include "libutil/map.h"
 #include "libutil/map_private.h"
+#include "contrib/libucl/lua_ucl.h"
 
 /***
  * This module is used to manage rspamd maps and map like objects
@@ -210,6 +211,58 @@ lua_config_radix_from_config (lua_State *L)
 	return 1;
 }
 
+
+gint
+lua_config_radix_from_ucl (lua_State *L)
+{
+	struct rspamd_config *cfg = lua_check_config (L, 1);
+	ucl_object_t *obj;
+	struct rspamd_lua_map *map, **pmap;
+	ucl_object_t *fake_obj;
+	struct rspamd_map *m;
+
+	if (!cfg) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	obj = ucl_object_lua_import (L, 2);
+
+	if (obj) {
+		map = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*map));
+		map->data.radix = NULL;
+		map->type = RSPAMD_LUA_MAP_RADIX;
+
+		fake_obj = ucl_object_typed_new (UCL_OBJECT);
+		ucl_object_insert_key (fake_obj, ucl_object_ref (obj),
+				"data", 0, false);
+		ucl_object_insert_key (fake_obj, ucl_object_fromstring ("static"),
+				"url", 0, false);
+
+		if ((m = rspamd_map_add_from_ucl (cfg, fake_obj, "static radix map",
+				rspamd_radix_read,
+				rspamd_radix_fin,
+				(void **)&map->data.radix)) == NULL) {
+			msg_err_config ("invalid radix map static");
+			lua_pushnil (L);
+			ucl_object_unref (fake_obj);
+
+			return 1;
+		}
+
+		ucl_object_unref (fake_obj);
+		pmap = lua_newuserdata (L, sizeof (void *));
+		map->map = m;
+		*pmap = map;
+		rspamd_lua_setclass (L, "rspamd{map}", -1);
+
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
 gint
 lua_config_add_hash_map (lua_State *L)
 {
@@ -384,8 +437,11 @@ lua_config_add_map (lua_State *L)
 
 		g_assert (map_obj != NULL);
 
-		if (type == NULL) {
+		if (type == NULL && cbidx != -1) {
 			type = "callback";
+		}
+		else if (type == NULL) {
+			return luaL_error (L, "invalid map type");
 		}
 
 		if (strcmp (type, "callback") == 0) {

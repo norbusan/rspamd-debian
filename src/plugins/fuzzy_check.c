@@ -82,11 +82,13 @@ struct fuzzy_rule {
 	struct rspamd_cryptobox_keypair *local_key;
 	struct rspamd_cryptobox_pubkey *peer_key;
 	double max_score;
+	guint32 min_bytes;
 	gboolean read_only;
 	gboolean skip_unknown;
 	gboolean fuzzy_images;
 	gboolean short_text_direct_hash;
 	gint learn_condition_cb;
+	GHashTable *skip_map;
 };
 
 struct fuzzy_ctx {
@@ -107,8 +109,23 @@ struct fuzzy_ctx {
 	gboolean enabled;
 };
 
+enum fuzzy_result_type {
+	FUZZY_RESULT_TXT,
+	FUZZY_RESULT_IMG,
+	FUZZY_RESULT_BIN
+};
+
+struct fuzzy_client_result {
+	const gchar *symbol;
+	gchar *option;
+	gdouble score;
+	gdouble prob;
+	enum fuzzy_result_type type;
+};
+
 struct fuzzy_client_session {
 	GPtrArray *commands;
+	GPtrArray *results;
 	struct rspamd_task *task;
 	struct upstream *server;
 	rspamd_inet_addr_t *addr;
@@ -404,6 +421,15 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 	rule->learn_condition_cb = -1;
 	rule->alg = RSPAMD_SHINGLES_OLD;
 
+	if ((value = ucl_object_lookup (obj, "skip_hashes")) != NULL) {
+		rspamd_map_add_from_ucl (cfg, value,
+			"Fuzzy hashes whitelist", rspamd_kv_list_read, rspamd_kv_list_fin,
+			(void **)&rule->skip_map);
+	}
+	else {
+		rule->skip_map = NULL;
+	}
+
 	if ((value = ucl_object_lookup (obj, "mime_types")) != NULL) {
 		it = NULL;
 		while ((cur = ucl_object_iterate (value, &it, value->type == UCL_ARRAY))
@@ -471,6 +497,10 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 
 	if ((value = ucl_object_lookup (obj, "max_score")) != NULL) {
 		rule->max_score = ucl_obj_todouble (value);
+	}
+
+	if ((value = ucl_object_lookup (obj, "min_bytes")) != NULL) {
+		rule->min_bytes = ucl_obj_toint (value);
 	}
 
 	if ((value = ucl_object_lookup (obj,  "symbol")) != NULL) {
@@ -788,6 +818,15 @@ fuzzy_check_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 			0);
 	rspamd_rcl_add_doc_by_path (cfg,
 			"fuzzy_check.rule",
+			"Whitelisted hashes map",
+			"skip_hashes",
+			UCL_STRING,
+			NULL,
+			0,
+			NULL,
+			0);
+	rspamd_rcl_add_doc_by_path (cfg,
+			"fuzzy_check.rule",
 			"Set of mime types (in form type/subtype, or type/*, or *) to check with fuzzy",
 			"mime_types",
 			UCL_ARRAY,
@@ -891,6 +930,15 @@ fuzzy_check_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 			"Use direct hash for short texts",
 			"short_text_direct_hash",
 			UCL_BOOLEAN,
+			NULL,
+			0,
+			NULL,
+			0);
+	rspamd_rcl_add_doc_by_path (cfg,
+			"fuzzy_check.rule",
+			"Override module default min bytes for this rule",
+			"min_bytes",
+			UCL_INT,
 			NULL,
 			0,
 			NULL,
@@ -1123,6 +1171,10 @@ fuzzy_io_fin (void *ud)
 		g_ptr_array_free (session->commands, TRUE);
 	}
 
+	if (session->results) {
+		g_ptr_array_free (session->results, TRUE);
+	}
+
 	event_del (&session->ev);
 	event_del (&session->timev);
 	close (session->fd);
@@ -1302,7 +1354,8 @@ fuzzy_cmd_set_cached (struct fuzzy_rule *rule,
  * Create fuzzy command from a text part
  */
 static struct fuzzy_cmd_io *
-fuzzy_cmd_from_text_part (struct fuzzy_rule *rule,
+fuzzy_cmd_from_text_part (struct rspamd_task *task,
+		struct fuzzy_rule *rule,
 		int c,
 		gint flag,
 		guint32 weight,
@@ -1348,12 +1401,16 @@ fuzzy_cmd_from_text_part (struct fuzzy_rule *rule,
 		if (short_text) {
 			enccmd = rspamd_mempool_alloc0 (pool, sizeof (*encshcmd));
 			cmd = &enccmd->cmd;
-			rspamd_cryptobox_hash_init (&st, rule->hash_key->str, rule->hash_key->len);
-			words = fuzzy_preprocess_words (part, pool);
+			rspamd_cryptobox_hash_init (&st, rule->hash_key->str,
+					rule->hash_key->len);
 
-			for (i = 0; i < words->len; i ++) {
-				word = &g_array_index (words, rspamd_stat_token_t, i);
-				rspamd_cryptobox_hash_update (&st, word->begin, word->len);
+			rspamd_cryptobox_hash_update (&st, part->stripped_content->data,
+					part->stripped_content->len);
+
+			if (task->subject) {
+				/* We also include subject */
+				rspamd_cryptobox_hash_update (&st, task->subject,
+						strlen (task->subject));
 			}
 
 			rspamd_cryptobox_hash_final (&st, cmd->digest);
@@ -1732,7 +1789,7 @@ fuzzy_process_reply (guchar **pos, gint *r, GPtrArray *req,
 	for (i = 0; i < req->len; i ++) {
 		io = g_ptr_array_index (req, i);
 
-		if (io->tag == rep->tag) {
+		if (io->tag == rep->v1.tag) {
 			if (!(io->flags & FUZZY_CMD_FLAG_REPLIED)) {
 				io->flags |= FUZZY_CMD_FLAG_REPLIED;
 
@@ -1751,7 +1808,7 @@ fuzzy_process_reply (guchar **pos, gint *r, GPtrArray *req,
 	}
 
 	if (!found) {
-		msg_info ("unexpected tag: %ud", rep->tag);
+		msg_info ("unexpected tag: %ud", rep->v1.tag);
 	}
 
 	return NULL;
@@ -1771,11 +1828,14 @@ fuzzy_insert_result (struct fuzzy_client_session *session,
 	double nval;
 	guchar buf[2048];
 	const gchar *type = "bin";
+	struct fuzzy_client_result *res;
+	gboolean is_fuzzy = FALSE;
+	gchar hexbuf[rspamd_cryptobox_HASHBYTES * 2 + 1];
 
 	/* Get mapping by flag */
 	if ((map =
 			g_hash_table_lookup (session->rule->mappings,
-					GINT_TO_POINTER (rep->flag))) == NULL) {
+					GINT_TO_POINTER (rep->v1.flag))) == NULL) {
 		/* Default symbol and default weight */
 		symbol = session->rule->symbol;
 		weight = session->rule->max_score;
@@ -1786,49 +1846,84 @@ fuzzy_insert_result (struct fuzzy_client_session *session,
 		weight = map->weight;
 	}
 
-
+	res = rspamd_mempool_alloc0 (task->task_pool, sizeof (*res));
+	res->prob = rep->v1.prob;
+	res->symbol = symbol;
 	/*
 	 * Hash is assumed to be found if probability is more than 0.5
 	 * In that case `value` means number of matches
 	 * Otherwise `value` means error code
 	 */
 
-	nval = fuzzy_normalize (rep->value, weight);
+	nval = fuzzy_normalize (rep->v1.value, weight);
 
 	if (io && (io->flags & FUZZY_CMD_FLAG_IMAGE)) {
-		nval *= rspamd_normalize_probability (rep->prob, 0.5);
+		nval *= rspamd_normalize_probability (rep->v1.prob, 0.5);
 		type = "img";
+		res->type = FUZZY_RESULT_IMG;
 	}
 	else {
 		if (cmd->shingles_count > 0) {
 			type = "txt";
+			res->type = FUZZY_RESULT_TXT;
+		}
+		else {
+			res->type = FUZZY_RESULT_BIN;
 		}
 
-		nval *= rspamd_normalize_probability (rep->prob, 0.5);
+		nval *= rspamd_normalize_probability (rep->v1.prob, 0.5);
 	}
 
-	msg_info_task (
-			"found fuzzy hash(%s) %*xs with weight: "
-			"%.2f, probability %.2f, in list: %s:%d%s",
-			type,
-			(gint)sizeof (cmd->digest), cmd->digest,
-			nval,
-			(gdouble)rep->prob,
-			symbol,
-			rep->flag,
-			map == NULL ? "(unknown)" : "");
+	res->score = nval;
+
+	if (memcmp (rep->digest, cmd->digest, sizeof (rep->digest)) != 0) {
+		is_fuzzy = TRUE;
+	}
+
+	if (is_fuzzy) {
+		msg_info_task (
+				"found fuzzy hash(%s) %*xs (%*xs requested) with weight: "
+						"%.2f, probability %.2f, in list: %s:%d%s",
+				type,
+				(gint) sizeof (rep->digest), rep->digest,
+				(gint) sizeof (cmd->digest), cmd->digest,
+				nval,
+				(gdouble) rep->v1.prob,
+				symbol,
+				rep->v1.flag,
+				map == NULL ? "(unknown)" : "");
+	}
+	else {
+		msg_info_task (
+				"found exact fuzzy hash(%s) %*xs with weight: "
+						"%.2f, probability %.2f, in list: %s:%d%s",
+				type,
+				(gint) sizeof (rep->digest), rep->digest,
+				nval,
+				(gdouble) rep->v1.prob,
+				symbol,
+				rep->v1.flag,
+				map == NULL ? "(unknown)" : "");
+	}
+
 	if (map != NULL || !session->rule->skip_unknown) {
+		if (session->rule->skip_map) {
+			rspamd_encode_hex_buf (cmd->digest, sizeof (cmd->digest),
+				hexbuf, sizeof (hexbuf) - 1);
+			hexbuf[sizeof (hexbuf) - 1] = '\0';
+			if (g_hash_table_lookup (session->rule->skip_map, hexbuf)) {
+				return;
+			}
+		}
 		rspamd_snprintf (buf,
 				sizeof (buf),
 				"%d:%*xs:%.2f:%s",
-				rep->flag,
-				rspamd_fuzzy_hash_len, cmd->digest,
-				rep->prob,
+				rep->v1.flag,
+				(gint)MIN(rspamd_fuzzy_hash_len, sizeof (rep->digest)), rep->digest,
+				rep->v1.prob,
 				type);
-		rspamd_task_insert_result_single (session->task,
-				symbol,
-				nval,
-				buf);
+		res->option = rspamd_mempool_strdup (task->task_pool, buf);
+		g_ptr_array_add (session->results, res);
 	}
 }
 
@@ -1859,9 +1954,9 @@ fuzzy_check_try_read (struct fuzzy_client_session *session)
 
 		while ((rep = fuzzy_process_reply (&p, &r,
 				session->commands, session->rule, &cmd, &io)) != NULL) {
-			if (rep->prob > 0.5) {
+			if (rep->v1.prob > 0.5) {
 				if (cmd->cmd == FUZZY_CHECK) {
-					fuzzy_insert_result (session, rep, cmd, io, rep->flag);
+					fuzzy_insert_result (session, rep, cmd, io, rep->v1.flag);
 				}
 				else if (cmd->cmd == FUZZY_STAT) {
 					/* Just set pool variable to extract it in further */
@@ -1869,7 +1964,7 @@ fuzzy_check_try_read (struct fuzzy_client_session *session)
 					GList *res;
 
 					pval = rspamd_mempool_alloc (task->task_pool, sizeof (*pval));
-					pval->fuzzy_cnt = rep->flag;
+					pval->fuzzy_cnt = rep->v1.flag;
 					pval->name = session->rule->name;
 
 					res = rspamd_mempool_get_variable (task->task_pool, "fuzzy_stat");
@@ -1884,16 +1979,23 @@ fuzzy_check_try_read (struct fuzzy_client_session *session)
 					}
 				}
 			}
-			else if (rep->value == 403) {
+			else if (rep->v1.value == 403) {
 				msg_info_task (
 						"fuzzy check error for %d: forbidden",
-						rep->flag);
+						rep->v1.flag);
 			}
-			else if (rep->value != 0) {
+			else if (rep->v1.value == 401) {
+				if (cmd->cmd != FUZZY_CHECK) {
+					msg_info_task (
+							"fuzzy check error for %d: skipped by server",
+							rep->v1.flag);
+				}
+			}
+			else if (rep->v1.value != 0) {
 				msg_info_task (
 						"fuzzy check error for %d: unknown error (%d)",
-						rep->flag,
-						rep->value);
+						rep->v1.flag,
+						rep->v1.value);
 			}
 
 			ret = 1;
@@ -1901,6 +2003,48 @@ fuzzy_check_try_read (struct fuzzy_client_session *session)
 	}
 
 	return ret;
+}
+
+static void
+fuzzy_insert_metric_results (struct rspamd_task *task, GPtrArray *results)
+{
+	struct fuzzy_client_result *res;
+	guint i;
+	gboolean seen_text = FALSE, seen_img = FALSE;
+	gdouble prob_txt = 0.0, mult;
+
+	PTR_ARRAY_FOREACH (results, i, res) {
+		if (res->type == FUZZY_RESULT_TXT) {
+			seen_text = TRUE;
+			prob_txt = MAX (prob_txt, res->prob);
+		}
+		else if (res->type == FUZZY_RESULT_IMG) {
+			seen_img = TRUE;
+		}
+	}
+
+	PTR_ARRAY_FOREACH (results, i, res) {
+		mult = 1.0;
+
+		if (res->type == FUZZY_RESULT_IMG) {
+			if (!seen_text) {
+				mult *= 0.25;
+			}
+			else if (prob_txt < 0.75) {
+				/* Penalize sole image without matching text */
+				mult *= prob_txt;
+			}
+		}
+		else if (res->type == FUZZY_RESULT_TXT) {
+			if (seen_img) {
+				/* Slightly increase score */
+				mult = 1.1;
+			}
+		}
+
+		rspamd_task_insert_result_single (task, res->symbol,
+				res->score * mult, res->option);
+	}
 }
 
 static gboolean
@@ -1920,6 +2064,7 @@ fuzzy_check_session_is_completed (struct fuzzy_client_session *session)
 	}
 
 	if (nreplied == session->commands->len) {
+		fuzzy_insert_metric_results (session->task, session->results);
 		rspamd_session_remove_event (session->task->s, fuzzy_io_fin, session);
 
 		return TRUE;
@@ -2112,7 +2257,7 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 					session->commands, session->rule, &cmd, &io)) != NULL) {
 				if ((map =
 						g_hash_table_lookup (session->rule->mappings,
-								GINT_TO_POINTER (rep->flag))) == NULL) {
+								GINT_TO_POINTER (rep->v1.flag))) == NULL) {
 					/* Default symbol and default weight */
 					symbol = session->rule->symbol;
 
@@ -2138,32 +2283,53 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 					op = "deleted";
 				}
 
-				if (rep->prob > 0.5) {
+				if (rep->v1.prob > 0.5) {
 					msg_info_task ("%s fuzzy hash (%s) %*xs, list: %s:%d for "
 							"message <%s>",
 							op,
 							ftype,
-							(gint)sizeof (cmd->digest), cmd->digest,
+							(gint)sizeof (rep->digest), rep->digest,
 							symbol,
-							rep->flag,
+							rep->v1.flag,
 							session->task->message_id);
 				}
 				else {
-					msg_info_task ("fuzzy hash (%s) for message cannot be %s"
-							"<%s>, %*xs, "
-							"list %s:%d, error: %d",
-							ftype,
-							op,
-							session->task->message_id,
-							(gint)sizeof (cmd->digest), cmd->digest,
-							symbol,
-							rep->flag,
-							rep->value);
+					if (rep->v1.value == 401) {
+						msg_info_task (
+								"fuzzy hash (%s) for message cannot be %s"
+										"<%s>, %*xs, "
+										"list %s:%d, skipped by server",
+								ftype,
+								op,
+								session->task->message_id,
+								(gint)sizeof (rep->digest), rep->digest,
+								symbol,
+								rep->v1.flag);
 
-					if (*(session->err) == NULL) {
-						g_set_error (session->err,
-							g_quark_from_static_string ("fuzzy check"),
-							rep->value, "process fuzzy error");
+						if (*(session->err) == NULL) {
+							g_set_error (session->err,
+									g_quark_from_static_string ("fuzzy check"),
+									rep->v1.value, "fuzzy hash is skipped");
+						}
+					}
+					else {
+						msg_info_task (
+								"fuzzy hash (%s) for message cannot be %s"
+										"<%s>, %*xs, "
+										"list %s:%d, error: %d",
+								ftype,
+								op,
+								session->task->message_id,
+								(gint)sizeof (rep->digest), rep->digest,
+								symbol,
+								rep->v1.flag,
+								rep->v1.value);
+
+						if (*(session->err) == NULL) {
+							g_set_error (session->err,
+									g_quark_from_static_string ("fuzzy check"),
+									rep->v1.value, "process fuzzy error");
+						}
 					}
 
 					ret = return_finished;
@@ -2375,10 +2541,17 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 	struct rspamd_mime_part *mime_part;
 	struct rspamd_image *image;
 	struct fuzzy_cmd_io *io, *cur;
-	guint i, j;
+	guint i, j, min_bytes = 0;
 	GPtrArray *res;
 
 	res = g_ptr_array_sized_new (task->parts->len + 1);
+
+	if (rule->min_bytes) {
+		min_bytes = rule->min_bytes;
+	}
+	else {
+		min_bytes = fuzzy_module_ctx->min_bytes;
+	}
 
 	if (c == FUZZY_STAT) {
 		io = fuzzy_cmd_stat (rule, c, flag, value, task->task_pool);
@@ -2402,13 +2575,13 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 
 			/* Check length of part */
 			fac = fuzzy_module_ctx->text_multiplier * part->content->len;
-			if ((double) fuzzy_module_ctx->min_bytes > fac) {
+			if ((double)min_bytes > fac) {
 				if (!rule->short_text_direct_hash) {
 					msg_info_task (
 							"<%s>, part is shorter than %d bytes: %.0f "
 									"(%d * %.2f bytes), "
 									"skip fuzzy check",
-							task->message_id, fuzzy_module_ctx->min_bytes,
+							task->message_id, min_bytes,
 							fac,
 							part->content->len,
 							fuzzy_module_ctx->text_multiplier);
@@ -2419,7 +2592,7 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 							"<%s>, part is shorter than %d bytes: %.0f "
 									"(%d * %.2f bytes), "
 									"use direct hash",
-							task->message_id, fuzzy_module_ctx->min_bytes,
+							task->message_id, min_bytes,
 							fac,
 							part->content->len,
 							fuzzy_module_ctx->text_multiplier);
@@ -2455,7 +2628,7 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 				}
 			}
 
-			io = fuzzy_cmd_from_text_part (rule,
+			io = fuzzy_cmd_from_text_part (task, rule,
 					c,
 					flag,
 					value,
@@ -2502,8 +2675,8 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 							image->height >= fuzzy_module_ctx->min_height) &&
 						(fuzzy_module_ctx->min_width == 0 ||
 							image->width >= fuzzy_module_ctx->min_width) &&
-						(fuzzy_module_ctx->min_bytes <= 0 ||
-								mime_part->parsed_data.len >= fuzzy_module_ctx->min_bytes)) {
+						(min_bytes == 0 ||
+								mime_part->parsed_data.len >= min_bytes)) {
 						io = fuzzy_cmd_from_data_part (rule, c, flag, value,
 								task->task_pool,
 								image->parent->digest);
@@ -2563,8 +2736,7 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 					!(mime_part->flags & (RSPAMD_MIME_PART_TEXT|RSPAMD_MIME_PART_IMAGE)) &&
 					mime_part->parsed_data.len > 0 &&
 					fuzzy_check_content_type (rule, mime_part->ct)) {
-				if (fuzzy_module_ctx->min_bytes <= 0 || mime_part->parsed_data.len >=
-						fuzzy_module_ctx->min_bytes) {
+				if (min_bytes == 0 || mime_part->parsed_data.len >= min_bytes) {
 					io = fuzzy_cmd_from_data_part (rule, c, flag, value,
 							task->task_pool,
 							mime_part->digest);
@@ -2644,6 +2816,7 @@ register_fuzzy_client_call (struct rspamd_task *task,
 			session->server = selected;
 			session->rule = rule;
 			session->addr = addr;
+			session->results = g_ptr_array_sized_new (32);
 
 			event_set (&session->ev, sock, EV_WRITE, fuzzy_check_io_callback,
 					session);
@@ -2783,7 +2956,7 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 	struct fuzzy_rule *rule;
 	struct rspamd_controller_session *session = conn_ent->ud;
 	struct rspamd_task *task, **ptask;
-	gboolean processed = FALSE, res = TRUE, skip;
+	gboolean processed = FALSE, res = TRUE, skip = FALSE;
 	guint i;
 	GError **err;
 	GPtrArray *commands;
@@ -2792,7 +2965,7 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 	gint r, *saved, rules = 0, err_idx;
 
 	/* Prepare task */
-	task = rspamd_task_new (session->wrk, session->cfg, NULL);
+	task = rspamd_task_new (session->wrk, session->cfg, NULL, session->lang_det);
 	task->cfg = ctx->cfg;
 	task->ev_base = conn_ent->rt->ev_base;
 	saved = rspamd_mempool_alloc0 (session->pool, sizeof (gint));
@@ -2888,7 +3061,7 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 		if (is_hash) {
 			GPtrArray *args;
 			const rspamd_ftok_t *arg;
-			guint i;
+			guint j;
 
 			args = rspamd_http_message_find_header_multiple (msg, "Hash");
 
@@ -2896,8 +3069,8 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 				struct fuzzy_cmd_io *io;
 				commands = g_ptr_array_sized_new (args->len);
 
-				for (i = 0; i < args->len; i ++) {
-					arg = g_ptr_array_index (args, i);
+				for (j = 0; j < args->len; j ++) {
+					arg = g_ptr_array_index (args, j);
 					io = fuzzy_cmd_hash (rule, cmd, arg, flag, value,
 							task->task_pool);
 
@@ -2949,6 +3122,7 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 				strerror (errno));
 		rspamd_controller_send_error (conn_ent, 400, "Message sending error");
 		rspamd_task_free (task);
+
 		return;
 	}
 	else if (!processed) {
@@ -2972,11 +3146,7 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 			}
 		}
 		rspamd_task_free (task);
-
-		return;
 	}
-
-	return;
 }
 
 static int

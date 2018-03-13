@@ -25,8 +25,12 @@ local fun = require "fun"
 local rspamd_logger = require "rspamd_logger"
 local rspamd_config = rspamd_config
 local hash = require "rspamd_cryptobox_hash"
+local lua_util = require "lua_util"
+local N = "rspamd_update"
 local rspamd_version = rspamd_version
 local maps = {}
+local allow_rules = false -- Deny for now
+local global_priority = 1 -- Default for local rules
 
 local function process_symbols(obj, priority)
   fun.each(function(sym, score)
@@ -100,12 +104,12 @@ local function gen_callback()
       if check_version(obj) then
 
         if obj['symbols'] then
-          process_symbols(obj['symbols'])
+          process_symbols(obj['symbols'], global_priority)
         end
         if obj['actions'] then
-          process_actions(obj['actions'])
+          process_actions(obj['actions'], global_priority)
         end
-        if obj['rules'] then
+        if allow_rules and obj['rules'] then
           process_rules(obj['rules'])
         end
 
@@ -126,7 +130,7 @@ if section then
     if k == 'key' then
       trusted_key = elt
     else
-      local map = rspamd_config:add_map(elt, "rspamd updates map", nil)
+      local map = rspamd_config:add_map(elt, "rspamd updates map", nil, "callback")
       if not map then
         rspamd_logger.errx(rspamd_config, 'cannot load updates from %1', elt)
       else
@@ -149,4 +153,5 @@ if section then
   end, maps)
 else
   rspamd_logger.infox(rspamd_config, 'Module is unconfigured')
+  lua_util.disable_module(N, "config")
 end

@@ -5,14 +5,9 @@
 #include "multipattern.h"
 #include "monitored.h"
 
-#define DEFAULT_REDIRECTOR_PORT 8080
 #define DEFAULT_SURBL_WEIGHT 10
-#define DEFAULT_REDIRECTOR_CONNECT_TIMEOUT 1.0
 #define DEFAULT_REDIRECTOR_READ_TIMEOUT 5.0
-#define DEFAULT_SURBL_MAX_URLS 1000
-#define DEFAULT_SURBL_URL_EXPIRE 86400
 #define DEFAULT_SURBL_SYMBOL "SURBL_DNS"
-#define DEFAULT_SURBL_SUFFIX "multi.surbl.org"
 #define SURBL_OPTION_NOIP (1 << 0)
 #define SURBL_OPTION_RESOLVEIP (1 << 1)
 #define SURBL_OPTION_CHECKIMAGES (1 << 2)
@@ -31,6 +26,7 @@ struct surbl_ctx {
 	void *redirector_map_data;
 	GHashTable *redirector_tlds;
 	guint use_redirector;
+	guint max_redirected_urls;
 	gint redirector_cbid;
 	struct upstream_list *redirectors;
 	rspamd_mempool_t *surbl_pool;
@@ -66,6 +62,7 @@ struct redirector_param {
 	struct suffix_item *suffix;
 	struct rspamd_async_watcher *w;
 	gint sock;
+	guint redirector_requests;
 };
 
 struct surbl_bit_item {

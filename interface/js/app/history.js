@@ -37,6 +37,7 @@ function($, _, Humanize) {
       '=': '&#x3D;'
     };
     var htmlEscaper = /[&<>"'\/`=]/g;
+    var symbolDescriptions = {};
 
     EscapeHTML = function(string) {
       return ('' + string).replace(htmlEscaper, function(match) {
@@ -63,9 +64,13 @@ function($, _, Humanize) {
                 case "symbols":
                     Object.keys(item.symbols).map(function(key) {
                         var sym = item.symbols[key];
-
+                        if (!sym.name) {
+                            sym.name = key;
+                        }
                         sym.name = EscapeHTML(key);
-                        sym.description = EscapeHTML(sym.description);
+                        if (sym.description) {
+	                        sym.description = EscapeHTML(sym.description);
+                        }
 
                         if (sym.options) {
                             escape_HTML_array(sym.options);
@@ -117,10 +122,15 @@ function($, _, Humanize) {
             preprocess_item(item);
             Object.keys(item.symbols).map(function(key) {
                 var sym = item.symbols[key];
-                if (!sym.name) {
-                    sym.name = key;
+
+                if (sym.description) {
+	                var str = '<strong><abbr data-sym-key="' + key + '">' + sym.name + '</abbr></strong>' + "(" + sym.score + ")";
+
+	                // Store description for tooltip
+	                symbolDescriptions[key] = sym.description;
+                } else {
+	                var str = '<strong>' + sym.name + '</strong>' + "(" + sym.score + ")";
                 }
-                var str = '<strong>' + sym.name + '</strong>' + "(" + sym.score + ")";
 
                if (sym.options) {
                    str += '[' + sym.options.join(",") + "]";
@@ -447,7 +457,11 @@ function($, _, Humanize) {
         _onStatusDropdownChanged : function(e) {
             var self = e.data.self, selected = $(this).val();
             if (selected !== self.def) {
-                self.addFilter('action', selected, [ 'action' ]);
+                if(selected === "reject"){
+		  self.addFilter('action', 'reject -soft', [ 'action' ]);
+                } else {
+		  self.addFilter('action', selected, [ 'action' ]);
+		}
             } else {
                 self.removeFilter('action');
             }
@@ -457,7 +471,11 @@ function($, _, Humanize) {
             this._super();
             var action = this.find('action');
             if (action instanceof FooTable.Filter) {
-                this.$action.val(action.query.val());
+                if(action.query.val() === 'reject -soft'){
+                    this.$action.val('reject');
+                } else {
+                    this.$action.val(action.query.val());
+                }
             } else {
                 this.$action.val(this.def);
             }
@@ -511,8 +529,20 @@ function($, _, Humanize) {
                         "sorting": {
                             "enabled": true
                         },
-                        components: {
-                            filtering: FooTable.actionFilter
+                        "components": {
+                            "filtering": FooTable.actionFilter
+                        },
+                        "on": {
+	                        "ready.ft.table": function () {
+		                        // Update symbol description tooltips
+		                        $.each(symbolDescriptions, function (key, description) {
+			                        $('abbr[data-sym-key=' + key + ']').tooltip({
+				                        "placement": "bottom",
+				                        "html": true,
+				                        "title": description
+			                        });
+		                        });
+	                        }
                         }
                     });
                 } else {

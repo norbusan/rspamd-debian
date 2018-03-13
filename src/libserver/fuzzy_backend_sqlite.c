@@ -46,10 +46,12 @@ static const guint max_retries = 10;
         backend->pool->tag.tagname, backend->pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
-#define msg_debug_fuzzy_backend(...)  rspamd_default_log_function (G_LOG_LEVEL_DEBUG, \
-        backend->pool->tag.tagname, backend->pool->tag.uid, \
+#define msg_debug_fuzzy_backend(...)  rspamd_conditional_debug_fast (NULL, NULL, \
+       rspamd_fuzzy_sqlite_log_id, backend->pool->tag.tagname, backend->pool->tag.uid, \
         G_STRFUNC, \
         __VA_ARGS__)
+
+INIT_LOG_MODULE(fuzzy_sqlite)
 
 static const char *create_tables_sql =
 		"BEGIN;"
@@ -426,7 +428,7 @@ rspamd_fuzzy_backend_sqlite_open_db (const gchar *path, GError **err)
 
 	g_assert (path != NULL);
 
-	bk = g_slice_alloc (sizeof (*bk));
+	bk = g_malloc0 (sizeof (*bk));
 	bk->path = g_strdup (path);
 	bk->expired = 0;
 	bk->pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), "fuzzy_backend");
@@ -496,12 +498,15 @@ struct rspamd_fuzzy_reply
 rspamd_fuzzy_backend_sqlite_check (struct rspamd_fuzzy_backend_sqlite *backend,
 		const struct rspamd_fuzzy_cmd *cmd, gint64 expire)
 {
-	struct rspamd_fuzzy_reply rep = {0, 0, 0, 0.0};
+	struct rspamd_fuzzy_reply rep;
 	const struct rspamd_fuzzy_shingle_cmd *shcmd;
 	int rc;
 	gint64 timestamp;
 	gint64 shingle_values[RSPAMD_SHINGLE_SIZE], i, sel_id, cur_id,
 		cur_cnt, max_cnt;
+
+	memset (&rep, 0, sizeof (rep));
+	memcpy (rep.digest, cmd->digest, sizeof (rep.digest));
 
 	if (backend == NULL) {
 		return rep;
@@ -522,10 +527,10 @@ rspamd_fuzzy_backend_sqlite_check (struct rspamd_fuzzy_backend_sqlite *backend,
 			msg_debug_fuzzy_backend ("requested hash has been expired");
 		}
 		else {
-			rep.value = sqlite3_column_int64 (
+			rep.v1.value = sqlite3_column_int64 (
 				prepared_stmts[RSPAMD_FUZZY_BACKEND_CHECK].stmt, 0);
-			rep.prob = 1.0;
-			rep.flag = sqlite3_column_int (
+			rep.v1.prob = 1.0;
+			rep.v1.flag = sqlite3_column_int (
 					prepared_stmts[RSPAMD_FUZZY_BACKEND_CHECK].stmt, 2);
 		}
 	}
@@ -586,12 +591,12 @@ rspamd_fuzzy_backend_sqlite_check (struct rspamd_fuzzy_backend_sqlite *backend,
 
 		if (sel_id != -1) {
 			/* We have some id selected here */
-			rep.prob = (float)max_cnt / (float)RSPAMD_SHINGLE_SIZE;
+			rep.v1.prob = (float)max_cnt / (float)RSPAMD_SHINGLE_SIZE;
 
-			if (rep.prob > 0.5) {
+			if (rep.v1.prob > 0.5) {
 				msg_debug_fuzzy_backend (
 						"found fuzzy hash with probability %.2f",
-						rep.prob);
+						rep.v1.prob);
 				rc = rspamd_fuzzy_backend_sqlite_run_stmt (backend, FALSE,
 						RSPAMD_FUZZY_BACKEND_GET_DIGEST_BY_ID, sel_id);
 				if (rc == SQLITE_OK) {
@@ -602,13 +607,17 @@ rspamd_fuzzy_backend_sqlite_check (struct rspamd_fuzzy_backend_sqlite *backend,
 						/* Expire element */
 						msg_debug_fuzzy_backend (
 								"requested hash has been expired");
-						rep.prob = 0.0;
+						rep.v1.prob = 0.0;
 					}
 					else {
-						rep.value = sqlite3_column_int64 (
+						rep.ts = timestamp;
+						memcpy (rep.digest, sqlite3_column_blob (
+								prepared_stmts[RSPAMD_FUZZY_BACKEND_GET_DIGEST_BY_ID].stmt,
+								0), sizeof (rep.digest));
+						rep.v1.value = sqlite3_column_int64 (
 								prepared_stmts[RSPAMD_FUZZY_BACKEND_GET_DIGEST_BY_ID].stmt,
 								1);
-						rep.flag = sqlite3_column_int (
+						rep.v1.flag = sqlite3_column_int (
 								prepared_stmts[RSPAMD_FUZZY_BACKEND_GET_DIGEST_BY_ID].stmt,
 								3);
 					}
@@ -616,7 +625,7 @@ rspamd_fuzzy_backend_sqlite_check (struct rspamd_fuzzy_backend_sqlite *backend,
 			}
 			else {
 				/* Otherwise we assume that as error */
-				rep.value = 0;
+				rep.v1.value = 0;
 			}
 
 			rspamd_fuzzy_backend_sqlite_cleanup_stmt (backend,
@@ -1000,7 +1009,7 @@ rspamd_fuzzy_backend_sqlite_close (struct rspamd_fuzzy_backend_sqlite *backend)
 			rspamd_mempool_delete (backend->pool);
 		}
 
-		g_slice_free1 (sizeof (*backend), backend);
+		g_free (backend);
 	}
 }
 

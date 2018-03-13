@@ -1,5 +1,5 @@
 /*-
- * Copyright 2016 Vsevolod Stakhov
+ * Copyright 2017 Vsevolod Stakhov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 #include "ottery.h"
 #include "cryptobox.h"
 #include "libutil/map.h"
+#define ZSTD_STATIC_LINKING_ONLY
 #include "contrib/zstd/zstd.h"
 #include "contrib/zstd/zdict.h"
 
@@ -50,6 +51,9 @@
 #endif
 #ifdef __APPLE__
 #include <mach/mach_time.h>
+#include <mach/mach_init.h>
+#include <mach/thread_act.h>
+#include <mach/mach_port.h>
 #endif
 #ifdef WITH_GPERF_TOOLS
 #include <gperftools/profiler.h>
@@ -70,9 +74,15 @@
 #ifdef HAVE_SYS_RESOURCE_H
 #include <sys/resource.h>
 #endif
+#ifdef HAVE_RDTSC
+#ifdef __x86_64__
+#include <x86intrin.h>
+#endif
+#endif
 #include <math.h> /* for pow */
 
 #include "cryptobox.h"
+#include "zlib.h"
 
 /* Check log messages intensity once per minute */
 #define CHECK_TIME 60
@@ -181,9 +191,10 @@ static gint
 rspamd_inet_socket_create (gint type, struct addrinfo *addr, gboolean is_server,
 	gboolean async, GList **list)
 {
-	gint fd = -1, r, optlen, on = 1, s_error;
+	gint fd = -1, r, on = 1, s_error;
 	struct addrinfo *cur;
 	gpointer ptr;
+	socklen_t optlen;
 
 	cur = addr;
 	while (cur) {
@@ -294,7 +305,9 @@ rspamd_socket_unix (const gchar *path,
 	gboolean is_server,
 	gboolean async)
 {
-	gint fd = -1, s_error, r, optlen, serrno, on = 1;
+
+	socklen_t optlen;
+	gint fd = -1, s_error, r, serrno, on = 1;
 	struct stat st;
 
 	if (path == NULL)
@@ -604,22 +617,27 @@ err:
 }
 
 gboolean
-rspamd_socketpair (gint pair[2])
+rspamd_socketpair (gint pair[2], gboolean is_stream)
 {
 	gint r, serrno;
 
+	if (!is_stream) {
 #ifdef HAVE_SOCK_SEQPACKET
-	r = socketpair (AF_LOCAL, SOCK_SEQPACKET, 0, pair);
+		r = socketpair (AF_LOCAL, SOCK_SEQPACKET, 0, pair);
 
-	if (r == -1) {
-		msg_warn ("seqpacket socketpair failed: %d, '%s'",
-				errno,
-				strerror (errno));
-		r = socketpair (AF_LOCAL, SOCK_DGRAM, 0, pair);
-	}
+		if (r == -1) {
+			msg_warn ("seqpacket socketpair failed: %d, '%s'",
+					errno,
+					strerror (errno));
+			r = socketpair (AF_LOCAL, SOCK_DGRAM, 0, pair);
+		}
 #else
-	r = socketpair (AF_LOCAL, SOCK_DGRAM, 0, pair);
+		r = socketpair (AF_LOCAL, SOCK_DGRAM, 0, pair);
 #endif
+	}
+	else {
+		r = socketpair (AF_LOCAL, SOCK_STREAM, 0, pair);
+	}
 
 	if (r == -1) {
 		msg_warn ("socketpair failed: %d, '%s'", errno, strerror (
@@ -1467,7 +1485,7 @@ rspamd_mutex_new (void)
 {
 	rspamd_mutex_t *new;
 
-	new = g_slice_alloc (sizeof (rspamd_mutex_t));
+	new = g_malloc0 (sizeof (rspamd_mutex_t));
 #if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION > 30))
 	g_mutex_init (&new->mtx);
 #else
@@ -1511,91 +1529,7 @@ rspamd_mutex_free (rspamd_mutex_t *mtx)
 #if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION > 30))
 	g_mutex_clear (&mtx->mtx);
 #endif
-	g_slice_free1 (sizeof (rspamd_mutex_t), mtx);
-}
-
-/**
- * Create new rwlock
- * @return
- */
-rspamd_rwlock_t *
-rspamd_rwlock_new (void)
-{
-	rspamd_rwlock_t *new;
-
-	new = g_malloc (sizeof (rspamd_rwlock_t));
-#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION > 30))
-	g_rw_lock_init (&new->rwlock);
-#else
-	g_static_rw_lock_init (&new->rwlock);
-#endif
-
-	return new;
-}
-
-/**
- * Lock rwlock for writing
- * @param mtx
- */
-inline void
-rspamd_rwlock_writer_lock (rspamd_rwlock_t *mtx)
-{
-#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION > 30))
-	g_rw_lock_writer_lock (&mtx->rwlock);
-#else
-	g_static_rw_lock_writer_lock (&mtx->rwlock);
-#endif
-}
-
-/**
- * Lock rwlock for reading
- * @param mtx
- */
-inline void
-rspamd_rwlock_reader_lock (rspamd_rwlock_t *mtx)
-{
-#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION > 30))
-	g_rw_lock_reader_lock (&mtx->rwlock);
-#else
-	g_static_rw_lock_reader_lock (&mtx->rwlock);
-#endif
-}
-
-/**
- * Unlock rwlock from writing
- * @param mtx
- */
-inline void
-rspamd_rwlock_writer_unlock (rspamd_rwlock_t *mtx)
-{
-#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION > 30))
-	g_rw_lock_writer_unlock (&mtx->rwlock);
-#else
-	g_static_rw_lock_writer_unlock (&mtx->rwlock);
-#endif
-}
-
-/**
- * Unlock rwlock from reading
- * @param mtx
- */
-inline void
-rspamd_rwlock_reader_unlock (rspamd_rwlock_t *mtx)
-{
-#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION > 30))
-	g_rw_lock_reader_unlock (&mtx->rwlock);
-#else
-	g_static_rw_lock_reader_unlock (&mtx->rwlock);
-#endif
-}
-
-void
-rspamd_rwlock_free (rspamd_rwlock_t *mtx)
-{
-#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION > 30))
-	g_rw_lock_clear (&mtx->rwlock);
-#endif
-	g_slice_free1 (sizeof (rspamd_rwlock_t), mtx);
+	g_free (mtx);
 }
 
 struct rspamd_thread_data {
@@ -1613,7 +1547,6 @@ rspamd_thread_func (gpointer ud)
 
 	/* Ignore signals in thread */
 	sigemptyset (&s_mask);
-	sigaddset (&s_mask, SIGTERM);
 	sigaddset (&s_mask, SIGINT);
 	sigaddset (&s_mask, SIGHUP);
 	sigaddset (&s_mask, SIGCHLD);
@@ -1622,7 +1555,7 @@ rspamd_thread_func (gpointer ud)
 	sigaddset (&s_mask, SIGALRM);
 	sigaddset (&s_mask, SIGPIPE);
 
-	sigprocmask (SIG_BLOCK, &s_mask, NULL);
+	pthread_sigmask (SIG_BLOCK, &s_mask, NULL);
 
 	ud = td->func (td->data);
 	g_free (td->name);
@@ -1769,8 +1702,8 @@ restart:
 		return 0;
 	}
 
-	(void)write (output, "Enter passphrase: ", sizeof ("Enter passphrase: ") -
-		1);
+	g_assert (write (output, "Enter passphrase: ", sizeof ("Enter passphrase: ") -
+		1) != -1);
 
 	/* Save the current sighandler */
 	for (i = 0; i < NSIG; i++) {
@@ -1798,7 +1731,7 @@ restart:
 		}
 	}
 	*p = '\0';
-	(void)write (output, "\n", 1);
+	g_assert (write (output, "\n", 1) == 1);
 
 	/* Restore terminal state */
 	if (memcmp (&term, &oterm, sizeof (term)) != 0) {
@@ -1837,30 +1770,52 @@ restart:
 }
 
 gdouble
-rspamd_get_ticks (void)
+rspamd_get_ticks (gboolean rdtsc_ok)
 {
 	gdouble res;
 
+#ifdef HAVE_RDTSC
+# ifdef __x86_64__
+	guint64 r64;
+
+	if (rdtsc_ok) {
+		__builtin_ia32_lfence ();
+		r64 = __rdtsc ();
+		/* Preserve lower 52 bits */
+		res = r64 & ((1ULL << 53) - 1);
+		return res;
+	}
+# endif
+#endif
 #ifdef HAVE_CLOCK_GETTIME
 	struct timespec ts;
 	gint clk_id = CLOCK_MONOTONIC;
 
-#ifdef CLOCK_MONOTONIC_FAST
-	clk_id = CLOCK_MONOTONIC_FAST;
-#endif
-#ifdef CLOCK_MONOTONIC_COARSE
-	clk_id = CLOCK_MONOTONIC_COARSE;
-#endif
 	clock_gettime (clk_id, &ts);
 
-	res = (double)ts.tv_sec + ts.tv_nsec / 1000000000.;
-#elif defined(__APPLE__)
-	res = mach_absolute_time () / 1000000000.;
+	if (rdtsc_ok) {
+		res = (double) ts.tv_sec * 1e9 + ts.tv_nsec;
+	}
+	else {
+		res = (double) ts.tv_sec + ts.tv_nsec / 1000000000.;
+	}
+# elif defined(__APPLE__)
+	if (rdtsc_ok) {
+		res = mach_absolute_time ();
+	}
+	else {
+		res = mach_absolute_time () / 1000000000.;
+	}
 #else
 	struct timeval tv;
 
 	(void)gettimeofday (&tv, NULL);
-	res = (double)tv.tv_sec + tv.tv_nsec / 1000000.;
+	if (rdtsc_ok) {
+		res = (double) ts.tv_sec * 1e9 + tv.tv_usec * 1e3;
+	}
+	else {
+		res = (double)tv.tv_sec + tv.tv_usec / 1000000.;
+	}
 #endif
 
 	return res;
@@ -1884,6 +1839,18 @@ rspamd_get_virtual_ticks (void)
 # endif
 
 	res = (double)ts.tv_sec + ts.tv_nsec / 1000000000.;
+#elif defined(__APPLE__)
+	thread_port_t thread = mach_thread_self ();
+
+	mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+	thread_basic_info_data_t info;
+	if (thread_info (thread, THREAD_BASIC_INFO, (thread_info_t)&info, &count) != KERN_SUCCESS) {
+		return -1;
+	}
+
+	res = info.user_time.seconds + info.system_time.seconds;
+	res += ((gdouble)(info.user_time.microseconds + info.system_time.microseconds)) / 1e6;
+	mach_port_deallocate(mach_task_self(), thread);
 #else
 	res = clock () / (double)CLOCKS_PER_SEC;
 #endif
@@ -1895,14 +1862,21 @@ gdouble
 rspamd_get_calendar_ticks (void)
 {
 	gdouble res;
+#ifdef HAVE_CLOCK_GETTIME
+	struct timespec ts;
+
+	clock_gettime (CLOCK_REALTIME, &ts);
+	res = ts_to_double (&ts);
+#else
 	struct timeval tv;
 
 	if (gettimeofday (&tv, NULL) == 0) {
-		res = (gdouble)tv.tv_sec + tv.tv_usec / 1e6f;
+		res = tv_to_double (&tv);
 	}
 	else {
 		res = time (NULL);
 	}
+#endif
 
 	return res;
 }
@@ -1922,7 +1896,7 @@ rspamd_random_hex (guchar *buf, guint64 len)
 
 	g_assert (len > 0);
 
-	ottery_rand_bytes (buf, (len / 2.0 + 0.5));
+	ottery_rand_bytes (buf, ceil (len / 2.0));
 
 	for (i = (gint64)len - 1; i >= 0; i -= 2) {
 		buf[i] = hexdigests[buf[i / 2] & 0xf];
@@ -1999,12 +1973,17 @@ rspamd_gstring_free_hard (gpointer p)
 	g_string_free (ar, TRUE);
 }
 
-void
-rspamd_gstring_free_soft (gpointer p)
+void rspamd_gerror_free_maybe (gpointer p)
 {
-	GString *ar = (GString *)p;
+	GError **err;
 
-	g_string_free (ar, FALSE);
+	if (p) {
+		err = (GError **)p;
+
+		if (*err) {
+			g_error_free (*err);
+		}
+	}
 }
 
 struct rspamd_external_libs_ctx *
@@ -2015,7 +1994,7 @@ rspamd_init_libs (void)
 	struct ottery_config *ottery_cfg;
 	gint ssl_options;
 
-	ctx = g_slice_alloc0 (sizeof (*ctx));
+	ctx = g_malloc0 (sizeof (*ctx));
 	ctx->crypto_ctx = rspamd_cryptobox_init ();
 	ottery_cfg = g_malloc0 (ottery_get_sizeof_config ());
 	ottery_config_init (ottery_cfg);
@@ -2113,18 +2092,20 @@ rspamd_open_zstd_dictionary (const char *path)
 {
 	struct zstd_dictionary *dict;
 
-	dict = g_slice_alloc0 (sizeof (*dict));
+	dict = g_malloc0 (sizeof (*dict));
 	dict->dict = rspamd_file_xmap (path, PROT_READ, &dict->size, TRUE);
 
 	if (dict->dict == NULL) {
-		g_slice_free1 (sizeof (*dict), dict);
+		g_free (dict);
+
 		return NULL;
 	}
 
 	dict->id = ZDICT_getDictID (dict->dict, dict->size);
 
 	if (dict->id == 0) {
-		g_slice_free1 (sizeof (*dict), dict);
+		g_free (dict);
+
 		return NULL;
 	}
 
@@ -2136,7 +2117,7 @@ rspamd_free_zstd_dictionary (struct zstd_dictionary *dict)
 {
 	if (dict) {
 		munmap (dict->dict, dict->size);
-		g_slice_free1 (sizeof (*dict), dict);
+		g_free (dict);
 	}
 }
 
@@ -2145,12 +2126,14 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 		struct rspamd_config *cfg)
 {
 	static const char secure_ciphers[] = "HIGH:!aNULL:!kRSA:!PSK:!SRP:!MD5:!RC4";
+	size_t r;
 
 	g_assert (cfg != NULL);
 
 	if (ctx != NULL) {
 		if (cfg->local_addrs) {
-			rspamd_config_radix_from_ucl (cfg, cfg->local_addrs, "Local addresses",
+			rspamd_config_radix_from_ucl (cfg, cfg->local_addrs,
+					"Local addresses",
 					ctx->local_addrs, NULL);
 		}
 
@@ -2161,15 +2144,15 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 						cfg->ssl_ca_path,
 						ERR_error_string (ERR_get_error (), NULL));
 			}
-		}
-		else {
+		} else {
 			msg_debug_config ("ssl_ca_path is not set, using default CA path");
 			SSL_CTX_set_default_verify_paths (ctx->ssl_ctx);
 		}
 
 		if (cfg->ssl_ciphers) {
 			if (SSL_CTX_set_cipher_list (ctx->ssl_ctx, cfg->ssl_ciphers) != 1) {
-				msg_err_config ("cannot set ciphers set to %s: %s; fallback to %s",
+				msg_err_config (
+						"cannot set ciphers set to %s: %s; fallback to %s",
 						cfg->ssl_ciphers,
 						ERR_error_string (ERR_get_error (), NULL),
 						secure_ciphers);
@@ -2183,7 +2166,8 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 		}
 
 		if (cfg->zstd_input_dictionary) {
-			ctx->in_dict = rspamd_open_zstd_dictionary (cfg->zstd_input_dictionary);
+			ctx->in_dict = rspamd_open_zstd_dictionary (
+					cfg->zstd_input_dictionary);
 
 			if (ctx->in_dict == NULL) {
 				msg_err_config ("cannot open zstd dictionary in %s",
@@ -2191,7 +2175,8 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 			}
 		}
 		if (cfg->zstd_output_dictionary) {
-			ctx->out_dict = rspamd_open_zstd_dictionary (cfg->zstd_output_dictionary);
+			ctx->out_dict = rspamd_open_zstd_dictionary (
+					cfg->zstd_output_dictionary);
 
 			if (ctx->out_dict == NULL) {
 				msg_err_config ("cannot open zstd dictionary in %s",
@@ -2201,11 +2186,25 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 
 		/* Init decompression */
 		ctx->in_zstream = ZSTD_createDStream ();
-		rspamd_libs_reset_decompression (ctx);
+		r = ZSTD_initDStream (ctx->in_zstream);
+
+		if (ZSTD_isError (r)) {
+			msg_err ("cannot init decompression stream: %s",
+					ZSTD_getErrorName (r));
+			ZSTD_freeDStream (ctx->in_zstream);
+			ctx->in_zstream = NULL;
+		}
 
 		/* Init compression */
 		ctx->out_zstream = ZSTD_createCStream ();
-		rspamd_libs_reset_compression (ctx);
+		r = ZSTD_initCStream (ctx->out_zstream, 1);
+
+		if (ZSTD_isError (r)) {
+			msg_err ("cannot init compression stream: %s",
+					ZSTD_getErrorName (r));
+			ZSTD_freeCStream (ctx->out_zstream);
+			ctx->out_zstream = NULL;
+		}
 	}
 }
 
@@ -2215,17 +2214,10 @@ rspamd_libs_reset_decompression (struct rspamd_external_libs_ctx *ctx)
 	gsize r;
 
 	if (ctx->in_zstream == NULL) {
-		msg_err ("cannot create decompression stream");
 		return FALSE;
 	}
 	else {
-		if (ctx->in_dict) {
-			r = ZSTD_initDStream_usingDict (ctx->in_zstream,
-					ctx->in_dict->dict, ctx->in_dict->size);
-		}
-		else {
-			r = ZSTD_initDStream (ctx->in_zstream);
-		}
+		r = ZSTD_resetDStream (ctx->in_zstream);
 
 		if (ZSTD_isError (r)) {
 			msg_err ("cannot init decompression stream: %s",
@@ -2246,18 +2238,11 @@ rspamd_libs_reset_compression (struct rspamd_external_libs_ctx *ctx)
 	gsize r;
 
 	if (ctx->out_zstream == NULL) {
-		msg_err ("cannot create compression stream");
-
 		return FALSE;
 	}
 	else {
-		if (ctx->out_dict) {
-			r = ZSTD_initCStream_usingDict (ctx->out_zstream,
-					ctx->out_dict->dict, ctx->out_dict->size, 1);
-		}
-		else {
-			r = ZSTD_initCStream (ctx->out_zstream, 1);
-		}
+		/* Dictionary will be reused automatically if specified */
+		r = ZSTD_resetCStream (ctx->out_zstream, 0);
 
 		if (ZSTD_isError (r)) {
 			msg_err ("cannot init compression stream: %s",
@@ -2290,9 +2275,16 @@ rspamd_deinit_libs (struct rspamd_external_libs_ctx *ctx)
 		rspamd_inet_library_destroy ();
 		rspamd_free_zstd_dictionary (ctx->in_dict);
 		rspamd_free_zstd_dictionary (ctx->out_dict);
-		ZSTD_freeCStream (ctx->out_zstream);
-		ZSTD_freeDStream (ctx->in_zstream);
-		g_slice_free1 (sizeof (*ctx), ctx);
+
+		if (ctx->out_zstream) {
+			ZSTD_freeCStream (ctx->out_zstream);
+		}
+
+		if (ctx->in_zstream) {
+			ZSTD_freeDStream (ctx->in_zstream);
+		}
+
+		g_free (ctx);
 	}
 }
 
@@ -2422,7 +2414,7 @@ rspamd_file_xopen (const char *fname, int oflags, guint mode,
 		gboolean allow_symlink)
 {
 	struct stat sb;
-	int fd;
+	int fd, flags = oflags;
 
 	if (lstat (fname, &sb) == -1) {
 
@@ -2431,18 +2423,39 @@ rspamd_file_xopen (const char *fname, int oflags, guint mode,
 		}
 	}
 	else if (!S_ISREG (sb.st_mode)) {
-		return -1;
+		if (S_ISLNK (sb.st_mode)) {
+			if (!allow_symlink) {
+				return -1;
+			}
+		}
+		else {
+			return -1;
+		}
 	}
+
+#ifdef HAVE_OCLOEXEC
+	flags |= O_CLOEXEC;
+#endif
 
 #ifdef HAVE_ONOFOLLOW
 	if (!allow_symlink) {
-		fd = open (fname, oflags | O_NOFOLLOW, mode);
+		flags |= O_NOFOLLOW;
+		fd = open (fname, flags, mode);
 	}
 	else {
-		fd = open (fname, oflags, mode);
+		fd = open (fname, flags, mode);
 	}
 #else
-	fd = open (fname, oflags, mode);
+	fd = open (fname, flags, mode);
+#endif
+
+#ifndef HAVE_OCLOEXEC
+	if (fcntl (fd, F_SETFD, FD_CLOEXEC) == -1) {
+		msg_warn ("fcntl failed: %d, '%s'", errno, strerror (errno));
+		close (fd);
+
+		return -1;
+	}
 #endif
 
 	return (fd);
@@ -2470,8 +2483,16 @@ rspamd_file_xmap (const char *fname, guint mode, gsize *size,
 		return NULL;
 	}
 
-	if (fstat (fd, &sb) == -1 || !S_ISREG (sb.st_mode) || sb.st_size == 0) {
+	if (fstat (fd, &sb) == -1 || !S_ISREG (sb.st_mode)) {
 		close (fd);
+		*size = (gsize)-1;
+
+		return NULL;
+	}
+
+	if (sb.st_size == 0) {
+		close (fd);
+		*size = (gsize)0;
 
 		return NULL;
 	}
@@ -2652,4 +2673,191 @@ rspamd_tm_to_time (const struct tm *tm, glong tz)
 	result -= offset;
 
 	return result;
+}
+
+
+void
+rspamd_gmtime (gint64 ts, struct tm *dest)
+{
+	guint64 days, secs, years;
+	int remdays, remsecs, remyears;
+	int leap_400_cycles, leap_100_cycles, leap_4_cycles;
+	int months;
+	int wday, yday, leap;
+	/* From March */
+	static const uint8_t days_in_month[] = {31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 29};
+	static const guint64 leap_epoch = 946684800ULL + 86400 * (31 + 29);
+	static const guint64 days_per_400y = 365*400 + 97;
+	static const guint64 days_per_100y = 365*100 + 24;
+	static const guint64 days_per_4y = 365*4 + 1;
+
+	secs = ts - leap_epoch;
+	days = secs / 86400;
+	remsecs = secs % 86400;
+
+	if (remsecs < 0) {
+		remsecs += 86400;
+		days--;
+	}
+
+	wday = (3 + days) % 7;
+	if (wday < 0) {
+		wday += 7;
+	}
+
+	/* Deal with gregorian adjustments */
+	leap_400_cycles = days / days_per_400y;
+	remdays = days % days_per_400y;
+
+	if (remdays < 0) {
+		remdays += days_per_400y;
+		leap_400_cycles--;
+	}
+
+	leap_100_cycles = remdays / days_per_100y;
+	if (leap_100_cycles == 4) {
+		/* 400 years */
+		leap_100_cycles--;
+	}
+
+	remdays -= leap_100_cycles * days_per_100y;
+
+	leap_4_cycles = remdays / days_per_4y;
+	if (leap_4_cycles == 25) {
+		/* 100 years */
+		leap_4_cycles--;
+	}
+	remdays -= leap_4_cycles * days_per_4y;
+
+	remyears = remdays / 365;
+	if (remyears == 4) {
+		/* Ordinary leap year */
+		remyears--;
+	}
+	remdays -= remyears * 365;
+
+	leap = !remyears && (leap_4_cycles || !leap_100_cycles);
+	yday = remdays + 31 + 28 + leap;
+
+	if (yday >= 365 + leap) {
+		yday -= 365 + leap;
+	}
+
+	years = remyears + 4 * leap_4_cycles + 100 * leap_100_cycles +
+			400ULL * leap_400_cycles;
+
+	for (months=0; days_in_month[months] <= remdays; months++) {
+		remdays -= days_in_month[months];
+	}
+
+	if (months >= 10) {
+		months -= 12;
+		years++;
+	}
+
+	dest->tm_year = years + 100;
+	dest->tm_mon = months + 2;
+	dest->tm_mday = remdays + 1;
+	dest->tm_wday = wday;
+	dest->tm_yday = yday;
+
+	dest->tm_hour = remsecs / 3600;
+	dest->tm_min = remsecs / 60 % 60;
+	dest->tm_sec = remsecs % 60;
+#if !defined(__sun)
+	dest->tm_gmtoff = 0;
+#endif
+	dest->tm_zone = "GMT";
+}
+
+#ifdef HAVE_SANE_TZSET
+extern char *tzname[2];
+extern long timezone;
+extern int daylight;
+
+void rspamd_localtime (gint64 ts, struct tm *dest)
+{
+	static gint64 last_tzcheck = 0;
+	static const guint tz_check_interval = 120;
+
+	if (ts - last_tzcheck > tz_check_interval) {
+		tzset ();
+		last_tzcheck = ts;
+	}
+
+	ts += timezone;
+	rspamd_gmtime (ts, dest);
+	dest->tm_zone = daylight ? (tzname[1] ? tzname[1] : tzname[0]) : tzname[0];
+#if !defined(__sun)
+	dest->tm_gmtoff = timezone;
+#endif
+}
+
+#else
+void rspamd_localtime (gint64 ts, struct tm *dest)
+{
+	time_t t = ts;
+	localtime_r (&t, dest);
+}
+#endif
+
+gboolean
+rspamd_fstring_gzip (rspamd_fstring_t **in)
+{
+	z_stream strm;
+	gint rc;
+	rspamd_fstring_t *comp, *buf = *in;
+	gchar *p;
+	gsize remain;
+
+	memset (&strm, 0, sizeof (strm));
+	rc = deflateInit2 (&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+			MAX_WBITS + 16, MAX_MEM_LEVEL - 1, Z_DEFAULT_STRATEGY);
+
+	if (rc != Z_OK) {
+		return FALSE;
+	}
+
+	comp = rspamd_fstring_sized_new (deflateBound (&strm, buf->len));
+
+	strm.avail_in = buf->len;
+	strm.next_in = (guchar *)buf->str;
+	p = comp->str;
+	remain = comp->allocated;
+
+	while (strm.avail_in != 0) {
+		strm.avail_out = remain;
+		strm.next_out = p;
+
+		rc = deflate (&strm, Z_FINISH);
+
+		if (rc != Z_OK && rc != Z_BUF_ERROR) {
+			if (rc == Z_STREAM_END) {
+				break;
+			}
+			else {
+				rspamd_fstring_free (comp);
+				deflateEnd (&strm);
+
+				return FALSE;
+			}
+		}
+
+		comp->len = strm.total_out;
+
+		if (strm.avail_out == 0 && strm.avail_in != 0) {
+			/* Need to allocate more */
+			remain = comp->len;
+			comp = rspamd_fstring_grow (comp, strm.avail_in);
+			p = comp->str + remain;
+			remain = comp->allocated - remain;
+		}
+	}
+
+	deflateEnd (&strm);
+	comp->len = strm.total_out;
+	rspamd_fstring_free (buf); /* We replace buf with its compressed version */
+	*in = comp;
+
+	return TRUE;
 }

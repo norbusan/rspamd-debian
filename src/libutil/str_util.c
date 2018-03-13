@@ -79,10 +79,12 @@ rspamd_str_lc (gchar *str, guint size)
 	switch (leftover) {
 	case 3:
 		*dest++ = lc_map[(guchar)str[i++]];
+		/* falltrough */
 	case 2:
 		*dest++ = lc_map[(guchar)str[i++]];
+		/* falltrough */
 	case 1:
-		*dest++ = lc_map[(guchar)str[i]];
+		*dest = lc_map[(guchar)str[i]];
 	}
 
 }
@@ -362,29 +364,6 @@ rspamd_strlcpy (gchar *dst, const gchar *src, gsize siz)
 	}
 
 	return (d - dst);
-}
-
-gsize
-rspamd_strlcpy_tolower (gchar *dst, const gchar *src, gsize siz)
-{
-	gchar *d = dst;
-	const gchar *s = src;
-	gsize n = siz;
-
-	/* Copy as many bytes as will fit */
-	if (n != 0) {
-		while (--n != 0) {
-			if ((*d++ = g_ascii_tolower (*s++)) == '\0') {
-				break;
-			}
-		}
-	}
-
-	if (n == 0 && siz != 0) {
-		*d = '\0';
-	}
-
-	return (s - src - 1);    /* count does not include NUL */
 }
 
 /*

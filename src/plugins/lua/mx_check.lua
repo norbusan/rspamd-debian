@@ -22,6 +22,8 @@ end
 local rspamd_logger = require "rspamd_logger"
 local rspamd_tcp = require "rspamd_tcp"
 local rspamd_util = require "rspamd_util"
+local lua_util = require "lua_util"
+local N = "mx_check"
 local fun = require "fun"
 
 local settings = {
@@ -29,6 +31,7 @@ local settings = {
   symbol_bad_mx = 'MX_INVALID',
   symbol_no_mx = 'MX_MISSING',
   symbol_good_mx = 'MX_GOOD',
+  symbol_white_mx = 'MX_WHITE',
   expire = 86400, -- 1 day by default
   expire_novalid = 7200, -- 2 hours by default for no valid mxes
   greylist_invalid = true, -- Greylist first message with invalid MX (require greylist plugin)
@@ -64,7 +67,7 @@ local function mx_check(task)
   if exclude_domains then
     if exclude_domains:get_key(mx_domain) then
       rspamd_logger.infox(task, 'skip mx check for %s, excluded', mx_domain)
-
+	  task:insert_result(settings.symbol_white_mx, 1.0, mx_domain)
       return
     end
   end
@@ -267,6 +270,7 @@ if opts then
   redis_params = rspamd_parse_redis_server('mx_check')
   if not redis_params then
     rspamd_logger.errx(rspamd_config, 'no redis servers are specified, disabling module')
+    lua_util.disable_module(N, "redis")
     return
   end
   for k,v in pairs(opts) do
@@ -288,6 +292,11 @@ if opts then
     type = 'virtual',
     parent = id
   })
+  rspamd_config:register_symbol({
+    name = settings.symbol_white_mx,
+    type = 'virtual',
+    parent = id
+  })
 
   rspamd_config:set_metric_symbol({
     name = settings.symbol_bad_mx,
@@ -301,6 +310,14 @@ if opts then
     name = settings.symbol_good_mx,
     score = -0.01,
     description = 'Domain has working MX',
+    group = 'MX',
+    one_shot = true,
+    one_param = true,
+  })
+  rspamd_config:set_metric_symbol({
+    name = settings.symbol_white_mx,
+    score = 0.0,
+    description = 'Domain is whitelisted from MX check',
     group = 'MX',
     one_shot = true,
     one_param = true,

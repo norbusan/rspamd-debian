@@ -11,8 +11,8 @@ PROJECT(rspamd C)
 ENABLE_LANGUAGE(ASM)
 
 SET(RSPAMD_VERSION_MAJOR 1)
-SET(RSPAMD_VERSION_MINOR 6)
-SET(RSPAMD_VERSION_PATCH 6)
+SET(RSPAMD_VERSION_MINOR 7)
+SET(RSPAMD_VERSION_PATCH 0)
 
 # Keep two digits all the time
 SET(RSPAMD_VERSION_MAJOR_NUM ${RSPAMD_VERSION_MAJOR}0)
@@ -56,13 +56,14 @@ OPTION(WANT_SYSTEMD_UNITS  "Install systemd unit files on Linux [default: OFF]" 
 OPTION(ENABLE_SNOWBALL     "Enable snowball stemmer [default: ON]"              ON)
 OPTION(ENABLE_CLANG_PLUGIN "Enable clang static analysing plugin [default: OFF]" OFF)
 OPTION(ENABLE_HYPERSCAN    "Enable hyperscan for fast regexp processing [default: OFF]" OFF)
-OPTION(ENABLE_FANN         "Enable fann for neural network plugin [default: ON]" ON)
+OPTION(ENABLE_FANN         "Enable fann for neural network plugin [default: OFF]" OFF)
 OPTION(ENABLE_PCRE2        "Enable pcre2 instead of pcre  [default: OFF]"         OFF)
 OPTION(ENABLE_GD           "Enable libgd for images processing [default: OFF]" OFF)
 OPTION(ENABLE_JEMALLOC     "Build rspamd with jemalloc allocator  [default: OFF]" OFF)
 OPTION(ENABLE_COVERAGE     "Build rspamd with code coverage options [default: OFF]" OFF)
 OPTION(ENABLE_FULL_DEBUG   "Build rspamd with all possible debug [default: OFF]" OFF)
 OPTION(ENABLE_UTILS        "Build rspamd internal utils [default: OFF]" OFF)
+OPTION(ENABLE_TORCH        "Install torch7 with Rspamd [default: ON]" ON)
 
 INCLUDE(FindArch.cmake)
 TARGET_ARCHITECTURE(ARCH)
@@ -72,12 +73,7 @@ IF(NOT RAGEL_FOUND)
 	MESSAGE(FATAL_ERROR "Ragel is required to build rspamd")
 ENDIF()
 
-IF ("${ARCH}" STREQUAL "x86_64")
-	IF (ENABLE_HYPERSCAN MATCHES "ON" OR ENABLE_STATIC MATCHES "ON")
-		ENABLE_LANGUAGE(CXX)
-		SET(USE_CXX_LINKER 1)
-	ENDIF()
-ELSE()
+IF (NOT "${ARCH}" STREQUAL "x86_64")
 	MESSAGE(STATUS "Hyperscan support is possible only for x86_64 architecture")
 	SET(ENABLE_HYPERSCAN "OFF")
 ENDIF()
@@ -429,16 +425,19 @@ MACRO(ProcessPackage PKG_NAME)
 			ENDIF(NOT _incl)
 
 			IF(_incl AND _lib)
+				# We need to apply heuristic to find the real dir name
+				STRING(REGEX REPLACE "/[^/]+$" "" _incl_path "${PKG_INCLUDE}")
+				STRING(REGEX REPLACE "${_incl_path}/$" "" _stripped_incl "${_incl}")
 				GET_FILENAME_COMPONENT(_lib_path "${_lib}" PATH)
-				INCLUDE_DIRECTORIES("${_incl}")
+				INCLUDE_DIRECTORIES("${_stripped_incl}")
 				LINK_DIRECTORIES("${_lib_path}")
 				LIST(APPEND RSPAMD_REQUIRED_LIBRARIES ${_lib})
-				SET(${PKG_NAME}_INCLUDE "${_incl}" CACHE INTERNAL "")
+				SET(${PKG_NAME}_INCLUDE "${_stripped_incl}" CACHE INTERNAL "")
 				SET(${PKG_NAME}_LIBRARY_PATH "${_lib_path}" CACHE INTERNAL "")
 				SET(${PKG_NAME}_LIBRARY "${_lib}" CACHE INTERNAL "")
 				SET(${PKG_NAME}_GUESSED 1 CACHE INTERNAL "")
 				SET(WITH_${PKG_NAME} 1 CACHE INTERNAL "")
-				MESSAGE(STATUS "Found package ${PKG_NAME} in '${_lib_path}' (${_lib}) and '${_incl}' (${PKG_INCLUDE}).")
+				MESSAGE(STATUS "Found package ${PKG_NAME} in '${_lib_path}' (${_lib}) and '${_stripped_incl}' (${PKG_INCLUDE}).")
 			ENDIF()
 
 		ELSE()
@@ -513,19 +512,6 @@ ENDIF(CMAKE_INSTALL_PREFIX)
 
 LIST(APPEND CMAKE_REQUIRED_LIBRARIES m)
 
-# Try to detect platform for further configuration
-CHECK_C_SOURCE_COMPILES ("#if !defined(__x86_64) && !defined(__amd64) && !defined(_M_X64)
-					#error assume 32 bit arch
-					#endif
-					int main() { return 0;}" AMD_64)
-IF(NOT BUILD_CPU_MODE)
-	IF(AMD_64)
-		SET (BUILD_CPU_MODE "64")
-	ELSE(AMD_64)
-		SET (BUILD_CPU_MODE "32")
-	ENDIF(AMD_64)
-ENDIF(NOT BUILD_CPU_MODE)
-
 SET(POE_LOOP "Loop::IO_Poll")
 SET(TAR "tar")
 
@@ -566,9 +552,6 @@ ENDIF(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_GNU_SOURCE")
 	ADD_DEFINITIONS(-D_GNU_SOURCE -DLINUX)
-	IF(BUILD_CPU_MODE STREQUAL "32")
-		ADD_DEFINITIONS(-D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE)
-	ENDIF(BUILD_CPU_MODE STREQUAL "32")
 	# Workaround with architecture specific includes
 	#IF(IS_DIRECTORY "/usr/include/${CMAKE_SYSTEM_PROCESSOR}-linux-gnu/")
 	#	INCLUDE_DIRECTORIES("/usr/include/${CMAKE_SYSTEM_PROCESSOR}-linux-gnu/")
@@ -580,9 +563,6 @@ IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	LIST(APPEND CMAKE_REQUIRED_LIBRARIES resolv)
 	LIST(APPEND CMAKE_REQUIRED_LIBRARIES nsl)
 	MESSAGE(STATUS "Configuring for Linux")
-	IF(ENABLE_STATIC MATCHES "ON")
-		LIST(APPEND CMAKE_REQUIRED_LIBRARIES z)
-	ENDIF()
 	IF(EXISTS "/etc/debian_version")
 		SET(LINUX_START_SCRIPT "rspamd_debian.in")
 	ELSE(EXISTS "/etc/debian_version")
@@ -592,35 +572,15 @@ IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 ENDIF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 
 IF(CMAKE_SYSTEM_NAME STREQUAL "SunOS")
-	IF(NOT BUILD_CPU_MODE)
-		SET (BUILD_CPU_MODE "32")
-	ENDIF(NOT BUILD_CPU_MODE)
 
 	IF("${CMAKE_C_COMPILER_ID}" MATCHES SunPro)
 		SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Xa -xregs=no%frameptr -xstrconst -xc99")
-		SET(SUN_BUILD32 "-xtarget=generic")
-		SET(SUN_BUILD64 "-xtarget=generic64")
 		IF(ENABLE_OPTIMIZATION MATCHES "ON")
 			SET(CMAKE_C_OPT_FLAGS "-fast -xdepend")
 		ELSE(ENABLE_OPTIMIZATION MATCHES "ON")
 			SET(CMAKE_C_OPT_FLAGS "-xO0")
 		ENDIF(ENABLE_OPTIMIZATION MATCHES "ON")
-	ELSE("${CMAKE_C_COMPILER_ID}" MATCHES SunPro)
-		set(SUN_BUILD32 "-m32")
-		set(SUN_BUILD64 "-m64")
 	ENDIF("${CMAKE_C_COMPILER_ID}" MATCHES SunPro)
-
-	IF (BUILD_CPU_MODE STREQUAL "32")
-	   message (STATUS "Building 32-bit mode on Solaris")
-	   # If we are asked to build 32 bit mode
-		set(CMAKE_C_FLAGS  "${SUN_BUILD32} ${CMAKE_C_FLAGS}")
-		set(CMAKE_SHARED_LINKER_FLAGS  "${CMAKE_SHARED_LINKER_FLAGS} ${SUN_BUILD32}")
-	ELSE (BUILD_CPU_MODE STREQUAL "32")
-	   # solaris 64-bit mode
-		message (STATUS "Building 64-bit mode on Solaris")
-		set(CMAKE_C_FLAGS  "${SUN_BUILD64} ${CMAKE_C_FLAGS}")
-		set(CMAKE_SHARED_LINKER_FLAGS  "${CMAKE_SHARED_LINKER_FLAGS} ${SUN_BUILD64}")
-	ENDIF (BUILD_CPU_MODE STREQUAL "32")
 
 	SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__EXTENSIONS__ -DSOLARIS -D_POSIX_SOURCE -D_POSIX_C_SOURCE=200112L")
 
@@ -689,18 +649,20 @@ ProcessPackage(LIBEVENT LIBRARY event INCLUDE event.h INCLUDE_SUFFIXES include/e
 	ROOT ${LIBEVENT_ROOT_DIR} MODULES event libevent)
 ProcessPackage(SQLITE3 LIBRARY sqlite3 INCLUDE sqlite3.h INCLUDE_SUFFIXES include/sqlite3 include/sqlite
 	ROOT ${SQLITE3_ROOT_DIR} MODULES sqlite3 sqlite)
-ProcessPackage(ICUDATA LIBRARY icudata INCLUDE ucnv.h INCLUDE_SUFFIXES include/unicode
+ProcessPackage(ICUDATA LIBRARY icudata INCLUDE unicode/ucnv.h
 	ROOT ${ICU_ROOT_DIR} MODULES icu-i18n)
-ProcessPackage(ICUC LIBRARY icuuc INCLUDE ucnv.h INCLUDE_SUFFIXES include/unicode
+ProcessPackage(ICUC LIBRARY icuuc INCLUDE unicode/ucnv.h
 	ROOT ${ICU_ROOT_DIR} MODULES icu-i18n)
-ProcessPackage(ICUI18N LIBRARY icui18n INCLUDE ucnv.h INCLUDE_SUFFIXES include/unicode
+ProcessPackage(ICUI18N LIBRARY icui18n INCLUDE unicode/ucnv.h
 	ROOT ${ICU_ROOT_DIR} MODULES icu-i18n)
-ProcessPackage(LIBCRYPT LIBRARY crypto INCLUDE err.h INCLUDE_SUFFIXES include/openssl
+ProcessPackage(LIBCRYPT LIBRARY crypto INCLUDE openssl/evp.h
 	ROOT ${OPENSSL_ROOT_DIR} MODULES openssl libcrypt)
-ProcessPackage(LIBSSL LIBRARY ssl INCLUDE ssl.h INCLUDE_SUFFIXES include/openssl
+ProcessPackage(LIBSSL LIBRARY ssl INCLUDE openssl/ssl.h
 	ROOT ${OPENSSL_ROOT_DIR} MODULES openssl libssl)
 ProcessPackage(MAGIC LIBRARY magic INCLUDE magic.h INCLUDE_SUFFIXES include/libmagic
 	ROOT ${LIBMAGIC_ROOT_DIR} MODULES magic)
+ProcessPackage(LIBZ LIBRARY z INCLUDE zlib.h INCLUDE_SUFFIXES include/zlib
+		ROOT ${LIBZ_ROOT_DIR} MODULES z)
 
 IF(ENABLE_HYPERSCAN MATCHES "ON")
 	ProcessPackage(HYPERSCAN LIBRARY hs INCLUDE hs.h INCLUDE_SUFFIXES
@@ -748,6 +710,13 @@ IF(ENABLE_GPERF_TOOLS MATCHES "ON")
 	SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer")
 	SET(WITH_GPERF_TOOLS 1)
 ENDIF(ENABLE_GPERF_TOOLS MATCHES "ON")
+
+IF (ENABLE_HYPERSCAN MATCHES "ON")
+	IF(${HYPERSCAN_LIBRARY} MATCHES ".*[.]a$")
+		ENABLE_LANGUAGE(CXX)
+		SET(USE_CXX_LINKER 1)
+	ENDIF()
+ENDIF()
 
 # Process with warn flags
 SET(CMAKE_C_WARN_FLAGS "")
@@ -904,6 +873,7 @@ CHECK_INCLUDE_FILES(sys/file.h  HAVE_SYS_FILE_H)
 CHECK_INCLUDE_FILES(sys/utsname.h  HAVE_SYS_UTSNAME_H)
 CHECK_INCLUDE_FILES(sys/resource.h  HAVE_SYS_RESOURCE_H)
 CHECK_INCLUDE_FILES(netinet/in.h  HAVE_NETINET_IN_H)
+CHECK_INCLUDE_FILES(netinet/tcp.h  HAVE_NETINET_TCP_H)
 CHECK_INCLUDE_FILES(arpa/inet.h  HAVE_ARPA_INET_H)
 CHECK_INCLUDE_FILES(netdb.h  HAVE_NETDB_H)
 CHECK_INCLUDE_FILES(syslog.h HAVE_SYSLOG_H)
@@ -955,6 +925,15 @@ CHECK_C_SOURCE_COMPILES(
 	int main(int argc, char** argv) {
   		return cmkcheckweak == NULL;
 	}" HAVE_WEAK_SYMBOLS)
+CHECK_C_SOURCE_COMPILES(
+		"#include <time.h>
+		extern char *tzname[2];
+		extern long timezone;
+		extern int daylight;
+	int main(int argc, char** argv) {
+		tzset();
+		return timezone;
+	}" HAVE_SANE_TZSET)
 
 IF(WITH_ICONV)
 	CHECK_C_SOURCE_COMPILES("
@@ -1000,6 +979,7 @@ CHECK_SYMBOL_EXISTS(SOCK_SEQPACKET "sys/types.h;sys/socket.h" HAVE_SOCK_SEQPACKE
 CHECK_SYMBOL_EXISTS(I_SETSIG "sys/types.h;sys/ioctl.h" HAVE_SETSIG)
 CHECK_SYMBOL_EXISTS(O_ASYNC "sys/types.h;sys/fcntl.h" HAVE_OASYNC)
 CHECK_SYMBOL_EXISTS(O_NOFOLLOW "sys/types.h;sys/fcntl.h" HAVE_ONOFOLLOW)
+CHECK_SYMBOL_EXISTS(O_CLOEXEC "sys/types.h;sys/fcntl.h" HAVE_OCLOEXEC)
 LIST(APPEND CMAKE_REQUIRED_INCLUDES "${LIBSSL_INCLUDE}")
 CHECK_SYMBOL_EXISTS(SSL_set_tlsext_host_name "openssl/ssl.h" HAVE_SSL_TLSEXT_HOSTNAME)
 CHECK_SYMBOL_EXISTS(dirfd "sys/types.h;unistd.h;dirent.h" HAVE_DIRFD)
@@ -1116,6 +1096,23 @@ IF(NOT HAVE_ATOMIC_BUILTINS)
 	MESSAGE(STATUS "atomic builtins are -NOT- supported")
 ELSE()
 	MESSAGE(STATUS "atomic builtins are supported")
+ENDIF()
+
+CHECK_C_SOURCE_RUNS("
+#include <x86intrin.h>
+int main(int argc, char **argv) {
+        __builtin_ia32_lfence ();
+        if (__builtin_ia32_rdtsc()) {
+                return 0;
+        }
+        return -1;
+}
+" HAVE_RDTSC)
+
+IF(NOT HAVE_RDTSC)
+	MESSAGE(STATUS "rdtsc intrinsic is -NOT- supported")
+ELSE()
+	MESSAGE(STATUS "rdtsc intrinsic is supported")
 ENDIF()
 
 IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -1260,6 +1257,19 @@ IF(ENABLE_CLANG_PLUGIN MATCHES "ON")
 	ADD_SUBDIRECTORY(clang-plugin)
 ENDIF()
 
+IF(ENABLE_TORCH MATCHES "ON")
+	IF(WITH_LUAJIT)
+		ADD_SUBDIRECTORY(contrib/torch/paths)
+		ADD_SUBDIRECTORY(contrib/torch/torch7)
+		ADD_SUBDIRECTORY(contrib/torch/nn)
+		ADD_SUBDIRECTORY(contrib/torch/optim)
+		ADD_SUBDIRECTORY(contrib/torch/decisiontree)
+		SET(WITH_TORCH 1)
+	ELSE()
+		MESSAGE(FATAL_ERROR "Cannot enable torch without luajit")
+	ENDIF()
+ENDIF()
+
 ADD_SUBDIRECTORY(src)
 ADD_SUBDIRECTORY(test)
 ADD_SUBDIRECTORY(utils)
@@ -1319,6 +1329,13 @@ ENDFOREACH(LUA_PLUGIN)
 INSTALL(FILES "contrib/publicsuffix/effective_tld_names.dat" DESTINATION
 	"${PLUGINSDIR}")
 
+# Install languages data
+INSTALL(CODE "FILE(MAKE_DIRECTORY \$ENV{DESTDIR}${PLUGINSDIR}/languages)")
+FILE(GLOB LANGUAGES "${CMAKE_CURRENT_SOURCE_DIR}/contrib/languages-data/*.json")
+FOREACH(_LANG ${LANGUAGES})
+	INSTALL(FILES "${_LANG}" DESTINATION ${PLUGINSDIR}/languages)
+ENDFOREACH()
+
 # Lua config
 FILE(GLOB_RECURSE LUA_CONFIGS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/rules"
 	"${CMAKE_CURRENT_SOURCE_DIR}/rules/*.lua")
@@ -1340,6 +1357,10 @@ ENDFOREACH(LUA_LIB)
 # Install lua fun library
 INSTALL(FILES "contrib/lua-fun/fun.lua" DESTINATION ${LUALIBDIR})
 
+IF(ENABLE_TORCH MATCHES "ON")
+	INSTALL(FILES "contrib/moses/moses.lua" DESTINATION ${LUALIBDIR})
+ENDIF()
+
 # systemd unit
 IF(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND WANT_SYSTEMD_UNITS MATCHES "ON")
 	INSTALL(FILES "rspamd.service" DESTINATION ${SYSTEMDDIR})
@@ -1357,6 +1378,9 @@ INSTALL(PROGRAMS "utils/rspamd_stats.pl" RENAME rspamd_stats DESTINATION bin)
 IF(INSTALL_WEBUI MATCHES "ON")
 	INSTALL(DIRECTORY "interface/" DESTINATION ${WWWDIR} PATTERN ".git" EXCLUDE)
 ENDIF(INSTALL_WEBUI MATCHES "ON")
+
+
+INSTALL(DIRECTORY "contrib/elastic/" DESTINATION "${PLUGINSDIR}/elastic" PATTERN ".git" EXCLUDE)
 
 ADD_CUSTOM_TARGET(dist ${CMAKE_SOURCE_DIR}/dist.sh
 	"${CMAKE_BINARY_DIR}/rspamd-${RSPAMD_VERSION}.tar.xz" "${TAR}"

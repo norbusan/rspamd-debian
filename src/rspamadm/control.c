@@ -24,7 +24,6 @@
 #include <event.h>
 #include "libutil/util.h"
 #include "lua/lua_common.h"
-#include "fuzzy_stat.lua.h"
 
 static gchar *control_path = RSPAMD_DBDIR "/rspamd.sock";
 static gboolean json = FALSE;
@@ -39,7 +38,8 @@ struct rspamadm_command control_command = {
 		.name = "control",
 		.flags = 0,
 		.help = rspamadm_control_help,
-		.run = rspamadm_control
+		.run = rspamadm_control,
+		.lua_subrs = NULL,
 };
 
 struct rspamadm_control_cbdata {
@@ -81,9 +81,9 @@ rspamadm_control_help (gboolean full_help)
 				"Supported commands:\n"
 				"stat - show statistics\n"
 				"reload - reload workers dynamic data\n"
-				"reresolve - resolve upstreams addresses\n";
-				"recompile - recompile hyperscan regexes\n";
-				"fuzzystat - show fuzzy statistics\n";
+				"reresolve - resolve upstreams addresses\n"
+				"recompile - recompile hyperscan regexes\n"
+				"fuzzystat - show fuzzy statistics\n"
 				"fuzzysync - immediately sync fuzzy database to storage\n";
 	}
 	else {
@@ -135,7 +135,7 @@ rspamd_control_finish_handler (struct rspamd_http_connection *conn,
 						cbdata->argc,
 						cbdata->argv,
 						obj,
-						rspamadm_script_fuzzy_stat);
+						"fuzzy_stat");
 
 				rspamd_fstring_free (out);
 				ucl_object_unref (obj);

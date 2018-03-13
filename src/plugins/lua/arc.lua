@@ -16,12 +16,12 @@ limitations under the License.
 
 local rspamd_logger = require "rspamd_logger"
 local lua_util = require "lua_util"
-local dkim_sign_tools = require "dkim_sign_tools"
+local dkim_sign_tools = require "lua_dkim_tools"
 local rspamd_util = require "rspamd_util"
 local rspamd_rsa_privkey = require "rspamd_rsa_privkey"
 local rspamd_rsa = require "rspamd_rsa"
 local fun = require "fun"
-local auth_results = require "auth_results"
+local auth_results = require "lua_auth_results"
 local hash = require "rspamd_cryptobox_hash"
 
 if confighelp then
@@ -29,10 +29,21 @@ if confighelp then
 end
 
 local N = 'arc'
+
+if not rspamd_plugins.dkim then
+  rspamd_logger.errx(rspamd_config, "cannot enable arc plugin: dkim is disabled")
+  return
+end
+
 local dkim_verify = rspamd_plugins.dkim.verify
 local dkim_sign = rspamd_plugins.dkim.sign
 local dkim_canonicalize = rspamd_plugins.dkim.canon_header_relaxed
 local redis_params
+
+if not dkim_verify or not dkim_sign or not dkim_canonicalize then
+  rspamd_logger.errx(rspamd_config, "cannot enable arc plugin: dkim is disabled")
+  return
+end
 
 local arc_symbols = {
   allow = 'ARC_ALLOW',
@@ -299,35 +310,35 @@ rspamd_config:register_symbol({
   parent = id,
   type = 'virtual',
   score = -1.0,
-  group = 'arc',
+  group = 'policies',
 })
 rspamd_config:register_symbol({
   name = arc_symbols['reject'],
   parent = id,
   type = 'virtual',
   score = 2.0,
-  group = 'arc',
+  group = 'policies',
 })
 rspamd_config:register_symbol({
   name = arc_symbols['invalid'],
   parent = id,
   type = 'virtual',
   score = 1.0,
-  group = 'arc',
+  group = 'policies',
 })
 rspamd_config:register_symbol({
   name = arc_symbols['dnsfail'],
   parent = id,
   type = 'virtual',
   score = 0.0,
-  group = 'arc',
+  group = 'policies',
 })
 rspamd_config:register_symbol({
   name = arc_symbols['na'],
   parent = id,
   type = 'virtual',
   score = 0.0,
-  group = 'arc',
+  group = 'policies',
 })
 
 rspamd_config:register_dependency(id, symbols['spf_allow_symbol'])
@@ -505,6 +516,10 @@ local function arc_signing_cb(task)
   else
     if (p.key and p.selector) then
       p.key = lua_util.template(p.key, {domain = p.domain, selector = p.selector})
+      if not rspamd_util.file_exists(p.key) then
+        rspamd_logger.debugm(N, task, 'file %s does not exists', p.key)
+        return false
+      end
       local dret, hdr = dkim_sign(task, p)
       if dret then
         return arc_sign_seal(task, p, hdr)
@@ -530,6 +545,7 @@ end
 if not (settings.use_redis or settings.path or
     settings.domain or settings.path_map or settings.selector_map) then
   rspamd_logger.infox(rspamd_config, 'mandatory parameters missing, disable arc signing')
+  lua_util.disable_module(N, "fail")
   return
 end
 
@@ -537,7 +553,8 @@ if settings.use_redis then
   redis_params = rspamd_parse_redis_server('arc')
 
   if not redis_params then
-    rspamd_logger.errx(rspamd_config, 'no servers are specified, but module is configured to load keys from redis, disable dkim signing')
+    rspamd_logger.errx(rspamd_config, 'no servers are specified, but module is configured to load keys from redis, disable arc signing')
+    lua_util.disable_module(N, "config")
     return
   end
 end

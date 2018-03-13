@@ -220,6 +220,7 @@ rspamd_rs_compile (struct hs_helper_ctx *ctx, struct rspamd_worker *worker,
 		ctx->loaded = TRUE;
 	}
 
+	memset (&srv_cmd, 0, sizeof (srv_cmd));
 	srv_cmd.type = RSPAMD_SRV_HYPERSCAN_LOADED;
 	rspamd_strlcpy (srv_cmd.cmd.hs_loaded.cache_dir, ctx->hs_dir,
 			sizeof (srv_cmd.cmd.hs_loaded.cache_dir));
@@ -290,8 +291,7 @@ start_hs_helper (struct rspamd_worker *worker)
 
 	ctx->ev_base = rspamd_prepare_worker (worker,
 			"hs_helper",
-			NULL,
-			FALSE);
+			NULL);
 
 	if (!rspamd_rs_compile (ctx, worker, FALSE)) {
 		/* Tell main not to respawn more workers */
