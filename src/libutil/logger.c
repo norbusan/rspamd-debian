@@ -1433,13 +1433,15 @@ rspamd_logger_configure_modules (GHashTable *mods_enabled)
 		rspamd_logger_add_debug_module ((const gchar *)k);
 	}
 
-	/* Now we have bit in our bitset available */
-	memset (log_modules->bitset, 0, log_modules->bitset_allocated);
 	g_hash_table_iter_init (&it, mods_enabled);
 
 	while (g_hash_table_iter_next (&it, &k, &v)) {
 		id = rspamd_logger_add_debug_module ((const gchar *)k);
-		msg_info ("enable debugging for module %s (%d)", (const gchar *)k, id);
-		setbit (log_modules->bitset, id);
+
+		if (isclr (log_modules->bitset, id)) {
+			msg_info ("enable debugging for module %s (%d)", (const gchar *) k,
+					id);
+			setbit (log_modules->bitset, id);
+		}
 	}
 }

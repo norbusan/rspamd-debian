@@ -5,6 +5,7 @@ use Data::Dumper;
 use Getopt::Long;
 use Pod::Usage;
 use Time::Local;
+use IO::Handle;
 use warnings;
 use strict;
 
@@ -15,6 +16,7 @@ my $reject_score = 15.0;
 my $junk_score = 6.0;
 my $diff_alpha = 0.1;
 my $correlations = 0;
+my $nrelated = 10;
 my $log_file = "";
 my $search_pattern = "";
 my $startTime="";
@@ -34,22 +36,23 @@ my %decompressor = (
 );
 
 GetOptions(
-  "reject-score|r=f" => \$reject_score,
-  "junk-score|j=f" => \$junk_score,
-  "symbol|s=s@" => \@symbols_search,
-  "symbol-bidir|S=s@" => \@symbols_bidirectional,
-  "exclude|X=s@" => \@symbols_exclude,
-  "log|l=s" => \$log_file,
+  "reject-score|r=f"      => \$reject_score,
+  "junk-score|j=f"        => \$junk_score,
+  "symbol|s=s@"           => \@symbols_search,
+  "symbol-bidir|S=s@"     => \@symbols_bidirectional,
+  "exclude|X=s@"          => \@symbols_exclude,
+  "log|l=s"               => \$log_file,
   "alpha-score|alpha|a=f" => \$diff_alpha,
-  "correlations|c" => \$correlations,
-  "search-pattern=s" => \$search_pattern,
-  "start=s" => \$startTime,
-  "end=s" => \$endTime,
-  "num-logs|n=i" => \$num_logs,
-  "exclude-logs|x=i" => \$exclude_logs,
-  "json|j" => \$json,
-  "help|?" => \$help,
-  "man" => \$man
+  "correlations|c"        => \$correlations,
+  "nrelated=i"            => \$nrelated,
+  "search-pattern=s"      => \$search_pattern,
+  "start=s"               => \$startTime,
+  "end=s"                 => \$endTime,
+  "num-logs|n=i"          => \$num_logs,
+  "exclude-logs|x=i"      => \$exclude_logs,
+  "json|j"                => \$json,
+  "help|?"                => \$help,
+  "man"                   => \$man
 ) or pod2usage(2);
 
 pod2usage(1) if $help;
@@ -110,7 +113,7 @@ elsif ( -d "$log_file" ) {
     open( $rspamd_log, "-|", "$dc $log_dir/$_" )
       or die "cannot execute $dc $log_dir/$_ : $!";
 
-    printf "\033[J  Parsing log files: [%d/%d] %s\033[G", $log_file_num++, scalar @logs, $_;
+    printf {interactive(*STDERR)} "\033[J  Parsing log files: [%d/%d] %s\033[G", $log_file_num++, scalar @logs, $_;
     $spinner_update_time = 0;   # Force spinner update
     &spinner;
 
@@ -119,9 +122,15 @@ elsif ( -d "$log_file" ) {
     close($rspamd_log)
       or warn "cannot close $dc $log_dir/$_: $!";
   }
+  print {interactive(*STDERR)} "\033[J\033[G";   # Progress indicator clean-up
 }
 else {
-  open($rspamd_log, '<', $log_file) or die "cannot open $log_file";
+  my $ext = ($log_file =~ /[^.]+\.?([^.]*?)$/)[0];
+  my $dc = $decompressor{$ext} || 'cat';
+  open( $rspamd_log, "-|", "$dc $log_file" )
+    or die "cannot execute $dc $log_file : $!";
+  $spinner_update_time = 0;   # Force spinner update
+  &spinner;
   &ProcessLog();
 }
 
@@ -141,7 +150,31 @@ else {
 
 exit;
 
-sub SymbolsStat() {
+sub GenRelated {
+  my ($htb, $target_sym) = @_;
+
+  my @result;
+  my $i = 0;
+  foreach my $sym (sort { $htb->{$b} <=> $htb->{$a} } keys %{$htb}) {
+    if ($sym ne $target_sym) {
+      my @elt = ($sym, $htb->{$sym});
+      push @result, \@elt;
+      $i ++;
+    }
+
+    last if $i > $nrelated;
+  }
+
+  return \@result;
+}
+
+sub StringifyRelated {
+  my ($ar, $total) = @_;
+  return join("\n", (map { sprintf "\t%s(%s: %.1f%%)",
+    $_->[0], $_->[1], $_->[1] / ($total * 1.0) * 100.0 } @{$ar}));
+}
+
+sub SymbolsStat {
   if ($total > 0) {
     my $has_comma = 0;
     while (my ($s, $r) = each(%sym_res)) {
@@ -237,6 +270,11 @@ Junk changes / total junk hits : %6d/%-6d (%7.3f%%)
         }
 
         if ($correlations) {
+
+          my $spam_related = GenRelated($r->{symbols_met_spam}, $s);
+          my $junk_related = GenRelated($r->{symbols_met_junk}, $s);
+          my $ham_related = GenRelated($r->{symbols_met_ham}, $s);
+
           if (!$json) {
             print "Correlations report:\n";
 
@@ -246,18 +284,26 @@ Junk changes / total junk hits : %6d/%-6d (%7.3f%%)
               printf "Probability of %s when %s fires: %.3f\n", $s, $cs,
                 ($corr_prob / $sym_prob);
             }
+
+            print "Related symbols report:\n";
+            printf "Top related in spam:\n %s\n", StringifyRelated($spam_related,
+              $r->{spam_hits});
+            printf "Top related in junk:\n %s\n", StringifyRelated($junk_related,
+              $r->{junk_hits});
+            printf "Top related in ham:\n %s\n", StringifyRelated($ham_related,
+              $r->{hits} - $r->{spam_hits} - $r->{junk_hits});
           }
           else {
             print ",";
             print "\"correllations\":{";
 
-            my $has_comma = 0;
+            my $has_comma_ = 0;
             while (my ($cs, $hits) = each %{$r->{corr}}) {
-              if ($has_comma) {
+              if ($has_comma_) {
                 print ",";
               }
               else {
-                $has_comma = 1;
+                $has_comma_ = 1;
               }
               my $corr_prob = $hits / $total;
               my $sym_prob = $r->{hits} / $total;
@@ -325,6 +371,41 @@ Messages scanned: $total";
       JsonObjectElt($a, $action{$a}, "%d");
     }
     print "},";
+  }
+}
+
+sub ProcessRelated {
+  my ($symbols, $target) = @_;
+
+  foreach my $s (@{$symbols}) {
+    $s =~ /^([^\(]+)(\(([^\)]+)\))?/;
+    my $sym_name = $1;
+    my $sym_score = 0;
+
+    if ($2) {
+      $sym_score = $3 * 1.0;
+
+      if (abs($sym_score) < $diff_alpha) {
+        next;
+      }
+
+      my $bm = $bidir_match{$sym_name};
+      if ($bm) {
+        if ($sym_score >= 0) {
+          $sym_name = $bm->{'spam'};
+        }
+        else {
+          $sym_name = $bm->{'ham'};
+        }
+      }
+    }
+
+    if (exists($target->{$sym_name})) {
+      $target->{$sym_name} ++;
+    }
+    else {
+      $target->{$sym_name} = 1;
+    }
   }
 }
 
@@ -429,13 +510,16 @@ sub ProcessLog {
 
             if (!$sym_res{$sym_name}) {
               $sym_res{$sym_name} = {
-                hits => 0,
-                spam_hits => 0,
-                junk_hits => 0,
-                spam_change => 0,
-                junk_change => 0,
-                weight => 0,
-                corr => {},
+                hits             => 0,
+                spam_hits        => 0,
+                junk_hits        => 0,
+                spam_change      => 0,
+                junk_change      => 0,
+                weight           => 0,
+                corr             => {},
+                symbols_met_spam => {},
+                symbols_met_ham  => {},
+                symbols_met_junk => {},
               };
             }
 
@@ -449,10 +533,21 @@ sub ProcessLog {
             if ($score >= $reject_score) {
               $is_spam = 1;
               $r->{spam_hits} ++;
+              if ($correlations) {
+                ProcessRelated(\@symbols, $r->{symbols_met_spam});
+              }
             }
             elsif ($score >= $junk_score) {
               $is_junk = 1;
               $r->{junk_hits} ++;
+              if ($correlations) {
+                ProcessRelated(\@symbols, $r->{symbols_met_junk});
+              }
+            }
+            else {
+              if ($correlations) {
+                ProcessRelated(\@symbols, $r->{symbols_met_ham});
+              }
             }
 
             if ($sym_score != 0) {
@@ -534,13 +629,11 @@ sub GetLogfilesList {
       splice( @logs, $exclude_logs, $num_logs ||= @logs - $exclude_logs );
 
   # Loop through array printing out filenames
-  if (!$json) {
-    print "\nLog files to process:\n";
-    foreach my $file (@logs) {
-      print "  $file\n";
-    }
-    print "\n";
+  print {interactive(*STDERR)} "\nLog files to process:\n";
+  foreach my $file (@logs) {
+    print {interactive(*STDERR)} "  $file\n";
   }
+  print {interactive(*STDERR)} "\n";
 
   return @logs;
 }
@@ -560,6 +653,12 @@ sub log_time_format {
 
     # Aug  8 00:02:50 #66986(
     elsif (/^\w{3} (?:\s?\d|\d\d) \d\d:\d\d:\d\d #\d+\(/) {
+      $format = 'syslog';
+      last;
+    }
+
+    # Aug  8 00:02:50 hostname rspamd[66986]
+    elsif (/^\w{3} (?:\s?\d|\d\d) \d\d:\d\d:\d\d \S+ rspamd\[\d+\]/) {
       $format = 'syslog';
       last;
     }
@@ -600,8 +699,9 @@ sub spinner {
     my @spinner = qw{/ - \ |};
     return
       if ( ( time - $spinner_update_time ) < 1 );
-    printf "%s\033[1D", $spinner[ time % @spinner ];
     $spinner_update_time = time;
+    printf {interactive(*STDERR)} "%s\r", $spinner[ $spinner_update_time % @spinner ];
+    select()->flush();
 }
 
 # Convert syslog timestamp to "ISO 8601 like" format
@@ -618,6 +718,48 @@ sub syslog2iso {
   sprintf '%04d-%02d-%02d %02d:%02d:%02d',
     1900 + (localtime)[5] - ( $epoch > time ),
     $month_map{$month} + 1, @t;
+}
+
+### Imported from IO::Interactive 1.022 Perl module
+sub is_interactive {
+    my ($out_handle) = (@_, select);    # Default to default output handle
+
+    # Not interactive if output is not to terminal...
+    return 0 if not -t $out_handle;
+
+    # If *ARGV is opened, we're interactive if...
+    if ( tied(*ARGV) or defined(fileno(ARGV)) ) { # this is what 'Scalar::Util::openhandle *ARGV' boils down to
+
+        # ...it's currently opened to the magic '-' file
+        return -t *STDIN if defined $ARGV && $ARGV eq '-';
+
+        # ...it's at end-of-file and the next file is the magic '-' file
+        return @ARGV>0 && $ARGV[0] eq '-' && -t *STDIN if eof *ARGV;
+
+        # ...it's directly attached to the terminal
+        return -t *ARGV;
+    }
+
+    # If *ARGV isn't opened, it will be interactive if *STDIN is attached
+    # to a terminal.
+    else {
+        return -t *STDIN;
+    }
+}
+
+### Imported from IO::Interactive 1.022 Perl module
+local (*DEV_NULL, *DEV_NULL2);
+my $dev_null;
+BEGIN {
+    pipe *DEV_NULL, *DEV_NULL2
+        or die "Internal error: can't create null filehandle";
+    $dev_null = \*DEV_NULL;
+}
+
+### Imported from IO::Interactive 1.022 Perl module
+sub interactive {
+    my ($out_handle) = (@_, \*STDOUT);      # Default to STDOUT
+    return &is_interactive ? $out_handle : $dev_null;
 }
 
 __END__
@@ -637,6 +779,7 @@ rspamd_stats [options] [--symbol=SYM1 [--symbol=SYM2...]] [--log file]
    --symbol=sym           check specified symbol (perl regexps, '.*' by default)
    --alpha-score=score    set ignore score for symbols (0.1 by default)
    --correlations         enable correlations report
+   --nrelated=integer     show that amount of related symbols (10 by default)
    --search-pattern       do not process input unless the desired pattern is found
    --start                starting time (oldest) for log parsing
    --end                  ending time (newest) for log parsing

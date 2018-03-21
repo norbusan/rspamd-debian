@@ -80,5 +80,7 @@
 #define TLS_VERSION_HEADER "TLS-Version"
 #define MTA_NAME_HEADER "MTA-Name"
 #define MILTER_HEADER "Milter"
+#define FILENAME_HEADER "Filename"
+#define CERT_ISSUER_HEADER "TLS-Cert-Issuer"
 
 #endif //RSPAMD_PROTOCOL_INTERNAL_H

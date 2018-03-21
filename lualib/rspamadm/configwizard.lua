@@ -371,10 +371,21 @@ end
 
 return ver
 ]]
-    conn:add_cmd('EVAL', {lua_script, '1', symbol_spam})
-    local _,ver = conn:exec()
+    conn:add_cmd('EVAL', {lua_script, '1', symbol_ham})
+    local _,ver_ham = conn:exec()
 
-    return tonumber(ver)
+    conn:add_cmd('EVAL', {lua_script, '1', symbol_spam})
+    local _,ver_spam = conn:exec()
+
+    -- If one of the classes is missing we still can convert the other one
+    if ver_ham == 0 and ver_spam == 0 and ver_ham ~= ver_spam then
+      printf("Current statistics versions do not match: %s -> %s, %s -> %s",
+          symbol_ham, ver_ham, symbol_spam, ver_spam)
+      printf("Cannot convert statistics")
+      return false
+    end
+
+    return true,tonumber(ver_ham)
   end
 
   local function check_expire(conn)
@@ -404,8 +415,8 @@ return ttl
   end
 
   if not cls.new_schema then
-    local ver = get_version(conn)
-
+    local r,ver = get_version(conn)
+    if not r then return false end
     if ver ~= 2 then
       printf("You are using an old schema for %s/%s", symbol_ham, symbol_spam)
       try_convert(true)
@@ -425,7 +436,8 @@ return ttl
       end
     end
   else
-    local ver = get_version(conn)
+    local r,ver = get_version(conn)
+    if not r then return false end
     if ver ~= 2 then
       printf("You have configured new schema for %s/%s but your DB has old data",
         symbol_spam, symbol_ham)
@@ -622,7 +634,7 @@ return function(args, cfg)
       end
     end
 
-    if has_check('statistic') then
+    if has_check('statistic') or has_check('statistics') then
       setup_statistic(cfg, changes)
     end
 
