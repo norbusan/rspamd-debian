@@ -175,6 +175,13 @@ LUA_FUNCTION_DEF (task, has_urls);
 LUA_FUNCTION_DEF (task, get_content);
 
 /***
+ * @method task:get_filename()
+ * Returns filename for a specific task
+ * @return {string|nil} filename or nil if unknown
+ */
+LUA_FUNCTION_DEF (task, get_filename);
+
+/***
  * @method task:get_rawbody()
  * Get raw body for the specified task
  * @return {text} the data contained in the task
@@ -855,6 +862,7 @@ static const struct luaL_reg tasklib_m[] = {
 	LUA_INTERFACE_DEF (task, has_urls),
 	LUA_INTERFACE_DEF (task, get_urls),
 	LUA_INTERFACE_DEF (task, get_content),
+	LUA_INTERFACE_DEF (task, get_filename),
 	LUA_INTERFACE_DEF (task, get_rawbody),
 	LUA_INTERFACE_DEF (task, get_emails),
 	LUA_INTERFACE_DEF (task, get_text_parts),
@@ -1526,6 +1534,26 @@ lua_task_get_content (lua_State * L)
 		t->len = task->msg.len;
 		t->start = task->msg.begin;
 		t->flags = 0;
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_task_get_filename (lua_State * L)
+{
+	struct rspamd_task *task = lua_check_task (L, 1);
+
+	if (task) {
+		if (task->msg.fpath) {
+			lua_pushstring (L, task->msg.fpath);
+		}
+		else {
+			lua_pushnil (L);
+		}
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
@@ -4152,19 +4180,12 @@ lua_task_get_metric_action (lua_State *L)
 	enum rspamd_action_type action;
 
 	if (task) {
-		if ((metric_res = task->result) != NULL) {
-			if (task->result->action == METRIC_ACTION_MAX) {
-				action = rspamd_check_action_metric (task, metric_res);
-			}
-			else {
-				action = task->result->action;
-			}
+		if ((metric_res = task->result) == NULL) {
+			metric_res = rspamd_create_metric_result (task);
+		}
 
-			lua_pushstring (L, rspamd_action_to_str (action));
-		}
-		else {
-			lua_pushnil (L);
-		}
+		action = rspamd_check_action_metric (task, metric_res);
+		lua_pushstring (L, rspamd_action_to_str (action));
 	}
 	else {
 		return luaL_error (L, "invalid arguments");

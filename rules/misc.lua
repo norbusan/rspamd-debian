@@ -331,15 +331,15 @@ local function freemail_reply_neq_from(task)
   return false
 end
 
-local freemail_reply_neq_from_id = rspamd_config:register_symbol({
+rspamd_config:register_symbol({
   name = 'FREEMAIL_REPLYTO_NEQ_FROM_DOM',
   callback = freemail_reply_neq_from,
   description = 'Freemail From and Reply-To, but to different Freemail services',
   score = 3.0,
   group = 'headers',
 })
-rspamd_config:register_dependency(freemail_reply_neq_from_id, 'FREEMAIL_REPLYTO')
-rspamd_config:register_dependency(freemail_reply_neq_from_id, 'FREEMAIL_FROM')
+rspamd_config:register_dependency('FREEMAIL_REPLYTO_NEQ_FROM_DOM', 'FREEMAIL_REPLYTO')
+rspamd_config:register_dependency('FREEMAIL_REPLYTO_NEQ_FROM_DOM', 'FREEMAIL_FROM')
 
 rspamd_config.OMOGRAPH_URL = {
   callback = function(task)
@@ -482,6 +482,7 @@ rspamd_config:register_symbol{
 
 local check_from_display_name = rspamd_config:register_symbol{
   type = 'callback',
+  name = 'FROM_DISPLAY_CALLBACK',
   callback = function (task)
     local from = task:get_from(2)
     if not (from and from[1] and from[1].name) then return false end

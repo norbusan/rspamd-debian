@@ -713,6 +713,7 @@ if opts then
       name = 'RATELIMIT_CHECK',
       priority = 4,
       callback = ratelimit_cb,
+      flags = 'empty',
     }
     if use_ip_score then
       s.type = 'normal'
@@ -722,9 +723,9 @@ if opts then
     elseif info_symbol then
       s.name = info_symbol
     end
-    local id = rspamd_config:register_symbol(s)
+    rspamd_config:register_symbol(s)
     if use_ip_score then
-      rspamd_config:register_dependency(id, 'IP_SCORE')
+      rspamd_config:register_dependency(s.name, 'IP_SCORE')
     end
     for _, v in pairs(custom_keywords) do
       if type(v) == 'table' and type(v['init']) == 'function' then

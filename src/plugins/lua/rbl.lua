@@ -527,10 +527,12 @@ local need_dkim = false
 local id = rspamd_config:register_symbol({
   type = 'callback',
   callback = rbl_cb,
+  name = 'RBL_CALLBACK',
   flags = 'empty,nice'
 })
 
 local is_monitored = {}
+local rbls_count = 0
 for key,rbl in pairs(opts['rbls']) do
   (function()
     if type(rbl) ~= 'table' or rbl['disabled'] then
@@ -588,12 +590,13 @@ for key,rbl in pairs(opts['rbls']) do
       (not rbl['returncodes'])) then
         rbl['symbol'] = key
     end
-    if type(rspamd_config.get_api_version) ~= 'nil' and rbl['symbol'] then
+    if rbl['symbol'] then
       rspamd_config:register_symbol({
         name = rbl['symbol'],
         parent = id,
         type = 'virtual'
       })
+      rbls_count = rbls_count + 1
 
       if rbl['dkim'] then
         need_dkim = true
@@ -638,7 +641,7 @@ for key,rbl in pairs(opts['rbls']) do
   end)()
 end
 
-if #opts.rbls == 0 then
+if rbls_count == 0 then
   lua_util.disable_module(N, "config")
 end
 
@@ -650,5 +653,5 @@ for _, w in pairs(white_symbols) do
   end
 end
 if need_dkim then
-  rspamd_config:register_dependency(id, symbols['dkim_allow_symbol'])
+  rspamd_config:register_dependency('RBL_CALLBACK', symbols['dkim_allow_symbol'])
 end

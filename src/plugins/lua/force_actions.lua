@@ -114,13 +114,14 @@ local function configure_module()
               local h = rspamd_cryptobox_hash.create()
               h:update(expr)
               local name = 'FORCE_ACTION_' .. string.upper(string.sub(h:hex(), 1, 12))
-              local id = rspamd_config:register_symbol({
+              rspamd_config:register_symbol({
                 type = 'normal',
                 name = name,
                 callback = cb,
+                flags = 'empty',
               })
               for _, a in ipairs(atoms) do
-                rspamd_config:register_dependency(id, a)
+                rspamd_config:register_dependency(name, a)
               end
               rspamd_logger.infox(rspamd_config, 'Registered symbol %1 <%2> with dependencies [%3]', name, expr, table.concat(atoms, ','))
             end
@@ -150,10 +151,11 @@ local function configure_module()
           end
           t.name = 'FORCE_ACTION_' .. name
           t.callback = cb
-          local id = rspamd_config:register_symbol(t)
+          t.flags = 'empty'
+          rspamd_config:register_symbol(t)
           if t.type == 'normal' then
             for _, a in ipairs(atoms) do
-              rspamd_config:register_dependency(id, a)
+              rspamd_config:register_dependency(t.name, a)
             end
             rspamd_logger.infox(rspamd_config, 'Registered symbol %1 <%2> with dependencies [%3]', name, expr, table.concat(atoms, ','))
           else

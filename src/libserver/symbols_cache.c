@@ -413,6 +413,8 @@ rspamd_symbols_cache_post_init (struct symbols_cache *cache)
 					"%s is missing", ddep->from, ddep->to, ddep->from);
 		}
 		else {
+			msg_debug_cache ("delayed between %s(%d) -> %s", ddep->from,
+					it->id, ddep->to);
 			rspamd_symbols_cache_add_dependency (cache, it->id, ddep->to);
 		}
 
@@ -457,15 +459,24 @@ rspamd_symbols_cache_post_init (struct symbols_cache *cache)
 					dit = g_ptr_array_index (cache->items_by_id, dit->parent);
 				}
 
-				rdep = rspamd_mempool_alloc (cache->static_pool, sizeof (*rdep));
-				rdep->sym = dep->sym;
-				rdep->item = it;
-				rdep->id = i;
-				g_ptr_array_add (dit->rdeps, rdep);
-				dep->item = dit;
-				dep->id = dit->id;
+				if (dit->id == i) {
+					msg_err_cache ("cannot add dependency on self: %s -> %s "
+							"(resolved to %s)",
+							it->symbol, dep->sym, dit->symbol);
+				}
+				else {
+					rdep = rspamd_mempool_alloc (cache->static_pool,
+							sizeof (*rdep));
+					rdep->sym = dep->sym;
+					rdep->item = it;
+					rdep->id = i;
+					g_ptr_array_add (dit->rdeps, rdep);
+					dep->item = dit;
+					dep->id = dit->id;
 
-				msg_debug_cache ("add dependency from %d on %d", it->id, dit->id);
+					msg_debug_cache ("add dependency from %d on %d", it->id,
+							dit->id);
+				}
 			}
 			else {
 				msg_err_cache ("cannot find dependency on symbol %s", dep->sym);
@@ -615,7 +626,8 @@ rspamd_symbols_cache_load_items (struct symbols_cache *cache, const gchar *name)
 				}
 			}
 
-			if ((item->type & SYMBOL_TYPE_VIRTUAL) && item->parent != -1) {
+			if ((item->type & SYMBOL_TYPE_VIRTUAL) &&
+					!(item->type & SYMBOL_TYPE_SQUEEZED) && item->parent != -1) {
 				g_assert (item->parent < (gint)cache->items_by_id->len);
 				parent = g_ptr_array_index (cache->items_by_id, item->parent);
 
@@ -1066,7 +1078,8 @@ rspamd_symbols_cache_validate_cb (gpointer k, gpointer v, gpointer ud)
 		item->priority ++;
 	}
 
-	if ((item->type & SYMBOL_TYPE_VIRTUAL) && item->parent != -1) {
+	if ((item->type & SYMBOL_TYPE_VIRTUAL) &&
+			!(item->type & SYMBOL_TYPE_SQUEEZED) && item->parent != -1) {
 		g_assert (item->parent < (gint)cache->items_by_id->len);
 		parent = g_ptr_array_index (cache->items_by_id, item->parent);
 
@@ -1258,6 +1271,7 @@ rspamd_symbols_cache_check_symbol (struct rspamd_task *task,
 		setbit (checkpoint->processed_bits, item->id * 2);
 
 		if (!item->enabled ||
+				(item->type & SYMBOL_TYPE_SQUEEZED) ||
 				(RSPAMD_TASK_IS_EMPTY (task) && !(item->type & SYMBOL_TYPE_EMPTY))) {
 			check = FALSE;
 		}
@@ -1931,7 +1945,8 @@ rspamd_symbols_cache_counters_cb (gpointer v, gpointer ud)
 		ucl_object_insert_key (obj, ucl_object_fromstring (item->symbol),
 				"symbol", 0, false);
 
-		if ((item->type & SYMBOL_TYPE_VIRTUAL) && item->parent != -1) {
+		if ((item->type & SYMBOL_TYPE_VIRTUAL) &&
+				!(item->type & SYMBOL_TYPE_SQUEEZED) && item->parent != -1) {
 			g_assert (item->parent < (gint)cbd->cache->items_by_id->len);
 			parent = g_ptr_array_index (cbd->cache->items_by_id,
 					item->parent);
@@ -2315,7 +2330,7 @@ rspamd_symbols_cache_disable_symbol_checkpoint (struct rspamd_task *task,
 
 	id = rspamd_symbols_cache_find_symbol_parent (cache, symbol);
 
-	if (id > 0) {
+	if (id >= 0) {
 		/* Set executed and finished flags */
 		item = g_ptr_array_index (cache->items_by_id, id);
 
@@ -2347,14 +2362,14 @@ rspamd_symbols_cache_enable_symbol_checkpoint (struct rspamd_task *task,
 
 	id = rspamd_symbols_cache_find_symbol_parent (cache, symbol);
 
-	if (id > 0) {
+	if (id >= 0) {
 		/* Set executed and finished flags */
 		item = g_ptr_array_index (cache->items_by_id, id);
 
 		clrbit (checkpoint->processed_bits, item->id * 2);
 		clrbit (checkpoint->processed_bits, item->id * 2 + 1);
 
-		msg_debug_task ("enable execution of %s", symbol);
+		msg_debug_task ("enable execution of %s (%d)", symbol, id);
 	}
 	else {
 		msg_info_task ("cannot enable %s: not found", symbol);

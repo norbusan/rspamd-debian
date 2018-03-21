@@ -341,8 +341,8 @@ rspamd_config:register_symbol({
   group = 'policies',
 })
 
-rspamd_config:register_dependency(id, symbols['spf_allow_symbol'])
-rspamd_config:register_dependency(id, symbols['dkim_allow_symbol'])
+rspamd_config:register_dependency('ARC_CALLBACK', symbols['spf_allow_symbol'])
+rspamd_config:register_dependency('ARC_CALLBACK', symbols['dkim_allow_symbol'])
 
 local function arc_sign_seal(task, params, header)
   local fold_type = "crlf"
@@ -559,10 +559,10 @@ if settings.use_redis then
   end
 end
 
-id = rspamd_config:register_symbol({
+rspamd_config:register_symbol({
   name = settings['sign_symbol'],
   callback = arc_signing_cb
 })
 
 -- Do not sign unless valid
-rspamd_config:register_dependency(id, 'ARC_CALLBACK')
+rspamd_config:register_dependency(settings['sign_symbol'], 'ARC_CALLBACK')
