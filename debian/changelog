@@ -1,4 +1,4 @@
-rspamd (1.7.0-1) UNRELEASED; urgency=medium
+rspamd (1.7.1-1) unstable; urgency=medium
 
   [ Jerome Lebleu ]
   * d/source: Switch to 3.0 native to quilt source format
@@ -9,7 +9,7 @@ rspamd (1.7.0-1) UNRELEASED; urgency=medium
   * d/rspamd.init: Use rspamd.conf as config. file and test it on start
 
   [ Sebastien Badia ]
-  * New upstream version 1.7.0 (Closes: #813222, #849396)
+  * New upstream version 1.7.1 (Closes: #813222, #849396)
   * Added upstream-metadata-file (refs: http://dep.debian.net/deps/dep12/)
   * Depends on packaged js libs and import minified versions
   * d/man: Added a manpage for rspamd_stats
@@ -21,7 +21,7 @@ rspamd (1.7.0-1) UNRELEASED; urgency=medium
   * d/rules: Remove un-needed dh_systemd (it's now enabled by default)
   * d/compat: Bump compat version to 11
 
- -- Sebastien Badia <sbadia@debian.org>  Tue, 13 Mar 2018 20:08:35 +0100
+ -- Sebastien Badia <sbadia@debian.org>  Wed, 21 Mar 2018 10:40:54 +0100
 
 rspamd (0.6.10) unstable; urgency=low
 
