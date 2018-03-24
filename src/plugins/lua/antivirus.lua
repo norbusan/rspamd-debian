@@ -481,10 +481,13 @@ local function clamav_check(task, rule)
         upstream:ok()
         data = tostring(data)
         local cached
+        rspamd_logger.debugm(N, task, '%s [%s]: got reply: %s', rule['symbol'], rule['type'], data)
         if data == 'stream: OK' then
           cached = 'OK'
           if rule['log_clean'] then
             rspamd_logger.infox(task, '%s [%s]: message is clean', rule['symbol'], rule['type'])
+          else
+            rspamd_logger.debugm(N, task, '%s [%s]: message is clean', rule['symbol'], rule['type'])
           end
         else
           local vname = string.match(data, 'stream: (.+) FOUND')
@@ -531,6 +534,7 @@ local function sophos_check(task, rule)
     local bye = 'BYE\n'
 
     local function sophos_callback(err, data, conn)
+
       if err then
         if err == 'IO timeout' then
           if retransmits > 0 then
@@ -564,6 +568,20 @@ local function sophos_check(task, rule)
               rspamd_logger.infox(task, '%s [%s]: message is clean', rule['symbol'], rule['type'])
             end
             save_av_cache(task, rule, 'OK')
+          elseif string.find(data, 'FAIL 0212') then
+            if rule['savdi_report_encrypted'] then
+              rspamd_logger.infox(task, 'Message is ENCRYPTED (0212 SOPHOS_SAVI_ERROR_FILE_ENCRYPTED): %s', data)
+              yield_result(task, rule, "SAVDI_FILE_ENCRYPTED")
+              save_av_cache(task, rule, "SAVDI_FILE_ENCRYPTED")
+            end
+          elseif string.find(data, 'REJ 4') then
+            if rule['savdi_report_oversize'] then
+              rspamd_logger.infox(task, 'Message is OVERSIZED (SSSP reject code 4): %s', data)
+              yield_result(task, rule, "SAVDI_FILE_OVERSIZED")
+              save_av_cache(task, rule, "SAVDI_FILE_OVERSIZED")
+            end
+          elseif string.find(data, 'REJ 1') then
+            rspamd_logger.errx(task, 'SAVDI (Protocol error (REJ 1)): %s', data)
           elseif string.find(data, 'ACC') or string.find(data, 'OK SSSP') then
             conn:add_read(sophos_callback)
           else
@@ -866,4 +884,3 @@ if opts and type(opts) == 'table' then
     lua_util.disable_module(N, 'config')
   end
 end
-
