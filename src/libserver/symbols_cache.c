@@ -653,6 +653,8 @@ rspamd_symbols_cache_load_items (struct symbols_cache *cache, const gchar *name)
 	return TRUE;
 }
 
+#define ROUND_DOUBLE(x) (floor((x) * 100.0) / 100.0)
+
 static gboolean
 rspamd_symbols_cache_save_items (struct symbols_cache *cache, const gchar *name)
 {
@@ -695,17 +697,21 @@ rspamd_symbols_cache_save_items (struct symbols_cache *cache, const gchar *name)
 	while (g_hash_table_iter_next (&it, &k, &v)) {
 		item = v;
 		elt = ucl_object_typed_new (UCL_OBJECT);
-		ucl_object_insert_key (elt, ucl_object_fromdouble (item->st->weight),
+		ucl_object_insert_key (elt,
+				ucl_object_fromdouble (ROUND_DOUBLE (item->st->weight)),
 				"weight", 0, false);
-		ucl_object_insert_key (elt, ucl_object_fromdouble (item->st->time_counter.mean),
+		ucl_object_insert_key (elt,
+				ucl_object_fromdouble (ROUND_DOUBLE (item->st->time_counter.mean)),
 				"time", 0, false);
-		ucl_object_insert_key (elt, ucl_object_fromdouble (item->st->total_hits),
+		ucl_object_insert_key (elt, ucl_object_fromint (item->st->total_hits),
 				"count", 0, false);
 
 		freq = ucl_object_typed_new (UCL_OBJECT);
-		ucl_object_insert_key (freq, ucl_object_fromdouble (item->st->frequency_counter.mean),
+		ucl_object_insert_key (freq,
+				ucl_object_fromdouble (ROUND_DOUBLE (item->st->frequency_counter.mean)),
 				"avg", 0, false);
-		ucl_object_insert_key (freq, ucl_object_fromdouble (item->st->frequency_counter.stddev),
+		ucl_object_insert_key (freq,
+				ucl_object_fromdouble (ROUND_DOUBLE (item->st->frequency_counter.stddev)),
 				"stddev", 0, false);
 		ucl_object_insert_key (elt, freq, "frequency", 0, false);
 
@@ -721,6 +727,8 @@ rspamd_symbols_cache_save_items (struct symbols_cache *cache, const gchar *name)
 
 	return ret;
 }
+
+#undef ROUND_DOUBLE
 
 gint
 rspamd_symbols_cache_add_symbol (struct symbols_cache *cache,
@@ -1271,7 +1279,6 @@ rspamd_symbols_cache_check_symbol (struct rspamd_task *task,
 		setbit (checkpoint->processed_bits, item->id * 2);
 
 		if (!item->enabled ||
-				(item->type & SYMBOL_TYPE_SQUEEZED) ||
 				(RSPAMD_TASK_IS_EMPTY (task) && !(item->type & SYMBOL_TYPE_EMPTY))) {
 			check = FALSE;
 		}
@@ -1315,7 +1322,7 @@ rspamd_symbols_cache_check_symbol (struct rspamd_task *task,
 				*total_diff += diff;
 			}
 
-			if (diff > slow_diff_limit) {
+			if (diff > slow_diff_limit && !(item->type & SYMBOL_TYPE_SQUEEZED)) {
 				msg_info_task ("slow rule: %s: %.0f ticks", item->symbol,
 						diff);
 			}
@@ -1931,6 +1938,8 @@ struct counters_cbdata {
 	struct symbols_cache *cache;
 };
 
+#define ROUND_DOUBLE(x) (floor((x) * 100.0) / 100.0)
+
 static void
 rspamd_symbols_cache_counters_cb (gpointer v, gpointer ud)
 {
@@ -1950,29 +1959,39 @@ rspamd_symbols_cache_counters_cb (gpointer v, gpointer ud)
 			g_assert (item->parent < (gint)cbd->cache->items_by_id->len);
 			parent = g_ptr_array_index (cbd->cache->items_by_id,
 					item->parent);
-			ucl_object_insert_key (obj, ucl_object_fromdouble (item->st->weight),
+			ucl_object_insert_key (obj,
+					ucl_object_fromdouble (ROUND_DOUBLE (item->st->weight)),
 					"weight", 0, false);
-			ucl_object_insert_key (obj, ucl_object_fromdouble (parent->st->avg_frequency),
+			ucl_object_insert_key (obj,
+					ucl_object_fromdouble (ROUND_DOUBLE (parent->st->avg_frequency)),
 					"frequency", 0, false);
-			ucl_object_insert_key (obj, ucl_object_fromint (parent->st->total_hits),
+			ucl_object_insert_key (obj,
+					ucl_object_fromint (parent->st->total_hits),
 					"hits", 0, false);
-			ucl_object_insert_key (obj, ucl_object_fromdouble (parent->st->avg_time),
+			ucl_object_insert_key (obj,
+					ucl_object_fromdouble (ROUND_DOUBLE (parent->st->avg_time)),
 					"time", 0, false);
 		}
 		else {
-			ucl_object_insert_key (obj, ucl_object_fromdouble (item->st->weight),
+			ucl_object_insert_key (obj,
+					ucl_object_fromdouble (ROUND_DOUBLE (item->st->weight)),
 					"weight", 0, false);
-			ucl_object_insert_key (obj, ucl_object_fromdouble (item->st->avg_frequency),
+			ucl_object_insert_key (obj,
+					ucl_object_fromdouble (ROUND_DOUBLE (item->st->avg_frequency)),
 					"frequency", 0, false);
-			ucl_object_insert_key (obj, ucl_object_fromint (item->st->total_hits),
+			ucl_object_insert_key (obj,
+					ucl_object_fromint (item->st->total_hits),
 					"hits", 0, false);
-			ucl_object_insert_key (obj, ucl_object_fromdouble (item->st->avg_time),
+			ucl_object_insert_key (obj,
+					ucl_object_fromdouble (ROUND_DOUBLE (item->st->avg_time)),
 					"time", 0, false);
 		}
 
 		ucl_array_append (top, obj);
 	}
 }
+
+#undef ROUND_DOUBLE
 
 ucl_object_t *
 rspamd_symbols_cache_counters (struct symbols_cache * cache)
@@ -2334,10 +2353,15 @@ rspamd_symbols_cache_disable_symbol_checkpoint (struct rspamd_task *task,
 		/* Set executed and finished flags */
 		item = g_ptr_array_index (cache->items_by_id, id);
 
-		setbit (checkpoint->processed_bits, item->id * 2);
-		setbit (checkpoint->processed_bits, item->id * 2 + 1);
+		if (!(item->type & SYMBOL_TYPE_SQUEEZED)) {
+			setbit (checkpoint->processed_bits, item->id * 2);
+			setbit (checkpoint->processed_bits, item->id * 2 + 1);
 
-		msg_debug_task ("disable execution of %s", symbol);
+			msg_debug_task ("disable execution of %s", symbol);
+		}
+		else {
+			msg_debug_task ("skip squeezed symbol %s", symbol);
+		}
 	}
 	else {
 		msg_info_task ("cannot disable %s: not found", symbol);

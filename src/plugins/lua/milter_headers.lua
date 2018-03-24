@@ -29,6 +29,7 @@ local E = {}
 local HOSTNAME = util.get_hostname()
 
 local settings = {
+  remove_upstream_spam_flag = true;
   skip_local = true,
   skip_authenticated = true,
   local_headers = {},
@@ -484,11 +485,6 @@ if type(opts['custom']) == 'table' then
       custom_routines[k] = f()
     end
   end
-end
-if opts['extended_spam_headers'] then
-  activate_routine('x-spamd-result')
-  activate_routine('x-rspamd-server')
-  activate_routine('x-rspamd-queue-id')
 end
 if type(opts['skip_local']) == 'boolean' then
   settings.skip_local = opts['skip_local']

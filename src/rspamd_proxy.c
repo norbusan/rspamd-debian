@@ -1598,6 +1598,7 @@ rspamd_proxy_scan_self_reply (struct rspamd_task *task)
 	case CMD_PROCESS:
 	case CMD_SKIP:
 	case CMD_CHECK_V2:
+		rspamd_task_set_finish_time (task);
 		rspamd_protocol_http_reply (msg, task, &rep);
 		rspamd_protocol_write_log_pipe (task);
 		break;

@@ -29,6 +29,7 @@ local E = {}
 local rows = {}
 local attachment_rows = {}
 local urls_rows = {}
+local emails_rows = {}
 local specific_rows = {}
 local asn_rows = {}
 local symbols_rows = {}
@@ -50,7 +51,9 @@ local settings = {
   table = 'rspamd',
   attachments_table = 'rspamd_attachments',
   urls_table = 'rspamd_urls',
+  emails_table = 'rspamd_emails',
   symbols_table = 'rspamd_symbols',
+  asn_table = 'rspamd_asn',
   ipmask = 19,
   ipmask6 = 48,
   full_urls = false,
@@ -63,7 +66,7 @@ local settings = {
 
 local clickhouse_schema = {
 rspamd = [[
-CREATE TABLE IF NOT EXISTS rspamd
+CREATE TABLE IF NOT EXISTS ${table}
 (
     Date Date,
     TS DateTime,
@@ -91,7 +94,7 @@ CREATE TABLE IF NOT EXISTS rspamd
 ]],
 
   attachments = [[
-CREATE TABLE IF NOT EXISTS rspamd_attachments (
+CREATE TABLE IF NOT EXISTS ${attachments_table} (
     Date Date,
     Digest FixedString(32),
     `Attachments.FileName` Array(String),
@@ -102,7 +105,7 @@ CREATE TABLE IF NOT EXISTS rspamd_attachments (
 ]],
 
   urls = [[
-CREATE TABLE IF NOT EXISTS rspamd_urls (
+CREATE TABLE IF NOT EXISTS ${urls_table} (
     Date Date,
     Digest FixedString(32),
     `Urls.Tld` Array(String),
@@ -110,8 +113,16 @@ CREATE TABLE IF NOT EXISTS rspamd_urls (
 ) ENGINE = MergeTree(Date, Digest, 8192)
 ]],
 
+  emails = [[
+CREATE TABLE IF NOT EXISTS ${emails_table} (
+    Date Date,
+    Digest FixedString(32),
+    Emails Array(String)
+) ENGINE = MergeTree(Date, Digest, 8192)
+]],
+
   asn = [[
-CREATE TABLE IF NOT EXISTS rspamd_asn (
+CREATE TABLE IF NOT EXISTS ${asn_table} (
     Date Date,
     Digest FixedString(32),
     ASN String,
@@ -121,7 +132,7 @@ CREATE TABLE IF NOT EXISTS rspamd_asn (
 ]],
 
   symbols = [[
-CREATE TABLE IF NOT EXISTS rspamd_symbols (
+CREATE TABLE IF NOT EXISTS ${symbols_table} (
     Date Date,
     Digest FixedString(32),
     `Symbols.Names` Array(String),
@@ -188,6 +199,17 @@ local function clickhouse_urls_row(tname)
   return elt
 end
 
+local function clickhouse_emails_row(tname)
+  local emails_fields = {
+    'Date',
+    'Digest',
+    'Emails',
+  }
+  local elt = string.format('INSERT INTO %s (%s) VALUES ',
+      tname, table.concat(emails_fields, ','))
+  return elt
+end
+
 local function clickhouse_symbols_row(tname)
   local symbols_fields = {
     'Date',
@@ -224,6 +246,10 @@ local function clickhouse_first_row()
     table.insert(urls_rows,
       clickhouse_urls_row(settings['urls_table']))
   end
+  if settings['emails_table'] then
+    table.insert(emails_rows,
+        clickhouse_emails_row(settings['emails_table']))
+  end
   if settings['asn_table'] then
     table.insert(asn_rows,
       clickhouse_asn_row(settings['asn_table']))
@@ -253,15 +279,18 @@ local function clickhouse_send_data(task)
   local upstream = settings.upstream:get_upstream_round_robin()
   local ip_addr = upstream:get_addr():to_string(true)
 
-  local function http_cb(err_message, code, _, _)
-    if code ~= 200 or err_message then
-      rspamd_logger.errx(task, "cannot send data to clickhouse server %s: %s",
-        ip_addr, err_message)
-      upstream:fail()
-    else
-      rspamd_logger.infox(task, "sent %s rows to clickhouse server %s",
-        settings['limit'], ip_addr)
-      upstream:ok()
+  local function gen_http_cb(what, how_many)
+    return function (err_message, code, data, _)
+      if code ~= 200 or err_message then
+        if not err_message then err_message = data end
+        rspamd_logger.errx(task, "cannot send %s data to clickhouse server %s: %s",
+            what, ip_addr, err_message)
+        upstream:fail()
+      else
+        rspamd_logger.infox(task, "sent %s rows of %s to clickhouse server %s",
+            how_many - 1, what, ip_addr)
+        upstream:ok()
+      end
     end
   end
 
@@ -270,7 +299,7 @@ local function clickhouse_send_data(task)
       task = task,
       url = connect_prefix .. ip_addr,
       body = body,
-      callback = http_cb,
+      callback = gen_http_cb('generic data', #rows),
       gzip = settings.use_gzip,
       mime_type = 'text/plain',
       timeout = settings['timeout'],
@@ -285,7 +314,7 @@ local function clickhouse_send_data(task)
       task = task,
       url = connect_prefix .. ip_addr,
       body = body,
-      callback = http_cb,
+      callback = gen_http_cb('attachments data', #attachment_rows),
       mime_type = 'text/plain',
       timeout = settings['timeout'],
     }) then
@@ -299,12 +328,26 @@ local function clickhouse_send_data(task)
       task = task,
       url = connect_prefix .. ip_addr,
       body = body,
-      callback = http_cb,
+      callback = gen_http_cb('urls data', #urls_rows),
       mime_type = 'text/plain',
       timeout = settings['timeout'],
     }) then
       rspamd_logger.errx(task, "cannot send urls to clickhouse server %s: cannot make request",
         settings['server'])
+    end
+  end
+  if #emails_rows > 1 then
+    body = table.concat(emails_rows, ' ')
+    if not rspamd_http.request({
+      task = task,
+      url = connect_prefix .. ip_addr,
+      body = body,
+      callback = gen_http_cb('emails data', #emails_rows),
+      mime_type = 'text/plain',
+      timeout = settings['timeout'],
+    }) then
+      rspamd_logger.errx(task, "cannot send emails to clickhouse server %s: cannot make request",
+          settings['server'])
     end
   end
   if #asn_rows > 1 then
@@ -313,7 +356,7 @@ local function clickhouse_send_data(task)
       task = task,
       url = connect_prefix .. ip_addr,
       body = body,
-      callback = http_cb,
+      callback = gen_http_cb('asn data', #asn_rows),
       mime_type = 'text/plain',
       timeout = settings['timeout'],
     }) then
@@ -328,7 +371,7 @@ local function clickhouse_send_data(task)
       task = task,
       url = connect_prefix .. ip_addr,
       body = body,
-      callback = http_cb,
+      callback = gen_http_cb('symbols data', #symbols_rows),
       mime_type = 'text/plain',
       timeout = settings['timeout'],
     }) then
@@ -344,7 +387,7 @@ local function clickhouse_send_data(task)
         task = task,
         url = connect_prefix .. ip_addr,
         body = body,
-        callback = http_cb,
+        callback = gen_http_cb('domain specific data ('..k..')', #specific),
         mime_type = 'text/plain',
         timeout = settings['timeout'],
       }) then
@@ -561,7 +604,7 @@ local function clickhouse_collect(task)
   local urls_tlds = {}
   local urls_urls = {}
   if task:has_urls(false) then
-    for _,u in ipairs(task:get_urls()) do
+    for _,u in ipairs(task:get_urls(false)) do
       table.insert(urls_tlds, string.format("'%s'", clickhouse_quote(u:get_tld())))
       if settings['full_urls'] then
         table.insert(urls_urls, string.format("'%s'",
@@ -579,6 +622,23 @@ local function clickhouse_collect(task)
       table.concat(urls_tlds, ','),
       table.concat(urls_urls, ','))
     table.insert(urls_rows, elt)
+  end
+
+  -- Emails step
+  local emails = {}
+  if task:has_urls(true) then
+    for _,u in ipairs(task:get_emails()) do
+      table.insert(emails, string.format("'%s'", clickhouse_quote(
+          string.format('%s@%s', u:get_user(), u:get_host())
+      )))
+    end
+  end
+
+  if #emails > 0 then
+    elt = string.format("(today(),'%s',[%s])",
+        task:get_digest(),
+        table.concat(emails, ','))
+    table.insert(emails_rows, elt)
   end
 
   -- ASN information
@@ -640,6 +700,7 @@ local function clickhouse_collect(task)
     rows = {}
     attachment_rows = {}
     urls_rows = {}
+    emails_rows = {}
     specific_rows = {}
     asn_rows = {}
     symbols_rows = {}
@@ -694,17 +755,18 @@ if opts then
           for _,up in ipairs(upstreams) do
             local ip_addr = up:get_addr():to_string(true)
 
-            local function http_cb(err_message, code, _, _)
-              if code ~= 200 or err_message then
-                rspamd_logger.errx(rspamd_config, "cannot create table in clickhouse server %s: %s",
-                    ip_addr, err_message)
-                up:fail()
-              else
-                up:ok()
-              end
-            end
-
             local function send_req(elt, sql)
+              local function http_cb(err_message, code, data, _)
+                if code ~= 200 or err_message then
+                  if not err_message then err_message = data end
+                  rspamd_logger.errx(rspamd_config, "cannot create table %s in clickhouse server %s: %s",
+                      elt, ip_addr, err_message)
+                  up:fail()
+                else
+                  up:ok()
+                end
+              end
+
               if not rspamd_http.request({
                 ev_base = ev_base,
                 config = cfg,
@@ -720,7 +782,7 @@ if opts then
             end
 
             for tab,sql in pairs(clickhouse_schema) do
-              send_req(tab, sql)
+              send_req(tab, rspamd_lua_utils.template(sql, settings))
             end
           end
         end
