@@ -24,7 +24,9 @@ enum rspamd_url_flags {
 	RSPAMD_URL_FLAG_MISSINGSLASHES = 1 << 11,
 	RSPAMD_URL_FLAG_IDN = 1 << 12,
 	RSPAMD_URL_FLAG_HAS_PORT = 1 << 13,
-	RSPAMD_URL_FLAG_HAS_USER = 1 << 12,
+	RSPAMD_URL_FLAG_HAS_USER = 1 << 14,
+	RSPAMD_URL_FLAG_SCHEMALESS = 1 << 15,
+	RSPAMD_URL_FLAG_UNNORMALISED = 1 << 16,
 };
 
 struct rspamd_url_tag {
@@ -124,7 +126,8 @@ enum uri_errno rspamd_url_parse (struct rspamd_url *uri,
  * @return TRUE if url is found in specified text
  */
 gboolean rspamd_url_find (rspamd_mempool_t *pool, const gchar *begin, gsize len,
-		gchar **url_str, gboolean is_html, goffset *url_pos);
+		gchar **url_str, gboolean is_html, goffset *url_pos,
+		gboolean *prefix_added);
 /*
  * Return text representation of url parsing error
  */

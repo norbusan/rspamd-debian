@@ -139,11 +139,6 @@ rspamd_milter_session_reset (struct rspamd_milter_session *session,
 			session->helo->len = 0;
 		}
 
-		if (session->hostname) {
-			msg_debug_milter ("cleanup hostname");
-			session->hostname->len = 0;
-		}
-
 		if (priv->headers) {
 			msg_debug_milter ("cleanup headers");
 			g_hash_table_remove_all (priv->headers);
@@ -155,6 +150,10 @@ rspamd_milter_session_reset (struct rspamd_milter_session *session,
 			msg_debug_milter ("cleanup addr");
 			rspamd_inet_address_free (session->addr);
 			session->addr = NULL;
+		}
+		if (session->hostname) {
+			msg_debug_milter ("cleanup hostname");
+			session->hostname->len = 0;
 		}
 	}
 
@@ -331,10 +330,14 @@ rspamd_milter_process_command (struct rspamd_milter_session *session,
 			 */
 			if (session->hostname == NULL) {
 				session->hostname = rspamd_fstring_new_init (pos, zero - pos);
+				msg_debug_milter ("got hostname on connect phase: %V",
+						session->hostname);
 			}
 			else {
 				session->hostname = rspamd_fstring_assign (session->hostname,
 						pos, zero - pos);
+				msg_debug_milter ("rewrote hostname on connect phase: %V",
+						session->hostname);
 			}
 
 			pos = zero + 1;
@@ -481,11 +484,6 @@ rspamd_milter_process_command (struct rspamd_milter_session *session,
 					g_hash_table_replace (session->macros, name_tok, value_tok);
 					msg_debug_milter ("got macro: %T -> %T",
 							name_tok, value_tok);
-
-					if (rspamd_ftok_cstr_equal (name_tok, "{mail_host}", FALSE)) {
-						session->hostname = rspamd_fstring_assign (session->hostname,
-								value_tok->begin, value_tok->len);
-					}
 
 					cmdlen -= zero_val - pos;
 					pos = zero_val + 1;
@@ -1377,8 +1375,15 @@ rspamd_milter_macro_http (struct rspamd_milter_session *session,
 
 	if (!session->hostname || session->hostname->len == 0) {
 		IF_MACRO("{client_name}") {
-			rspamd_http_message_add_header_len (msg, HOSTNAME_HEADER,
-					found->begin, found->len);
+			if (!(found->len == sizeof ("unknown") - 1 &&
+					memcmp (found->begin, "unknown",
+							sizeof ("unknown") - 1) == 0)) {
+				rspamd_http_message_add_header_len (msg, HOSTNAME_HEADER,
+						found->begin, found->len);
+			}
+			else {
+				msg_debug_milter ("skip unknown hostname from being added");
+			}
 		}
 	}
 
@@ -1408,6 +1413,7 @@ rspamd_milter_to_http (struct rspamd_milter_session *session)
 	struct rspamd_http_message *msg;
 	guint i;
 	struct rspamd_email_address *rcpt;
+	struct rspamd_milter_private *priv = session->priv;
 
 	g_assert (session != NULL);
 
@@ -1421,9 +1427,16 @@ rspamd_milter_to_http (struct rspamd_milter_session *session)
 		session->message = NULL;
 	}
 
-	if (session->hostname && session->hostname->len > 0) {
-		rspamd_http_message_add_header_fstr (msg, HOSTNAME_HEADER,
-				session->hostname);
+	if (session->hostname && RSPAMD_FSTRING_LEN (session->hostname) > 0) {
+		if (!(session->hostname->len == sizeof ("unknown") - 1 &&
+				memcmp (RSPAMD_FSTRING_DATA (session->hostname), "unknown",
+						sizeof ("unknown") - 1) == 0)) {
+			rspamd_http_message_add_header_fstr (msg, HOSTNAME_HEADER,
+					session->hostname);
+		}
+		else {
+			msg_debug_milter ("skip unknown hostname from being added");
+		}
 	}
 
 	if (session->helo && session->helo->len > 0) {
@@ -1787,8 +1800,15 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 					sizeof (RSPAMD_MILTER_XCODE_REJECT) - 1);
 
 			if (!reply) {
-				reply = rspamd_fstring_new_init (RSPAMD_MILTER_REJECT_MESSAGE,
-						sizeof (RSPAMD_MILTER_REJECT_MESSAGE) - 1);
+				if (milter_ctx->reject_message == NULL) {
+					reply = rspamd_fstring_new_init (
+							RSPAMD_MILTER_REJECT_MESSAGE,
+							sizeof (RSPAMD_MILTER_REJECT_MESSAGE) - 1);
+				}
+				else {
+					reply = rspamd_fstring_new_init (milter_ctx->reject_message,
+							strlen (milter_ctx->reject_message));
+				}
 			}
 
 			rspamd_milter_set_reply (session, rcode, xcode, reply);

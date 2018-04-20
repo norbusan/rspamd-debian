@@ -393,7 +393,11 @@ rspamd_config.URL_IN_SUBJECT = {
 
     if urls then
       for _,u in ipairs(urls) do
-        if u:is_subject() then
+        local flags = u:get_flags()
+        if flags.subject then
+          if flags.schemaless then
+            return true,0.1,u:get_host()
+          end
           local subject = task:get_subject()
 
           if subject then
@@ -487,7 +491,7 @@ local check_from_display_name = rspamd_config:register_symbol{
     local from = task:get_from(2)
     if not (from and from[1] and from[1].name) then return false end
     -- See if we can parse an email address from the name
-    local parsed = util.parse_mail_address(from[1].name)
+    local parsed = util.parse_mail_address(from[1].name, task:get_mempool())
     if not parsed then return false end
     if not (parsed[1] and parsed[1]['addr']) then return false end
     -- Make sure we did not mistake e.g. <something>@<name> for an email address
@@ -567,7 +571,7 @@ rspamd_config.SPOOF_REPLYTO = {
     end
     if not found_fromdom then return false end
     -- Parse Reply-To header
-    local parsed = ((util.parse_mail_address(rt) or E)[1] or E).domain
+    local parsed = ((util.parse_mail_address(rt, task:get_mempool()) or E)[1] or E).domain
     if not parsed then return false end
     -- Reply-To domain must be different to From domain
     if not util.strequal_caseless(parsed, from[1].domain) then

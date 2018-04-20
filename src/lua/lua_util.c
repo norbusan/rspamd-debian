@@ -135,11 +135,13 @@ LUA_FUNCTION_DEF (util, levenshtein_distance);
 LUA_FUNCTION_DEF (util, parse_addr);
 
 /***
- * @function util.fold_header(name, value)
+ * @function util.fold_header(name, value, [how, [stop_chars]])
  * Fold rfc822 header according to the folding rules
  *
  * @param {string} name name of the header
  * @param {string} value value of the header
+ * @param {string} how "cr" for \r, "lf" for \n and "crlf" for \r\n (default)
+ * @param {string} stop_chars also fold header when the
  * @return {string} Folded value of the header
  */
 LUA_FUNCTION_DEF (util, fold_header);
@@ -181,7 +183,7 @@ LUA_FUNCTION_DEF (util, get_tld);
 LUA_FUNCTION_DEF (util, glob);
 
 /***
- * @function util.parse_mail_address(str)
+ * @function util.parse_mail_address(str, pool)
  * Parses email address and returns a table of tables in the following format:
  *
  * - `name` - name of internet address in UTF8, e.g. for `Vsevolod Stakhov <blah@foo.com>` it returns `Vsevolod Stakhov`
@@ -190,6 +192,7 @@ LUA_FUNCTION_DEF (util, glob);
  * - `domain` - domain part (if present), e.g. `foo.com`
  *
  * @param {string} str input string
+ * @param {rspamd_mempool} pool memory pool to use
  * @return {table/tables} parsed list of mail addresses
  */
 LUA_FUNCTION_DEF (util, parse_mail_address);
@@ -1005,6 +1008,7 @@ lua_util_tokenize_text (lua_State *L)
 					ex = g_malloc0 (sizeof (*ex));
 					ex->pos = pos;
 					ex->len = ex_len;
+					ex->type = RSPAMD_EXCEPTION_URL;
 					exceptions = g_list_prepend (exceptions, ex);
 				}
 			}
@@ -1178,7 +1182,7 @@ lua_util_parse_addr (lua_State *L)
 static gint
 lua_util_fold_header (lua_State *L)
 {
-	const gchar *name, *value, *how;
+	const gchar *name, *value, *how, *stop_chars = NULL;
 	GString *folded;
 
 	name = luaL_checkstring (L, 1);
@@ -1187,24 +1191,29 @@ lua_util_fold_header (lua_State *L)
 	if (name && value) {
 
 		if (lua_isstring (L, 3)) {
+
 			how = lua_tostring (L, 3);
+
+			if (lua_isstring (L, 4)) {
+				stop_chars = lua_tostring (L, 4);
+			}
 
 			if (strcmp (how, "cr") == 0) {
 				folded = rspamd_header_value_fold (name, value, 0,
-						RSPAMD_TASK_NEWLINES_CR);
+						RSPAMD_TASK_NEWLINES_CR, stop_chars);
 			}
 			else if (strcmp (how, "lf") == 0) {
 				folded = rspamd_header_value_fold (name, value, 0,
-						RSPAMD_TASK_NEWLINES_LF);
+						RSPAMD_TASK_NEWLINES_LF, stop_chars);
 			}
 			else {
 				folded = rspamd_header_value_fold (name, value, 0,
-						RSPAMD_TASK_NEWLINES_CRLF);
+						RSPAMD_TASK_NEWLINES_CRLF, stop_chars);
 			}
 		}
 		else {
 			folded = rspamd_header_value_fold (name, value, 0,
-					RSPAMD_TASK_NEWLINES_CRLF);
+					RSPAMD_TASK_NEWLINES_CRLF, stop_chars);
 		}
 
 		if (folded) {

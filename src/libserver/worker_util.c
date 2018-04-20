@@ -629,9 +629,21 @@ rspamd_fork_worker (struct rspamd_main *rspamd_main,
 		setrlimit (RLIMIT_STACK, &rlim);
 
 		setproctitle ("%s process", cf->worker->name);
-		rspamd_pidfile_close (rspamd_main->pfh);
+
+		if (rspamd_main->pfh) {
+			rspamd_pidfile_close (rspamd_main->pfh);
+		}
+
 		/* Do silent log reopen to avoid collisions */
 		rspamd_log_close (rspamd_main->logger);
+
+
+		if (rspamd_main->cfg->log_silent_workers) {
+			rspamd_main->cfg->log_level = G_LOG_LEVEL_MESSAGE;
+			rspamd_set_logger (rspamd_main->cfg, cf->type,
+					&rspamd_main->logger, rspamd_main->server_pool);
+		}
+
 		rspamd_log_open (rspamd_main->logger);
 		wrk->start_time = rspamd_get_calendar_ticks ();
 
@@ -658,7 +670,11 @@ rspamd_fork_worker (struct rspamd_main *rspamd_main,
 		break;
 	case -1:
 		msg_err_main ("cannot fork main process. %s", strerror (errno));
-		rspamd_pidfile_remove (rspamd_main->pfh);
+
+		if (rspamd_main->pfh) {
+			rspamd_pidfile_remove (rspamd_main->pfh);
+		}
+
 		rspamd_hard_terminate (rspamd_main);
 		break;
 	default:
