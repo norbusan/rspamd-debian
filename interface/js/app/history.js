@@ -116,6 +116,18 @@ function($, _, Humanize) {
     function process_history_v2(data) {
         var items = [];
 
+        function getSelector(id) {
+            var e = document.getElementById(id);
+            return e.options[e.selectedIndex].value;
+        }
+        var compare = (getSelector("selSymOrder") === "score")
+            ? function (e1, e2) {
+                return Math.abs(e1.score) < Math.abs(e2.score);
+            }
+            : function (e1, e2) {
+                return e1.name.localeCompare(e2.name);
+            };
+
         $.each(data.rows,
           function (i, item) {
 
@@ -141,9 +153,7 @@ function($, _, Humanize) {
                 map(function(key) {
                     return item.symbols[key];
                 }).
-                sort(function(e1, e2) {
-                    return Math.abs(e1.score) < Math.abs(e2.score);
-                }).
+                sort(compare).
                 map(function(e) { return e.str; }).
                 join("<br>\n");
             item.time = {
@@ -428,7 +438,7 @@ function($, _, Humanize) {
         construct : function(instance) {
             this._super(instance);
             this.actions = [ 'reject', 'add header', 'greylist',
-                    'no action', 'soft reject' ];
+                    'no action', 'soft reject', 'rewrite subject' ];
             this.def = 'Any action';
             this.$action = null;
         },
@@ -482,6 +492,17 @@ function($, _, Humanize) {
         }
         });
 
+        var drawTooltips = function() {
+            // Update symbol description tooltips
+            $.each(symbolDescriptions, function (key, description) {
+                $('abbr[data-sym-key=' + key + ']').tooltip({
+                    "placement": "bottom",
+                    "html": true,
+                    "title": description
+                });
+            });
+        }
+
         if (checked_server === "All SERVERS") {
             rspamd.queryNeighbours("history", function (req_data) {
                 function differentVersions() {
@@ -533,16 +554,10 @@ function($, _, Humanize) {
                             "filtering": FooTable.actionFilter
                         },
                         "on": {
-	                        "ready.ft.table": function () {
-		                        // Update symbol description tooltips
-		                        $.each(symbolDescriptions, function (key, description) {
-			                        $('abbr[data-sym-key=' + key + ']').tooltip({
-				                        "placement": "bottom",
-				                        "html": true,
-				                        "title": description
-			                        });
-		                        });
-	                        }
+	                    "ready.ft.table": drawTooltips,
+	                    "after.ft.sorting": drawTooltips,
+	                    "after.ft.paging": drawTooltips,
+	                    "after.ft.filtering": drawTooltips
                         }
                     });
                 } else {
@@ -582,8 +597,14 @@ function($, _, Humanize) {
                         "sorting": {
                             "enabled": true
                         },
-                        components: {
-                            filtering: FooTable.actionFilter
+                        "components": {
+                            "filtering": FooTable.actionFilter
+                        },
+                        "on": {
+	                    "ready.ft.table": drawTooltips,
+	                    "after.ft.sorting": drawTooltips,
+	                    "after.ft.paging": drawTooltips,
+	                    "after.ft.filtering": drawTooltips
                         }
                     });
                 }
@@ -592,6 +613,9 @@ function($, _, Humanize) {
         $('#updateHistory').off('click');
         $('#updateHistory').on('click', function (e) {
             e.preventDefault();
+            interface.getHistory(rspamd, tables, neighbours, checked_server);
+        });
+        $("#selSymOrder").unbind().change(function() {
             interface.getHistory(rspamd, tables, neighbours, checked_server);
         });
 

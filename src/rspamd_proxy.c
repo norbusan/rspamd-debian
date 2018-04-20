@@ -150,6 +150,8 @@ struct rspamd_proxy_ctx {
 	gchar *spam_header;
 	/* CA name that can be used for client certificates */
 	gchar *client_ca_name;
+	/* Milter rejection message */
+	gchar *reject_message;
 	/* Sessions cache */
 	void *sessions_cache;
 	struct rspamd_milter_context milter_ctx;
@@ -848,6 +850,14 @@ init_rspamd_proxy (struct rspamd_config *cfg)
 			G_STRUCT_OFFSET (struct rspamd_proxy_ctx, client_ca_name),
 			0,
 			"Allow certificates issued by this CA to be treated as client certificates");
+	rspamd_rcl_register_worker_option (cfg,
+			type,
+			"reject_message",
+			rspamd_rcl_parse_struct_string,
+			ctx,
+			G_STRUCT_OFFSET (struct rspamd_proxy_ctx, reject_message),
+			0,
+			"Use custom rejection message");
 
 	return ctx;
 }
@@ -1219,7 +1229,8 @@ proxy_check_file (struct rspamd_http_message *msg,
 	}
 	else {
 		/* Need to parse query URL */
-		if (http_parser_parse_url (msg->url->str, msg->url->len, 0, &u) != 0) {
+		if (http_parser_parse_url (RSPAMD_FSTRING_DATA (msg->url),
+				RSPAMD_FSTRING_LEN (msg->url), 0, &u) != 0) {
 			msg_err_session ("bad request url: %V", msg->url);
 
 			return FALSE;
@@ -1248,7 +1259,7 @@ proxy_check_file (struct rspamd_http_message *msg,
 				}
 
 				/* We need to create a new URL with file attribute removed */
-				new_url = rspamd_fstring_new_init (msg->url->str,
+				new_url = rspamd_fstring_new_init (RSPAMD_FSTRING_DATA (msg->url),
 						u.field_data[UF_QUERY].off);
 				new_url = rspamd_fstring_append (new_url, "?", 1);
 
@@ -2179,6 +2190,7 @@ start_rspamd_proxy (struct rspamd_worker *worker) {
 	ctx->milter_ctx.quarantine_on_reject = ctx->quarantine_on_reject;
 	ctx->milter_ctx.sessions_cache = ctx->sessions_cache;
 	ctx->milter_ctx.client_ca_name = ctx->client_ca_name;
+	ctx->milter_ctx.reject_message = ctx->reject_message;
 	rspamd_milter_init_library (&ctx->milter_ctx);
 
 	rspamd_lua_run_postloads (ctx->cfg->lua_state, ctx->cfg, ctx->ev_base,

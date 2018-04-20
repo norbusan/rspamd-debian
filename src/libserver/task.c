@@ -245,7 +245,7 @@ rspamd_task_free (struct rspamd_task *task)
 				g_array_free (tp->ucs32_words, TRUE);
 			}
 			if (tp->languages) {
-				g_ptr_array_free (tp->languages, TRUE);
+				g_ptr_array_unref (tp->languages);
 			}
 		}
 
@@ -1467,7 +1467,7 @@ rspamd_task_write_log (struct rspamd_task *task)
 		}
 	}
 
-	msg_info_task ("%V", logbuf);
+	msg_notice_task ("%V", logbuf);
 
 	rspamd_fstring_free (logbuf);
 }

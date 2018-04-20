@@ -69,8 +69,21 @@ BASE64_DECLARE(sse42);
 # endif
 #endif
 
+#ifdef RSPAMD_HAS_TARGET_ATTR
+# if defined(HAVE_AVX2)
+int base64_decode_avx2 (const char *in, size_t inlen,
+		unsigned char *out, size_t *outlen) __attribute__((__target__("avx2")));
+
+BASE64_DECLARE(avx2);
+#  define BASE64_AVX2 BASE64_IMPL(CPUID_AVX2, "avx2", avx2)
+# endif
+#endif
+
 static const base64_impl_t base64_list[] = {
 		BASE64_REF,
+#ifdef BASE64_AVX2
+		BASE64_AVX2,
+#endif
 #ifdef BASE64_SSE42
 		BASE64_SSE42,
 #endif

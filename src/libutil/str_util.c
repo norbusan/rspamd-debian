@@ -18,7 +18,13 @@
 #include "cryptobox.h"
 #include "url.h"
 #include "str_util.h"
+#include "logger.h"
 #include "contrib/t1ha/t1ha.h"
+#include <unicode/uversion.h>
+#include <unicode/ucnv.h>
+#if U_ICU_VERSION_MAJOR_NUM >= 44
+#include <unicode/unorm2.h>
+#endif
 #include <math.h>
 
 const guchar lc_map[256] = {
@@ -912,12 +918,15 @@ GString *
 rspamd_header_value_fold (const gchar *name,
 		const gchar *value,
 		guint fold_max,
-		enum rspamd_newlines_type how)
+		enum rspamd_newlines_type how,
+		const gchar *fold_on_chars)
 {
 	GString *res;
 	const guint default_fold_max = 76;
 	guint cur_len;
 	const gchar *p, *c;
+	guint nspaces = 0;
+	const gchar *last;
 	gboolean first_token = TRUE;
 	enum {
 		fold_before = 0,
@@ -947,83 +956,98 @@ rspamd_header_value_fold (const gchar *name,
 
 	while (*p) {
 		switch (state) {
+
 		case read_token:
-			if (*p == ',' || *p == ';') {
-				/* We have something similar to the token's end, so check len */
-				if (cur_len > fold_max * 0.8 && cur_len < fold_max) {
-					/* We want fold */
+			if (fold_on_chars) {
+				if (strchr (fold_on_chars, *p) != NULL) {
 					fold_type = fold_after;
 					state = fold_token;
 					next_state = read_token;
 				}
-				else if (cur_len > fold_max && !first_token) {
-					fold_type = fold_before;
-					state = fold_token;
-					next_state = read_token;
-				}
-				else {
-					g_string_append_len (res, c, p - c + 1);
-					c = p + 1;
-					first_token = FALSE;
-				}
+
 				p ++;
-			}
-			else if (*p == '"') {
-				/* Fold before quoted tokens */
-				g_string_append_len (res, c, p - c);
-				c = p;
-				state = read_quoted;
-			}
-			else if (*p == '\r' || *p == '\n') {
-				if (cur_len > fold_max && !first_token) {
-					fold_type = fold_before;
-					state = fold_token;
-					next_state = read_token;
-				}
-				else {
-					/* Reset line length */
-					cur_len = 0;
-
-					while (g_ascii_isspace (*p)) {
-						p ++;
-					}
-
-					g_string_append_len (res, c, p - c);
-					c = p;
-					first_token = TRUE;
-				}
-			}
-			else if (g_ascii_isspace (*p)) {
-				if (cur_len > fold_max * 0.8 && cur_len < fold_max) {
-					/* We want fold */
-					fold_type = fold_after;
-					state = fold_token;
-					next_state = read_token;
-				}
-				else if (cur_len > fold_max && !first_token) {
-					fold_type = fold_before;
-					state = fold_token;
-					next_state = read_token;
-				}
-				else {
-					g_string_append_len (res, c, p - c);
-					c = p;
-					first_token = FALSE;
-					p ++;
-					cur_len ++;
-				}
 			}
 			else {
-				p ++;
-				cur_len ++;
+				if (*p == ',' || *p == ';') {
+					/* We have something similar to the token's end, so check len */
+					if (cur_len > fold_max * 0.8 && cur_len < fold_max) {
+						/* We want fold */
+						fold_type = fold_after;
+						state = fold_token;
+						next_state = read_token;
+					} else if (cur_len > fold_max && !first_token) {
+						fold_type = fold_before;
+						state = fold_token;
+						next_state = read_token;
+					} else {
+						g_string_append_len (res, c, p - c + 1);
+						c = p + 1;
+						first_token = FALSE;
+					}
+					p++;
+				} else if (*p == '"') {
+					/* Fold before quoted tokens */
+					g_string_append_len (res, c, p - c);
+					c = p;
+					state = read_quoted;
+				} else if (*p == '\r' || *p == '\n') {
+					if (cur_len > fold_max && !first_token) {
+						fold_type = fold_before;
+						state = fold_token;
+						next_state = read_token;
+					} else {
+						/* Reset line length */
+						cur_len = 0;
+
+						while (g_ascii_isspace (*p)) {
+							p++;
+						}
+
+						g_string_append_len (res, c, p - c);
+						c = p;
+						first_token = TRUE;
+					}
+				} else if (g_ascii_isspace (*p)) {
+					if (cur_len > fold_max * 0.8 && cur_len < fold_max) {
+						/* We want fold */
+						fold_type = fold_after;
+						state = fold_token;
+						next_state = read_token;
+					} else if (cur_len > fold_max && !first_token) {
+						fold_type = fold_before;
+						state = fold_token;
+						next_state = read_token;
+					} else {
+						g_string_append_len (res, c, p - c);
+						c = p;
+						first_token = FALSE;
+						p++;
+						cur_len++;
+					}
+				} else {
+					p++;
+					cur_len++;
+				}
 			}
 			break;
 		case fold_token:
 			/* Here, we have token start at 'c' and token end at 'p' */
 			if (fold_type == fold_after) {
-
+				nspaces = 0;
 				if (p > c) {
 					g_string_append_len (res, c, p - c);
+
+					/*
+					 * Check any spaces that are appended to the result
+					 * before folding
+					 */
+					last = &res->str[res->len - 1];
+
+					while (g_ascii_isspace (*last)) {
+						last --;
+						nspaces ++;
+						res->len --;
+					}
 				}
 
 				switch (how) {
@@ -1044,30 +1068,59 @@ rspamd_header_value_fold (const gchar *name,
 					p ++;
 				}
 
+				/* Move leftover spaces */
+				while (nspaces) {
+					g_string_append_c (res, ' ');
+					nspaces --;
+				}
+
 				cur_len = 0;
 			}
 			else {
+				const gchar *last;
+
 				/* Skip space if needed */
 				if (g_ascii_isspace (*c) && p > c) {
 					c ++;
 				}
 
-				switch (how) {
-				case RSPAMD_TASK_NEWLINES_LF:
-					g_string_append_len (res, "\n\t", 2);
-					break;
-				case RSPAMD_TASK_NEWLINES_CR:
-					g_string_append_len (res, "\r\t", 2);
-					break;
-				case RSPAMD_TASK_NEWLINES_CRLF:
-				default:
-					g_string_append_len (res, "\r\n\t", 3);
-					break;
+				/* Avoid double folding */
+				last = &res->str[res->len - 1];
+				last --;
+
+				if (*last != '\r' && *last != '\n') {
+					last ++;
+					while (g_ascii_isspace (*last)) {
+						last --;
+						nspaces ++;
+						res->len --;
+					}
+
+					switch (how) {
+					case RSPAMD_TASK_NEWLINES_LF:
+						g_string_append_len (res, "\n\t", 2);
+						break;
+					case RSPAMD_TASK_NEWLINES_CR:
+						g_string_append_len (res, "\r\t", 2);
+						break;
+					case RSPAMD_TASK_NEWLINES_CRLF:
+					default:
+						g_string_append_len (res, "\r\n\t", 3);
+						break;
+					}
+				}
+
+				/* Move leftover spaces */
+				cur_len = nspaces;
+
+				while (nspaces) {
+					g_string_append_c (res, ' ');
+					nspaces --;
 				}
 
 				if (p > c) {
 					g_string_append_len (res, c, p - c);
-					cur_len = p - c;
+					cur_len += p - c;
 				}
 				else {
 					cur_len = 0;
@@ -1102,7 +1155,7 @@ rspamd_header_value_fold (const gchar *name,
 	/* Last token */
 	switch (state) {
 	case read_token:
-		if (cur_len > fold_max && !first_token) {
+		if (!fold_on_chars && cur_len > fold_max && !first_token) {
 			if (g_ascii_isspace (*c)) {
 				c ++;
 			}
@@ -1137,10 +1190,8 @@ rspamd_header_value_fold (const gchar *name,
 	return res;
 }
 
-static inline bool rspamd_substring_cmp_func (guchar a, guchar b) RSPAMD_ALWAYS_INLINE;
 static inline bool rspamd_substring_cmp_func (guchar a, guchar b) { return a == b; }
 
-static inline bool rspamd_substring_casecmp_func (guchar a, guchar b) RSPAMD_ALWAYS_INLINE;
 static inline bool rspamd_substring_casecmp_func (guchar a, guchar b) { return lc_map[a] == lc_map[b]; }
 
 typedef bool (*rspamd_cmpchar_func_t) (guchar a, guchar b);
@@ -1957,4 +2008,88 @@ rspamd_memrchr (const void *m, gint c, gsize len)
 	}
 
 	return NULL;
+}
+
+gboolean
+rspamd_normalise_unicode_inplace (rspamd_mempool_t *pool, gchar *start,
+		guint *len)
+{
+#if U_ICU_VERSION_MAJOR_NUM >= 44
+	UErrorCode uc_err = U_ZERO_ERROR;
+	static UConverter *utf8_conv = NULL;
+	static const UNormalizer2 *norm = NULL;
+	gint32 nsym, end;
+	UChar *src = NULL, *dest = NULL;
+	gboolean ret = FALSE;
+
+	if (utf8_conv == NULL) {
+		utf8_conv = ucnv_open ("UTF-8", &uc_err);
+		g_assert (U_SUCCESS (uc_err));
+		norm = unorm2_getInstance (NULL, "nfkc", UNORM2_COMPOSE, &uc_err);
+		g_assert (U_SUCCESS (uc_err));
+	}
+
+	/* We first need to convert data to UChars :( */
+	src = g_malloc ((*len + 1) * sizeof (*src));
+	nsym = ucnv_toUChars (utf8_conv, src, *len + 1,
+			start, *len, &uc_err);
+
+	if (!U_SUCCESS (uc_err)) {
+		msg_warn_pool_check ("cannot normalise URL, cannot convert to unicode: %s",
+				u_errorName (uc_err));
+		goto out;
+	}
+
+	/* We can now check if we need to decompose */
+	end = unorm2_spanQuickCheckYes (norm, src, nsym, &uc_err);
+
+	if (!U_SUCCESS (uc_err)) {
+		msg_warn_pool_check ("cannot normalise URL, cannot check normalisation: %s",
+				u_errorName (uc_err));
+		goto out;
+	}
+
+	if (end == nsym) {
+		/* No normalisation needed */
+		goto out;
+	}
+
+	/* We copy sub(src, 0, end) to dest and normalise the rest */
+	ret = TRUE;
+	dest = g_malloc (nsym * sizeof (*dest));
+	memcpy (dest, src, end * sizeof (*dest));
+	nsym = unorm2_normalizeSecondAndAppend (norm, dest, end, nsym,
+			src + end, nsym - end, &uc_err);
+
+	if (!U_SUCCESS (uc_err)) {
+		msg_warn_pool_check ("cannot normalise URL: %s",
+				u_errorName (uc_err));
+		goto out;
+	}
+
+	/* We now convert it back to utf */
+	nsym = ucnv_fromUChars (utf8_conv, start, *len, dest, nsym, &uc_err);
+
+	if (!U_SUCCESS (uc_err)) {
+		msg_warn_pool_check ("cannot normalise URL, cannot convert to UTF8: %s",
+				u_errorName (uc_err));
+		goto out;
+	}
+
+	*len = nsym;
+	out:
+
+	if (src) {
+		g_free (src);
+	}
+
+	if (dest) {
+		g_free (dest);
+	}
+
+	return ret;
+#else
+	/* Kill that with fire please */
+	return FALSE;
+#endif
 }

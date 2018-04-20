@@ -22,6 +22,7 @@
 #include "html_colors.h"
 #include "url.h"
 #include <unicode/uversion.h>
+#include <unicode/ucnv.h>
 #if U_ICU_VERSION_MAJOR_NUM >= 46
 #include <unicode/uidna.h>
 #endif
@@ -847,7 +848,7 @@ rspamd_html_url_is_phished (rspamd_mempool_t *pool,
 
 	if (end > url_text + 4 &&
 			rspamd_url_find (pool, url_text, end - url_text, &url_str, FALSE,
-					&url_pos) &&
+					&url_pos, NULL) &&
 			url_str != NULL) {
 		if (url_pos > 0) {
 			/*
@@ -1469,6 +1470,8 @@ rspamd_html_parse_tag_content (rspamd_mempool_t *pool,
 	*statep = state;
 }
 
+
+
 struct rspamd_url *
 rspamd_html_process_url (rspamd_mempool_t *pool, const gchar *start, guint len,
 		struct html_tag_component *comp)
@@ -1554,13 +1557,23 @@ rspamd_html_process_url (rspamd_mempool_t *pool, const gchar *start, guint len,
 	}
 
 	*d = '\0';
+	dlen = d - decoded;
 
 	url = rspamd_mempool_alloc0 (pool, sizeof (*url));
-	rc = rspamd_url_parse (url, decoded, d - decoded, pool);
+
+	if (rspamd_normalise_unicode_inplace (pool, decoded, &dlen)) {
+		url->flags |= RSPAMD_URL_FLAG_UNNORMALISED;
+	}
+
+	rc = rspamd_url_parse (url, decoded, dlen, pool);
 
 	if (rc == URI_ERRNO_OK) {
 		if (has_bad_chars) {
 			url->flags |= RSPAMD_URL_FLAG_OBSCURED;
+		}
+
+		if (no_prefix) {
+			url->flags |= RSPAMD_URL_FLAG_SCHEMALESS;
 		}
 
 		decoded = url->string;
@@ -1620,11 +1633,16 @@ rspamd_process_html_url (rspamd_mempool_t *pool, struct rspamd_url *url,
 	struct rspamd_url *query_url, *existing;
 	gchar *url_str;
 	gint rc;
+	gboolean prefix_added;
+
+	if (url->flags & RSPAMD_URL_FLAG_UNNORMALISED) {
+		url->flags |= RSPAMD_URL_FLAG_OBSCURED;
+	}
 
 	if (url->querylen > 0) {
 
 		if (rspamd_url_find (pool, url->query, url->querylen, &url_str, TRUE,
-				NULL)) {
+				NULL, &prefix_added)) {
 			query_url = rspamd_mempool_alloc0 (pool,
 					sizeof (struct rspamd_url));
 
@@ -1643,6 +1661,22 @@ rspamd_process_html_url (rspamd_mempool_t *pool, struct rspamd_url *url,
 				}
 				else {
 					target_tbl = tbl_urls;
+				}
+
+				if (prefix_added) {
+					query_url->flags |= RSPAMD_URL_FLAG_SCHEMALESS;
+				}
+
+				if (query_url->flags
+						& (RSPAMD_URL_FLAG_UNNORMALISED|RSPAMD_URL_FLAG_OBSCURED|
+							RSPAMD_URL_FLAG_NUMERIC)) {
+					/* Set obscured flag if query url is bad */
+					url->flags |= RSPAMD_URL_FLAG_OBSCURED;
+				}
+
+				/* And vice-versa */
+				if (url->flags & RSPAMD_URL_FLAG_OBSCURED) {
+					query_url->flags |= RSPAMD_URL_FLAG_OBSCURED;
 				}
 
 				if ((existing = g_hash_table_lookup (target_tbl,

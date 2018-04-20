@@ -54,7 +54,8 @@ enum rspamd_dkim_param_type {
 	DKIM_PARAM_BODYHASH,
 	DKIM_PARAM_BODYLENGTH,
 	DKIM_PARAM_IDX,
-	DKIM_PARAM_CV
+	DKIM_PARAM_CV,
+	DKIM_PARAM_IGNORE
 };
 
 /* Signature methods */
@@ -93,6 +94,16 @@ enum rspamd_dkim_key_type {
 
 INIT_LOG_MODULE(dkim)
 
+#define RSPAMD_DKIM_FLAG_OVERSIGN (1u << 0)
+
+union rspamd_dkim_header_stat {
+	struct _st {
+		guint16 count;
+		guint16 flags;
+	} s;
+	guint32 n;
+};
+
 struct rspamd_dkim_common_ctx {
 	rspamd_mempool_t *pool;
 	guint64 sig_hash;
@@ -100,6 +111,7 @@ struct rspamd_dkim_common_ctx {
 	gint header_canon_type;
 	gint body_canon_type;
 	GPtrArray *hlist;
+	GHashTable *htable; /* header -> count mapping */
 	EVP_MD_CTX *headers_hash;
 	EVP_MD_CTX *body_hash;
 	enum rspamd_dkim_type type;
@@ -248,6 +260,7 @@ static const dkim_parse_param_f parser_funcs[] = {
 	[DKIM_PARAM_BODYLENGTH] = rspamd_dkim_parse_bodylength,
 	[DKIM_PARAM_IDX] = rspamd_dkim_parse_idx,
 	[DKIM_PARAM_CV] = rspamd_dkim_parse_cv,
+	[DKIM_PARAM_IGNORE] = rspamd_dkim_parse_ignore,
 };
 
 #define DKIM_ERROR dkim_error_quark ()
@@ -416,15 +429,16 @@ static gboolean
 rspamd_dkim_parse_hdrlist_common (struct rspamd_dkim_common_ctx *ctx,
 	const gchar *param,
 	gsize len,
+	gboolean sign,
 	GError **err)
 {
 	const gchar *c, *p, *end = param + len;
 	gchar *h;
-	gboolean from_found = FALSE;
+	gboolean from_found = FALSE, oversign;
 	guint count = 0;
 	struct rspamd_dkim_header *new;
 	gpointer found;
-	GHashTable *htb;
+	union rspamd_dkim_header_stat u;
 
 	p = param;
 	while (p <= end) {
@@ -443,15 +457,21 @@ rspamd_dkim_parse_hdrlist_common (struct rspamd_dkim_common_ctx *ctx,
 
 	c = param;
 	p = param;
-	htb = g_hash_table_new (rspamd_strcase_hash, rspamd_strcase_equal);
+	ctx->htable = g_hash_table_new (rspamd_strcase_hash, rspamd_strcase_equal);
 
 	while (p <= end) {
 		if ((p == end || *p == ':') && p - c > 0) {
-
+			oversign = FALSE;
 			h = rspamd_mempool_alloc (ctx->pool, p - c + 1);
 			rspamd_strlcpy (h, c, p - c + 1);
 
 			g_strstrip (h);
+
+			if (sign && rspamd_lc_cmp (h, "(o)", 3) == 0) {
+				oversign = TRUE;
+				h += 3;
+				msg_debug_dkim ("oversign header: %s", h);
+			}
 
 			/* Check mandatory from */
 			if (!from_found && g_ascii_strcasecmp (h, "from") == 0) {
@@ -462,20 +482,33 @@ rspamd_dkim_parse_hdrlist_common (struct rspamd_dkim_common_ctx *ctx,
 					sizeof (struct rspamd_dkim_header));
 			new->name = h;
 			new->count = 0;
+			u.n = 0;
 
 			g_ptr_array_add (ctx->hlist, new);
+			found = g_hash_table_lookup (ctx->htable, h);
 
-			if ((found = g_hash_table_lookup (htb, h)) != NULL) {
-				count = GPOINTER_TO_UINT (found);
-				new->count = count;
-				count ++;
+			if (oversign) {
+				if (found) {
+					msg_err_dkim ("specified oversigned header more than once: %s",
+							h);
+				}
+
+				u.s.flags |= RSPAMD_DKIM_FLAG_OVERSIGN;
+				u.s.count = 0;
 			}
 			else {
-				/* Insert new header order to the list */
-				count = new->count + 1;
+				if (found != NULL) {
+					u.n = GPOINTER_TO_UINT (found);
+					new->count = u.s.count;
+					u.s.count ++;
+				}
+				else {
+					/* Insert new header order to the list */
+					u.s.count = new->count + 1;
+				}
 			}
 
-			g_hash_table_insert (htb, h, GUINT_TO_POINTER (count));
+			g_hash_table_insert (ctx->htable, h, GUINT_TO_POINTER (u.n));
 
 			c = p + 1;
 			p++;
@@ -484,8 +517,6 @@ rspamd_dkim_parse_hdrlist_common (struct rspamd_dkim_common_ctx *ctx,
 			p++;
 		}
 	}
-
-	g_hash_table_unref (htb);
 
 	if (!ctx->hlist) {
 		g_set_error (err,
@@ -503,10 +534,13 @@ rspamd_dkim_parse_hdrlist_common (struct rspamd_dkim_common_ctx *ctx,
 				"invalid dkim header list, from header is missing");
 			return FALSE;
 		}
-		/* Reverse list */
+
 		rspamd_mempool_add_destructor (ctx->pool,
 			(rspamd_mempool_destruct_t)rspamd_dkim_hlist_free,
 			ctx->hlist);
+		rspamd_mempool_add_destructor (ctx->pool,
+				(rspamd_mempool_destruct_t)g_hash_table_unref,
+				ctx->htable);
 	}
 
 	return TRUE;
@@ -518,7 +552,7 @@ rspamd_dkim_parse_hdrlist (rspamd_dkim_context_t *ctx,
 	gsize len,
 	GError **err)
 {
-	return rspamd_dkim_parse_hdrlist_common (&ctx->common, param, len, err);
+	return rspamd_dkim_parse_hdrlist_common (&ctx->common, param, len, FALSE, err);
 }
 
 static gboolean
@@ -871,6 +905,9 @@ rspamd_create_dkim_context (const gchar *sig,
 					break;
 				case 'z':
 					param = DKIM_PARAM_COPIEDHDRS;
+					break;
+				case 'r':
+					param = DKIM_PARAM_IGNORE;
 					break;
 				default:
 					g_set_error (err,
@@ -2670,7 +2707,7 @@ rspamd_create_dkim_sign_context (struct rspamd_task *task,
 
 	if (type != RSPAMD_DKIM_ARC_SEAL) {
 		if (!rspamd_dkim_parse_hdrlist_common (&nctx->common, headers,
-				strlen (headers),
+				strlen (headers), TRUE,
 				err)) {
 			return NULL;
 		}
@@ -2723,6 +2760,8 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 	gchar *b64_data;
 	guchar *rsa_buf;
 	guint rsa_len;
+	guint headers_len = 0, cur_len = 0;
+	union rspamd_dkim_header_stat hstat;
 
 	g_assert (ctx != NULL);
 
@@ -2796,15 +2835,62 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 	for (i = 0; i < ctx->common.hlist->len; i++) {
 		dh = g_ptr_array_index (ctx->common.hlist, i);
 
-		if (g_hash_table_lookup (task->raw_headers, dh->name)) {
-			rspamd_dkim_canonize_header (&ctx->common, task, dh->name, dh->count,
-					NULL, NULL);
+		/* We allow oversigning if dh->count > number of headers with this name */
+		hstat.n = GPOINTER_TO_UINT (g_hash_table_lookup (ctx->common.htable, dh->name));
+
+		if (hstat.s.flags & RSPAMD_DKIM_FLAG_OVERSIGN) {
+			/* Do oversigning */
+			GPtrArray *ar;
+			guint count = 0;
+
+			ar = g_hash_table_lookup (task->raw_headers, dh->name);
+
+			if (ar) {
+				count = ar->len;
+			}
+
+			for (j = 0; j < count; j ++) {
+				/* Sign all existing headers */
+				rspamd_dkim_canonize_header (&ctx->common, task, dh->name, j,
+						NULL, NULL);
+			}
+
+			/* Now add one more entry to oversign */
+			cur_len = (strlen (dh->name) + 1) * (count + 1);
+			headers_len += cur_len;
+			if (headers_len > 70 && i > 0 && i < ctx->common.hlist->len - 1) {
+				rspamd_printf_gstring (hdr, "  ");
+				headers_len = cur_len;
+			}
+
+			for (j = 0; j < count + 1; j++) {
+				rspamd_printf_gstring (hdr, "%s:", dh->name);
+			}
+		}
+		else {
+			if (g_hash_table_lookup (task->raw_headers, dh->name)) {
+				if (hstat.s.count > 0) {
+
+					cur_len = (strlen (dh->name) + 1) * (hstat.s.count);
+					headers_len += cur_len;
+					if (headers_len > 70 && i > 0 && i < ctx->common.hlist->len - 1) {
+						rspamd_printf_gstring (hdr, "  ");
+						headers_len = cur_len;
+					}
+
+					for (j = 0; j < hstat.s.count; j++) {
+						rspamd_printf_gstring (hdr, "%s:", dh->name);
+					}
+				}
+
+
+				rspamd_dkim_canonize_header (&ctx->common, task,
+						dh->name, dh->count,
+						NULL, NULL);
+			}
 		}
 
-		/* We allow oversigning if dh->count > number of headers with this name */
-		for (j = 0; j < dh->count + 1; j++) {
-			rspamd_printf_gstring (hdr, "%s:", dh->name);
-		}
+		g_hash_table_remove (ctx->common.htable, dh->name);
 	}
 
 	/* Replace the last ':' with ';' */

@@ -198,6 +198,7 @@ struct url_callback_data {
 	rspamd_mempool_t *pool;
 	gint len;
 	gboolean is_html;
+	gboolean prefix_added;
 	guint newline_idx;
 	GPtrArray *newlines;
 	const gchar *start;
@@ -707,7 +708,8 @@ static gint
 rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 		gchar const **end, gboolean strict, guint *flags)
 {
-	const gchar *p = str, *c = str, *last = str + len, *slash = NULL;
+	const gchar *p = str, *c = str, *last = str + len, *slash = NULL,
+			*password_start = NULL, *user_start = NULL;
 	gchar t;
 	UChar32 uc;
 	glong pt;
@@ -827,6 +829,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					if (p - c == 0) {
 						goto out;
 					}
+					user_start = c;
 					st = parse_password_start;
 				}
 				else if (t == '@') {
@@ -867,11 +870,16 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 				if (t == '@') {
 					/* Empty password */
 					SET_U (u, UF_USERINFO);
+					if (u != NULL && u->field_data[UF_USERINFO].len > 0) {
+						/* Eat semicolon */
+						u->field_data[UF_USERINFO].len--;
+					}
 					*flags |= RSPAMD_URL_FLAG_HAS_USER;
 					st = parse_at;
 				}
 				else {
 					c = p;
+					password_start = p;
 					st = parse_password;
 				}
 				p++;
@@ -879,8 +887,19 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 			case parse_password:
 				if (t == '@') {
 					/* XXX: password is not stored */
-					*flags |= RSPAMD_URL_FLAG_HAS_USER;
-					SET_U (u, UF_USERINFO);
+					if (u != NULL) {
+						if (u->field_data[UF_USERINFO].len == 0
+								&& password_start
+								&& user_start && password_start > user_start + 1) {
+							*flags |= RSPAMD_URL_FLAG_HAS_USER;
+							u->field_set |= 1u << (UF_USERINFO);
+							u->field_data[UF_USERINFO].len =
+									password_start - user_start - 1;
+							u->field_data[UF_USERINFO].off =
+									user_start - str;
+						}
+
+					}
 					st = parse_at;
 				}
 				else if (!g_ascii_isgraph (t)) {
@@ -1543,7 +1562,7 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 	gchar *p, *comp;
 	const gchar *end;
 	guint i, complen, ret, flags = 0;
-	gsize unquoted_len = 0;
+	guint unquoted_len = 0;
 
 	memset (uri, 0, sizeof (*uri));
 	memset (&u, 0, sizeof (u));
@@ -1649,10 +1668,16 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 			uri->protocollen);
 	rspamd_url_shift (uri, unquoted_len, UF_SCHEMA);
 	unquoted_len = rspamd_url_decode (uri->host, uri->host, uri->hostlen);
+	if (rspamd_normalise_unicode_inplace (pool, uri->host, &unquoted_len)) {
+		uri->flags |= RSPAMD_URL_FLAG_UNNORMALISED;
+	}
 	rspamd_url_shift (uri, unquoted_len, UF_HOST);
 
 	if (uri->datalen) {
 		unquoted_len = rspamd_url_decode (uri->data, uri->data, uri->datalen);
+		if (rspamd_normalise_unicode_inplace (pool, uri->data, &unquoted_len)) {
+			uri->flags |= RSPAMD_URL_FLAG_UNNORMALISED;
+		}
 		rspamd_url_shift (uri, unquoted_len, UF_PATH);
 		/* We now normalize path */
 		rspamd_http_normalize_path_inplace (uri->data, uri->datalen, &unquoted_len);
@@ -1662,12 +1687,18 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 		unquoted_len = rspamd_url_decode (uri->query,
 				uri->query,
 				uri->querylen);
+		if (rspamd_normalise_unicode_inplace (pool, uri->query, &unquoted_len)) {
+			uri->flags |= RSPAMD_URL_FLAG_UNNORMALISED;
+		}
 		rspamd_url_shift (uri, unquoted_len, UF_QUERY);
 	}
 	if (uri->fragmentlen) {
 		unquoted_len = rspamd_url_decode (uri->fragment,
 				uri->fragment,
 				uri->fragmentlen);
+		if (rspamd_normalise_unicode_inplace (pool, uri->fragment, &unquoted_len)) {
+			uri->flags |= RSPAMD_URL_FLAG_UNNORMALISED;
+		}
 		rspamd_url_shift (uri, unquoted_len, UF_FRAGMENT);
 	}
 
@@ -2254,6 +2285,7 @@ rspamd_url_trie_callback (struct rspamd_multipattern *mp,
 					m.prefix,
 					(gint)m.m_len,
 					m.m_begin);
+			cb->prefix_added = TRUE;
 		}
 		else {
 			cb->url_str = rspamd_mempool_alloc (cb->pool, m.m_len + 1);
@@ -2275,7 +2307,8 @@ rspamd_url_trie_callback (struct rspamd_multipattern *mp,
 
 gboolean
 rspamd_url_find (rspamd_mempool_t *pool, const gchar *begin, gsize len,
-		gchar **url_str, gboolean is_html, goffset *url_pos)
+		gchar **url_str, gboolean is_html, goffset *url_pos,
+		gboolean *prefix_added)
 {
 	struct url_callback_data cb;
 	gint ret;
@@ -2296,6 +2329,10 @@ rspamd_url_find (rspamd_mempool_t *pool, const gchar *begin, gsize len,
 
 		if (url_pos) {
 			*url_pos = cb.start - begin;
+		}
+
+		if (prefix_added) {
+			*prefix_added = cb.prefix_added;
 		}
 
 		return TRUE;
@@ -2375,6 +2412,7 @@ rspamd_url_trie_generic_callback_common (struct rspamd_multipattern *mp,
 					m.prefix,
 					(gint)m.m_len,
 					m.m_begin);
+			cb->prefix_added = TRUE;
 		}
 		else {
 			cb->url_str = rspamd_mempool_alloc (cb->pool, m.m_len + 1);
@@ -2388,6 +2426,11 @@ rspamd_url_trie_generic_callback_common (struct rspamd_multipattern *mp,
 		rc = rspamd_url_parse (url, cb->url_str, strlen (cb->url_str), pool);
 
 		if (rc == URI_ERRNO_OK && url->hostlen > 0) {
+			if (cb->prefix_added) {
+				url->flags |= RSPAMD_URL_FLAG_SCHEMALESS;
+				cb->prefix_added = FALSE;
+			}
+
 			if (cb->func) {
 				cb->func (url, cb->start - text, cb->fin - text, cb->funcd);
 			}
@@ -2448,6 +2491,7 @@ rspamd_url_text_part_callback (struct rspamd_url *url, gsize start_offset,
 	struct rspamd_url *query_url, *existing;
 	GHashTable *target_tbl = NULL;
 	gint rc;
+	gboolean prefix_added;
 
 	task = cbd->task;
 	ex = rspamd_mempool_alloc0 (task->task_pool, sizeof (struct rspamd_process_exception));
@@ -2484,7 +2528,7 @@ rspamd_url_text_part_callback (struct rspamd_url *url, gsize start_offset,
 	/* We also search the query for additional url inside */
 	if (url->querylen > 0) {
 		if (rspamd_url_find (task->task_pool, url->query, url->querylen,
-				&url_str, IS_PART_HTML (cbd->part), NULL)) {
+				&url_str, IS_PART_HTML (cbd->part), NULL, &prefix_added)) {
 
 			query_url = rspamd_mempool_alloc0 (task->task_pool,
 					sizeof (struct rspamd_url));
@@ -2497,6 +2541,10 @@ rspamd_url_text_part_callback (struct rspamd_url *url, gsize start_offset,
 					query_url->hostlen > 0) {
 				msg_debug_task ("found url %s in query of url"
 						" %*s", url_str, url->querylen, url->query);
+
+				if (prefix_added) {
+					query_url->flags |= RSPAMD_URL_FLAG_SCHEMALESS;
+				}
 
 				if (query_url->protocol == PROTOCOL_MAILTO) {
 					if (query_url->userlen > 0) {
@@ -2606,6 +2654,7 @@ rspamd_url_task_subject_callback (struct rspamd_url *url, gsize start_offset,
 	gchar *url_str = NULL;
 	struct rspamd_url *query_url, *existing;
 	gint rc;
+	gboolean prefix_added;
 
 	/* It is just a displayed URL, we should not check it for certain things */
 	url->flags |= RSPAMD_URL_FLAG_HTML_DISPLAYED|RSPAMD_URL_FLAG_SUBJECT;
@@ -2633,7 +2682,7 @@ rspamd_url_task_subject_callback (struct rspamd_url *url, gsize start_offset,
 	/* We also search the query for additional url inside */
 	if (url->querylen > 0) {
 		if (rspamd_url_find (task->task_pool, url->query, url->querylen,
-				&url_str, FALSE, NULL)) {
+				&url_str, FALSE, NULL, &prefix_added)) {
 
 			query_url = rspamd_mempool_alloc0 (task->task_pool,
 					sizeof (struct rspamd_url));
@@ -2646,6 +2695,10 @@ rspamd_url_task_subject_callback (struct rspamd_url *url, gsize start_offset,
 					url->hostlen > 0) {
 				msg_debug_task ("found url %s in query of url"
 						" %*s", url_str, url->querylen, url->query);
+
+				if (prefix_added) {
+					query_url->flags |= RSPAMD_URL_FLAG_SCHEMALESS;
+				}
 
 				if ((existing = g_hash_table_lookup (task->urls,
 						query_url)) == NULL) {
