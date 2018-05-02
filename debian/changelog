@@ -1,4 +1,4 @@
-rspamd (1.7.3-1) unstable; urgency=medium
+rspamd (1.7.4-1) unstable; urgency=medium
 
   [ Jerome Lebleu ]
   * d/source: Switch to 3.0 native to quilt source format
@@ -9,7 +9,7 @@ rspamd (1.7.3-1) unstable; urgency=medium
   * d/rspamd.init: Use rspamd.conf as config. file and test it on start
 
   [ Sebastien Badia ]
-  * New upstream version 1.7.3 (Closes: #813222, #849396)
+  * New upstream version 1.7.4 (Closes: #813222, #849396)
   * Added upstream-metadata-file (refs: http://dep.debian.net/deps/dep12/)
   * Depends on packaged js libs and import minified versions
   * d/man: Added a manpage for rspamd_stats
