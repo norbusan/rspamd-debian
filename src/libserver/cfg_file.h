@@ -198,7 +198,7 @@ struct rspamd_worker_conf {
 	struct worker_s *worker;                        /**< pointer to worker type								*/
 	GQuark type;                                    /**< type of worker										*/
 	struct rspamd_worker_bind_conf *bind_conf;      /**< bind configuration									*/
-	guint16 count;                                  /**< number of workers									*/
+	gint16 count;                                   /**< number of workers									*/
 	GList *listen_socks;                            /**< listening sockets descriptors						*/
 	guint32 rlimit_nofile;                          /**< max files limit									*/
 	guint32 rlimit_maxcore;                         /**< maximum core file size								*/
@@ -637,10 +637,11 @@ const gchar * rspamd_action_to_str_alt (enum rspamd_action_type action);
  * @param err error pointer
  * @return
  */
+struct rspamd_radix_map_helper;
 gboolean rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 		const ucl_object_t *obj,
 		const gchar *description,
-		radix_compressed_t **target,
+		struct rspamd_radix_map_helper **target,
 		GError **err);
 
 #define msg_err_config(...) rspamd_default_log_function (G_LOG_LEVEL_CRITICAL, \

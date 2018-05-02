@@ -47,8 +47,9 @@ struct rspamd_async_session * rspamd_session_create (rspamd_mempool_t *pool,
  * @param user_data abstract user_data
  * @param forced unused
  */
-void rspamd_session_add_event (struct rspamd_async_session *session,
-	event_finalizer_t fin, gpointer user_data, GQuark subsystem);
+struct rspamd_async_event* rspamd_session_add_event (
+		struct rspamd_async_session *session,
+		event_finalizer_t fin, gpointer user_data, GQuark subsystem);
 
 /**
  * Remove normal event
@@ -70,6 +71,13 @@ gboolean rspamd_session_destroy (struct rspamd_async_session *session);
  * Try to remove all events pending
  */
 void rspamd_session_cleanup (struct rspamd_async_session *session);
+
+/**
+ * Returns mempool associated with async session
+ * @param session
+ * @return
+ */
+rspamd_mempool_t * rspamd_session_mempool (struct rspamd_async_session *session);
 
 /**
  * Check session for events pending and call fin callback if no events are pending

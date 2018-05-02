@@ -23,6 +23,12 @@ typedef gchar * (*map_cb_t)(gchar *chunk, gint len,
 	struct map_cb_data *data, gboolean final);
 typedef void (*map_fin_cb_t)(struct map_cb_data *data);
 
+typedef gboolean (*rspamd_map_traverse_cb)(gconstpointer key,
+		gconstpointer value, gsize hits, gpointer ud);
+typedef void (*rspamd_map_traverse_function)(void *data,
+		rspamd_map_traverse_cb cb,
+		gpointer cbdata, gboolean reset_hits);
+
 /**
  * Common map object
  */
@@ -77,92 +83,22 @@ void rspamd_map_watch (struct rspamd_config *cfg, struct event_base *ev_base,
  */
 void rspamd_map_remove_all (struct rspamd_config *cfg);
 
-typedef void (*insert_func) (gpointer st, gconstpointer key,
-	gconstpointer value);
-
 /**
- * Common callbacks for frequent types of lists
- */
-
-/**
- * Radix list is a list like ip/mask
- */
-gchar * rspamd_radix_read (
-	gchar *chunk,
-	gint len,
-	struct map_cb_data *data,
-	gboolean final);
-void rspamd_radix_fin (struct map_cb_data *data);
-
-/**
- * Host list is an ordinal list of hosts or domains
- */
-gchar * rspamd_hosts_read (
-	gchar *chunk,
-	gint len,
-	struct map_cb_data *data,
-	gboolean final);
-void rspamd_hosts_fin (struct map_cb_data *data);
-
-/**
- * Kv list is an ordinal list of keys and values separated by whitespace
- */
-gchar * rspamd_kv_list_read (
-	gchar *chunk,
-	gint len,
-	struct map_cb_data *data,
-	gboolean final);
-void rspamd_kv_list_fin (struct map_cb_data *data);
-
-/**
- * Regexp list is a list of regular expressions
- */
-struct rspamd_regexp_map;
-
-gchar * rspamd_regexp_list_read_single (
-		gchar *chunk,
-		gint len,
-		struct map_cb_data *data,
-		gboolean final);
-gchar * rspamd_regexp_list_read_multiple (
-		gchar *chunk,
-		gint len,
-		struct map_cb_data *data,
-		gboolean final);
-void rspamd_regexp_list_fin (struct map_cb_data *data);
-
-/**
- * FSM for lists parsing (support comments, blank lines and partial replies)
- */
-gchar *
-rspamd_parse_kv_list (
-	gchar * chunk,
-	gint len,
-	struct map_cb_data *data,
-	insert_func func,
-	const gchar *default_value,
-	gboolean final);
-
-/**
- * Find a single (any) matching regexp for the specified text or NULL if
- * no matches found
+ * Get traverse function for specific map
  * @param map
- * @param in
- * @param len
  * @return
  */
-gpointer rspamd_match_regexp_map_single (struct rspamd_regexp_map *map,
-		const gchar *in, gsize len);
+rspamd_map_traverse_function rspamd_map_get_traverse_function (struct rspamd_map *map);
 
 /**
- * Find a multiple (all) matching regexp for the specified text or NULL if
- * no matches found. Returns GPtrArray that *must* be freed by a caller if not NULL
+ * Perform map traverse
  * @param map
- * @param in
- * @param len
+ * @param cb
+ * @param cbdata
+ * @param reset_hits
  * @return
  */
-gpointer rspamd_match_regexp_map_all (struct rspamd_regexp_map *map,
-		const gchar *in, gsize len);
+void rspamd_map_traverse (struct rspamd_map *map, rspamd_map_traverse_cb cb,
+		gpointer cbdata, gboolean reset_hits);
 
 #endif

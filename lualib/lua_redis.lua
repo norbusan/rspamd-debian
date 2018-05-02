@@ -32,6 +32,7 @@ local function try_load_redis_servers(options, rspamd_config, result)
   local default_timeout = 1.0
   local default_expand_keys = false
   local upstream_list = require "rspamd_upstream_list"
+  local read_only = true
 
   -- Try to get read servers:
   local upstreams_read, upstreams_write
@@ -51,6 +52,7 @@ local function try_load_redis_servers(options, rspamd_config, result)
     else
       upstreams_read = upstream_list.create(options['servers'], default_port)
     end
+    read_only = false
   elseif options['server'] then
     if rspamd_config then
       upstreams_read = upstream_list.create(rspamd_config,
@@ -58,18 +60,20 @@ local function try_load_redis_servers(options, rspamd_config, result)
     else
       upstreams_read = upstream_list.create(options['server'], default_port)
     end
+    read_only = false
   end
 
   if upstreams_read then
     if options['write_servers'] then
       if rspamd_config then
         upstreams_write = upstream_list.create(rspamd_config,
-          options['write_servers'], default_port)
+                options['write_servers'], default_port)
       else
         upstreams_write = upstream_list.create(options['write_servers'],
-          default_port)
+                default_port)
       end
-    else
+      read_only = false
+    elseif not read_only then
       upstreams_write = upstreams_read
     end
   end
@@ -106,10 +110,17 @@ local function try_load_redis_servers(options, rspamd_config, result)
     result['password'] = options['password']
   end
 
-  if upstreams_write and upstreams_read then
-    result.read_servers = upstreams_read
-    result.write_servers = upstreams_write
+  if read_only and not result.write_servers then
+    result.read_only = true
+  elseif result.write_servers then
+    result.read_only = false
+  end
 
+  if upstreams_read then
+    result.read_servers = upstreams_read
+    if upstreams_write then
+      result.write_servers = upstreams_write
+    end
     return true
   end
 
@@ -801,6 +812,7 @@ local function load_script_taskless(script, cfg, ev_base)
           "uploaded redis script to %s with id %s, sha: %s",
             opt.upstream:get_addr(), script.id, data)
         script.sha = data -- We assume that sha is the same on all servers
+        script.fatal_error = nil
       end
       script.in_flight = script.in_flight - 1
 
@@ -840,7 +852,16 @@ local function add_redis_script(script, redis_params)
 
   -- Register on load function
   rspamd_config:add_on_load(function(cfg, ev_base, worker)
-    load_redis_script(new_script, cfg, ev_base, worker)
+    local mult = 0.0
+    rspamd_config:add_periodic(ev_base, 0.0, function()
+      if not new_script.sha then
+        load_redis_script(new_script, cfg, ev_base, worker)
+        mult = mult + 1
+        return 1.0 * mult -- Check one more time in one second
+      end
+
+      return false
+    end, false)
   end)
 
   table.insert(redis_scripts, new_script)

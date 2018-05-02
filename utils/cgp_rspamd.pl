@@ -94,11 +94,21 @@ sub rspamd_scan {
 
             if ( $block->{'add_headers'} ) {
               while ( my ( $h, $v ) = each( %{ $block->{'add_headers'} } ) ) {
-                if ( $headers eq "" ) {
-                  $headers .= "$h: $v";
+                if (ref($v) eq 'HASH') {
+                  if ($headers eq "") {
+                    $headers .= "$h: $v->{value}";
+                  }
+                  else {
+                    $headers .= "\\e$h: $v->{value}";
+                  }
                 }
                 else {
-                  $headers .= "\\e$h: $v";
+                  if ($headers eq "") {
+                    $headers .= "$h: $v";
+                  }
+                  else {
+                    $headers .= "\\e$h: $v";
+                  }
                 }
               }
             }
@@ -182,6 +192,7 @@ sub rspamd_scan {
         my $from;
         my @rcpts;
         my $ip;
+        my $user;
 
         foreach my $elt (@envelope) {
           if ( $elt =~ /^P\s[^<]*(<[^>]*>).*$/ ) {
@@ -190,8 +201,13 @@ sub rspamd_scan {
           elsif ( $elt =~ /^R\s[^<]*(<[^>]*>).*$/ ) {
             push @rcpts, $1;
           }
-          elsif ( $elt =~ /^S .*\[(.+)\]/ ) {
-            $ip = $1;
+          elsif ( $elt =~ /^S (?:<([^>]+)> )?(?:SMTP|HTTPU?|AIRSYNC|XIMSS) \[([0-9a-f.:]+)\]/ ) {
+            if ($1) {
+              $user = $1;
+            }
+            if ($2) {
+              $ip = $2;
+            }
           }
         }
 
@@ -205,12 +221,14 @@ sub rspamd_scan {
         if ( scalar(@rcpts) > 0 ) {
 
           # XXX: Anyevent cannot parse headers with multiple values
-          foreach (@rcpts) {
-            $headers->{Rcpt} = $_;
-          }
+          $headers->{Rcpt} = join(',', @rcpts);
         }
         if ($ip) {
           $headers->{IP} = $ip;
+        }
+
+        if ($user) {
+          $headers->{User} = $user;
         }
 
         http_post(

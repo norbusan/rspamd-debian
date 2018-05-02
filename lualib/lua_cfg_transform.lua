@@ -257,6 +257,22 @@ return function(cfg)
         end
       end
     end
+
+    local actions_set = {}
+    for _,d in ipairs(actions_defs) do
+      actions_set[d] = true
+    end
+
+    -- Now check actions section for garbadge
+    actions_set['unknown_weight'] = true
+    actions_set['grow_factor'] = true
+    actions_set['subject'] = true
+
+    for k,_ in pairs(cfg.actions) do
+      if not actions_set[k] then
+        logger.warnx('unknown element in actions section: %s', k)
+      end
+    end
   end
 
   if not cfg.group then
@@ -285,6 +301,14 @@ return function(cfg)
   if cfg.dkim and cfg.dkim.sign_headers and type(cfg.dkim.sign_headers) == 'table' then
     -- Flatten
     cfg.dkim.sign_headers = table.concat(cfg.dkim.sign_headers, ':')
+  end
+
+  -- Try to find some obvious issues with configuration
+  for k,v in pairs(cfg) do
+    if type(v) == 'table' and v[k] and type (v[k]) == 'table' then
+      logger.errx('nested section: %s { %s { ... } }, it is likely a configuration error',
+              k, k)
+    end
   end
 
   return ret, cfg
