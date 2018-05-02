@@ -12,6 +12,9 @@ use strict;
 my @symbols_search;
 my @symbols_exclude;
 my @symbols_bidirectional;
+my @symbols_groups;
+my @symbols_ignored;
+my %groups;
 my $reject_score = 15.0;
 my $junk_score = 6.0;
 my $diff_alpha = 0.1;
@@ -41,6 +44,8 @@ GetOptions(
   "symbol|s=s@"           => \@symbols_search,
   "symbol-bidir|S=s@"     => \@symbols_bidirectional,
   "exclude|X=s@"          => \@symbols_exclude,
+  "ignore=s@"             => \@symbols_ignored,
+  "group|g=s@"            => \@symbols_groups,
   "log|l=s"               => \$log_file,
   "alpha-score|alpha|a=f" => \$diff_alpha,
   "correlations|c"        => \$correlations,
@@ -91,6 +96,18 @@ foreach my $s (@symbols_bidirectional) {
     ham  => "${s}_HAM",
   };
   push @symbols_search, $s unless grep /^$s$/, @symbols_search;
+}
+
+# Deal with groups
+my $group_id = 0;
+foreach my $g (@symbols_groups) {
+  my @symbols = split /,/,$g;
+  my $group_name = "group$group_id";
+
+  foreach my $s (@symbols) {
+    $groups{$s} = $group_name;
+    push @symbols_search, $s unless grep /^$s$/, @symbols_search;
+  }
 }
 
 @symbols_search = '.*'
@@ -149,6 +166,18 @@ else {
 }
 
 exit;
+
+sub IsIgnored {
+  my ($sym) = @_;
+
+  foreach my $ex (@symbols_ignored) {
+    if ($sym =~ /^$ex$/) {
+      return 1;
+    }
+  }
+
+  return 0;
+}
 
 sub GenRelated {
   my ($htb, $target_sym) = @_;
@@ -279,10 +308,22 @@ Junk changes / total junk hits : %6d/%-6d (%7.3f%%)
             print "Correlations report:\n";
 
             while (my ($cs, $hits) = each %{$r->{corr}}) {
-              my $corr_prob = $hits / $total;
-              my $sym_prob = $r->{hits} / $total;
-              printf "Probability of %s when %s fires: %.3f\n", $s, $cs,
-                ($corr_prob / $sym_prob);
+              my $corr_prob = $r->{'hits'} / $total;
+              my $merged_hits = 0;
+              if($r->{symbols_met_spam}->{$cs}) {
+                $merged_hits += $r->{symbols_met_spam}->{$cs};
+              }
+              if($r->{symbols_met_junk}->{$cs}) {
+                $merged_hits += $r->{symbols_met_junk}->{$cs};
+              }
+              if($r->{symbols_met_ham}->{$cs}) {
+                $merged_hits += $r->{symbols_met_ham}->{$cs};
+              }
+
+              if ($merged_hits > 0) {
+                printf "Probability of %s when %s fires: %.3f\n", $cs, $s,
+                  (($merged_hits / $total) / $corr_prob);
+              }
             }
 
             print "Related symbols report:\n";
@@ -375,12 +416,20 @@ Messages scanned: $total";
 }
 
 sub ProcessRelated {
-  my ($symbols, $target) = @_;
+  my ($symbols, $target, $source) = @_;
 
   foreach my $s (@{$symbols}) {
     $s =~ /^([^\(]+)(\(([^\)]+)\))?/;
     my $sym_name = $1;
     my $sym_score = 0;
+
+    if ($groups{$sym_name}) {
+      $sym_name = $groups{$sym_name};
+    }
+
+    next if ($source eq $sym_name);
+
+    next if IsIgnored($sym_name);
 
     if ($2) {
       $sym_score = $3 * 1.0;
@@ -506,6 +555,11 @@ sub ProcessLog {
 
             next if $orig_name !~ /^$s/;
 
+            if ($groups{$s}) {
+              # Replace with group
+              $sym_name = $groups{$s};
+            }
+
             push @sym_names, $sym_name;
 
             if (!$sym_res{$sym_name}) {
@@ -534,19 +588,19 @@ sub ProcessLog {
               $is_spam = 1;
               $r->{spam_hits} ++;
               if ($correlations) {
-                ProcessRelated(\@symbols, $r->{symbols_met_spam});
+                ProcessRelated(\@symbols, $r->{symbols_met_spam}, $sym_name);
               }
             }
             elsif ($score >= $junk_score) {
               $is_junk = 1;
               $r->{junk_hits} ++;
               if ($correlations) {
-                ProcessRelated(\@symbols, $r->{symbols_met_junk});
+                ProcessRelated(\@symbols, $r->{symbols_met_junk}, $sym_name);
               }
             }
             else {
               if ($correlations) {
-                ProcessRelated(\@symbols, $r->{symbols_met_ham});
+                ProcessRelated(\@symbols, $r->{symbols_met_ham}, $sym_name);
               }
             }
 
@@ -576,6 +630,7 @@ sub ProcessLog {
 
       if ($correlations) {
         foreach my $sym (@sym_names) {
+          next if IsIgnored($sym);
           my $r = $sym_res{$sym};
 
           foreach my $corr_sym (@sym_names) {
@@ -666,6 +721,11 @@ sub log_time_format {
     # Skip newsyslog messages
     # Aug  8 00:00:00 hostname newsyslog[63284]: logfile turned over
     elsif ( /^\w{3} (?:\s?\d|\d\d) \d\d:\d\d:\d\d\ \S+ newsyslog\[\d+\]: logfile turned over$/ ) {
+      next;
+    }
+    # Skip journalctl messages
+    # -- Logs begin at Mon 2018-01-15 11:16:24 MSK, end at Fri 2018-04-27 09:10:30 MSK. --
+    elsif ( /^-- Logs begin at \w{3} \d{4}-\d\d-\d\d \d\d:\d\d:\d\d [A-Z]{3}, end at \w{3} \d{4}-\d\d-\d\d \d\d:\d\d:\d\d [A-Z]{3}\. --$/ ) {
       next;
     }
     else {

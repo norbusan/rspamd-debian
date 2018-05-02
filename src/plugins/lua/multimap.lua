@@ -505,12 +505,17 @@ local function multimap_callback(task, rule)
           return
         end
         local _,symbol,score = parse_ret(r, result)
-        if symbol and r['symbols_set'] then
-          if not r['symbols_set'][symbol] then
-            rspamd_logger.infox(task, 'symbol %s is not registered for map %s, ' ..
-              'replace it with just %s',
-              symbol, r['symbol'], r['symbol'])
-            symbol = r['symbol']
+        local forced = false
+        if symbol then
+          if r['symbols_set'] then
+            if not r['symbols_set'][symbol] then
+              rspamd_logger.infox(task, 'symbol %s is not registered for map %s, ' ..
+                  'replace it with just %s',
+                  symbol, r['symbol'], r['symbol'])
+              symbol = r['symbol']
+            end
+          else
+            forced = true
           end
         else
           symbol = r['symbol']
@@ -518,9 +523,9 @@ local function multimap_callback(task, rule)
 
         local opt = value_types[r['type']].get_value(value)
         if opt then
-          task:insert_result(symbol, score, opt)
+          task:insert_result(forced, symbol, score, opt)
         else
-          task:insert_result(symbol, score)
+          task:insert_result(forced, symbol, score)
         end
 
         if pre_filter then
@@ -944,6 +949,12 @@ local function add_multimap_rule(key, newrule)
               description = newrule['description'],
               type = 'regexp'
             })
+          elseif newrule['glob'] then
+            newrule['hash'] = rspamd_config:add_map ({
+              url = newrule['map'],
+              description = newrule['description'],
+              type = 'glob'
+            })
           else
             newrule['hash'] = rspamd_config:add_map ({
               url = newrule['map'],
@@ -982,6 +993,12 @@ local function add_multimap_rule(key, newrule)
             url = newrule['map'],
             description = newrule['description'],
             type = 'regexp'
+          })
+        elseif newrule['glob'] then
+          newrule['hash'] = rspamd_config:add_map ({
+            url = newrule['map'],
+            description = newrule['description'],
+            type = 'glob'
           })
         else
           newrule['hash'] = rspamd_config:add_map ({

@@ -95,7 +95,8 @@ enum rspamd_lua_map_type {
 	RSPAMD_LUA_MAP_HASH,
 	RSPAMD_LUA_MAP_REGEXP,
 	RSPAMD_LUA_MAP_REGEXP_MULTIPLE,
-	RSPAMD_LUA_MAP_CALLBACK
+	RSPAMD_LUA_MAP_CALLBACK,
+	RSPAMD_LUA_MAP_UNKNOWN,
 };
 
 struct rspamd_lua_map {
@@ -104,10 +105,10 @@ struct rspamd_lua_map {
 	guint flags;
 
 	union {
-		struct radix_tree_compressed *radix;
-		GHashTable *hash;
+		struct rspamd_radix_map_helper *radix;
+		struct rspamd_hash_map_helper *hash;
+		struct rspamd_regexp_map_helper *re_map;
 		struct lua_map_callback_data *cbdata;
-		struct rspamd_regexp_map *re_map;
 	} data;
 };
 
@@ -248,7 +249,6 @@ void rspamd_lua_add_preload (lua_State *L, const gchar *name, lua_CFunction func
 
 void luaopen_task (lua_State *L);
 void luaopen_config (lua_State *L);
-void luaopen_metric (lua_State *L);
 void luaopen_map (lua_State *L);
 void luaopen_trie (lua_State * L);
 void luaopen_textpart (lua_State *L);

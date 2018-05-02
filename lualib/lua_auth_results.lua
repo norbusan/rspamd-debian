@@ -16,6 +16,7 @@ limitations under the License.
 ]]--
 
 local global = require "global_functions"
+local rspamd_util = require "rspamd_util"
 
 local default_settings = {
   spf_symbols = {
@@ -54,6 +55,7 @@ local default_settings = {
 }
 
 local exports = {}
+local local_hostname = rspamd_util.get_hostname()
 
 local function gen_auth_results(task, settings)
   local table = table
@@ -76,10 +78,9 @@ local function gen_auth_results(task, settings)
     symbols = {}
   }
 
-  local received = task:get_received_headers() or {}
-  local mxname = (received[1] or {}).by_hostname
-  if mxname then
-    table.insert(hdr_parts, mxname)
+
+  if local_hostname then
+    table.insert(hdr_parts, local_hostname)
   end
 
   for auth_type, symbols in pairs(auth_types) do
@@ -170,25 +171,16 @@ local function gen_auth_results(task, settings)
   local smtp_from = task:get_from('smtp')
 
   if u and smtp_from then
-    local hdr
+    local hdr = {[1] = 'auth=pass'}
 
-    if #smtp_from[1]['addr'] > 0 then
-      if settings['add_smtp_user'] then
-        hdr = string.format('auth=pass smtp.auth=%s smtp.mailfrom=%s',
-          u, smtp_from[1]['addr'])
-      else
-        hdr = string.format('auth=pass smtp.mailfrom=%s',
-          smtp_from[1]['addr'])
-      end
-    else
-      if settings['add_smtp_user'] then
-        hdr = string.format('auth=pass smtp.auth=%s', u)
-      else
-        hdr = 'auth=pass'
-      end
+    if settings['add_smtp_user'] then
+      table.insert(hdr,'smtp.auth=' .. u)
+    end
+    if smtp_from[1]['addr'] then
+      table.insert(hdr,'smtp.mailfrom=' .. smtp_from[1]['addr'])
     end
 
-    table.insert(hdr_parts, hdr)
+    table.insert(hdr_parts, table.concat(hdr,' '))
   end
 
   if #hdr_parts > 0 then
