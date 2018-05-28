@@ -36,6 +36,7 @@
 #include "libutil/map_helpers.h"
 #include "libmime/images.h"
 #include "libserver/worker_util.h"
+#include "libserver/mempool_vars_internal.h"
 #include "fuzzy_wire.h"
 #include "utlist.h"
 #include "ottery.h"
@@ -1884,33 +1885,10 @@ fuzzy_insert_result (struct fuzzy_client_session *session,
 		is_fuzzy = TRUE;
 	}
 
-	if (is_fuzzy) {
-		msg_info_task (
-				"found fuzzy hash(%s) %*xs (%*xs requested) with weight: "
-						"%.2f, probability %.2f, in list: %s:%d%s",
-				type,
-				(gint) sizeof (rep->digest), rep->digest,
-				(gint) sizeof (cmd->digest), cmd->digest,
-				nval,
-				(gdouble) rep->v1.prob,
-				symbol,
-				rep->v1.flag,
-				map == NULL ? "(unknown)" : "");
-	}
-	else {
-		msg_info_task (
-				"found exact fuzzy hash(%s) %*xs with weight: "
-						"%.2f, probability %.2f, in list: %s:%d%s",
-				type,
-				(gint) sizeof (rep->digest), rep->digest,
-				nval,
-				(gdouble) rep->v1.prob,
-				symbol,
-				rep->v1.flag,
-				map == NULL ? "(unknown)" : "");
-	}
-
 	if (map != NULL || !session->rule->skip_unknown) {
+		GList *fuzzy_var;
+		rspamd_fstring_t *hex_result;
+
 		if (session->rule->skip_map) {
 			rspamd_encode_hex_buf (cmd->digest, sizeof (cmd->digest),
 				hexbuf, sizeof (hexbuf) - 1);
@@ -1919,15 +1897,66 @@ fuzzy_insert_result (struct fuzzy_client_session *session,
 				return;
 			}
 		}
+
+		rspamd_encode_hex_buf (rep->digest, sizeof (rep->digest),
+				hexbuf, sizeof (hexbuf) - 1);
+		hexbuf[sizeof (hexbuf) - 1] = '\0';
+
+		if (is_fuzzy) {
+			msg_info_task (
+					"found fuzzy hash(%s) %s (%*xs requested) with weight: "
+					"%.2f, probability %.2f, in list: %s:%d%s",
+					type,
+					hexbuf,
+					(gint) sizeof (cmd->digest), cmd->digest,
+					nval,
+					(gdouble) rep->v1.prob,
+					symbol,
+					rep->v1.flag,
+					map == NULL ? "(unknown)" : "");
+		}
+		else {
+			msg_info_task (
+					"found exact fuzzy hash(%s) %s with weight: "
+					"%.2f, probability %.2f, in list: %s:%d%s",
+					type,
+					hexbuf,
+					nval,
+					(gdouble) rep->v1.prob,
+					symbol,
+					rep->v1.flag,
+					map == NULL ? "(unknown)" : "");
+		}
+
 		rspamd_snprintf (buf,
 				sizeof (buf),
-				"%d:%*xs:%.2f:%s",
+				"%d:%*s:%.2f:%s",
 				rep->v1.flag,
-				(gint)MIN(rspamd_fuzzy_hash_len, sizeof (rep->digest)), rep->digest,
+				(gint)MIN(rspamd_fuzzy_hash_len * 2, sizeof (rep->digest) * 2), hexbuf,
 				rep->v1.prob,
 				type);
 		res->option = rspamd_mempool_strdup (task->task_pool, buf);
 		g_ptr_array_add (session->results, res);
+
+		/* Store hex string in pool variable */
+		hex_result = rspamd_mempool_alloc (task->task_pool,
+				sizeof (rspamd_fstring_t) + sizeof (hexbuf));
+		memcpy (hex_result->str, hexbuf, sizeof (hexbuf));
+		hex_result->len = sizeof (hexbuf) - 1;
+		hex_result->allocated = (gsize)-1;
+		fuzzy_var = rspamd_mempool_get_variable (task->task_pool,
+				RSPAMD_MEMPOOL_FUZZY_RESULT);
+
+		if (fuzzy_var == NULL) {
+			fuzzy_var = g_list_prepend (NULL, hex_result);
+			rspamd_mempool_set_variable (task->task_pool,
+					RSPAMD_MEMPOOL_FUZZY_RESULT, fuzzy_var,
+					(rspamd_mempool_destruct_t)g_list_free);
+		}
+		else {
+			/* Not very efficient, but we don't really use it intensively */
+			fuzzy_var = g_list_append (fuzzy_var, hex_result);
+		}
 	}
 }
 
@@ -1984,9 +2013,8 @@ fuzzy_check_try_read (struct fuzzy_client_session *session)
 				}
 			}
 			else if (rep->v1.value == 403) {
-				msg_info_task (
-						"fuzzy check error for %d: forbidden",
-						rep->v1.flag);
+				rspamd_task_insert_result (task, "FUZZY_BLOCKED", 0.0,
+						session->rule->name);
 			}
 			else if (rep->v1.value == 401) {
 				if (cmd->cmd != FUZZY_CHECK) {
@@ -2137,7 +2165,7 @@ fuzzy_check_io_callback (gint fd, short what, void *arg)
 		/* Error state */
 		msg_err_task ("got error on IO with server %s(%s), on %s, %d, %s",
 			rspamd_upstream_name (session->server),
-			rspamd_inet_address_to_string (session->addr),
+				rspamd_inet_address_to_string_pretty (session->addr),
 			session->state == 1 ? "read" : "write",
 			errno,
 			strerror (errno));
@@ -2178,7 +2206,7 @@ fuzzy_check_timer_callback (gint fd, short what, void *arg)
 	if (session->retransmits >= fuzzy_module_ctx->retransmits) {
 		msg_err_task ("got IO timeout with server %s(%s), after %d retransmits",
 				rspamd_upstream_name (session->server),
-				rspamd_inet_address_to_string (session->addr),
+				rspamd_inet_address_to_string_pretty (session->addr),
 				session->retransmits);
 		rspamd_upstream_fail (session->server);
 		rspamd_session_remove_event (session->task->s, fuzzy_io_fin, session);
@@ -2383,7 +2411,7 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 	else if (ret == return_error) {
 		msg_err_task ("got error in IO with server %s(%s), %d, %s",
 				rspamd_upstream_name (session->server),
-				rspamd_inet_address_to_string (session->addr),
+				rspamd_inet_address_to_string_pretty (session->addr),
 				errno, strerror (errno));
 		rspamd_upstream_fail (session->server);
 	}
@@ -2486,7 +2514,7 @@ fuzzy_controller_timer_callback (gint fd, short what, void *arg)
 		msg_err_task_check ("got IO timeout with server %s(%s), "
 				"after %d retransmits",
 				rspamd_upstream_name (session->server),
-				rspamd_inet_address_to_string (session->addr),
+				rspamd_inet_address_to_string_pretty (session->addr),
 				session->retransmits);
 
 		if (session->session) {
@@ -2801,7 +2829,7 @@ register_fuzzy_client_call (struct rspamd_task *task,
 		if ((sock = rspamd_inet_address_connect (addr, SOCK_DGRAM, TRUE)) == -1) {
 			msg_warn_task ("cannot connect to %s(%s), %d, %s",
 				rspamd_upstream_name (selected),
-				rspamd_inet_address_to_string (addr),
+					rspamd_inet_address_to_string_pretty (addr),
 				errno,
 				strerror (errno));
 			rspamd_upstream_fail (selected);

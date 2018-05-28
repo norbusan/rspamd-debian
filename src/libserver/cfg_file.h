@@ -123,8 +123,8 @@ struct rspamd_symbol {
 	gdouble *weight_ptr;
 	gdouble score;
 	guint priority;
-	struct rspamd_symbols_group *gr;
-	GList *groups;
+	struct rspamd_symbols_group *gr; /* Main group */
+	GPtrArray *groups; /* Other groups */
 	guint flags;
 	gint nshots;
 };
@@ -182,6 +182,7 @@ struct rspamd_worker_bind_conf {
 	GPtrArray *addrs;
 	guint cnt;
 	gchar *name;
+	const gchar *bind_line;
 	gboolean is_systemd;
 	struct rspamd_worker_bind_conf *next;
 };
@@ -310,6 +311,8 @@ struct rspamd_config {
 	gboolean ignore_received;                       /**< Ignore data from the first received header			*/
 	gboolean enable_sessions_cache;                 /**< Enable session cache for debug						*/
 	gboolean enable_experimental;                   /**< Enable experimental plugins						*/
+	gboolean disable_pcre_jit;                      /**< Disable pcre JIT									*/
+	gboolean disable_lua_squeeze;                   /**< Disable lua rules squeezing						*/
 
 	gsize max_diff;                                 /**< maximum diff size for text parts					*/
 	gsize max_cores_size;                           /**< maximum size occupied by rspamd core files			*/
@@ -583,10 +586,24 @@ gboolean rspamd_init_filters (struct rspamd_config *cfg, bool reconfig);
  * @return TRUE if symbol has been inserted or FALSE if symbol already exists with higher priority
  */
 gboolean rspamd_config_add_symbol (struct rspamd_config *cfg,
-		const gchar *symbol, gdouble score, const gchar *description,
-		const gchar *group, guint flags,
-		guint priority,
-		gint nshots);
+								   const gchar *symbol,
+								   gdouble score,
+								   const gchar *description,
+								   const gchar *group,
+								   guint flags,
+								   guint priority,
+								   gint nshots);
+
+/**
+ * Adds new group for a symbol
+ * @param cfg
+ * @param symbol
+ * @param group
+ * @return
+ */
+gboolean rspamd_config_add_symbol_group (struct rspamd_config *cfg,
+										 const gchar *symbol,
+										 const gchar *group);
 
 /**
  * Sets action score for a specified metric with the specified priority

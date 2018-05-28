@@ -331,7 +331,7 @@ cache_logic_cmp (const void *p1, const void *p2, gpointer ud)
 }
 
 /**
- * Set counter for a symbol
+ * Set counter for a symbol using moving average
  */
 static double
 rspamd_set_counter (struct counter_data *cd, gdouble value)
@@ -350,6 +350,30 @@ rspamd_set_counter (struct counter_data *cd, gdouble value)
 
 	return cd->mean;
 }
+
+/**
+ * Set counter for a symbol using exponential moving average
+ */
+static double
+rspamd_set_counter_ema (struct counter_data *cd, gdouble value, gdouble alpha)
+{
+	gdouble diff, incr;
+
+	/* Cumulative moving average using per-process counter data */
+	if (cd->number == 0) {
+		cd->mean = 0;
+		cd->stddev = 0;
+	}
+
+	diff = value - cd->mean;
+	incr = diff * alpha;
+	cd->mean += incr;
+	cd->stddev = (1 - alpha) * (cd->stddev + diff * incr);
+	cd->number ++;
+
+	return cd->mean;
+}
+
 
 static void
 rspamd_symbols_cache_resort (struct symbols_cache *cache)
@@ -391,7 +415,7 @@ rspamd_symbols_cache_post_init (struct symbols_cache *cache)
 	struct delayed_cache_dependency *ddep;
 	struct delayed_cache_condition *dcond;
 	GList *cur;
-	guint i, j;
+	gint i, j;
 	gint id;
 
 	rspamd_symbols_cache_resort (cache);
@@ -480,6 +504,16 @@ rspamd_symbols_cache_post_init (struct symbols_cache *cache)
 			}
 			else {
 				msg_err_cache ("cannot find dependency on symbol %s", dep->sym);
+			}
+		}
+
+		/* Reversed loop to make removal safe */
+		for (j = it->deps->len - 1; j >= 0; j --) {
+			dep = g_ptr_array_index (it->deps, j);
+
+			if (dep->item == NULL) {
+				/* Remove useless dep */
+				g_ptr_array_remove_index (it->deps, j);
 			}
 		}
 	}
@@ -1270,7 +1304,7 @@ rspamd_symbols_cache_check_symbol (struct rspamd_task *task,
 	struct rspamd_task **ptask;
 	lua_State *L;
 	gboolean check = TRUE;
-	const gdouble slow_diff_limit = 1e7;
+	const gdouble slow_diff_limit = 0.1;
 
 	if (item->func) {
 
@@ -1309,9 +1343,9 @@ rspamd_symbols_cache_check_symbol (struct rspamd_task *task,
 					rspamd_symbols_cache_watcher_cb,
 					item);
 			msg_debug_task ("execute %s, %d", item->symbol, item->id);
-			t1 = rspamd_get_ticks (TRUE);
+			t1 = rspamd_get_ticks (FALSE);
 			item->func (task, item->user_data);
-			t2 = rspamd_get_ticks (TRUE);
+			t2 = rspamd_get_ticks (FALSE);
 			diff = (t2 - t1);
 
 			if (G_UNLIKELY (RSPAMD_TASK_IS_PROFILING (task))) {
@@ -1323,8 +1357,8 @@ rspamd_symbols_cache_check_symbol (struct rspamd_task *task,
 			}
 
 			if (diff > slow_diff_limit && !(item->type & SYMBOL_TYPE_SQUEEZED)) {
-				msg_info_task ("slow rule: %s: %.0f ticks", item->symbol,
-						diff);
+				msg_info_task ("slow rule: %s: %.2f ms", item->symbol,
+						diff * 1000);
 			}
 
 			if (rspamd_worker_is_scanner (task->worker)) {
@@ -2046,11 +2080,12 @@ rspamd_symbols_cache_resort_cb (gint fd, short what, gpointer ud)
 	struct cache_item *item, *parent;
 	guint i;
 	gdouble cur_ticks;
+	static const double decay_rate = 0.7;
 
 	cache = cbdata->cache;
 	/* Plan new event */
 	tm = rspamd_time_jitter (cache->reload_time, 0);
-	cur_ticks = rspamd_get_ticks (TRUE);
+	cur_ticks = rspamd_get_ticks (FALSE);
 	msg_debug_cache ("resort symbols cache, next reload in %.2f seconds", tm);
 	g_assert (cache != NULL);
 	evtimer_set (&cbdata->resort_ev, rspamd_symbols_cache_resort_cb, cbdata);
@@ -2063,7 +2098,7 @@ rspamd_symbols_cache_resort_cb (gint fd, short what, gpointer ud)
 		for (i = 0; i < cache->items_by_id->len; i ++) {
 			item = g_ptr_array_index (cache->items_by_id, i);
 			item->st->total_hits += item->st->hits;
-			item->st->hits = 0;
+			g_atomic_int_set (&item->st->hits, 0);
 
 			if (item->last_count > 0 && cbdata->w->index == 0) {
 				/* Calculate frequency */
@@ -2071,8 +2106,8 @@ rspamd_symbols_cache_resort_cb (gint fd, short what, gpointer ud)
 
 				cur_value = (item->st->total_hits - item->last_count) /
 						(cur_ticks - cbdata->last_resort);
-				rspamd_set_counter (&item->st->frequency_counter,
-						cur_value);
+				rspamd_set_counter_ema (&item->st->frequency_counter,
+						cur_value, decay_rate);
 				item->st->avg_frequency = item->st->frequency_counter.mean;
 				item->st->stddev_frequency = item->st->frequency_counter.stddev;
 
@@ -2111,8 +2146,8 @@ rspamd_symbols_cache_resort_cb (gint fd, short what, gpointer ud)
 			if (item->cd->number > 0) {
 				if (item->type & (SYMBOL_TYPE_CALLBACK|SYMBOL_TYPE_NORMAL)) {
 					item->st->avg_time = item->cd->mean;
-					rspamd_set_counter (&item->st->time_counter,
-							item->st->avg_time);
+					rspamd_set_counter_ema (&item->st->time_counter,
+							item->st->avg_time, decay_rate);
 					item->st->avg_time = item->st->time_counter.mean;
 					memset (item->cd, 0, sizeof (*item->cd));
 				}

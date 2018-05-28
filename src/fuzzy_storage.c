@@ -167,7 +167,7 @@ struct rspamd_fuzzy_storage_ctx {
 	struct rspamd_worker *worker;
 	struct rspamd_http_connection_router *collection_rt;
 	const ucl_object_t *skip_map;
-	GHashTable *skip_hashes;
+	struct rspamd_hash_map_helper *skip_hashes;
 	guchar cookie[COOKIE_SIZE];
 };
 
@@ -527,6 +527,8 @@ rspamd_fuzzy_updates_cb (gboolean success, void *ud)
 			}
 		}
 
+		msg_info ("successfully updated fuzzy storage: %d updates processed",
+				ctx->updates_pending->len);
 		/* Clear updates */
 		ctx->updates_pending->len = 0;
 		rspamd_fuzzy_backend_version (ctx->backend, source,
@@ -909,7 +911,7 @@ rspamd_fuzzy_process_command (struct fuzzy_session *session)
 					hexbuf, sizeof (hexbuf) - 1);
 				hexbuf[sizeof (hexbuf) - 1] = '\0';
 
-				if (g_hash_table_lookup (session->ctx->skip_hashes, hexbuf)) {
+				if (rspamd_match_hash_map (session->ctx->skip_hashes, hexbuf)) {
 					result.v1.value = 401;
 					result.v1.prob = 0.0;
 
@@ -2666,12 +2668,17 @@ fuzzy_peer_rep (struct rspamd_worker *worker,
 		rspamd_socket_nonblocking (rep_fd);
 	}
 
+	msg_info ("got peer fd reply from the main process");
+
 	/* Start listening */
 	cur = worker->cf->listen_socks;
 	while (cur) {
 		ls = cur->data;
 
 		if (ls->fd != -1) {
+			msg_info ("start listening on %s",
+					rspamd_inet_address_to_string_pretty (ls->addr));
+
 			if (ls->type == RSPAMD_WORKER_SOCKET_UDP) {
 				accept_events = g_malloc0 (sizeof (struct event) * 2);
 				event_set (&accept_events[0], ls->fd, EV_READ | EV_PERSIST,

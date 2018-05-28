@@ -1595,6 +1595,10 @@ lua_config_register_symbol (lua_State * L)
 			return luaL_error (L, "invalid arguments");
 		}
 
+		if (!no_squeeze) {
+			no_squeeze = cfg->disable_lua_squeeze;
+		}
+
 		if (nshots == 0) {
 			nshots = cfg->default_max_shots;
 		}
@@ -1641,6 +1645,23 @@ lua_config_register_symbol (lua_State * L)
 			rspamd_config_add_symbol (cfg, name,
 					score, description, group, flags,
 					(guint) priority, nshots);
+
+			lua_pushstring (L, "groups");
+			lua_gettable (L, 2);
+
+			if (lua_istable (L, -1)) {
+				for (lua_pushnil (L); lua_next (L, -2); lua_pop (L, 1)) {
+					if (lua_isstring (L, -1)) {
+						rspamd_config_add_symbol_group (cfg, name,
+								lua_tostring (L, -1));
+					}
+					else {
+						return luaL_error (L, "invalid groups element");
+					}
+				}
+			}
+
+			lua_pop (L, 1);
 		}
 	}
 	else {
@@ -1877,18 +1898,20 @@ lua_config_register_dependency (lua_State * L)
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	const gchar *parent = NULL, *child = NULL;
 	gint child_id;
-	gboolean skip_squeeze = FALSE;
+	gboolean skip_squeeze;
 
 	if (cfg == NULL) {
 		lua_error (L);
 		return 0;
 	}
 
+	skip_squeeze = cfg->disable_lua_squeeze;
+
 	if (lua_type (L, 2) == LUA_TNUMBER) {
 		child_id = luaL_checknumber (L, 2);
 		parent = luaL_checkstring (L, 3);
 
-		if (lua_isboolean (L, 4)) {
+		if (!skip_squeeze && lua_isboolean (L, 4)) {
 			skip_squeeze = lua_toboolean (L, 4);
 		}
 
@@ -1908,7 +1931,7 @@ lua_config_register_dependency (lua_State * L)
 		child = luaL_checkstring (L,2);
 		parent = luaL_checkstring (L, 3);
 
-		if (lua_isboolean (L, 4)) {
+		if (!skip_squeeze && lua_isboolean (L, 4)) {
 			skip_squeeze = lua_toboolean (L, 4);
 		}
 
@@ -1997,6 +2020,25 @@ lua_config_set_metric_symbol (lua_State * L)
 
 		rspamd_config_add_symbol (cfg, name,
 				weight, description, group, flags, (guint) priority, nshots);
+
+
+		if (lua_type (L, 2) == LUA_TTABLE) {
+			lua_pushstring (L, "groups");
+			lua_gettable (L, 2);
+
+			if (lua_istable (L, -1)) {
+				for (lua_pushnil (L); lua_next (L, -2); lua_pop (L, 1)) {
+					if (lua_isstring (L, -1)) {
+						rspamd_config_add_symbol_group (cfg, name,
+								lua_tostring (L, -1));
+					} else {
+						return luaL_error (L, "invalid groups element");
+					}
+				}
+			}
+
+			lua_pop (L, 1);
+		}
 	}
 	else {
 		return luaL_error (L, "invalid arguments, rspamd_config expected");
@@ -2011,6 +2053,8 @@ lua_config_get_metric_symbol (lua_State * L)
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	const gchar *sym_name = luaL_checkstring (L, 2);
 	struct rspamd_symbol *sym_def;
+	struct rspamd_symbols_group *sym_group;
+	guint i;
 
 	if (cfg && sym_name) {
 		sym_def = g_hash_table_lookup (cfg->symbols, sym_name);
@@ -2035,6 +2079,16 @@ lua_config_get_metric_symbol (lua_State * L)
 				lua_pushstring (L, sym_def->gr->name);
 				lua_settable (L, -3);
 			}
+
+			lua_pushstring (L, "groups");
+			lua_createtable (L, sym_def->groups->len, 0);
+
+			PTR_ARRAY_FOREACH (sym_def->groups, i, sym_group) {
+				lua_pushstring (L, sym_group->name);
+				lua_rawseti (L, -2, i + 1);
+			}
+
+			lua_settable (L, -3);
 		}
 	}
 	else {
@@ -2198,6 +2252,8 @@ lua_config_newindex (lua_State *L)
 	name = luaL_checkstring (L, 2);
 
 	if (cfg != NULL && name != NULL && lua_gettop (L) == 3) {
+		no_squeeze = cfg->disable_lua_squeeze;
+
 		if (lua_type (L, 3) == LUA_TFUNCTION) {
 			/* Normal symbol from just a function */
 			lua_pushvalue (L, 3);
@@ -2218,6 +2274,7 @@ lua_config_newindex (lua_State *L)
 			const char *type_str, *group = NULL, *description = NULL;
 			guint flags = 0;
 
+			no_squeeze = cfg->disable_lua_squeeze;
 			/*
 			 * Table can have the following attributes:
 			 * "callback" - should be a callback function
@@ -2284,13 +2341,15 @@ lua_config_newindex (lua_State *L)
 			}
 			lua_pop (L, 1);
 
-			lua_pushstring (L, "no_squeeze");
-			lua_gettable (L, -2);
+			if (!no_squeeze) {
+				lua_pushstring (L, "no_squeeze");
+				lua_gettable (L, -2);
 
-			if (lua_toboolean (L, -1)) {
-				no_squeeze = TRUE;
+				if (lua_toboolean (L, -1)) {
+					no_squeeze = TRUE;
+				}
+				lua_pop (L, 1);
 			}
-			lua_pop (L, 1);
 
 			id = rspamd_register_symbol_fromlua (L,
 					cfg,
@@ -2376,6 +2435,23 @@ lua_config_newindex (lua_State *L)
 					 */
 					rspamd_config_add_symbol (cfg, name, score,
 							description, group, flags, 0, nshots);
+
+					lua_pushstring (L, "groups");
+					lua_gettable (L, -2);
+
+					if (lua_istable (L, -1)) {
+						for (lua_pushnil (L); lua_next (L, -2); lua_pop (L, 1)) {
+							if (lua_isstring (L, -1)) {
+								rspamd_config_add_symbol_group (cfg, name,
+										lua_tostring (L, -1));
+							}
+							else {
+								return luaL_error (L, "invalid groups element");
+							}
+						}
+					}
+
+					lua_pop (L, 1);
 				}
 				else {
 					lua_pop (L, 1);
