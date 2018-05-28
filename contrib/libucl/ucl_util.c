@@ -516,6 +516,26 @@ ucl_copy_key_trash (const ucl_object_t *obj)
 	return obj->trash_stack[UCL_TRASH_KEY];
 }
 
+void
+ucl_chunk_free (struct ucl_chunk *chunk)
+{
+	if (chunk) {
+		if (chunk->special_handler) {
+			if (chunk->special_handler->free_function) {
+				chunk->special_handler->free_function (
+						(unsigned char *) chunk->begin,
+						chunk->end - chunk->begin,
+						chunk->special_handler->user_data);
+			} else {
+				UCL_FREE (chunk->end - chunk->begin,
+						(unsigned char *) chunk->begin);
+			}
+		}
+
+		UCL_FREE (sizeof (*chunk), chunk);
+	}
+}
+
 char *
 ucl_copy_value_trash (const ucl_object_t *obj)
 {
@@ -601,7 +621,7 @@ ucl_parser_free (struct ucl_parser *parser)
 		UCL_FREE (sizeof (struct ucl_macro), macro);
 	}
 	LL_FOREACH_SAFE (parser->chunks, chunk, ctmp) {
-		UCL_FREE (sizeof (struct ucl_chunk), chunk);
+		ucl_chunk_free (chunk);
 	}
 	LL_FOREACH_SAFE (parser->keys, key, ktmp) {
 		UCL_FREE (sizeof (struct ucl_pubkey), key);
@@ -716,6 +736,12 @@ ucl_pubkey_add (struct ucl_parser *parser, const unsigned char *key, size_t len)
 # endif
 #endif
 	return true;
+}
+
+void ucl_parser_add_special_handler (struct ucl_parser *parser,
+		struct ucl_parser_special_handler *handler)
+{
+	LL_APPEND (parser->special_handlers, handler);
 }
 
 #ifdef CURL_FOUND
@@ -1017,7 +1043,7 @@ ucl_include_url (const unsigned char *data, size_t len,
 		chunk = parser->chunks;
 		if (chunk != NULL) {
 			parser->chunks = chunk->next;
-			UCL_FREE (sizeof (struct ucl_chunk), chunk);
+			ucl_chunk_free (chunk);
 		}
 	}
 
@@ -1319,7 +1345,7 @@ ucl_include_file_single (const unsigned char *data, size_t len,
 	chunk = parser->chunks;
 	if (chunk != NULL) {
 		parser->chunks = chunk->next;
-		UCL_FREE (sizeof (struct ucl_chunk), chunk);
+		ucl_chunk_free (chunk);
 		parser->recursion --;
 	}
 
@@ -2182,14 +2208,23 @@ ucl_object_fromstring_common (const char *str, size_t len, enum ucl_string_flags
 		obj->type = UCL_STRING;
 		if (flags & UCL_STRING_ESCAPE) {
 			for (p = start, escaped_len = 0; p < end; p ++, escaped_len ++) {
-				if (ucl_test_character (*p, UCL_CHARACTER_JSON_UNSAFE)) {
-					escaped_len ++;
+				if (ucl_test_character (*p, UCL_CHARACTER_JSON_UNSAFE | UCL_CHARACTER_WHITESPACE_UNSAFE)) {
+					switch (*p) {
+					case '\v':
+						escaped_len += 5;
+						break;
+					case ' ':
+						break;
+					default:
+						escaped_len ++;
+						break;
+					}
 				}
 			}
 			dst = malloc (escaped_len + 1);
 			if (dst != NULL) {
 				for (p = start, d = dst; p < end; p ++, d ++) {
-					if (ucl_test_character (*p, UCL_CHARACTER_JSON_UNSAFE)) {
+					if (ucl_test_character (*p, UCL_CHARACTER_JSON_UNSAFE | UCL_CHARACTER_WHITESPACE_UNSAFE)) {
 						switch (*p) {
 						case '\n':
 							*d++ = '\\';
@@ -2211,9 +2246,20 @@ ucl_object_fromstring_common (const char *str, size_t len, enum ucl_string_flags
 							*d++ = '\\';
 							*d = 'f';
 							break;
+						case '\v':
+							*d++ = '\\';
+							*d++ = 'u';
+							*d++ = '0';
+							*d++ = '0';
+							*d++ = '0';
+							*d   = 'B';
+							break;
 						case '\\':
 							*d++ = '\\';
 							*d = '\\';
+							break;
+						case ' ':
+							*d = ' ';
 							break;
 						case '"':
 							*d++ = '\\';

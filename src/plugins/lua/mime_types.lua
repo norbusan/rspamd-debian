@@ -403,9 +403,9 @@ local full_extensions_map = {
   {"jfif", "image/pjpeg"},
   {"jnlp", "application/x-java-jnlp-file"},
   {"jpb", "application/octet-stream"},
-  {"jpe", "image/jpeg"},
-  {"jpeg", "image/jpeg"},
-  {"jpg", "image/jpeg"},
+  {"jpe", {"image/jpeg", "image/pjpeg"}},
+  {"jpeg", {"image/jpeg", "image/pjpeg"}},
+  {"jpg", {"image/jpeg", "image/pjpeg"}},
   {"js", "application/javascript"},
   {"json", "application/json"},
   {"jsx", "text/jscript"},
@@ -865,6 +865,13 @@ local function check_mime_type(task)
         if ext2 then
           check_extension(settings['bad_extensions'][ext],
             settings['bad_extensions'][ext2])
+          -- Check for archive cloaking like .zip.gz
+          if settings['archive_extensions'][ext2]
+            -- Exclude multipart archive extensions, e.g. .zip.001
+            and not string.match(ext, '^%d+$')
+          then
+            task:insert_result(settings['symbol_archive_in_archive'], 1.0, string.format(".%s.%s", ext2, ext))
+          end
         else
           check_extension(settings['bad_extensions'][ext], nil)
         end

@@ -148,7 +148,6 @@ local function symbol_transform(cfg, k, v)
 end
 
 local function test_groups(groups)
-  local all_symbols = {}
   for gr_name, gr in pairs(groups) do
     if not gr.symbols then
       local cnt = 0
@@ -158,16 +157,6 @@ local function test_groups(groups)
         logger.debugx('group %s is empty', gr_name)
       else
         logger.infox('group %s has no symbols', gr_name)
-      end
-
-    else
-      for sn,_ in pairs(gr.symbols) do
-        if all_symbols[sn] then
-          logger.errx('symbol %s has registered in multiple groups: %s and %s',
-              sn, all_symbols[sn], gr_name)
-        else
-          all_symbols[sn] = gr_name
-        end
       end
     end
   end
@@ -241,7 +230,8 @@ return function(cfg)
     logger.errx('no actions defined')
   else
     -- Perform sanity check for actions
-    local actions_defs = {'greylist', 'add header', 'add_header',
+    local actions_defs = {'no action', 'no_action', -- In case if that's added
+                          'greylist', 'add header', 'add_header',
                           'rewrite subject', 'rewrite_subject', 'reject'}
 
     if not cfg.actions['no action'] and not cfg.actions['no_action'] and
