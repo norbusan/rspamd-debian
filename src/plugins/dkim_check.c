@@ -409,8 +409,11 @@ dkim_module_config (struct rspamd_config *cfg)
 	if ((value =
 		rspamd_config_get_module_opt (cfg, "dkim", "domains")) != NULL) {
 		if (!rspamd_map_add_from_ucl (cfg, value,
-			"DKIM domains", rspamd_kv_list_read, rspamd_kv_list_fin,
-			(void **)&dkim_module_ctx->dkim_domains)) {
+				"DKIM domains",
+				rspamd_kv_list_read,
+				rspamd_kv_list_fin,
+				rspamd_kv_list_dtor,
+				(void **)&dkim_module_ctx->dkim_domains)) {
 			msg_warn_config ("cannot load dkim domains list from %s",
 				ucl_object_tostring (value));
 		}
@@ -425,7 +428,10 @@ dkim_module_config (struct rspamd_config *cfg)
 	if (!got_trusted && (value =
 			rspamd_config_get_module_opt (cfg, "dkim", "trusted_domains")) != NULL) {
 		if (!rspamd_map_add_from_ucl (cfg, value,
-				"DKIM domains", rspamd_kv_list_read, rspamd_kv_list_fin,
+				"DKIM domains",
+				rspamd_kv_list_read,
+				rspamd_kv_list_fin,
+				rspamd_kv_list_dtor,
 				(void **)&dkim_module_ctx->dkim_domains)) {
 			msg_warn_config ("cannot load dkim domains list from %s",
 					ucl_object_tostring (value));
@@ -618,11 +624,12 @@ lua_dkim_sign_handler (lua_State *L)
 	GError *err = NULL;
 	GString *hdr;
 	const gchar *selector = NULL, *domain = NULL, *key = NULL, *rawkey = NULL,
-			*headers = NULL, *sign_type_str = NULL, *arc_cv = NULL;
+			*headers = NULL, *sign_type_str = NULL, *arc_cv = NULL,
+			*pubkey = NULL;
 	rspamd_dkim_sign_context_t *ctx;
 	rspamd_dkim_sign_key_t *dkim_key;
 	gsize rawlen = 0, keylen = 0;
-	gboolean no_cache = FALSE;
+	gboolean no_cache = FALSE, strict_pubkey_check = FALSE;
 
 	luaL_argcheck (L, lua_type (L, 2) == LUA_TTABLE, 2, "'table' expected");
 	/*
@@ -633,11 +640,13 @@ lua_dkim_sign_handler (lua_State *L)
 	 */
 	if (!rspamd_lua_parse_table_arguments (L, 2, &err,
 			"key=V;rawkey=V;*domain=S;*selector=S;no_cache=B;headers=S;"
-					"sign_type=S;arc_idx=I;arc_cv=S;expire=I",
+			"sign_type=S;arc_idx=I;arc_cv=S;expire=I;pubkey=S;"
+			"strict_pubkey_check=B",
 			&keylen, &key, &rawlen, &rawkey, &domain,
 			&selector, &no_cache, &headers,
-			&sign_type_str, &arc_idx, &arc_cv, &expire)) {
-		msg_err_task ("invalid return value from sign condition: %e",
+			&sign_type_str, &arc_idx, &arc_cv, &expire, &pubkey,
+			&strict_pubkey_check)) {
+		msg_err_task ("cannot parse table arguments: %e",
 				err);
 		g_error_free (err);
 
@@ -763,6 +772,53 @@ lua_dkim_sign_handler (lua_State *L)
 			lua_settop (L, 0);
 			return luaL_error (L, "unknown sign type: %s",
 					sign_type_str);
+		}
+	}
+
+	if (pubkey != NULL) {
+		/* Also check if private and public keys match */
+		rspamd_dkim_key_t *pk;
+		gsize keylen = strlen (pubkey);
+
+		pk = rspamd_dkim_parse_key (pubkey, &keylen, NULL);
+
+		if (pk == NULL) {
+			if (strict_pubkey_check) {
+				msg_err_task ("cannot parse pubkey from string: %s, skip signing",
+						pubkey);
+				lua_pushboolean (L, FALSE);
+
+				return 1;
+			}
+			else {
+				msg_warn_task ("cannot parse pubkey from string: %s",
+						pubkey);
+			}
+		}
+		else {
+			GError *te = NULL;
+
+			/* We have parsed the key, so try to check keys */
+			if (!rspamd_dkim_match_keys (pk, dkim_key, &te)) {
+				if (strict_pubkey_check) {
+					msg_err_task ("public key for %s/%s does not match private "
+								  "key: %e, skip signing",
+							domain, selector, te);
+					g_error_free (te);
+					lua_pushboolean (L, FALSE);
+					rspamd_dkim_key_unref (pk);
+
+					return 1;
+				}
+				else {
+					msg_warn_task ("public key for %s/%s does not match private "
+								   "key: %e",
+							domain, selector, te);
+					g_error_free (te);
+				}
+			}
+
+			rspamd_dkim_key_unref (pk);
 		}
 	}
 

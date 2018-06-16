@@ -45,6 +45,7 @@ struct rdns_io_channel;
 typedef void (*dns_callback_type) (struct rdns_reply *reply, void *arg);
 
 enum rdns_request_type {
+	RDNS_REQUEST_INVALID = -1,
 	RDNS_REQUEST_A = 1,
 	RDNS_REQUEST_NS = 2,
 	RDNS_REQUEST_SOA = 6,
@@ -111,6 +112,7 @@ struct rdns_reply_entry {
 
 
 enum dns_rcode {
+	RDNS_RC_INVALID = -1,
 	RDNS_RC_NOERROR	= 0,
 	RDNS_RC_FORMERR	= 1,
 	RDNS_RC_SERVFAIL	= 2,
@@ -221,6 +223,8 @@ struct rdns_request_name {
 	unsigned int len;
 };
 
+#define MAX_FAKE_NAME 1000
+
 /*
  * RDNS API
  */
@@ -322,6 +326,19 @@ void rdns_resolver_set_max_io_uses (struct rdns_resolver *resolver,
  */
 void rdns_resolver_register_plugin (struct rdns_resolver *resolver,
 		struct rdns_plugin *plugin);
+
+/**
+ * Add a fake reply for a specified name
+ * @param resolver
+ * @param type
+ * @param name (must not be larger than MAX_FAKE_NAME)
+ * @param reply
+ */
+void rdns_resolver_set_fake_reply (struct rdns_resolver *resolver,
+								   const char *name,
+								   enum rdns_request_type type,
+								   enum dns_rcode rcode,
+								   struct rdns_reply_entry *reply);
 
 /**
  * Init DNS resolver

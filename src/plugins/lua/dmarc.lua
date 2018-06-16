@@ -37,7 +37,7 @@ local no_reporting_domains
 local statefile = string.format('%s/%s', rspamd_paths['DBDIR'], 'dmarc_reports_last_sent')
 local VAR_NAME = 'dmarc_reports_last_sent'
 local INTERVAL = 86400
-local pool = mempool.create()
+local pool
 
 local report_settings = {
   helo = 'rspamd',
@@ -66,10 +66,10 @@ Content-Transfer-Encoding: 7bit
 This is an aggregate report from %s.
 
 ------=_NextPart_000_024E_01CC9B0A.AFE54C00
-Content-Type: text/xml
+Content-Type: application/gzip
 Content-Transfer-Encoding: base64
 Content-Disposition: attachment;
-	filename="%s!%s!%s!%s.xml"
+	filename="%s!%s!%s!%s.xml.gz"
 
 ]]
 local report_footer = [[
@@ -608,6 +608,7 @@ if opts['reporting'] == true then
     rspamd_config:add_on_load(function(cfg, ev_base, worker)
       if not worker:is_primary_controller() then return end
       local rresolver = rspamd_resolver.init(ev_base, rspamd_config)
+      pool = mempool.create()
       rspamd_config:register_finish_script(function ()
         local stamp = pool:get_variable(VAR_NAME, 'double')
         if not stamp then
@@ -621,6 +622,7 @@ if opts['reporting'] == true then
         end
         assert(f:write(pool:get_variable(VAR_NAME, 'double')))
         assert(f:close())
+        pool:destroy()
       end)
       local get_reporting_domain, reporting_domain, report_start, report_end, report_id, want_period, report_key
       local reporting_addr = {}
@@ -744,10 +746,11 @@ if opts['reporting'] == true then
         for k in pairs(reporting_addr) do
           table.insert(tmp_addr, k)
         end
-        local encoded = rspamd_util.encode_base64(table.concat(
+        local encoded = rspamd_util.encode_base64(rspamd_util.gzip_compress(
+              table.concat(
                 {xmlf('header'),
                  xmlf('entries'),
-                 xmlf('footer')}), 78)
+                 xmlf('footer')})), 78)
         local function mail_cb(err, data, conn)
           local function no_error(merr, mdata, wantcode)
             wantcode = wantcode or '2'
@@ -808,11 +811,22 @@ if opts['reporting'] == true then
                 table.insert(atmp, k)
               end
               local addr_string = table.concat(atmp, ', ')
-              local rhead = string.format(report_template, report_settings.email, addr_string,
-                reporting_domain, report_settings.domain, report_id, rspamd_util.time_to_string(rspamd_util.get_time()),
-                rspamd_util.random_hex(12) .. '@rspamd', report_settings.domain, report_settings.domain, reporting_domain,
-                report_start, report_end)
-              conn:add_write(pre_quit_cb, {rhead, encoded, report_footer, '\r\n.\r\n'})
+              local rhead = string.format(report_template,
+                  report_settings.email,
+                  addr_string,
+                  reporting_domain,
+                  report_settings.domain,
+                  report_id,
+                  rspamd_util.time_to_string(rspamd_util.get_time()),
+                  rspamd_util.random_hex(12) .. '@rspamd',
+                  report_settings.domain,
+                  report_settings.domain,
+                  reporting_domain,
+                  report_start, report_end)
+              conn:add_write(pre_quit_cb, {rhead,
+                                           encoded,
+                                           report_footer,
+                                           '\r\n.\r\n'})
             end
           end
           local function data_cb(merr, mdata)

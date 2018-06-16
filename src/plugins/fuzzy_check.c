@@ -425,8 +425,11 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 
 	if ((value = ucl_object_lookup (obj, "skip_hashes")) != NULL) {
 		rspamd_map_add_from_ucl (cfg, value,
-			"Fuzzy hashes whitelist", rspamd_kv_list_read, rspamd_kv_list_fin,
-			(void **)&rule->skip_map);
+				"Fuzzy hashes whitelist",
+				rspamd_kv_list_read,
+				rspamd_kv_list_fin,
+				rspamd_kv_list_dtor,
+				(void **)&rule->skip_map);
 		rspamd_mempool_add_destructor (fuzzy_module_ctx->fuzzy_pool,
 				(rspamd_mempool_destruct_t)rspamd_map_helper_destroy_radix,
 				rule->skip_map);
@@ -3019,6 +3022,8 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 					"Message processing error");
 			return;
 		}
+
+		rspamd_message_process (task);
 	}
 
 	PTR_ARRAY_FOREACH (fuzzy_module_ctx->fuzzy_rules, i, rule) {

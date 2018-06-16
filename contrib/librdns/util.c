@@ -286,7 +286,7 @@ rdns_type_fromstr (const char *str)
 		}
 	}
 
-	return -1;
+	return RDNS_REQUEST_INVALID;
 }
 
 enum dns_rcode
@@ -334,7 +334,7 @@ rdns_rcode_fromstr (const char *str)
 		}
 	}
 
-	return -1;
+	return RDNS_RC_INVALID;
 }
 
 uint16_t
@@ -353,34 +353,38 @@ rdns_reply_free (struct rdns_reply *rep)
 {
 	struct rdns_reply_entry *entry, *tmp;
 
-	LL_FOREACH_SAFE (rep->entries, entry, tmp) {
-		switch (entry->type) {
-		case RDNS_REQUEST_PTR:
-			free (entry->content.ptr.name);
-			break;
-		case RDNS_REQUEST_NS:
-			free (entry->content.ns.name);
-			break;
-		case RDNS_REQUEST_MX:
-			free (entry->content.mx.name);
-			break;
-		case RDNS_REQUEST_TXT:
-		case RDNS_REQUEST_SPF:
-			free (entry->content.txt.data);
-			break;
-		case RDNS_REQUEST_SRV:
-			free (entry->content.srv.target);
-			break;
-		case RDNS_REQUEST_TLSA:
-			free (entry->content.tlsa.data);
-			break;
-		case RDNS_REQUEST_SOA:
-			free (entry->content.soa.mname);
-			free (entry->content.soa.admin);
-			break;
+	/* We don't need to free data for faked replies */
+	if (!rep->request || rep->request->state != RDNS_REQUEST_FAKE) {
+		LL_FOREACH_SAFE (rep->entries, entry, tmp) {
+			switch (entry->type) {
+			case RDNS_REQUEST_PTR:
+				free (entry->content.ptr.name);
+				break;
+			case RDNS_REQUEST_NS:
+				free (entry->content.ns.name);
+				break;
+			case RDNS_REQUEST_MX:
+				free (entry->content.mx.name);
+				break;
+			case RDNS_REQUEST_TXT:
+			case RDNS_REQUEST_SPF:
+				free (entry->content.txt.data);
+				break;
+			case RDNS_REQUEST_SRV:
+				free (entry->content.srv.target);
+				break;
+			case RDNS_REQUEST_TLSA:
+				free (entry->content.tlsa.data);
+				break;
+			case RDNS_REQUEST_SOA:
+				free (entry->content.soa.mname);
+				free (entry->content.soa.admin);
+				break;
+			}
+			free (entry);
 		}
-		free (entry);
 	}
+
 	free (rep);
 }
 
@@ -418,7 +422,11 @@ rdns_request_free (struct rdns_request *req)
 				HASH_DEL (req->io->requests, req);
 				req->async_event = NULL;
 			}
-
+			else if (req->state == RDNS_REQUEST_FAKE) {
+				req->async->del_write (req->async->data,
+						req->async_event);
+				req->async_event = NULL;
+			}
 		}
 #ifdef TWEETNACL
 		if (req->curve_plugin_data != NULL) {

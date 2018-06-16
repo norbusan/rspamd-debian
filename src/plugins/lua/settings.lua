@@ -37,6 +37,44 @@ local rspamd_regexp = require "rspamd_regexp"
 local ucl = require "ucl"
 local fun = require "fun"
 
+local function apply_settings(task, to_apply)
+  task:set_settings(to_apply)
+  task:cache_set('settings', to_apply)
+  lua_squeeze.handle_settings(task, to_apply)
+
+  if to_apply['add_headers'] or to_apply['remove_headers'] then
+    local rep = {
+      add_headers = to_apply['add_headers'] or {},
+      remove_headers = to_apply['remove_headers'] or {},
+    }
+    task:set_rmilter_reply(rep)
+  end
+
+  if to_apply.flags and type(to_apply.flags) == 'table' then
+    for _,fl in ipairs(to_apply.flags) do
+      task:set_flag(fl)
+    end
+  end
+
+  if to_apply.symbols then
+    -- Add symbols, specified in the settings
+    if #to_apply.symbols > 0 then
+      fun.each(function(val)
+        task:insert_result(val, 1.0)
+      end,
+          fun.filter(function(elt) return type(elt) == 'string' end,
+              to_apply.symbols))
+    else
+      -- Object like symbols
+      fun.each(function(k, val)
+        task:insert_result(k, val.score or 1.0, val.options or {})
+      end,
+          fun.filter(function(_, elt) return type(elt) == 'table' end,
+              to_apply.symbols))
+    end
+  end
+end
+
 -- Checks for overridden settings within query params and returns 'true' if
 -- settings are overridden
 local function check_query_settings(task)
@@ -47,9 +85,7 @@ local function check_query_settings(task)
     local res,err = parser:parse_string(tostring(query_set))
     if res then
       local settings_obj = parser:get_object()
-      task:set_settings(settings_obj)
-      task:cache_set('settings', settings_obj)
-      lua_squeeze.handle_settings(task, settings_obj)
+      apply_settings(task, settings_obj)
 
       return true
     else
@@ -76,10 +112,7 @@ local function check_query_settings(task)
         nset['default']['actions']['add header'] = ss
       end
 
-      task:set_settings(nset)
-      task:cache_set('settings', nset)
-      lua_squeeze.handle_settings(task, nset)
-
+      apply_settings(task, nset)
       return true
     end
   end
@@ -90,19 +123,8 @@ local function check_query_settings(task)
     local id_str = tostring(settings_id)
     local elt = settings_ids[id_str]
     if elt and elt['apply'] then
-      task:set_settings(elt['apply'])
-      lua_squeeze.handle_settings(task, elt['apply'])
-      task:cache_set('settings', elt['apply'])
-
-      if elt.apply['add_headers'] or elt.apply['remove_headers'] then
-        local rep = {
-          add_headers = elt.apply['add_headers'] or {},
-          remove_headers = elt.apply['remove_headers'] or {},
-        }
-        task:set_rmilter_reply(rep)
-      end
+      apply_settings(task, elt['apply'])
       rspamd_logger.infox(task, "applying settings id %s", id_str)
-
       return true
     end
   end
@@ -340,9 +362,7 @@ local function check_settings(task)
           rspamd_logger.infox(task, "<%1> apply settings according to rule %2",
             task:get_message_id(), s.name)
           if rule['apply'] then
-            task:set_settings(rule['apply'])
-            lua_squeeze.handle_settings(task, rule['apply'])
-            task:cache_set('settings', rule['apply'])
+            apply_settings(task, rule['apply'])
             applied = true
           end
           if rule['symbols'] then
@@ -653,9 +673,7 @@ local function gen_redis_callback(handler, id)
               local obj = parser:get_object()
               rspamd_logger.infox(task, "<%1> apply settings according to redis rule %2",
                 task:get_message_id(), id)
-              task:set_settings(obj)
-              lua_squeeze.handle_settings(task, obj)
-              task:cache_set('settings', obj)
+              apply_settings(task, obj)
               break
             end
           end

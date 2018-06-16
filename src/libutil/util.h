@@ -116,7 +116,7 @@ void rspamd_pass_signal (GHashTable *, gint );
 /*
  * Process title utility functions
  */
-gint init_title (gint argc, gchar *argv[], gchar *envp[]);
+gint init_title (struct rspamd_main *, gint argc, gchar *argv[], gchar *envp[]);
 gint setproctitle (const gchar *fmt, ...);
 #endif
 
@@ -497,5 +497,18 @@ void rspamd_localtime (gint64 ts, struct tm *dest);
  * @return TRUE if a string has been compressed
  */
 gboolean rspamd_fstring_gzip (rspamd_fstring_t **in);
+
+/**
+ * Perform globbing searching for the specified path. Allow recursion,
+ * returns an error if maximum nesting is reached.
+ * @param pattern
+ * @param recursive
+ * @param err
+ * @return GPtrArray of gchar *, elements are freed when array is freed
+ */
+GPtrArray *rspamd_glob_path (const gchar *dir,
+							 const gchar *pattern,
+							 gboolean recursive,
+							 GError **err);
 
 #endif
