@@ -56,6 +56,7 @@ static gchar * rspamd_ucl_read_cb (gchar * chunk,
 	struct map_cb_data *data,
 	gboolean final);
 static void rspamd_ucl_fin_cb (struct map_cb_data *data);
+static void rspamd_ucl_dtor_cb (struct map_cb_data *data);
 
 guint rspamd_config_log_id = (guint)-1;
 RSPAMD_CONSTRUCTOR(rspamd_config_log_init)
@@ -114,7 +115,7 @@ rspamd_parse_bind_line (struct rspamd_config *cfg,
 }
 
 struct rspamd_config *
-rspamd_config_new (void)
+rspamd_config_new (enum rspamd_config_init_flags flags)
 {
 	struct rspamd_config *cfg;
 
@@ -172,7 +173,11 @@ rspamd_config_new (void)
 	cfg->min_word_len = DEFAULT_MIN_WORD;
 	cfg->max_word_len = DEFAULT_MAX_WORD;
 
-	cfg->lua_state = rspamd_lua_init ();
+	if (!(flags & RSPAMD_CONFIG_INIT_SKIP_LUA)) {
+		cfg->lua_state = rspamd_lua_init ();
+		cfg->own_lua_state = TRUE;
+	}
+
 	cfg->cache = rspamd_symbols_cache_new (cfg);
 	cfg->ups_ctx = rspamd_upstreams_library_init ();
 	cfg->re_cache = rspamd_re_cache_new ();
@@ -251,7 +256,10 @@ rspamd_config_free (struct rspamd_config *cfg)
 	rspamd_re_cache_unref (cfg->re_cache);
 	rspamd_upstreams_library_unref (cfg->ups_ctx);
 	rspamd_mempool_delete (cfg->cfg_pool);
-	lua_close (cfg->lua_state);
+
+	if (cfg->lua_state && cfg->own_lua_state) {
+		lua_close (cfg->lua_state);
+	}
 	REF_RELEASE (cfg->libs_ctx);
 
 	DL_FOREACH_SAFE (cfg->log_pipes, lp, ltmp) {
@@ -1076,7 +1084,8 @@ rspamd_include_map_handler (const guchar *data, gsize len,
 			   "ucl include",
 			   rspamd_ucl_read_cb,
 			   rspamd_ucl_fin_cb,
-			   (void **)pcbdata);
+			   rspamd_ucl_dtor_cb,
+			   (void **)pcbdata) != NULL;
 }
 
 /*
@@ -1105,12 +1114,15 @@ rspamd_include_map_handler (const guchar *data, gsize len,
 #define RSPAMD_VERSION_MINOR_MACRO "VERSION_MINOR"
 #define RSPAMD_VERSION_PATCH_MACRO "VERSION_PATCH"
 #define RSPAMD_BRANCH_VERSION_MACRO "BRANCH_VERSION"
+#define RSPAMD_HOSTNAME_MACRO "HOSTNAME"
 
 void
 rspamd_ucl_add_conf_variables (struct ucl_parser *parser, GHashTable *vars)
 {
 	GHashTableIter it;
 	gpointer k, v;
+	gchar *hostbuf;
+	gsize hostlen;
 
 	ucl_parser_register_variable (parser,
 			RSPAMD_CONFDIR_MACRO,
@@ -1151,6 +1163,23 @@ rspamd_ucl_add_conf_variables (struct ucl_parser *parser, GHashTable *vars)
 	ucl_parser_register_variable (parser, "HAS_TORCH",
 			"no");
 #endif
+
+	hostlen = sysconf (_SC_HOST_NAME_MAX);
+
+	if (hostlen <= 0) {
+		hostlen = 256;
+	}
+	else {
+		hostlen ++;
+	}
+
+	hostbuf = g_alloca (hostlen);
+	memset (hostbuf, 0, hostlen);
+	gethostname (hostbuf, hostlen - 1);
+
+	/* UCL copies variables, so it is safe to pass an ephemeral buffer here */
+	ucl_parser_register_variable (parser, RSPAMD_HOSTNAME_MACRO,
+			hostbuf);
 
 	if (vars != NULL) {
 		g_hash_table_iter_init (&it, vars);
@@ -1337,6 +1366,19 @@ rspamd_ucl_fin_cb (struct map_cb_data *data)
 	}
 }
 
+static void
+rspamd_ucl_dtor_cb (struct map_cb_data *data)
+{
+	struct rspamd_ucl_map_cbdata *cbdata = data->cur_data;
+
+	if (cbdata != NULL) {
+		if (cbdata->buf != NULL) {
+			g_string_free (cbdata->buf, TRUE);
+		}
+		g_free (cbdata);
+	}
+}
+
 gboolean
 rspamd_check_module (struct rspamd_config *cfg, module_t *mod)
 {
@@ -1408,9 +1450,8 @@ rspamd_init_filters (struct rspamd_config *cfg, bool reconfig)
 			mod = *pmod;
 
 			if (rspamd_check_module (cfg, mod)) {
-				mod_ctx = g_malloc0 (sizeof (struct module_ctx));
-
 				if (mod->module_init_func (cfg, &mod_ctx) == 0) {
+					g_assert (mod_ctx != NULL);
 					g_hash_table_insert (cfg->c_modules,
 							(gpointer) mod->name,
 							mod_ctx);
@@ -1861,13 +1902,18 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 
 			if (rspamd_map_is_map (str)) {
 				if (rspamd_map_add_from_ucl (cfg, cur_elt,
-						description, rspamd_radix_read, rspamd_radix_fin,
+						description,
+						rspamd_radix_read,
+						rspamd_radix_fin,
+						rspamd_radix_dtor,
 						(void **)target) == NULL) {
 					g_set_error (err, g_quark_from_static_string ("rspamd-config"),
 							EINVAL, "bad map definition %s for %s", str,
 							ucl_object_key (obj));
 					return FALSE;
 				}
+
+				return TRUE;
 			}
 			else {
 				/* Just a list */
@@ -1881,12 +1927,17 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 		case UCL_OBJECT:
 			/* Should be a map description */
 			if (rspamd_map_add_from_ucl (cfg, cur_elt,
-					description, rspamd_radix_read, rspamd_radix_fin,
+					description,
+					rspamd_radix_read,
+					rspamd_radix_fin,
+					rspamd_radix_dtor,
 					(void **)target) == NULL) {
 				g_set_error (err, g_quark_from_static_string ("rspamd-config"),
 						EINVAL, "bad map object for %s", ucl_object_key (obj));
 				return FALSE;
 			}
+
+			return TRUE;
 			break;
 		case UCL_ARRAY:
 			/* List of IP addresses */
@@ -1912,6 +1963,11 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 			return FALSE;
 		}
 	}
+
+	/* Destroy on cfg cleanup */
+	rspamd_mempool_add_destructor (cfg->cfg_pool,
+			(rspamd_mempool_destruct_t)rspamd_map_helper_destroy_radix,
+			*target);
 
 	return TRUE;
 }

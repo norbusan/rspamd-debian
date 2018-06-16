@@ -276,7 +276,7 @@ reread_config (struct rspamd_main *rspamd_main)
 	gchar *cfg_file;
 
 	rspamd_symbols_cache_save (rspamd_main->cfg->cache);
-	tmp_cfg = rspamd_config_new ();
+	tmp_cfg = rspamd_config_new (RSPAMD_CONFIG_INIT_DEFAULT);
 	g_hash_table_unref (tmp_cfg->c_modules);
 	tmp_cfg->c_modules = g_hash_table_ref (rspamd_main->cfg->c_modules);
 	tmp_cfg->libs_ctx = rspamd_main->cfg->libs_ctx;
@@ -361,12 +361,15 @@ create_listen_socket (GPtrArray *addrs, guint cnt,
 	g_ptr_array_sort (addrs, rspamd_inet_address_compare_ptr);
 	for (i = 0; i < cnt; i ++) {
 
+		/*
+		 * Copy address to avoid reload issues
+		 */
 		if (listen_type & RSPAMD_WORKER_SOCKET_TCP) {
 			fd = rspamd_inet_address_listen (g_ptr_array_index (addrs, i),
 					SOCK_STREAM, TRUE);
 			if (fd != -1) {
 				ls = g_malloc0 (sizeof (*ls));
-				ls->addr = g_ptr_array_index (addrs, i);
+				ls->addr = rspamd_inet_address_copy (g_ptr_array_index (addrs, i));
 				ls->fd = fd;
 				ls->type = RSPAMD_WORKER_SOCKET_TCP;
 				result = g_list_prepend (result, ls);
@@ -377,7 +380,7 @@ create_listen_socket (GPtrArray *addrs, guint cnt,
 					SOCK_DGRAM, TRUE);
 			if (fd != -1) {
 				ls = g_malloc0 (sizeof (*ls));
-				ls->addr = g_ptr_array_index (addrs, i);
+				ls->addr = rspamd_inet_address_copy (g_ptr_array_index (addrs, i));
 				ls->fd = fd;
 				ls->type = RSPAMD_WORKER_SOCKET_UDP;
 				result = g_list_prepend (result, ls);
@@ -750,11 +753,17 @@ wait_for_workers (gpointer key, gpointer value, gpointer unused)
 			nowait ? "with no result available" :
 					(WTERMSIG (res) == SIGKILL ? "hardly" : "softly"));
 	if (w->srv_pipe[0] != -1) {
+		/* Ugly workaround */
+		if (w->tmp_data) {
+			g_free (w->tmp_data);
+		}
 		event_del (&w->srv_ev);
 	}
+
 	if (w->finish_actions) {
 		g_ptr_array_free (w->finish_actions, TRUE);
 	}
+
 	REF_RELEASE (w->cf);
 	g_free (w);
 
@@ -874,8 +883,7 @@ load_rspamd_config (struct rspamd_main *rspamd_main,
 	cfg->compiled_modules = modules;
 	cfg->compiled_workers = workers;
 
-	if (!rspamd_config_read (cfg, cfg->cfg_name, NULL,
-		config_logger, rspamd_main, ucl_vars)) {
+	if (!rspamd_config_read (cfg, cfg->cfg_name, config_logger, rspamd_main, ucl_vars)) {
 		return FALSE;
 	}
 
@@ -1057,6 +1065,10 @@ rspamd_cld_handler (gint signo, short what, gpointer arg)
 			}
 
 			if (cur->srv_pipe[0] != -1) {
+				/* Ugly workaround */
+				if (cur->tmp_data) {
+					g_free (cur->tmp_data);
+				}
 				event_del (&cur->srv_ev);
 			}
 
@@ -1180,13 +1192,13 @@ main (gint argc, gchar **argv, gchar **env)
 			"main");
 	rspamd_main->stat = rspamd_mempool_alloc0_shared (rspamd_main->server_pool,
 			sizeof (struct rspamd_stat));
-	rspamd_main->cfg = rspamd_config_new ();
+	rspamd_main->cfg = rspamd_config_new (RSPAMD_CONFIG_INIT_DEFAULT);
 	rspamd_main->spairs = g_hash_table_new_full (rspamd_spair_hash,
 			rspamd_spair_equal, g_free, rspamd_spair_close);
 	rspamd_main->start_mtx = rspamd_mempool_get_mutex (rspamd_main->server_pool);
 
 #ifndef HAVE_SETPROCTITLE
-	init_title (argc, argv, env);
+	init_title (rspamd_main, argc, argv, env);
 #endif
 
 	rspamd_main->cfg->libs_ctx = rspamd_init_libs ();
@@ -1496,6 +1508,7 @@ main (gint argc, gchar **argv, gchar **env)
 	rspamd_log_close (rspamd_main->logger);
 	REF_RELEASE (rspamd_main->cfg);
 	g_hash_table_unref (rspamd_main->spairs);
+	g_hash_table_unref (rspamd_main->workers);
 	rspamd_mempool_delete (rspamd_main->server_pool);
 
 	if (!skip_pid) {
@@ -1504,6 +1517,10 @@ main (gint argc, gchar **argv, gchar **env)
 
 	g_free (rspamd_main);
 	event_base_free (ev_base);
+
+	if (control_addr) {
+		rspamd_inet_address_free (control_addr);
+	}
 
 	return (res);
 }

@@ -80,9 +80,11 @@
 #endif
 #endif
 #include <math.h> /* for pow */
+#include <glob.h> /* in fact, we require this file ultimately */
 
 #include "cryptobox.h"
 #include "zlib.h"
+#include "contrib/uthash/utlist.h"
 
 /* Check log messages intensity once per minute */
 #define CHECK_TIME 60
@@ -418,6 +420,12 @@ out:
 	return (-1);
 }
 
+static int
+rspamd_prefer_v4_hack (const struct addrinfo *a1, const struct addrinfo *a2)
+{
+	return a1->ai_addr->sa_family - a2->ai_addr->sa_family;
+}
+
 /**
  * Make a universal socket
  * @param credits host, ip or path to unix socket
@@ -480,6 +488,7 @@ rspamd_socket (const gchar *credits, guint16 port,
 
 		rspamd_snprintf (portbuf, sizeof (portbuf), "%d", (int)port);
 		if ((r = getaddrinfo (credits, portbuf, &hints, &res)) == 0) {
+			LL_SORT2 (res, rspamd_prefer_v4_hack, ai_next);
 			r = rspamd_inet_socket_create (type, res, is_server, async, NULL);
 			freeaddrinfo (res);
 			return r;
@@ -572,7 +581,9 @@ rspamd_sockets_list (const gchar *credits, guint16 port,
 
 			rspamd_snprintf (portbuf, sizeof (portbuf), "%d", (int)port);
 			if ((r = getaddrinfo (credits, portbuf, &hints, &res)) == 0) {
-				fd = rspamd_inet_socket_create (type, res, is_server, async, &result);
+				LL_SORT2 (res, rspamd_prefer_v4_hack, ai_next);
+				fd = rspamd_inet_socket_create (type, res, is_server, async,
+						&result);
 				freeaddrinfo (res);
 
 				if (result == NULL) {
@@ -841,13 +852,29 @@ setproctitle (const gchar *fmt, ...)
 #endif
 }
 
+#if !(defined(DARWIN) || defined(SOLARIS) || defined(__APPLE__))
+static void
+rspamd_title_dtor (gpointer d)
+{
+	gchar **env = (gchar **)d;
+	guint i;
+
+	for (i = 0; env[i] != NULL; i++) {
+		g_free (env[i]);
+	}
+
+	g_free (env);
+}
+#endif
+
 /*
    It has to be _init function, because __attribute__((constructor))
    functions gets called without arguments.
  */
 
 gint
-init_title (gint argc, gchar *argv[], gchar *envp[])
+init_title (struct rspamd_main *rspamd_main,
+		gint argc, gchar *argv[], gchar *envp[])
 {
 #if defined(DARWIN) || defined(SOLARIS) || defined(__APPLE__)
 	/* XXX: try to handle these OSes too */
@@ -857,45 +884,46 @@ init_title (gint argc, gchar *argv[], gchar *envp[])
 	gint i;
 
 	for (i = 0; i < argc; ++i) {
-		if (!begin_of_buffer)
+		if (!begin_of_buffer) {
 			begin_of_buffer = argv[i];
-		if (!end_of_buffer || end_of_buffer + 1 == argv[i])
+		}
+		if (!end_of_buffer || end_of_buffer + 1 == argv[i]) {
 			end_of_buffer = argv[i] + strlen (argv[i]);
+		}
 	}
 
 	for (i = 0; envp[i]; ++i) {
-		if (!begin_of_buffer)
+		if (!begin_of_buffer) {
 			begin_of_buffer = envp[i];
-		if (!end_of_buffer || end_of_buffer + 1 == envp[i])
+		}
+		if (!end_of_buffer || end_of_buffer + 1 == envp[i]) {
 			end_of_buffer = envp[i] + strlen (envp[i]);
+		}
 	}
 
-	if (!end_of_buffer)
+	if (!end_of_buffer) {
 		return 0;
+	}
 
 	gchar **new_environ = g_malloc ((i + 1) * sizeof (envp[0]));
 
-	if (!new_environ)
-		return 0;
-
 	for (i = 0; envp[i]; ++i) {
-		if (!(new_environ[i] = g_strdup (envp[i])))
-			goto cleanup_enomem;
+		new_environ[i] = g_strdup (envp[i]);
 	}
-	new_environ[i] = 0;
+
+	new_environ[i] = NULL;
 
 	if (program_invocation_name) {
 		title_progname_full = g_strdup (program_invocation_name);
 
-		if (!title_progname_full)
-			goto cleanup_enomem;
-
 		gchar *p = strrchr (title_progname_full, '/');
 
-		if (p)
+		if (p) {
 			title_progname = p + 1;
-		else
+		}
+		else {
 			title_progname = title_progname_full;
+		}
 
 		program_invocation_name = title_progname_full;
 		program_invocation_short_name = title_progname;
@@ -905,13 +933,9 @@ init_title (gint argc, gchar *argv[], gchar *envp[])
 	title_buffer = begin_of_buffer;
 	title_buffer_size = end_of_buffer - begin_of_buffer;
 
-	return 0;
+	rspamd_mempool_add_destructor (rspamd_main->server_pool,
+			rspamd_title_dtor, new_environ);
 
-cleanup_enomem:
-	for (--i; i >= 0; --i) {
-		g_free (new_environ[i]);
-	}
-	g_free (new_environ);
 	return 0;
 #endif
 }
@@ -2836,4 +2860,100 @@ rspamd_fstring_gzip (rspamd_fstring_t **in)
 	*in = comp;
 
 	return TRUE;
+}
+
+static gboolean
+rspamd_glob_dir (const gchar *full_path, const gchar *pattern,
+				 gboolean recursive, guint rec_len,
+				 GPtrArray *res, GError **err)
+{
+	glob_t globbuf;
+	const gchar *path;
+	static gchar pathbuf[PATH_MAX]; /* Static to help recursion */
+	guint i;
+	gint rc;
+	static const guint rec_lim = 16;
+	struct stat st;
+
+	if (rec_len > rec_lim) {
+		g_set_error (err, g_quark_from_static_string ("glob"), EOVERFLOW,
+				"maximum nesting is reached: %d", rec_lim);
+
+		return FALSE;
+	}
+
+	memset (&globbuf, 0, sizeof (globbuf));
+
+	if ((rc = glob (full_path, 0, NULL, &globbuf)) != 0) {
+
+		if (rc != GLOB_NOMATCH) {
+			g_set_error (err, g_quark_from_static_string ("glob"), errno,
+					"glob %s failed: %s", full_path, strerror (errno));
+			globfree (&globbuf);
+
+			return FALSE;
+		}
+		else {
+			globfree (&globbuf);
+
+			return TRUE;
+		}
+	}
+
+	for (i = 0; i < globbuf.gl_pathc; i ++) {
+		path = globbuf.gl_pathv[i];
+
+		if (stat (path, &st) == -1) {
+			if (errno == EPERM || errno == EACCES || errno == ELOOP) {
+				/* Silently ignore */
+				continue;
+			}
+
+			g_set_error (err, g_quark_from_static_string ("glob"), errno,
+					"stat %s failed: %s", path, strerror (errno));
+			globfree (&globbuf);
+
+			return FALSE;
+		}
+
+		if (S_ISREG (st.st_mode)) {
+			g_ptr_array_add (res, g_strdup (path));
+		}
+		else if (recursive && S_ISDIR (st.st_mode)) {
+			rspamd_snprintf (pathbuf, sizeof (pathbuf), "%s%c%s",
+					path, G_DIR_SEPARATOR, pattern);
+
+			if (!rspamd_glob_dir (full_path, pattern, recursive, rec_len + 1,
+					res, err)) {
+				globfree (&globbuf);
+
+				return FALSE;
+			}
+		}
+	}
+
+	globfree (&globbuf);
+
+	return TRUE;
+}
+
+GPtrArray *
+rspamd_glob_path (const gchar *dir,
+				  const gchar *pattern,
+				  gboolean recursive,
+				  GError **err)
+{
+	gchar path[PATH_MAX];
+	GPtrArray *res;
+
+	res = g_ptr_array_new_full (32, (GDestroyNotify)g_free);
+	rspamd_snprintf (path, sizeof (path), "%s%c%s", dir, G_DIR_SEPARATOR, pattern);
+
+	if (!rspamd_glob_dir (path, pattern, recursive, 0, res, err)) {
+		g_ptr_array_free (res, TRUE);
+
+		return NULL;
+	}
+
+	return res;
 }
