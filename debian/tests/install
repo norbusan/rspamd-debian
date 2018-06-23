@@ -1,0 +1,7 @@
+#!/bin/bash
+
+set -x
+
+systemctl status rspamd
+
+curl -s http://127.0.0.1:11334
