@@ -22,7 +22,7 @@ rspamd (1.7.6-1) unstable; urgency=medium
   * d/compat: Bump compat version to 11
   * d/tests: Added a basic test suite (systemd + rspamd web)
 
- -- Sebastien Badia <sbadia@debian.org>  Sat, 23 Jun 2018 08:47:22 +0200
+ -- Sebastien Badia <sbadia@debian.org>  Sat, 23 Jun 2018 13:35:46 +0200
 
 rspamd (0.6.10) unstable; urgency=low
 
