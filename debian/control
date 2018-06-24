@@ -1,8 +1,8 @@
 Source: rspamd
 Section: mail
 Priority: optional
-Maintainer: Mikhail Gusarov <dottedmag@debian.org>
-Uploaders: Sebastien Badia <sbadia@debian.org>,
+Maintainer: Sebastien Badia <sbadia@debian.org>
+Uploaders: Mikhail Gusarov <dottedmag@debian.org>,
            Jerome Lebleu <jerome@maroufle.fr>
 Build-Depends: cmake,
                debhelper (>= 11~),
