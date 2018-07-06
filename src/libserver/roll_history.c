@@ -77,6 +77,10 @@ roll_history_symbols_callback (gpointer key, gpointer value, void *user_data)
 	struct rspamd_symbol_result *s = value;
 	guint wr;
 
+	if (s->flags & RSPAMD_SYMBOL_RESULT_IGNORED) {
+		return;
+	}
+
 	if (cb->remain > 0) {
 		wr = rspamd_snprintf (cb->pos, cb->remain, "%s, ", s->name);
 		cb->pos += wr;
@@ -236,7 +240,11 @@ rspamd_roll_history_load (struct roll_history *history, const gchar *filename)
 	ucl_parser_free (parser);
 	close (fd);
 
-	g_assert (top != NULL);
+	if (top == NULL) {
+		msg_warn ("cannot parse history file %s: no object", filename);
+
+		return FALSE;
+	}
 
 	if (ucl_object_type (top) != UCL_ARRAY) {
 		msg_warn ("invalid object type read from: %s", filename);

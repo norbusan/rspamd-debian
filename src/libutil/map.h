@@ -78,8 +78,17 @@ struct rspamd_map* rspamd_map_add_from_ucl (struct rspamd_config *cfg,
 /**
  * Start watching of maps by adding events to libevent event loop
  */
-void rspamd_map_watch (struct rspamd_config *cfg, struct event_base *ev_base,
-		struct rspamd_dns_resolver *resolver, gboolean active_http);
+void rspamd_map_watch (struct rspamd_config *cfg,
+					   struct event_base *ev_base,
+					   struct rspamd_dns_resolver *resolver,
+					   struct rspamd_worker *worker,
+					   gboolean active_http);
+
+/**
+ * Preloads maps where all backends are file
+ * @param cfg
+ */
+void rspamd_map_preload (struct rspamd_config *cfg);
 
 /**
  * Remove all maps watched (remove events)

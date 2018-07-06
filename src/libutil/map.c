@@ -827,8 +827,9 @@ static gboolean
 read_map_file (struct rspamd_map *map, struct file_map_data *data,
 		struct rspamd_map_backend *bk, struct map_periodic_cbdata *periodic)
 {
-	guchar *bytes;
+	gchar *bytes;
 	gsize len;
+	struct stat st;
 
 	if (map->read_callback == NULL || map->fin_callback == NULL) {
 		msg_err_map ("%s: bad callback for reading map file",
@@ -836,7 +837,7 @@ read_map_file (struct rspamd_map *map, struct file_map_data *data,
 		return FALSE;
 	}
 
-	if (access (data->filename, R_OK) == -1) {
+	if (stat (data->filename, &st) == -1) {
 		/* File does not exist, skipping */
 		if (errno != ENOENT) {
 			msg_err_map ("%s: map file is unavailable for reading: %s",
@@ -845,29 +846,41 @@ read_map_file (struct rspamd_map *map, struct file_map_data *data,
 			return FALSE;
 		}
 		else {
-			msg_info_map ("%s: map file is not found",
+			msg_info_map ("%s: map file is not found; "
+						  "it will be read automatically if created",
 					data->filename);
 			return TRUE;
 		}
 	}
 
-	bytes = rspamd_file_xmap (data->filename, PROT_READ, &len, TRUE);
-
-	if (bytes == NULL) {
-		msg_err_map ("can't open map %s: %s", data->filename, strerror (errno));
-		return FALSE;
-	}
+	len = st.st_size;
 
 	if (bk->is_signed) {
+		bytes = rspamd_file_xmap (data->filename, PROT_READ, &len, TRUE);
+
+		if (bytes == NULL) {
+			msg_err_map ("can't open map %s: %s", data->filename, strerror (errno));
+			return FALSE;
+		}
+
 		if (!rspamd_map_check_file_sig (data->filename, map, bk, bytes, len)) {
 			munmap (bytes, len);
 
 			return FALSE;
 		}
+
+		munmap (bytes, len);
 	}
 
 	if (len > 0) {
 		if (bk->is_compressed) {
+			bytes = rspamd_file_xmap (data->filename, PROT_READ, &len, TRUE);
+
+			if (bytes == NULL) {
+				msg_err_map ("can't open map %s: %s", data->filename, strerror (errno));
+				return FALSE;
+			}
+
 			ZSTD_DStream *zstream;
 			ZSTD_inBuffer zin;
 			ZSTD_outBuffer zout;
@@ -918,18 +931,82 @@ read_map_file (struct rspamd_map *map, struct file_map_data *data,
 					len, zout.pos);
 			map->read_callback (out, zout.pos, &periodic->cbdata, TRUE);
 			g_free (out);
+
+			munmap (bytes, len);
 		}
 		else {
-			msg_info_map ("%s: read map dat, %z bytes", data->filename,
-					len);
-			map->read_callback (bytes, len, &periodic->cbdata, TRUE);
+			/* Perform buffered read: fail-safe */
+			gint fd;
+			gssize r, avail;
+			gsize buflen = 1024 * 1024;
+			gchar *pos;
+
+			fd = rspamd_file_xopen (data->filename, O_RDONLY, 0, TRUE);
+
+			if (fd == -1) {
+				msg_err_map ("can't open map for buffered reading %s: %s",
+						data->filename, strerror (errno));
+				return FALSE;
+			}
+
+			buflen = MIN (len, buflen);
+			bytes = g_malloc (buflen);
+			avail = buflen;
+			pos = bytes;
+
+			while ((r = read (fd, pos, avail)) > 0) {
+				gchar *end = bytes + (pos - bytes) + r;
+				msg_info_map ("%s: read map chunk, %z bytes", data->filename,
+						r);
+				pos = map->read_callback (bytes, end - bytes,
+						&periodic->cbdata, r == len);
+
+				if (pos && pos > bytes && pos < end) {
+					guint remain = end - pos;
+
+					memmove (bytes, pos, remain);
+					pos = bytes + remain;
+					/* Need to preserve the remain */
+					avail = ((gssize)buflen) - remain;
+
+					if (avail <= 0) {
+						/* Try realloc, too large element */
+						g_assert (buflen >= remain);
+						bytes = g_realloc (bytes, buflen * 2);
+
+						pos = bytes + remain; /* Adjust */
+						avail += buflen;
+						buflen *= 2;
+					}
+				}
+				else {
+					avail = buflen;
+					pos = bytes;
+				}
+
+				len -= r;
+			}
+
+			if (r == -1) {
+				msg_err_map ("can't read from map %s: %s",
+						data->filename, strerror (errno));
+				close (fd);
+				g_free (bytes);
+
+				return FALSE;
+			}
+
+			close (fd);
+			g_free (bytes);
 		}
 	}
 	else {
+		/* Empty map */
 		map->read_callback (NULL, 0, &periodic->cbdata, TRUE);
 	}
 
-	munmap (bytes, len);
+	/* Also update at the read time */
+	memcpy (&data->st, &st, sizeof (struct stat));
 
 	return TRUE;
 }
@@ -1058,7 +1135,7 @@ rspamd_map_schedule_periodic (struct rspamd_map *map,
 	gdouble timeout;
 	struct map_periodic_cbdata *cbd;
 
-	if (map->scheduled_check) {
+	if (map->scheduled_check || (map->wrk && map->wrk->wanna_die)) {
 		/* Do not schedule check if some check is already scheduled */
 		return;
 	}
@@ -1583,45 +1660,49 @@ rspamd_map_periodic_callback (gint fd, short what, void *ud)
 		return;
 	}
 
-	bk = g_ptr_array_index (cbd->map->backends, cbd->cur_backend);
-	g_assert (bk != NULL);
+	if (!(cbd->map->wrk && cbd->map->wrk->wanna_die)) {
+		bk = g_ptr_array_index (cbd->map->backends, cbd->cur_backend);
+		g_assert (bk != NULL);
 
-	if (cbd->need_modify) {
-		/* Load data from the next backend */
-		switch (bk->protocol) {
-		case MAP_PROTO_HTTP:
-		case MAP_PROTO_HTTPS:
-			rspamd_map_http_read_callback (fd, what, cbd);
-			break;
-		case MAP_PROTO_FILE:
-			rspamd_map_file_read_callback (fd, what, cbd);
-			break;
-		case MAP_PROTO_STATIC:
-			rspamd_map_static_read_callback (fd, what, cbd);
-			break;
-		}
-	}
-	else {
-		/* Check the next backend */
-		switch (bk->protocol) {
-		case MAP_PROTO_HTTP:
-		case MAP_PROTO_HTTPS:
-			rspamd_map_http_check_callback (fd, what, cbd);
-			break;
-		case MAP_PROTO_FILE:
-			rspamd_map_file_check_callback (fd, what, cbd);
-			break;
-		case MAP_PROTO_STATIC:
-			rspamd_map_static_check_callback (fd, what, cbd);
-			break;
+		if (cbd->need_modify) {
+			/* Load data from the next backend */
+			switch (bk->protocol) {
+			case MAP_PROTO_HTTP:
+			case MAP_PROTO_HTTPS:
+				rspamd_map_http_read_callback (fd, what, cbd);
+				break;
+			case MAP_PROTO_FILE:
+				rspamd_map_file_read_callback (fd, what, cbd);
+				break;
+			case MAP_PROTO_STATIC:
+				rspamd_map_static_read_callback (fd, what, cbd);
+				break;
+			}
+		} else {
+			/* Check the next backend */
+			switch (bk->protocol) {
+			case MAP_PROTO_HTTP:
+			case MAP_PROTO_HTTPS:
+				rspamd_map_http_check_callback (fd, what, cbd);
+				break;
+			case MAP_PROTO_FILE:
+				rspamd_map_file_check_callback (fd, what, cbd);
+				break;
+			case MAP_PROTO_STATIC:
+				rspamd_map_static_check_callback (fd, what, cbd);
+				break;
+			}
 		}
 	}
 }
 
 /* Start watching event for all maps */
 void
-rspamd_map_watch (struct rspamd_config *cfg, struct event_base *ev_base,
-		struct rspamd_dns_resolver *resolver, gboolean active_http)
+rspamd_map_watch (struct rspamd_config *cfg,
+				  struct event_base *ev_base,
+				  struct rspamd_dns_resolver *resolver,
+				  struct rspamd_worker *worker,
+				  gboolean active_http)
 {
 	GList *cur = cfg->maps;
 	struct rspamd_map *map;
@@ -1631,6 +1712,7 @@ rspamd_map_watch (struct rspamd_config *cfg, struct event_base *ev_base,
 		map = cur->data;
 		map->ev_base = ev_base;
 		map->r = resolver;
+		map->wrk = worker;
 
 		if (active_http) {
 			map->active_http = active_http;
@@ -1652,6 +1734,76 @@ rspamd_map_watch (struct rspamd_config *cfg, struct event_base *ev_base,
 }
 
 void
+rspamd_map_preload (struct rspamd_config *cfg)
+{
+	GList *cur = cfg->maps;
+	struct rspamd_map *map;
+	struct rspamd_map_backend *bk;
+	guint i;
+	gboolean map_ok;
+
+	/* First of all do synced read of data */
+	while (cur) {
+		map = cur->data;
+		map_ok = TRUE;
+
+		PTR_ARRAY_FOREACH (map->backends, i, bk) {
+			if (!(bk->protocol == MAP_PROTO_FILE ||
+				  bk->protocol == MAP_PROTO_STATIC)) {
+				map_ok = FALSE;
+				break;
+			}
+		}
+
+		if (map_ok) {
+			struct map_periodic_cbdata fake_cbd;
+			gboolean succeed = TRUE;
+
+			memset (&fake_cbd, 0, sizeof (fake_cbd));
+			fake_cbd.cbdata.state = 0;
+			fake_cbd.cbdata.prev_data = *map->user_data;
+			fake_cbd.cbdata.cur_data = NULL;
+			fake_cbd.cbdata.map = map;
+			fake_cbd.map = map;
+
+			PTR_ARRAY_FOREACH (map->backends, i, bk) {
+				fake_cbd.cur_backend = i;
+
+				if (bk->protocol == MAP_PROTO_FILE) {
+					if (!read_map_file (map, bk->data.fd, bk, &fake_cbd)) {
+						succeed = FALSE;
+						break;
+					}
+				}
+				else if (bk->protocol == MAP_PROTO_STATIC) {
+					if (!read_map_static (map, bk->data.sd, bk, &fake_cbd)) {
+						succeed = FALSE;
+						break;
+					}
+				}
+				else {
+					g_assert_not_reached ();
+				}
+			}
+
+			if (succeed) {
+				map->fin_callback (&fake_cbd.cbdata);
+
+				if (fake_cbd.cbdata.cur_data) {
+					*map->user_data = fake_cbd.cbdata.cur_data;
+				}
+			}
+			else {
+				msg_info_map ("preload of %s failed", map->name);
+			}
+
+		}
+
+		cur = g_list_next (cur);
+	}
+}
+
+void
 rspamd_map_remove_all (struct rspamd_config *cfg)
 {
 	struct rspamd_map *map;
@@ -1662,11 +1814,6 @@ rspamd_map_remove_all (struct rspamd_config *cfg)
 
 	for (cur = cfg->maps; cur != NULL; cur = g_list_next (cur)) {
 		map = cur->data;
-
-		for (i = 0; i < map->backends->len; i ++) {
-			bk = g_ptr_array_index (map->backends, i);
-			MAP_RELEASE (bk, "rspamd_map_backend");
-		}
 
 		if (g_atomic_int_compare_and_exchange (&map->cache->available, 1, 0)) {
 			if (map->cur_cache_cbd) {
@@ -1690,6 +1837,11 @@ rspamd_map_remove_all (struct rspamd_config *cfg)
 
 			map->dtor (&cbdata);
 			*map->user_data = NULL;
+		}
+
+		for (i = 0; i < map->backends->len; i ++) {
+			bk = g_ptr_array_index (map->backends, i);
+			MAP_RELEASE (bk, "rspamd_map_backend");
 		}
 	}
 
@@ -1905,9 +2057,9 @@ rspamd_map_parse_backend (struct rspamd_config *cfg, const gchar *map_line)
 		if (access (bk->uri, R_OK) == -1) {
 			if (errno != ENOENT) {
 				msg_err_config ("cannot open file '%s': %s", bk->uri, strerror (errno));
-				return NULL;
-
+				goto err;
 			}
+
 			msg_info_config (
 					"map '%s' is not found, but it can be loaded automatically later",
 					bk->uri);
@@ -1928,7 +2080,7 @@ rspamd_map_parse_backend (struct rspamd_config *cfg, const gchar *map_line)
 		else {
 			if (!(up.field_set & 1 << UF_HOST)) {
 				msg_err_config ("cannot parse HTTP url: %s: no host", bk->uri);
-				return NULL;
+				goto err;
 			}
 
 			tok.begin = bk->uri + up.field_data[UF_HOST].off;
@@ -1956,7 +2108,8 @@ rspamd_map_parse_backend (struct rspamd_config *cfg, const gchar *map_line)
 		}
 
 		bk->data.hd = hdata;
-	}else if (bk->protocol == MAP_PROTO_STATIC) {
+	}
+	else if (bk->protocol == MAP_PROTO_STATIC) {
 		sdata = g_malloc0 (sizeof (*sdata));
 		bk->data.sd = sdata;
 	}

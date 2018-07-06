@@ -69,6 +69,7 @@ rspamd_task_new (struct rspamd_worker *worker, struct rspamd_config *cfg,
 
 	new_task = g_malloc0 (sizeof (struct rspamd_task));
 	new_task->worker = worker;
+	new_task->lang_det = lang_det;
 
 	if (cfg) {
 		new_task->cfg = cfg;
@@ -78,7 +79,14 @@ rspamd_task_new (struct rspamd_worker *worker, struct rspamd_config *cfg,
 			new_task->flags |= RSPAMD_TASK_FLAG_PASS_ALL;
 		}
 
-		new_task->re_rt = rspamd_re_cache_runtime_new (cfg->re_cache);
+
+		if (cfg->re_cache) {
+			new_task->re_rt = rspamd_re_cache_runtime_new (cfg->re_cache);
+		}
+
+		if (new_task->lang_det == NULL && cfg->lang_det != NULL) {
+			new_task->lang_det = cfg->lang_det;
+		}
 	}
 
 	gettimeofday (&new_task->tv, NULL);
@@ -86,7 +94,6 @@ rspamd_task_new (struct rspamd_worker *worker, struct rspamd_config *cfg,
 	new_task->time_virtual = rspamd_get_virtual_ticks ();
 	new_task->time_real_finish = NAN;
 	new_task->time_virtual_finish = NAN;
-	new_task->lang_det = lang_det;
 
 	if (pool == NULL) {
 		new_task->task_pool =
@@ -263,7 +270,10 @@ rspamd_task_free (struct rspamd_task *task)
 		}
 
 		ucl_object_unref (task->messages);
-		rspamd_re_cache_runtime_destroy (task->re_rt);
+
+		if (task->re_rt) {
+			rspamd_re_cache_runtime_destroy (task->re_rt);
+		}
 
 		if (task->http_conn != NULL) {
 			rspamd_http_connection_reset (task->http_conn);
@@ -1077,7 +1087,11 @@ rspamd_task_log_metric_res (struct rspamd_task *task,
 			sorted_symbols = g_ptr_array_sized_new (g_hash_table_size (mres->symbols));
 
 			while (g_hash_table_iter_next (&it, &k, &v)) {
-				g_ptr_array_add (sorted_symbols, v);
+				sym = v;
+
+				if (!(sym->flags & RSPAMD_SYMBOL_RESULT_IGNORED)) {
+					g_ptr_array_add (sorted_symbols, v);
+				}
 			}
 
 			g_ptr_array_sort (sorted_symbols, rspamd_task_compare_log_sym);

@@ -452,7 +452,7 @@ rspamd_fuzzy_send_update_mirror (struct rspamd_fuzzy_storage_ctx *ctx,
 
 	if (conn->sock == -1) {
 		msg_err ("cannot connect upstream for %s", m->name);
-		rspamd_upstream_fail (conn->up);
+		rspamd_upstream_fail (conn->up, TRUE);
 		return;
 	}
 
@@ -1060,7 +1060,7 @@ rspamd_fuzzy_decrypt_command (struct fuzzy_session *s)
 
 	/* Now decrypt request */
 	if (!rspamd_cryptobox_decrypt_nm_inplace (payload, payload_len, hdr->nonce,
-			rspamd_pubkey_get_nm (rk),
+			rspamd_pubkey_get_nm (rk, key->key),
 			hdr->mac, RSPAMD_CRYPTOBOX_MODE_25519)) {
 		msg_err ("decryption failed");
 		rspamd_pubkey_unref (rk);
@@ -1068,7 +1068,7 @@ rspamd_fuzzy_decrypt_command (struct fuzzy_session *s)
 		return FALSE;
 	}
 
-	memcpy (s->nm, rspamd_pubkey_get_nm (rk), sizeof (s->nm));
+	memcpy (s->nm, rspamd_pubkey_get_nm (rk, key->key), sizeof (s->nm));
 	rspamd_pubkey_unref (rk);
 
 	return TRUE;
@@ -2903,7 +2903,7 @@ start_fuzzy (struct rspamd_worker *worker)
 	ctx->resolver = dns_resolver_init (worker->srv->logger,
 				ctx->ev_base,
 				worker->srv->cfg);
-	rspamd_map_watch (worker->srv->cfg, ctx->ev_base, ctx->resolver, 0);
+	rspamd_map_watch (worker->srv->cfg, ctx->ev_base, ctx->resolver, worker, 0);
 
 	/* Get peer pipe */
 	memset (&srv_cmd, 0, sizeof (srv_cmd));

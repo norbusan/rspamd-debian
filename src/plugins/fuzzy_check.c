@@ -422,6 +422,7 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 			fuzzy_module_ctx->fuzzy_pool);
 	rule->learn_condition_cb = -1;
 	rule->alg = RSPAMD_SHINGLES_OLD;
+	rule->skip_map = NULL;
 
 	if ((value = ucl_object_lookup (obj, "skip_hashes")) != NULL) {
 		rspamd_map_add_from_ucl (cfg, value,
@@ -430,12 +431,6 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 				rspamd_kv_list_fin,
 				rspamd_kv_list_dtor,
 				(void **)&rule->skip_map);
-		rspamd_mempool_add_destructor (fuzzy_module_ctx->fuzzy_pool,
-				(rspamd_mempool_destruct_t)rspamd_map_helper_destroy_radix,
-				rule->skip_map);
-	}
-	else {
-		rule->skip_map = NULL;
 	}
 
 	if ((value = ucl_object_lookup (obj, "mime_types")) != NULL) {
@@ -1219,7 +1214,8 @@ fuzzy_encrypt_cmd (struct fuzzy_rule *rule,
 	rspamd_keypair_cache_process (fuzzy_module_ctx->keypairs_cache,
 			rule->local_key, rule->peer_key);
 	rspamd_cryptobox_encrypt_nm_inplace (data, datalen,
-			hdr->nonce, rspamd_pubkey_get_nm (rule->peer_key), hdr->mac,
+			hdr->nonce, rspamd_pubkey_get_nm (rule->peer_key, rule->local_key),
+			hdr->mac,
 			rspamd_pubkey_alg (rule->peer_key));
 }
 
@@ -1774,7 +1770,7 @@ fuzzy_process_reply (guchar **pos, gint *r, GPtrArray *req,
 		if (!rspamd_cryptobox_decrypt_nm_inplace ((guchar *)&encrep.rep,
 				sizeof (encrep.rep),
 				encrep.hdr.nonce,
-				rspamd_pubkey_get_nm (rule->peer_key),
+				rspamd_pubkey_get_nm (rule->peer_key, rule->local_key),
 				encrep.hdr.mac,
 				rspamd_pubkey_alg (rule->peer_key))) {
 			msg_info ("cannot decrypt reply");
@@ -2172,7 +2168,7 @@ fuzzy_check_io_callback (gint fd, short what, void *arg)
 			session->state == 1 ? "read" : "write",
 			errno,
 			strerror (errno));
-		rspamd_upstream_fail (session->server);
+		rspamd_upstream_fail (session->server, FALSE);
 		rspamd_session_remove_event (session->task->s, fuzzy_io_fin, session);
 	}
 	else {
@@ -2211,7 +2207,7 @@ fuzzy_check_timer_callback (gint fd, short what, void *arg)
 				rspamd_upstream_name (session->server),
 				rspamd_inet_address_to_string_pretty (session->addr),
 				session->retransmits);
-		rspamd_upstream_fail (session->server);
+		rspamd_upstream_fail (session->server, FALSE);
 		rspamd_session_remove_event (session->task->s, fuzzy_io_fin, session);
 	}
 	else {
@@ -2416,7 +2412,7 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 				rspamd_upstream_name (session->server),
 				rspamd_inet_address_to_string_pretty (session->addr),
 				errno, strerror (errno));
-		rspamd_upstream_fail (session->server);
+		rspamd_upstream_fail (session->server, FALSE);
 	}
 
 	/*
@@ -2513,7 +2509,7 @@ fuzzy_controller_timer_callback (gint fd, short what, void *arg)
 	task = session->task;
 
 	if (session->retransmits >= fuzzy_module_ctx->retransmits) {
-		rspamd_upstream_fail (session->server);
+		rspamd_upstream_fail (session->server, FALSE);
 		msg_err_task_check ("got IO timeout with server %s(%s), "
 				"after %d retransmits",
 				rspamd_upstream_name (session->server),
@@ -2835,7 +2831,7 @@ register_fuzzy_client_call (struct rspamd_task *task,
 					rspamd_inet_address_to_string_pretty (addr),
 				errno,
 				strerror (errno));
-			rspamd_upstream_fail (selected);
+			rspamd_upstream_fail (selected, FALSE);
 			g_ptr_array_free (commands, TRUE);
 		}
 		else {
@@ -2946,7 +2942,7 @@ register_fuzzy_controller_call (struct rspamd_http_connection_entry *entry,
 
 		if ((sock = rspamd_inet_address_connect (addr,
 				SOCK_DGRAM, TRUE)) == -1) {
-			rspamd_upstream_fail (selected);
+			rspamd_upstream_fail (selected, TRUE);
 		}
 		else {
 			s =
@@ -3306,7 +3302,7 @@ fuzzy_check_send_lua_learn (struct fuzzy_rule *rule,
 
 		if ((sock = rspamd_inet_address_connect (addr,
 				SOCK_DGRAM, TRUE)) == -1) {
-			rspamd_upstream_fail (selected);
+			rspamd_upstream_fail (selected, TRUE);
 		}
 		else {
 			s =
