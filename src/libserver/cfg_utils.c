@@ -653,6 +653,11 @@ rspamd_config_parse_log_format (struct rspamd_config *cfg)
 	return TRUE;
 }
 
+static void
+rspamd_urls_config_dtor (gpointer _unused)
+{
+	rspamd_url_deinit ();
+}
 
 /*
  * Perform post load actions
@@ -751,6 +756,9 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 		else {
 			rspamd_url_init (cfg->tld_file);
 		}
+
+		rspamd_mempool_add_destructor (cfg->cfg_pool, rspamd_urls_config_dtor,
+				NULL);
 	}
 
 	init_dynamic_config (cfg);
@@ -842,7 +850,11 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 			ret = FALSE;
 		}
 
-		return rspamd_symbols_cache_validate (cfg->cache, cfg, FALSE) && ret;
+		ret = rspamd_symbols_cache_validate (cfg->cache, cfg, FALSE) && ret;
+	}
+
+	if (opts & RSPAMD_CONFIG_INIT_PRELOAD_MAPS) {
+		rspamd_map_preload (cfg);
 	}
 
 	return ret;
@@ -1891,6 +1903,9 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 	ucl_object_iter_t it = NULL;
 	const ucl_object_t *cur, *cur_elt;
 	const gchar *str;
+
+	/* Cleanup */
+	*target = NULL;
 
 	LL_FOREACH (obj, cur_elt) {
 		type = ucl_object_type (cur_elt);

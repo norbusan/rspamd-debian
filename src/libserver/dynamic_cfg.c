@@ -175,7 +175,7 @@ json_config_fin_cb (struct map_cb_data *data)
 	ucl_object_t *top;
 	struct ucl_parser *parser;
 
-	if (data->prev_data) {
+	if (data->cur_data && data->prev_data) {
 		jb = data->prev_data;
 		/* Clean prev data */
 		if (jb->buf) {
@@ -190,7 +190,6 @@ json_config_fin_cb (struct map_cb_data *data)
 		jb = data->cur_data;
 	}
 	else {
-		msg_err ("no data read");
 		return;
 	}
 
@@ -234,6 +233,10 @@ json_config_dtor_cb (struct map_cb_data *data)
 			g_string_free (jb->buf, TRUE);
 		}
 
+		if (jb->cfg && jb->cfg->current_dynamic_conf) {
+			ucl_object_unref (jb->cfg->current_dynamic_conf);
+		}
+
 		g_free (jb);
 	}
 }
@@ -259,9 +262,6 @@ init_dynamic_config (struct rspamd_config *cfg)
 	jb->cfg = cfg;
 	*pjb = jb;
 	cfg->current_dynamic_conf = ucl_object_typed_new (UCL_ARRAY);
-	rspamd_mempool_add_destructor (cfg->cfg_pool,
-			(rspamd_mempool_destruct_t)ucl_object_unref,
-			cfg->current_dynamic_conf);
 	rspamd_mempool_add_destructor (cfg->cfg_pool,
 			(rspamd_mempool_destruct_t)g_free,
 			pjb);

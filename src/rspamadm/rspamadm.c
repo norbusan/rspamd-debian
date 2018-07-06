@@ -99,7 +99,12 @@ rspamadm_commands (GPtrArray *all_commands)
 
 	PTR_ARRAY_FOREACH (all_commands, i, cmd) {
 		if (!(cmd->flags & RSPAMADM_FLAG_NOHELP)) {
-			rspamd_printf ("  %-18s %-60s\n", cmd->name, cmd->help (FALSE, cmd));
+			if (cmd->flags & RSPAMADM_FLAG_LUA) {
+				(void)cmd->help (FALSE, cmd);
+			}
+			else {
+				printf ("  %-18s %-60s\n", cmd->name, cmd->help (FALSE, cmd));
+			}
 		}
 	}
 }
@@ -201,7 +206,9 @@ rspamadm_parse_ucl_var (const gchar *option_name,
 
 gboolean
 rspamadm_execute_lua_ucl_subr (gpointer pL, gint argc, gchar **argv,
-		const ucl_object_t *res, const gchar *script_name)
+							   const ucl_object_t *res,
+							   const gchar *script_name,
+							   gboolean rspamadm_subcommand)
 {
 	lua_State *L = pL;
 	gint err_idx, i, ret;
@@ -214,8 +221,14 @@ rspamadm_execute_lua_ucl_subr (gpointer pL, gint argc, gchar **argv,
 
 	/* Init internal rspamadm routines */
 
-	rspamd_snprintf (str, sizeof (str), "return require \"%s.%s\"", "rspamadm",
-			script_name);
+	if (rspamadm_subcommand) {
+		rspamd_snprintf (str, sizeof (str), "return require \"%s.%s\"", "rspamadm",
+				script_name);
+	}
+	else {
+		rspamd_snprintf (str, sizeof (str), "return require \"%s\"",
+				script_name);
+	}
 
 	if (luaL_dostring (L, str) != 0) {
 		msg_err ("cannot execute lua script %s: %s",

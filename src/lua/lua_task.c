@@ -21,6 +21,8 @@
 #include "unix-std.h"
 #include "libmime/smtp_parsers.h"
 #include "libserver/mempool_vars_internal.h"
+#include "libserver/task.h"
+#include "libstat/stat_api.h"
 #include <math.h>
 
 /***
@@ -44,7 +46,18 @@ end
  */
 
 /* Task methods */
+/***
+ * @function rspamd_task.load_from_file(filename[, cfg])
+ * Loads a message from specific file
+ * @return {boolean},{rspamd_task|error} status + new task or error message
+ */
+LUA_FUNCTION_DEF (task, load_from_file);
+
 LUA_FUNCTION_DEF (task, get_message);
+/***
+ * @method task:process_message()
+ * Parses message
+ */
 LUA_FUNCTION_DEF (task, process_message);
 /***
  * @method task:get_cfg()
@@ -852,7 +865,27 @@ LUA_FUNCTION_DEF (task, disable_action);
  */
 LUA_FUNCTION_DEF (task, get_newlines_type);
 
+/***
+ * @method task:get_stat_tokens()
+ * Returns list of tables the statistical tokens:
+ * - `data`: 64 bit number encoded as a string
+ * - `t1`: the first token (if any)
+ * - `t2`: the second token (if any)
+ * - `win`: window index
+ * - `flag`: table of strings:
+ *    - `text`: text token
+ *    - `meta`: meta token
+ *    - `lua`: lua meta token
+ *    - `exception`: exception
+ *    - `subject`: subject token
+ *    - `unigram`: unigram token
+ *
+ * @return {table of tables}
+ */
+LUA_FUNCTION_DEF (task, get_stat_tokens);
+
 static const struct luaL_reg tasklib_f[] = {
+	LUA_INTERFACE_DEF (task, load_from_file),
 	{NULL, NULL}
 };
 
@@ -946,6 +979,7 @@ static const struct luaL_reg tasklib_m[] = {
 	LUA_INTERFACE_DEF (task, headers_foreach),
 	LUA_INTERFACE_DEF (task, disable_action),
 	LUA_INTERFACE_DEF (task, get_newlines_type),
+	LUA_INTERFACE_DEF (task, get_stat_tokens),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
 };
@@ -1000,6 +1034,7 @@ static const struct luaL_reg textlib_m[] = {
 	LUA_INTERFACE_DEF (text, ptr),
 	LUA_INTERFACE_DEF (text, take_ownership),
 	LUA_INTERFACE_DEF (text, save_in_file),
+	{"write", lua_text_save_in_file},
 	{"__len", lua_text_len},
 	{"__tostring", lua_text_str},
 	{"__gc", lua_text_gc},
@@ -1166,6 +1201,74 @@ static int
 lua_task_get_message (lua_State * L)
 {
 	return luaL_error (L, "task:get_message is no longer supported");
+}
+
+static void
+lua_task_unmap_dtor (gpointer p)
+{
+	struct rspamd_task *task = (struct rspamd_task *)p;
+
+	if (task->msg.begin) {
+		munmap ((gpointer)task->msg.begin, task->msg.len);
+	}
+}
+
+static int
+lua_task_load_from_file (lua_State * L)
+{
+	struct rspamd_task *task = NULL, **ptask;
+	const gchar *fname = luaL_checkstring (L, 1), *err = NULL;
+	struct rspamd_config *cfg = NULL;
+	gboolean res = FALSE;
+	gpointer map;
+	gsize sz;
+
+	if (fname) {
+
+		if (lua_type (L, 2) == LUA_TUSERDATA) {
+			gpointer p;
+			p = rspamd_lua_check_udata_maybe (L, 2, "rspamd{config}");
+
+			if (p) {
+				cfg = *(struct rspamd_config **)p;
+			}
+		}
+
+		map = rspamd_file_xmap (fname, PROT_READ, &sz, TRUE);
+
+		if (!map) {
+			err = strerror (errno);
+		}
+		else {
+			task = rspamd_task_new (NULL, cfg, NULL, NULL);
+			task->msg.begin = map;
+			task->msg.len = sz;
+			rspamd_mempool_add_destructor (task->task_pool,
+					lua_task_unmap_dtor, task);
+			res = TRUE;
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	lua_pushboolean (L, res);
+
+	if (res) {
+		ptask = lua_newuserdata (L, sizeof (*ptask));
+		*ptask = task;
+		rspamd_lua_setclass (L, "rspamd{task}", -1);
+	}
+	else {
+		if (err) {
+			lua_pushstring (L, err);
+		}
+		else {
+			lua_pushnil (L);
+		}
+	}
+
+	return 2;
 }
 
 static int
@@ -3206,11 +3309,13 @@ lua_task_get_symbols (lua_State *L)
 
 			while (g_hash_table_iter_next (&it, &k, &v)) {
 				s = v;
-				lua_pushstring (L, k);
-				lua_rawseti (L, -3, i);
-				lua_pushnumber (L, s->score);
-				lua_rawseti (L, -2, i);
-				i ++;
+				if (!(s->flags & RSPAMD_SYMBOL_RESULT_IGNORED)) {
+					lua_pushstring (L, k);
+					lua_rawseti (L, -3, i);
+					lua_pushnumber (L, s->score);
+					lua_rawseti (L, -2, i);
+					i++;
+				}
 			}
 		}
 		else {
@@ -3281,14 +3386,17 @@ lua_task_get_symbols_numeric (lua_State *L)
 			g_hash_table_iter_init (&it, mres->symbols);
 
 			while (g_hash_table_iter_next (&it, &k, &v)) {
-				id = rspamd_symbols_cache_find_symbol (task->cfg->cache,
-						k);
 				s = v;
-				lua_pushnumber (L, id);
-				lua_rawseti (L, -3, i);
-				lua_pushnumber (L, s->score);
-				lua_rawseti (L, -2, i);
-				i ++;
+
+				if (!(s->flags & RSPAMD_SYMBOL_RESULT_IGNORED)) {
+					id = rspamd_symbols_cache_find_symbol (task->cfg->cache,
+							k);
+					lua_pushnumber (L, id);
+					lua_rawseti (L, -3, i);
+					lua_pushnumber (L, s->score);
+					lua_rawseti (L, -2, i);
+					i++;
+				}
 			}
 		}
 		else {
@@ -4315,6 +4423,112 @@ lua_task_get_newlines_type (lua_State *L)
 	return 1;
 }
 
+static void
+lua_push_stat_token (lua_State *L, rspamd_token_t *tok)
+{
+	gchar numbuf[64];
+
+	/* Table values
+	 * - `data`: 64 bit number encoded as a string
+	 * - `t1`: the first token (if any)
+	 * - `t2`: the second token (if any)
+	 * - `win`: window index
+	 * - `flag`: table of strings:
+	 *    - `text`: text token
+	 *    - `meta`: meta token
+	 *    - `lua`: lua meta token
+	 *    - `exception`: exception
+	 *    - `subject`: subject token
+	 *    - `unigram`: unigram token
+	 */
+	lua_createtable (L, 0, 5);
+
+	rspamd_snprintf (numbuf, sizeof (numbuf), "%uL", tok->data);
+	lua_pushstring (L, "data");
+	lua_pushstring (L, numbuf);
+	lua_settable (L, -3);
+
+	if (tok->t1) {
+		lua_pushstring (L, "t1");
+		lua_pushlstring (L, tok->t1->begin, tok->t1->len);
+		lua_settable (L, -3);
+	}
+
+	if (tok->t2) {
+		lua_pushstring (L, "t2");
+		lua_pushlstring (L, tok->t2->begin, tok->t2->len);
+		lua_settable (L, -3);
+	}
+
+	lua_pushstring (L, "win");
+	lua_pushnumber (L, tok->window_idx);
+	lua_settable (L, -3);
+
+	lua_pushstring (L, "flags");
+	lua_createtable (L, 0, 5);
+
+	/* Flags */
+	{
+		if (tok->flags & RSPAMD_STAT_TOKEN_FLAG_TEXT) {
+			lua_pushstring (L, "text");
+			lua_pushboolean (L, true);
+			lua_settable (L, -3);
+		}
+		if (tok->flags & RSPAMD_STAT_TOKEN_FLAG_META) {
+			lua_pushstring (L, "meta");
+			lua_pushboolean (L, true);
+			lua_settable (L, -3);
+		}
+		if (tok->flags & RSPAMD_STAT_TOKEN_FLAG_LUA_META) {
+			lua_pushstring (L, "lua");
+			lua_pushboolean (L, true);
+			lua_settable (L, -3);
+		}
+		if (tok->flags & RSPAMD_STAT_TOKEN_FLAG_EXCEPTION) {
+			lua_pushstring (L, "exception");
+			lua_pushboolean (L, true);
+			lua_settable (L, -3);
+		}
+		if (tok->flags & RSPAMD_STAT_TOKEN_FLAG_SUBJECT) {
+			lua_pushstring (L, "subject");
+			lua_pushboolean (L, true);
+			lua_settable (L, -3);
+		}
+	}
+	lua_settable (L, -3);
+}
+
+static gint
+lua_task_get_stat_tokens (lua_State *L)
+{
+	struct rspamd_task *task = lua_check_task (L, 1);
+	guint i;
+	rspamd_token_t *tok;
+
+	if (task) {
+		if (!task->tokens) {
+			rspamd_stat_process_tokenize (NULL, task);
+		}
+
+		if (!task->tokens) {
+			lua_pushnil (L);
+		}
+		else {
+			lua_createtable (L, task->tokens->len, 0);
+
+			PTR_ARRAY_FOREACH (task->tokens, i, tok) {
+				lua_push_stat_token (L, tok);
+				lua_rawseti (L, -2, i + 1);
+			}
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
 static gint
 lua_task_set_metric_subject (lua_State *L)
 {
@@ -4765,33 +4979,47 @@ static gint
 lua_text_save_in_file (lua_State *L)
 {
 	struct rspamd_lua_text *t = lua_check_text (L, 1);
-	const gchar *fname = luaL_checkstring (L, 2);
+	const gchar *fname = NULL;
 	guint mode = 00644;
 	gint fd;
 
-	if (t != NULL && fname != NULL) {
+	if (t != NULL) {
+		if (lua_type (L, 2) == LUA_TSTRING) {
+			fname = luaL_checkstring (L, 2);
+		}
 		if (lua_type (L, 3) == LUA_TNUMBER) {
 			mode = lua_tonumber (L, 3);
 		}
 
-		fd = rspamd_file_xopen (fname, O_CREAT | O_WRONLY | O_EXCL, mode, 0);
+		if (fname) {
+			fd = rspamd_file_xopen (fname, O_CREAT | O_WRONLY | O_EXCL, mode, 0);
 
-		if (fd == -1) {
-			lua_pushboolean (L, false);
-			lua_pushstring (L, strerror (errno));
+			if (fd == -1) {
+				lua_pushboolean (L, false);
+				lua_pushstring (L, strerror (errno));
 
-			return 2;
+				return 2;
+			}
+		}
+		else {
+			fd = STDOUT_FILENO;
 		}
 
 		if (write (fd, t->start, t->len) == -1) {
-			close (fd);
+			if (fd != STDOUT_FILENO) {
+				close (fd);
+			}
+
 			lua_pushboolean (L, false);
 			lua_pushstring (L, strerror (errno));
 
 			return 2;
 		}
 
-		close (fd);
+		if (fd != STDOUT_FILENO) {
+			close (fd);
+		}
+
 		lua_pushboolean (L, true);
 	}
 	else {
