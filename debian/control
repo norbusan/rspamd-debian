@@ -16,6 +16,7 @@ Build-Depends: cmake,
                libpcre3-dev,
                libsqlite3-dev,
                libssl-dev (>= 1.0),
+               libunwind-dev,
                ragel,
                zlib1g-dev
 Standards-Version: 4.1.4
