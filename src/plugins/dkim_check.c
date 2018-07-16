@@ -85,7 +85,8 @@ struct dkim_check_result {
 	rspamd_dkim_key_t *key;
 	struct rspamd_task *task;
 	gint res;
-	gint mult_allow, mult_deny;
+	gdouble mult_allow;
+	gdouble mult_deny;
 	struct rspamd_async_watcher *w;
 	struct dkim_check_result *next, *prev, *first;
 };
@@ -127,7 +128,6 @@ dkim_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 	if (dkim_module_ctx == NULL) {
 		dkim_module_ctx = g_malloc0 (sizeof (struct dkim_ctx));
 
-		dkim_module_ctx->dkim_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), "dkim");
 		dkim_module_ctx->sign_headers = default_sign_headers;
 		dkim_module_ctx->sign_condition_ref = -1;
 		dkim_module_ctx->max_sigs = DEFAULT_MAX_SIGS;
@@ -400,10 +400,6 @@ dkim_module_config (struct rspamd_config *cfg)
 
 		rspamd_config_radix_from_ucl (cfg, value, "DKIM whitelist",
 				&dkim_module_ctx->whitelist_ip, NULL);
-		rspamd_mempool_add_destructor (dkim_module_ctx->dkim_pool,
-				(rspamd_mempool_destruct_t)rspamd_map_helper_destroy_radix,
-				dkim_module_ctx->whitelist_ip);
-
 	}
 
 	if ((value =
@@ -418,9 +414,6 @@ dkim_module_config (struct rspamd_config *cfg)
 				ucl_object_tostring (value));
 		}
 		else {
-			rspamd_mempool_add_destructor (dkim_module_ctx->dkim_pool,
-					(rspamd_mempool_destruct_t)rspamd_map_helper_destroy_hash,
-					dkim_module_ctx->dkim_domains);
 			got_trusted = TRUE;
 		}
 	}
@@ -437,9 +430,6 @@ dkim_module_config (struct rspamd_config *cfg)
 					ucl_object_tostring (value));
 		}
 		else {
-			rspamd_mempool_add_destructor (dkim_module_ctx->dkim_pool,
-					(rspamd_mempool_destruct_t)rspamd_map_helper_destroy_hash,
-					dkim_module_ctx->dkim_domains);
 			got_trusted = TRUE;
 		}
 	}
@@ -539,7 +529,7 @@ dkim_module_config (struct rspamd_config *cfg)
 					dkim_module_ctx->sign_condition_ref = luaL_ref (cfg->lua_state,
 							LUA_REGISTRYINDEX);
 					rspamd_lua_add_ref_dtor (cfg->lua_state,
-							dkim_module_ctx->dkim_pool,
+							cfg->cfg_pool,
 							dkim_module_ctx->sign_condition_ref);
 
 					rspamd_symbols_cache_add_symbol (cfg->cache,
@@ -864,7 +854,6 @@ dkim_module_reconfig (struct rspamd_config *cfg)
 	struct module_ctx saved_ctx;
 
 	saved_ctx = dkim_module_ctx->ctx;
-	rspamd_mempool_delete (dkim_module_ctx->dkim_pool);
 
 	if (dkim_module_ctx->dkim_hash) {
 		rspamd_lru_hash_destroy (dkim_module_ctx->dkim_hash);
@@ -876,7 +865,6 @@ dkim_module_reconfig (struct rspamd_config *cfg)
 
 	memset (dkim_module_ctx, 0, sizeof (*dkim_module_ctx));
 	dkim_module_ctx->ctx = saved_ctx;
-	dkim_module_ctx->dkim_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), "dkim");
 	dkim_module_ctx->sign_headers = default_sign_headers;
 	dkim_module_ctx->sign_condition_ref = -1;
 	dkim_module_ctx->max_sigs = DEFAULT_MAX_SIGS;
@@ -888,17 +876,27 @@ dkim_module_reconfig (struct rspamd_config *cfg)
  * Parse strict value for domain in format: 'reject_multiplier:deny_multiplier'
  */
 static gboolean
-dkim_module_parse_strict (const gchar *value, gint *allow, gint *deny)
+dkim_module_parse_strict (const gchar *value, gdouble *allow, gdouble *deny)
 {
 	const gchar *colon;
-	gulong val;
+	gchar *err = NULL;
+	gdouble val;
+	gchar numbuf[64];
 
 	colon = strchr (value, ':');
 	if (colon) {
-		if (rspamd_strtoul (value, colon - value, &val)) {
+		rspamd_strlcpy (numbuf, value,
+				MIN (sizeof (numbuf), (colon - value) + 1));
+		val = strtod (numbuf, &err);
+
+		if (err == NULL || *err == '\0') {
 			*deny = val;
 			colon++;
-			if (rspamd_strtoul (colon, strlen (colon), &val)) {
+			rspamd_strlcpy (numbuf, colon, sizeof (numbuf));
+			err = NULL;
+			val = strtod (numbuf, &err);
+
+			if (err == NULL || *err == '\0') {
 				*allow = val;
 				return TRUE;
 			}
@@ -952,7 +950,7 @@ dkim_module_check (struct dkim_check_result *res)
 	if (all_done) {
 		DL_FOREACH (first, cur) {
 			const gchar *symbol = NULL, *trace = NULL;
-			int symbol_weight = 1;
+			gdouble symbol_weight = 1.0;
 
 			if (cur->ctx == NULL) {
 				continue;
@@ -1103,19 +1101,9 @@ dkim_symbol_callback (struct rspamd_task *task, void *unused)
 				continue;
 			}
 
-			if (res == NULL) {
-				res = rspamd_mempool_alloc0 (task->task_pool, sizeof (*res));
-				res->prev = res;
-				res->w = rspamd_session_get_watcher (task->s);
-				cur = res;
-			}
-			else {
-				cur = rspamd_mempool_alloc0 (task->task_pool, sizeof (*res));
-			}
-
+			cur = rspamd_mempool_alloc0 (task->task_pool, sizeof (*cur));
 			cur->first = res;
 			cur->res = -1;
-			cur->w = res->w;
 			cur->task = task;
 			cur->mult_allow = 1.0;
 			cur->mult_deny = 1.0;
@@ -1143,7 +1131,6 @@ dkim_symbol_callback (struct rspamd_task *task, void *unused)
 			}
 			else {
 				/* Get key */
-
 				cur->ctx = ctx;
 
 				if (dkim_module_ctx->trusted_only &&
@@ -1167,14 +1154,23 @@ dkim_symbol_callback (struct rspamd_task *task, void *unused)
 							dkim_module_key_dtor, cur->key);
 				}
 				else {
-					rspamd_get_dkim_key (ctx,
+					if (!rspamd_get_dkim_key (ctx,
 							task,
 							dkim_module_key_handler,
-							cur);
+							cur)) {
+						continue;
+					}
 				}
 			}
 
-			if (res != cur) {
+			if (res == NULL) {
+				res = cur;
+				res->first = res;
+				res->prev = res;
+				res->w = rspamd_session_get_watcher (task->s);
+			}
+			else {
+				cur->w = res->w;
 				DL_APPEND (res, cur);
 			}
 

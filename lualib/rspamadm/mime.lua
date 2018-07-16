@@ -92,6 +92,8 @@ stat:mutex(
     stat:flag "-F --fuzzy"
         :description "Fuzzy hashes"
 )
+stat:flag "-s --shingles"
+    :description "Show shingles for fuzzy hashes"
 
 local urls = parser:command "urls url u"
                    :description "Extracts URLs from MIME messages"
@@ -316,6 +318,41 @@ local function stat_handler(opts)
         return string.format('%s (%d): "%s"+"%s", [%s]', e.data, e.win, e.t1 or "",
             e.t2 or "", table.concat(fun.totable(
                 fun.map(function(k) return k end, e.flags)), ","))
+      end
+    elseif opts.fuzzy then
+      local parts = task:get_parts() or {}
+      out_elts[fname] = {}
+      process_func = function(e)
+        local ret = string.format('part: %s(%s): %s', e.type, e.file or "", e.digest)
+        if opts.shingles and e.shingles then
+          local sgl = {}
+          for _,s in ipairs(e.shingles) do
+            table.insert(sgl, string.format('%s: %s+%s+%s', s[1], s[2], s[3], s[4]))
+          end
+
+          ret = ret .. '\n' .. table.concat(sgl, '\n')
+        end
+        return ret
+      end
+      for _,part in ipairs(parts) do
+        if not part:is_multipart() then
+          local text = part:get_text()
+
+          if text then
+            local digest,shingles = text:get_fuzzy_hashes(task:get_mempool())
+            table.insert(out_elts[fname], {
+              digest = digest,
+              shingles = shingles,
+              type = string.format('%s/%s', part:get_type())
+            })
+          else
+            table.insert(out_elts[fname], {
+              digest = part:get_digest(),
+              file = part:get_filename(),
+              type = string.format('%s/%s', part:get_type())
+            })
+          end
+        end
       end
     end
 

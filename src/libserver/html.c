@@ -1684,7 +1684,7 @@ rspamd_html_process_url_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 							3 /* for :// */;
 					buf = rspamd_mempool_alloc (pool, len + 1);
 					rspamd_snprintf (buf, len + 1, "%*s://%*s/%*s",
-							hc->base_url->protocollen, hc->base_url->protocol,
+							hc->base_url->protocollen, hc->base_url->string,
 							hc->base_url->hostlen, hc->base_url->host,
 							(gint)orig_len, start);
 					start = buf;
@@ -2582,13 +2582,22 @@ rspamd_html_propagate_style (struct html_content *hc,
 		bl->font_color.d.comp.b = 0;
 		bl->font_color.valid = TRUE;
 	}
+	else {
+		push_block = TRUE;
+	}
 
 	if (!bl->background_color.valid) {
 		memcpy (&bl->background_color, &hc->bgcolor, sizeof (hc->bgcolor));
 	}
+	else {
+		push_block = TRUE;
+	}
 
 	if (bl->font_size == (guint)-1) {
 		bl->font_size = 16; /* Default for browsers */
+	}
+	else {
+		push_block = TRUE;
 	}
 
 	if (push_block && !(tag->flags & FL_CLOSED)) {
