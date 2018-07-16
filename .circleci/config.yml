@@ -43,7 +43,7 @@ jobs:
       - run: sudo apt-get install -qq cmake libevent-dev libglib2.0-dev libicu-dev libluajit-5.1-dev libmagic-dev libsqlite3-dev libssl-dev ragel
 
       - run: mkdir ../build ; mkdir ../install ; cd ../build
-      - run: cmake ../project -DDBDIR=/nana -DENABLE_COVERAGE=ON -DCMAKE_INSTALL_PREFIX=../install -DENABLE_HIREDIS=ON
+      - run: cmake ../project -DDBDIR=/nana -DENABLE_COVERAGE=ON -DCMAKE_INSTALL_PREFIX=../install
 
       - run: make install -j`nproc`
 
@@ -119,11 +119,29 @@ jobs:
 
       - run: (exit $RETURN_CODE)
 
+  eslint:
+    docker:
+      - image: circleci/node:latest
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+          - v1-dependencies-{{ checksum "package.json" }}
+          # fallback to using the latest cache if no exact match is found
+          - v1-dependencies-
+      - run: npm install
+      - save_cache:
+          paths:
+            - node_modules
+          key: v1-dependencies-{{ checksum "package.json" }}
+      - run: ./node_modules/.bin/eslint -v && ./node_modules/.bin/eslint ./
+
 workflows:
   version: 2
   build-and-test:
     jobs:
       - build
+      - eslint
       - rspamd-test:
           requires:
             - build
