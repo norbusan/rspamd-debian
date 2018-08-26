@@ -2094,6 +2094,9 @@ rspamd_init_libs (void)
 #endif
 
 	SSL_CTX_set_options (ctx->ssl_ctx, ssl_options);
+	ctx->ssl_ctx_noverify = SSL_CTX_new (SSLv23_method ());
+	SSL_CTX_set_verify (ctx->ssl_ctx_noverify, SSL_VERIFY_NONE, NULL);
+	SSL_CTX_set_options (ctx->ssl_ctx_noverify, ssl_options);
 #endif
 	rspamd_random_seed_fast ();
 
@@ -2308,6 +2311,7 @@ rspamd_deinit_libs (struct rspamd_external_libs_ctx *ctx)
 		EVP_cleanup ();
 		ERR_free_strings ();
 		SSL_CTX_free (ctx->ssl_ctx);
+		SSL_CTX_free (ctx->ssl_ctx_noverify);
 #endif
 		rspamd_inet_library_destroy ();
 		rspamd_free_zstd_dictionary (ctx->in_dict);
@@ -2969,4 +2973,44 @@ rspamd_glob_path (const gchar *dir,
 	}
 
 	return res;
+}
+
+double
+rspamd_set_counter (struct rspamd_counter_data *cd, gdouble value)
+{
+	gdouble cerr;
+
+	/* Cumulative moving average using per-process counter data */
+	if (cd->number == 0) {
+		cd->mean = 0;
+		cd->stddev = 0;
+	}
+
+	cd->mean += (value - cd->mean) / (gdouble)(++cd->number);
+	cerr = (value - cd->mean) * (value - cd->mean);
+	cd->stddev += (cerr - cd->stddev) / (gdouble)(cd->number);
+
+	return cd->mean;
+}
+
+double
+rspamd_set_counter_ema (struct rspamd_counter_data *cd,
+		gdouble value,
+		gdouble alpha)
+{
+	gdouble diff, incr;
+
+	/* Cumulative moving average using per-process counter data */
+	if (cd->number == 0) {
+		cd->mean = 0;
+		cd->stddev = 0;
+	}
+
+	diff = value - cd->mean;
+	incr = diff * alpha;
+	cd->mean += incr;
+	cd->stddev = (1 - alpha) * (cd->stddev + diff * incr);
+	cd->number ++;
+
+	return cd->mean;
 }

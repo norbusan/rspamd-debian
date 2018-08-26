@@ -205,6 +205,7 @@ LUA_FUNCTION_DEF (config, get_classifier);
  *     + `empty` if symbol can be called for empty messages
  *     + `skip` if symbol should be skipped now
  *     + `nostat` if symbol should be excluded from stat tokens
+ *     + `trivial` symbol is trivial (e.g. no network requests)
  * - `parent`: id of parent symbol (useful for virtual symbols)
  *
  * @return {number} id of symbol registered
@@ -1568,6 +1569,9 @@ lua_parse_symbol_flags (const gchar *str)
 		if (strstr (str, "squeezed") != NULL) {
 			ret |= SYMBOL_TYPE_SQUEEZED;
 		}
+		if (strstr (str, "trivial") != NULL) {
+			ret |= SYMBOL_TYPE_TRIVIAL;
+		}
 	}
 
 	return ret;
@@ -1988,7 +1992,7 @@ lua_config_register_dependency (lua_State * L)
 			skip_squeeze = lua_toboolean (L, 4);
 		}
 
-		if (child != NULL && child != NULL) {
+		if (child != NULL && parent != NULL) {
 
 			if (skip_squeeze || !rspamd_lua_squeeze_dependency (L, cfg, child, parent)) {
 				rspamd_symbols_cache_add_delayed_dependency (cfg->cache, child,
@@ -2268,7 +2272,8 @@ lua_config_add_composite (lua_State * L)
 					msg_warn_config ("composite %s is redefined", name);
 					new = FALSE;
 				}
-				composite = rspamd_mempool_alloc (cfg->cfg_pool,
+
+				composite = rspamd_mempool_alloc0 (cfg->cfg_pool,
 						sizeof (struct rspamd_composite));
 				composite->expr = expr;
 				composite->id = g_hash_table_size (cfg->composite_symbols);

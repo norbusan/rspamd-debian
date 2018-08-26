@@ -70,7 +70,7 @@ define(["jquery", "footable", "humanize"],
                         if (!sym.name) {
                             sym.name = key;
                         }
-                        sym.name = EscapeHTML(key);
+                        sym.name = EscapeHTML(sym.name);
                         if (sym.description) {
                             sym.description = EscapeHTML(sym.description);
                         }
@@ -128,6 +128,8 @@ define(["jquery", "footable", "humanize"],
                 : function (e1, e2) {
                     return e1.name.localeCompare(e2.name);
                 };
+
+            $("#selSymOrder, label[for='selSymOrder']").show();
 
             $.each(data.rows,
                 function (i, item) {
@@ -218,6 +220,12 @@ define(["jquery", "footable", "humanize"],
         function process_history_legacy(data) {
             var items = [];
 
+            var compare = function (e1, e2) {
+                return e1.name.localeCompare(e2.name);
+            };
+
+            $("#selSymOrder, label[for='selSymOrder']").hide();
+
             $.each(data, function (i, item) {
                 item.time = unix_time_format(item.unix_time);
                 preprocess_item(item);
@@ -227,6 +235,13 @@ define(["jquery", "footable", "humanize"],
                     },
                     value: item.scan_time
                 };
+                item.symbols = Object.keys(item.symbols)
+                    .map(function (key) {
+                        return item.symbols[key];
+                    })
+                    .sort(compare)
+                    .map(function (e) { return e.name; })
+                    .join(", ");
                 item.time = {
                     value: unix_time_format(item.unix_time),
                     options: {
@@ -555,69 +570,69 @@ define(["jquery", "footable", "humanize"],
             };
 
             if (checked_server === "All SERVERS") {
-                rspamd.queryNeighbours("history", function (req_data) {
-                    function differentVersions() {
-                        var dv = neighbours_data.some(function (e) {
-                            return e.version !== neighbours_data[0].version;
-                        });
-                        if (dv) {
-                            rspamd.alertMessage("alert-error",
-                                "Neighbours history backend versions do not match. Cannot display history.");
-                            return true;
-                        }
-                    }
-
-                    var neighbours_data = req_data
-                        .filter(function (d) { return d.status; }) // filter out unavailable neighbours
-                        .map(function (d) { return d.data; });
-                    if (neighbours_data.length && !differentVersions()) {
-                        var data = {};
-                        if (neighbours_data[0].version) {
-                            data.rows = [].concat.apply([], neighbours_data
-                                .map(function (e) {
-                                    return e.rows;
-                                }));
-                            data.version = neighbours_data[0].version;
-                        }
-                        else {
-                        // Legacy version
-                            data = [].concat.apply([], neighbours_data);
-                        }
-
-                        var items = process_history_data(data);
-                        ft.history = FooTable.init("#historyTable", {
-                            columns: get_history_columns(data),
-                            rows: items,
-                            paging: {
-                                enabled: true,
-                                limit: 5,
-                                size: 25
-                            },
-                            filtering: {
-                                enabled: true,
-                                position: "left",
-                                connectors: false
-                            },
-                            sorting: {
-                                enabled: true
-                            },
-                            components: {
-                                filtering: FooTable.actionFilter
-                            },
-                            on: {
-                                "ready.ft.table": drawTooltips,
-                                "after.ft.sorting": drawTooltips,
-                                "after.ft.paging": drawTooltips,
-                                "after.ft.filtering": drawTooltips
+                rspamd.query("history", {
+                    success: function (req_data) {
+                        function differentVersions(neighbours_data) {
+                            var dv = neighbours_data.some(function (e) {
+                                return e.version !== neighbours_data[0].version;
+                            });
+                            if (dv) {
+                                rspamd.alertMessage("alert-error",
+                                    "Neighbours history backend versions do not match. Cannot display history.");
+                                return true;
                             }
-                        });
-                    } else if (ft.history) {
-                        ft.history.destroy();
-                        delete ft.history;
+                        }
+
+                        var neighbours_data = req_data
+                            .filter(function (d) { return d.status; }) // filter out unavailable neighbours
+                            .map(function (d) { return d.data; });
+                        if (neighbours_data.length && !differentVersions(neighbours_data)) {
+                            var data = {};
+                            if (neighbours_data[0].version) {
+                                data.rows = [].concat.apply([], neighbours_data
+                                    .map(function (e) {
+                                        return e.rows;
+                                    }));
+                                data.version = neighbours_data[0].version;
+                            } else {
+                            // Legacy version
+                                data = [].concat.apply([], neighbours_data);
+                            }
+
+                            var items = process_history_data(data);
+                            ft.history = FooTable.init("#historyTable", {
+                                columns: get_history_columns(data),
+                                rows: items,
+                                paging: {
+                                    enabled: true,
+                                    limit: 5,
+                                    size: 25
+                                },
+                                filtering: {
+                                    enabled: true,
+                                    position: "left",
+                                    connectors: false
+                                },
+                                sorting: {
+                                    enabled: true
+                                },
+                                components: {
+                                    filtering: FooTable.actionFilter
+                                },
+                                on: {
+                                    "ready.ft.table": drawTooltips,
+                                    "after.ft.sorting": drawTooltips,
+                                    "after.ft.paging": drawTooltips,
+                                    "after.ft.filtering": drawTooltips
+                                }
+                            });
+                        } else if (ft.history) {
+                            ft.history.destroy();
+                            delete ft.history;
+                        }
                     }
                 });
-            }
-            else {
+            } else {
                 $.ajax({
                     dataType: "json",
                     url: neighbours[checked_server].url + "history",
@@ -683,30 +698,14 @@ define(["jquery", "footable", "humanize"],
                     ft.errors.destroy();
                     delete ft.errors;
                 }
-                if (checked_server === "All SERVERS") {
-                    rspamd.queryNeighbours("errors", function () {
+
+                rspamd.query("historyreset", {
+                    success: function () {
                         ui.getHistory(rspamd, tables, neighbours, checked_server);
                         ui.getErrors(rspamd, tables, neighbours, checked_server);
-                    });
-                }
-                else {
-                    $.ajax({
-                        dataType: "json",
-                        type: "GET",
-                        jsonp: false,
-                        url: neighbours[checked_server].url + "historyreset",
-                        beforeSend: function (xhr) {
-                            xhr.setRequestHeader("Password", rspamd.getPassword());
-                        },
-                        success: function () {
-                            ui.getHistory(rspamd, tables, neighbours, checked_server);
-                            ui.getErrors(rspamd, tables, neighbours, checked_server);
-                        },
-                        error: function (data) {
-                            rspamd.alertMessage("alert-modal alert-error", data.statusText);
-                        }
-                    });
-                }
+                    },
+                    errorMessage: "Cannot reset history log"
+                });
             });
         };
 
@@ -754,23 +753,23 @@ define(["jquery", "footable", "humanize"],
                     beforeSend: function (xhr) {
                         xhr.setRequestHeader("Password", rspamd.getPassword());
                     },
-                    error: function () {
-                        rspamd.alertMessage("alert-error", "Cannot receive errors");
-                    },
                     success: function (data) {
                         drawErrorsTable(data);
-                    }
+                    },
+                    errorMessage: "Cannot receive errors"
                 });
             } else {
-                rspamd.queryNeighbours("errors", function (req_data) {
-                    var neighbours_data = req_data
-                        .filter(function (d) {
-                            return d.status;
-                        }) // filter out unavailable neighbours
-                        .map(function (d) {
-                            return d.data;
-                        });
-                    drawErrorsTable([].concat.apply([], neighbours_data));
+                rspamd.query("errors", {
+                    success: function (req_data) {
+                        var neighbours_data = req_data
+                            .filter(function (d) {
+                                return d.status;
+                            }) // filter out unavailable neighbours
+                            .map(function (d) {
+                                return d.data;
+                            });
+                        drawErrorsTable([].concat.apply([], neighbours_data));
+                    }
                 });
             }
             $("#updateErrors").off("click");
@@ -780,6 +779,5 @@ define(["jquery", "footable", "humanize"],
             });
         };
 
-        ui.setup = function () {};
         return ui;
     });

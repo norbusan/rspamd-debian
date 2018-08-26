@@ -57,10 +57,33 @@ struct file_map_data {
 	struct stat st;
 };
 
+
+struct http_map_data;
+
+struct rspamd_http_map_cached_cbdata {
+	struct event timeout;
+	struct rspamd_storage_shmem *shm;
+	struct rspamd_map *map;
+	struct http_map_data *data;
+	guint64 gen;
+	time_t last_checked;
+};
+
+struct rspamd_map_cachepoint {
+	gint available;
+	gsize len;
+	time_t last_modified;
+	gchar shmem_name[256];
+};
+
 /**
  * Data specific to HTTP maps
  */
 struct http_map_data {
+	/* Shared cache data */
+	struct rspamd_map_cachepoint *cache;
+	/* Non-shared for cache owner, used to cleanup cache */
+	struct rspamd_http_map_cached_cbdata *cur_cache_cbd;
 	gchar *path;
 	gchar *host;
 	gchar *last_signature;
@@ -88,6 +111,7 @@ struct rspamd_map_backend {
 	enum fetch_proto protocol;
 	gboolean is_signed;
 	gboolean is_compressed;
+	gboolean is_fallback;
 	guint32 id;
 	struct rspamd_cryptobox_pubkey *trusted_pubkey;
 	union rspamd_map_backend_data data;
@@ -95,26 +119,11 @@ struct rspamd_map_backend {
 	ref_entry_t ref;
 };
 
-struct rspamd_http_map_cached_cbdata {
-	struct event timeout;
-	struct rspamd_storage_shmem *shm;
-	struct rspamd_map *map;
-	struct http_map_data *data;
-	guint64 gen;
-	time_t last_checked;
-};
-
-struct rspamd_map_cachepoint {
-	gint available;
-	gsize len;
-	time_t last_modified;
-	gchar shmem_name[256];
-};
-
 struct rspamd_map {
 	struct rspamd_dns_resolver *r;
 	struct rspamd_config *cfg;
 	GPtrArray *backends;
+	struct rspamd_map_backend *fallback_backend;
 	map_cb_t read_callback;
 	map_fin_cb_t fin_callback;
 	map_dtor_t dtor;
@@ -138,10 +147,6 @@ struct rspamd_map {
 	gboolean active_http;
 	/* Shared lock for temporary disabling of map reading (e.g. when this map is written by UI) */
 	gint *locked;
-	/* Shared cache data */
-	struct rspamd_map_cachepoint *cache;
-	/* Non-shared for cache owner, used to cleanup cache */
-	struct rspamd_http_map_cached_cbdata *cur_cache_cbd;
 	gchar tag[MEMPOOL_UID_LEN];
 };
 

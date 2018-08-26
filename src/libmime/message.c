@@ -675,15 +675,22 @@ rspamd_message_process_text_part (struct rspamd_task *task,
 			RSPAMD_FTOK_ASSIGN (&html_tok, "<!DOCTYPE html");
 			RSPAMD_FTOK_ASSIGN (&xhtml_tok, "<html");
 
-			if (rspamd_lc_cmp (mime_part->parsed_data.begin, html_tok.begin,
-					MIN (html_tok.len, mime_part->parsed_data.len)) == 0 ||
-					rspamd_lc_cmp (mime_part->parsed_data.begin, xhtml_tok.begin,
-							MIN (xhtml_tok.len, mime_part->parsed_data.len)) == 0) {
-				msg_info_task ("found html part pretending to be text/plain part");
+			if (mime_part->parsed_data.len >= xhtml_tok.len &&
+					rspamd_lc_cmp (mime_part->parsed_data.begin,
+							xhtml_tok.begin, xhtml_tok.len) == 0) {
+				found_html = TRUE;
+			}
+			else if (mime_part->parsed_data.len >= html_tok.len &&
+					rspamd_lc_cmp (mime_part->parsed_data.begin,
+							html_tok.begin, html_tok.len) == 0) {
 				found_html = TRUE;
 			}
 			else {
 				found_txt = TRUE;
+			}
+
+			if (found_html) {
+				msg_info_task ("found html part pretending to be text/plain part");
 			}
 		}
 	}
@@ -828,9 +835,13 @@ rspamd_message_process_text_part (struct rspamd_task *task,
 		task->result = mres;
 		task->pre_result.action = act;
 		task->pre_result.str = "Gtube pattern";
-		ucl_object_insert_key (task->messages,
-				ucl_object_fromstring ("Gtube pattern"), "smtp_message", 0,
-				false);
+
+		if (ucl_object_lookup (task->messages, "smtp_message") == NULL) {
+			ucl_object_replace_key (task->messages,
+					ucl_object_fromstring ("Gtube pattern"), "smtp_message", 0,
+					false);
+		}
+
 		rspamd_task_insert_result (task, GTUBE_SYMBOL, 0, NULL);
 
 		return;
