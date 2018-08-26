@@ -1,16 +1,17 @@
-rspamd (1.7.8-1) UNRELEASED; urgency=medium
+rspamd (1.7.9-1) UNRELEASED; urgency=medium
 
   [ Sebastien Badia ]
-  * New upstream version 1.7.8
   * d/rules: Enable libunwind support (upstream)
   * d/control:
-    + Bump to Standards-Version 4.1.5 (no changes needed)
+    + Bump to Standards-Version 4.2.1 (no changes needed)
     + Switch Mikhail and me as Maintainer
+  * d/patches: Fix wrong-path-for-interpreter (Perl interpreter)
+  * New upstream version 1.7.9
 
   [ Jérôme Lebleu ]
   * d/scripts: Update require.min.js path coming with 1.7.7
 
- -- Sebastien Badia <sbadia@debian.org>  Mon, 16 Jul 2018 20:22:37 +0200
+ -- Sebastien Badia <sbadia@debian.org>  Sun, 26 Aug 2018 19:52:45 +0200
 
 rspamd (1.7.6-1) unstable; urgency=medium
 
