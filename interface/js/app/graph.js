@@ -212,8 +212,8 @@ define(["jquery", "d3evolution", "footable"],
                 graphs.graph = initGraph();
             }
 
-            if (checked_server === "All SERVERS") {
-                rspamd.queryNeighbours("graph", function (req_data) {
+            rspamd.query("graph", {
+                success: function (req_data) {
                     var neighbours_data = req_data
                         .filter(function (d) { return d.status; }) // filter out unavailable neighbours
                         .map(function (d) { return d.data; });
@@ -241,43 +241,13 @@ define(["jquery", "d3evolution", "footable"],
                             });
                             updateWidgets(data);
                         });
-                    }
-                    else {
+                    } else {
                         updateWidgets(neighbours_data[0]);
                     }
                 },
-                function (serv, jqXHR, textStatus, errorThrown) {
-                    var alert_status = serv.name + "_alerted";
-
-                    if (!(alert_status in sessionStorage)) {
-                        sessionStorage.setItem(alert_status, true);
-                        rspamd.alertMessage("alert-error", "Cannot receive RRD data from: " +
-                        serv.name + ", error: " + errorThrown);
-                    }
-                }, "GET", {}, {}, {
-                    type: type
-                });
-                return;
-            }
-
-            $.ajax({
-                dataType: "json",
-                type: "GET",
-                url: neighbours[checked_server].url + "graph",
-                jsonp: false,
-                data: {
-                    type: type
-                },
-                beforeSend: function (xhr) {
-                    xhr.setRequestHeader("Password", rspamd.getPassword());
-                },
-                success: function (data) {
-                    updateWidgets(data);
-                },
-                error: function (jqXHR, textStatus, errorThrown) {
-                    rspamd.alertMessage("alert-error", "Cannot receive throughput data: " +
-                    textStatus + " " + jqXHR.status + " " + errorThrown);
-                }
+                errorMessage: "Cannot receive throughput data",
+                errorOnceId: "alerted_graph_",
+                data: {type: type}
             });
         };
 

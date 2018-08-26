@@ -30,7 +30,12 @@ define(["jquery", "footable"],
         var ft = {};
         var ui = {};
 
-        function saveSymbols(rspamd, action, id, is_cluster) {
+        function getSelector(id) {
+            var e = document.getElementById(id);
+            return e.options[e.selectedIndex].value;
+        }
+
+        function saveSymbols(rspamd, action, id, server) {
             var inputs = $("#" + id + " :input[data-role=\"numerictextbox\"]");
             var url = action;
             var values = [];
@@ -41,53 +46,32 @@ define(["jquery", "footable"],
                 });
             });
 
-            if (is_cluster) {
-                rspamd.queryNeighbours(url, function () {
+            rspamd.query(url, {
+                success: function () {
                     rspamd.alertMessage("alert-modal alert-success", "Symbols successfully saved");
-                }, function (serv, qXHR, textStatus, errorThrown) {
-                    rspamd.alertMessage("alert-modal alert-error",
-                        "Save symbols error on " +
-                        serv.name + ": " + errorThrown);
-                }, "POST", {}, {
+                },
+                errorMessage: "Save symbols error",
+                method: "POST",
+                params: {
                     data: JSON.stringify(values),
                     dataType: "json",
-                });
-            }
-            else {
-                $.ajax({
-                    data: JSON.stringify(values),
-                    dataType: "json",
-                    type: "POST",
-                    url: url,
-                    jsonp: false,
-                    beforeSend: function (xhr) {
-                        xhr.setRequestHeader("Password", rspamd.getPassword());
-                    },
-                    success: function () {
-                        rspamd.alertMessage("alert-modal alert-success", "Symbols successfully saved");
-                    },
-                    error: function (data) {
-                        rspamd.alertMessage("alert-modal alert-error", data.statusText);
-                    }
-                });
-            }
+                },
+                server: server
+            });
         }
         function decimalStep(number) {
             var digits = ((Number(number)).toFixed(20)).replace(/^-?\d*\.?|0+$/g, "").length;
-            if (digits === 0 || digits > 4) {
-                return 0.1;
-            } else {
-                return 1.0 / (Math.pow(10, digits));
-            }
+            return (digits === 0 || digits > 4) ? 0.1 : 1.0 / (Math.pow(10, digits));
         }
         function process_symbols_data(data) {
             var items = [];
             var lookup = {};
             var freqs = [];
             var distinct_groups = [];
+            var selected_server = getSelector("selSrv");
 
-            $.each(data, function (i, group) {
-                $.each(group.rules, function (i, item) {
+            data.forEach(function (group) {
+                group.rules.forEach(function (item) {
                     var max = 20;
                     var min = -20;
                     if (item.weight > max) {
@@ -122,8 +106,13 @@ define(["jquery", "footable"],
                         lookup[item.group] = 1;
                         distinct_groups.push(item.group);
                     }
-                    item.save = "<button type=\"button\" data-save=\"local\" class=\"btn btn-primary btn-sm mb-disabled\">Save</button>" +
-                "&nbsp;<button data-save=\"cluster\" type=\"button\" class=\"btn btn-primary btn-sm mb-disabled\">Save in cluster</button>";
+                    item.save =
+                        "<button data-save=\"" + selected_server +
+                        "\" title=\"Save changes to the selected server\" " +
+                        "type=\"button\" class=\"btn btn-primary btn-sm mb-disabled\">Save</button>&nbsp;" +
+                        "<button data-save=\"All SERVERS" +
+                        "\" title=\"Save changes to all servers\" " +
+                        "type=\"button\" class=\"btn btn-primary btn-sm mb-disabled\">Save in cluster</button>";
                     items.push(item);
                 });
             });
@@ -148,25 +137,17 @@ define(["jquery", "footable"],
 
                 if (exp > 0) {
                     item.frequency = item.frequency.toFixed(2) + "e-" + exp;
-                }
-                else {
+                } else {
                     item.frequency = item.frequency.toFixed(2);
                 }
             });
             return [items, distinct_groups];
         }
         // @get symbols into modal form
-        ui.getSymbols = function (rspamd) {
-
-            $.ajax({
-                dataType: "json",
-                type: "GET",
-                url: "symbols",
-                jsonp: false,
-                beforeSend: function (xhr) {
-                    xhr.setRequestHeader("Password", rspamd.getPassword());
-                },
-                success: function (data) {
+        ui.getSymbols = function (rspamd, checked_server) {
+            rspamd.query("symbols", {
+                success: function (json) {
+                    var data = json[0].data;
                     var items = process_symbols_data(data);
                     FooTable.groupFilter = FooTable.Filtering.extend({
                         construct : function (instance) {
@@ -252,35 +233,27 @@ define(["jquery", "footable"],
                         }
                     });
                 },
-                error: function (data) {
-                    rspamd.alertMessage("alert-modal alert-error", data.statusText);
-                }
+                server: (checked_server === "All SERVERS") ? "local" : checked_server
             });
-            $(document).on("click", "#symbolsTable :button", function () {
-                var value = $(this).data("save");
-                if (!value) return;
-                saveSymbols(rspamd, "./savesymbols", "symbolsTable", value === "cluster");
-            });
+            $("#symbolsTable")
+                .off("click", ":button")
+                .on("click", ":button", function () {
+                    var value = $(this).data("save");
+                    if (!value) return;
+                    saveSymbols(rspamd, "./savesymbols", "symbolsTable", value);
+                });
         };
 
         ui.setup = function (rspamd) {
             $("#updateSymbols").on("click", function (e) {
                 e.preventDefault();
-                $.ajax({
-                    dataType: "json",
-                    type: "GET",
-                    jsonp: false,
-                    url: "symbols",
-                    beforeSend: function (xhr) {
-                        xhr.setRequestHeader("Password", rspamd.getPassword());
-                    },
+                var checked_server = getSelector("selSrv");
+                rspamd.query("symbols", {
                     success: function (data) {
-                        var items = process_symbols_data(data)[0];
+                        var items = process_symbols_data(data[0].data)[0];
                         ft.symbols.rows.load(items);
                     },
-                    error: function (data) {
-                        rspamd.alertMessage("alert-modal alert-error", data.statusText);
-                    }
+                    server: (checked_server === "All SERVERS") ? "local" : checked_server
                 });
             });
         };

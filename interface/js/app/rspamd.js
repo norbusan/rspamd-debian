@@ -42,6 +42,16 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
     var timer_id = [];
     var selData; // Graph's dataset selector state
 
+    function cleanCredentials() {
+        sessionStorage.clear();
+        $("#statWidgets").empty();
+        $("#listMaps").empty();
+        $("#modalBody").empty();
+        $("#historyLog tbody").remove();
+        $("#errorsLog tbody").remove();
+        $("#symbolsTable tbody").remove();
+    }
+
     function stopTimers() {
         for (var key in timer_id) {
             Visibility.stop(timer_id[key]);
@@ -79,7 +89,8 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
         ui.connect();
     }
 
-    function tabClick(tab_id) {
+    function tabClick(id) {
+        var tab_id = id;
         if ($(tab_id).attr("disabled")) return;
         $(tab_id).attr("disabled", true);
 
@@ -108,11 +119,11 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
             });
             break;
         case "#configuration_nav":
-            tab_config.getActions(ui);
+            tab_config.getActions(ui, checked_server);
             tab_config.getMaps(ui);
             break;
         case "#symbols_nav":
-            tab_symbols.getSymbols(ui, tables, checked_server);
+            tab_symbols.getSymbols(ui, checked_server);
             break;
         case "#history_nav":
             tab_history.getHistory(ui, tables, neighbours, checked_server);
@@ -139,17 +150,6 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
         sessionStorage.setItem("Password", password);
     }
 
-    // @clean credentials
-    function cleanCredentials() {
-        sessionStorage.clear();
-        $("#statWidgets").empty();
-        $("#listMaps").empty();
-        $("#modalBody").empty();
-        $("#historyLog tbody").remove();
-        $("#errorsLog tbody").remove();
-        $("#symbolsTable tbody").remove();
-    }
-
     function isLogged() {
         if (sessionStorage.getItem("Credentials") !== null) {
             return true;
@@ -159,10 +159,10 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
 
     function displayUI() {
         // @toggle auth and main
-        var disconnect = $("#navBar .pull-right");
+        var buttons = $("#navBar .pull-right");
         $("#mainUI").show();
         $("#progress").show();
-        $(disconnect).show();
+        $(buttons).show();
         tabClick("#refresh");
         $("#progress").hide();
     }
@@ -178,6 +178,74 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
                 $(this).alert("close");
             });
         }, 5000);
+    }
+
+    function queryServer(neighbours_status, ind, req_url, o) {
+        neighbours_status[ind].checked = false;
+        neighbours_status[ind].data = {};
+        neighbours_status[ind].status = false;
+        var req_params = {
+            jsonp: false,
+            data: o.data,
+            beforeSend: function (xhr) {
+                xhr.setRequestHeader("Password", getPassword());
+
+                if (o.headers) {
+                    $.each(o.headers, function (hname, hvalue) {
+                        xhr.setRequestHeader(hname, hvalue);
+                    });
+                }
+            },
+            url: neighbours_status[ind].url + req_url,
+            success: function (json) {
+                neighbours_status[ind].checked = true;
+                if (!jQuery.isEmptyObject(json) || req_url === "neighbours") {
+                    neighbours_status[ind].status = true;
+                    neighbours_status[ind].data = json;
+                }
+            },
+            error: function (jqXHR, textStatus, errorThrown) {
+                neighbours_status[ind].checked = true;
+                function errorMessage() {
+                    alertMessage("alert-error", neighbours_status[ind].name + " > " +
+                        ((o.errorMessage) ? o.errorMessage : "Request failed") + ": " + errorThrown);
+                }
+                if (o.error) {
+                    o.error(neighbours_status[ind],
+                        jqXHR, textStatus, errorThrown);
+                } else if (o.errorOnceId) {
+                    var alert_status = o.errorOnceId + neighbours_status[ind].name;
+                    if (!(alert_status in sessionStorage)) {
+                        sessionStorage.setItem(alert_status, true);
+                        errorMessage();
+                    }
+                } else {
+                    errorMessage();
+                }
+            },
+            complete: function () {
+                if (neighbours_status.every(function (elt) { return elt.checked; })) {
+                    if (neighbours_status.some(function (elt) { return elt.status; })) {
+                        if (o.success) {
+                            o.success(neighbours_status);
+                        } else {
+                            alertMessage("alert-success", "Request completed");
+                        }
+                    } else {
+                        alertMessage("alert-error", "Request failed");
+                    }
+                }
+            }
+        };
+        if (o.method) {
+            req_params.method = o.method;
+        }
+        if (o.params) {
+            $.each(o.params, function (k, v) {
+                req_params[k] = v;
+            });
+        }
+        $.ajax(req_params);
     }
 
     // Public functions
@@ -201,19 +269,6 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
             }, 1000);
         });
 
-        $.ajax({
-            type: "GET",
-            url: "stat",
-            success: function () {
-                saveCredentials({}, "nopassword");
-                var dialog = $("#connectDialog");
-                var backdrop = $("#backDrop");
-                $(dialog).hide();
-                $(backdrop).hide();
-                displayUI();
-            },
-        });
-
         $("a[data-toggle=\"tab\"]").on("click", function (e) {
             var tab_id = "#" + $(e.target).attr("id");
             tabClick(tab_id);
@@ -233,8 +288,7 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
             }
         });
         tab_config.setup(ui);
-        tab_symbols.setup(ui, tables);
-        tab_history.setup(ui, tables);
+        tab_symbols.setup(ui);
         tab_upload.setup(ui);
         selData = tab_graph.setup();
     };
@@ -248,8 +302,7 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
                 $("#learning_nav").hide();
                 $("#resetHistory").attr("disabled", true);
                 $("#errors-history").hide();
-            }
-            else {
+            } else {
                 ui.read_only = false;
                 $("#learning_nav").show();
                 $("#resetHistory").removeAttr("disabled", true);
@@ -284,18 +337,17 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
                 beforeSend: function (xhr) {
                     xhr.setRequestHeader("Password", password);
                 },
-                success: function (data) {
+                success: function (json) {
                     $("#connectPassword").val("");
-                    if (data.auth === "failed") {
+                    if (json.auth === "failed") {
                         // Is actually never returned by Rspamd
                     } else {
-                        if (data.read_only) {
+                        if (json.read_only) {
                             ui.read_only = true;
                             $("#learning_nav").hide();
                             $("#resetHistory").attr("disabled", true);
                             $("#errors-history").hide();
-                        }
-                        else {
+                        } else {
                             ui.read_only = false;
                             $("#learning_nav").show();
                             $("#resetHistory").removeAttr("disabled", true);
@@ -307,8 +359,8 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
                         displayUI();
                     }
                 },
-                error: function (data) {
-                    ui.alertMessage("alert-modal alert-error", data.statusText);
+                error: function (jqXHR) {
+                    ui.alertMessage("alert-modal alert-error", jqXHR.statusText);
                     $("#connectPassword").val("");
                     $("#connectPassword").focus();
                 }
@@ -316,148 +368,8 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
         });
     };
 
-    ui.queryLocal = function (req_url, on_success, on_error, method, headers, params) {
-        var req_params = {
-            type: method,
-            jsonp: false,
-            beforeSend: function (xhr) {
-                xhr.setRequestHeader("Password", getPassword());
-
-                if (headers) {
-                    $.each(headers, function (hname, hvalue) {
-                        xhr.setRequestHeader(hname, hvalue);
-                    });
-                }
-            },
-            url: req_url,
-            success: function (data) {
-                if (on_success) {
-                    on_success(data);
-                }
-                else {
-                    alertMessage("alert-success", "Data saved");
-                }
-            },
-            error: function (jqXHR, textStatus, errorThrown) {
-                if (on_error) {
-                    on_error("local", jqXHR, textStatus, errorThrown);
-                }
-                else {
-                    alertMessage("alert-error", "Cannot receive data: " + errorThrown);
-                }
-            }
-        };
-        if (params) {
-            $.each(params, function (k, v) {
-                req_params[k] = v;
-            });
-        }
-        $.ajax(req_params);
-    };
-
-    ui.queryNeighbours = function (req_url, on_success, on_error, method, headers, params, req_data) {
-        $.ajax({
-            dataType: "json",
-            type: "GET",
-            url: "neighbours",
-            jsonp: false,
-            beforeSend: function (xhr) {
-                xhr.setRequestHeader("Password", getPassword());
-            },
-            success: function (data) {
-                if (jQuery.isEmptyObject(data)) {
-                    neighbours = {
-                        local:  {
-                            host: window.location.host,
-                            url: window.location.href
-                        }
-                    };
-                } else {
-                    neighbours = data;
-                }
-                var neighbours_status = [];
-                $.each(neighbours, function (ind) {
-                    neighbours_status.push({
-                        name: ind,
-                        url: neighbours[ind].url,
-                        host: neighbours[ind].host,
-                        checked: false,
-                        data: {},
-                        status: false,
-                    });
-                });
-                $.each(neighbours_status, function (ind) {
-                    method = typeof method !== "undefined" ? method : "GET";
-                    var req_params = {
-                        type: method,
-                        jsonp: false,
-                        data: req_data,
-                        beforeSend: function (xhr) {
-                            xhr.setRequestHeader("Password", getPassword());
-
-                            if (headers) {
-                                $.each(headers, function (hname, hvalue) {
-                                    xhr.setRequestHeader(hname, hvalue);
-                                });
-                            }
-                        },
-                        url: neighbours_status[ind].url + req_url,
-                        success: function (data) {
-                            neighbours_status[ind].checked = true;
-
-                            if (jQuery.isEmptyObject(data)) {
-                                neighbours_status[ind].status = false; // serv does not work
-                            } else {
-                                neighbours_status[ind].status = true; // serv does not work
-                                neighbours_status[ind].data = data;
-                            }
-                            if (neighbours_status.every(function (elt) { return elt.checked; })) {
-                                if (on_success) {
-                                    on_success(neighbours_status);
-                                }
-                                else {
-                                    alertMessage("alert-success", "Request completed");
-                                }
-                            }
-                        },
-                        error: function (jqXHR, textStatus, errorThrown) {
-                            neighbours_status[ind].status = false;
-                            neighbours_status[ind].checked = true;
-                            if (on_error) {
-                                on_error(neighbours_status[ind],
-                                    jqXHR, textStatus, errorThrown);
-                            }
-                            else {
-                                alertMessage("alert-error", "Cannot receive data from " +
-                                       neighbours_status[ind].host + ": " + errorThrown);
-                            }
-                            if (neighbours_status.every(
-                                function (elt) { return elt.checked; })) {
-                                if (on_success) {
-                                    on_success(neighbours_status);
-                                }
-                                else {
-                                    alertMessage("alert-success", "Request completed");
-                                }
-                            }
-                        }
-                        // error display
-                    };
-                    if (params) {
-                        $.each(params, function (k, v) {
-                            req_params[k] = v;
-                        });
-                    }
-                    $.ajax(req_params);
-                });
-            },
-            error: function () {
-                ui.alertMessage("alert-error", "Cannot receive neighbours data");
-            },
-        });
-    };
-
-    ui.drawPie = function (obj, id, data, conf) {
+    ui.drawPie = function (object, id, data, conf) {
+        var obj = object;
         if (obj) {
             obj.updateProp("data.content",
                 data.filter(function (elt) {
@@ -548,6 +460,80 @@ function ($, d3pie, visibility, tab_stat, tab_graph, tab_config,
     };
 
     ui.getPassword = getPassword;
+
+    /**
+     * @param {string} url - A string containing the URL to which the request is sent
+     * @param {Object} [options] - A set of key/value pairs that configure the Ajax request. All settings are optional.
+     *
+     * @param {Object|string|Array} [options.data] - Data to be sent to the server.
+     * @param {Function} [options.error] - A function to be called if the request fails.
+     * @param {string} [options.errorMessage] - Text to display in the alert message if the request fails.
+     * @param {string} [options.errorOnceId] - A prefix of the alert ID to be added to the session storage. If the
+     *     parameter is set, the error for each server will be displayed only once per session.
+     * @param {Object} [options.headers] - An object of additional header key/value pairs to send along with requests
+     *     using the XMLHttpRequest transport.
+     * @param {string} [options.method] - The HTTP method to use for the request.
+     * @param {Object} [options.params] - An object of additional jQuery.ajax() settings key/value pairs.
+     * @param {string} [options.server] - A server to which send the request.
+     * @param {Function} [options.success] - A function to be called if the request succeeds.
+     *
+     * @returns {undefined}
+     */
+    ui.query = function (url, options) {
+        // Force options to be an object
+        var o = options || {};
+        Object.keys(o).forEach(function (option) {
+            if (["data", "error", "errorMessage", "errorOnceId", "headers", "method", "params", "server", "success"]
+                .indexOf(option) < 0) {
+                throw new Error("Unknown option: " + option);
+            }
+        });
+
+        var neighbours_status = [{
+            name: "local",
+            host: "local",
+            url: "",
+        }];
+        o.server = o.server || checked_server;
+        if (o.server === "All SERVERS") {
+            queryServer(neighbours_status, 0, "neighbours", {
+                success: function (json) {
+                    var data = json[0].data;
+                    if (jQuery.isEmptyObject(data)) {
+                        neighbours = {
+                            local:  {
+                                host: window.location.host,
+                                url: window.location.href
+                            }
+                        };
+                    } else {
+                        neighbours = data;
+                    }
+                    neighbours_status = [];
+                    $.each(neighbours, function (ind) {
+                        neighbours_status.push({
+                            name: ind,
+                            host: neighbours[ind].host,
+                            url: neighbours[ind].url,
+                        });
+                    });
+                    $.each(neighbours_status, function (ind) {
+                        queryServer(neighbours_status, ind, url, o);
+                    });
+                },
+                errorMessage: "Cannot receive neighbours data"
+            });
+        } else {
+            if (o.server !== "local") {
+                neighbours_status = [{
+                    name: o.server,
+                    host:  neighbours[o.server].host,
+                    url: neighbours[o.server].url,
+                }];
+            }
+            queryServer(neighbours_status, 0, url, o);
+        }
+    };
 
     return ui;
 });

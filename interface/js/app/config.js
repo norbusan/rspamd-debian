@@ -32,8 +32,9 @@ define(["jquery"],
             $("#modalDialog").modal("hide");
         }
         function save_map_error(rspamd, serv, jqXHR, textStatus, errorThrown) {
+            var serv_name = (typeof serv === "string") ? serv : serv.name;
             rspamd.alertMessage("alert-modal alert-error", "Save map error on " +
-                serv.name + ": " + errorThrown);
+                serv_name + ": " + errorThrown);
         }
         // @upload map from modal
         function saveMap(rspamd, action, id) {
@@ -49,8 +50,8 @@ define(["jquery"],
                     xhr.setRequestHeader("Map", id);
                     xhr.setRequestHeader("Debug", true);
                 },
-                error: function (data) {
-                    save_map_error(rspamd, "local", null, null, data.statusText);
+                error: function (jqXHR) {
+                    save_map_error(rspamd, "local", null, null, jqXHR.statusText);
                 },
                 success: function () { save_map_success(rspamd); },
             });
@@ -135,29 +136,21 @@ define(["jquery"],
             return JSON.stringify(values);
         }
 
-        function getActions(rspamd) {
-            $.ajax({
-                dataType: "json",
-                type: "GET",
-                url: "actions",
-                jsonp: false,
-                beforeSend: function (xhr) {
-                    xhr.setRequestHeader("Password", rspamd.getPassword());
-                },
+        ui.getActions = function getActions(rspamd, checked_server) {
+            rspamd.query("actions", {
                 success: function (data) {
-                // Order of sliders greylist -> probable spam -> rewrite subject -> spam
                     $("#actionsBody").empty();
                     $("#actionsForm").empty();
                     var items = [];
-                    $.each(data, function (i, item) {
+                    $.each(data[0].data, function (i, item) {
                         var idx = -1;
                         var label;
-                        if (item.action === "add header") {
-                            label = "Probably Spam";
-                            idx = 1;
-                        } else if (item.action === "greylist") {
+                        if (item.action === "greylist") {
                             label = "Greylist";
                             idx = 0;
+                        } else if (item.action === "add header") {
+                            label = "Probably Spam";
+                            idx = 1;
                         } else if (item.action === "rewrite subject") {
                             label = "Rewrite subject";
                             idx = 2;
@@ -197,7 +190,7 @@ define(["jquery"],
                         $("#actionsFormField").attr("disabled", true);
                     }
 
-                    function saveActions(callback) {
+                    function saveActions(server) {
                         var elts = loadActionsFromForm();
                         // String to array for comparison
                         var eltsArray = JSON.parse(loadActionsFromForm());
@@ -214,9 +207,13 @@ define(["jquery"],
                         (eltsArray[1] === null || eltsArray[2] < eltsArray[1]) &&
                         (eltsArray[0] === null || eltsArray[1] < eltsArray[0])
                         ) {
-                            callback("saveactions", null, null, "POST", {}, {
-                                data: elts,
-                                dataType: "json"
+                            rspamd.query("saveactions", {
+                                method: "POST",
+                                params: {
+                                    data: elts,
+                                    dataType: "json"
+                                },
+                                server: server
                             });
                         } else {
                             rspamd.alertMessage("alert-modal alert-error", "Incorrect order of metric actions threshold");
@@ -224,14 +221,15 @@ define(["jquery"],
                     }
 
                     $("#saveActionsBtn").on("click", function () {
-                        saveActions(rspamd.queryLocal);
+                        saveActions();
                     });
                     $("#saveActionsClusterBtn").on("click", function () {
-                        saveActions(rspamd.queryNeighbours);
+                        saveActions("All SERVERS");
                     });
                 },
+                server: (checked_server === "All SERVERS") ? "local" : checked_server
             });
-        }
+        };
 
         // @upload edited actions
         ui.setup = function (rspamd) {
@@ -269,16 +267,23 @@ define(["jquery"],
                 var action = $(form).attr("action");
                 var id = $(form).attr("id");
                 var data = $("#" + id).find("textarea").val();
-                rspamd.queryNeighbours(action, save_map_success, save_map_error, "POST", {
-                    Map: id,
-                }, {
-                    data: data,
-                    dataType: "text",
+                rspamd.query(action, {
+                    success: function () {
+                        save_map_success(rspamd);
+                    },
+                    errorMessage: "Save map error",
+                    method: "POST",
+                    headers: {
+                        Map: id,
+                    },
+                    params:{
+                        data: data,
+                        dataType: "text",
+                    }
                 });
             });
         };
 
-        ui.getActions = getActions;
         ui.getMaps = getMaps;
 
         return ui;

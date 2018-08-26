@@ -127,7 +127,6 @@ struct rspamd_fuzzy_storage_ctx {
 	struct rspamd_config *cfg;
 	/* END OF COMMON PART */
 	struct fuzzy_global_stat stat;
-	char *hashfile;
 	gdouble expire;
 	gdouble sync_timeout;
 	struct rspamd_radix_map_helper *update_ips;
@@ -155,6 +154,7 @@ struct rspamd_fuzzy_storage_ctx {
 	GHashTable *keys;
 	gboolean encrypted_only;
 	gboolean collection_mode;
+	gboolean read_only;
 	struct rspamd_cryptobox_keypair *collection_keypair;
 	struct rspamd_cryptobox_pubkey *collection_sign_key;
 	gchar *collection_id_file;
@@ -241,6 +241,10 @@ rspamd_fuzzy_check_client (struct fuzzy_session *session, gboolean is_write)
 	}
 
 	if (is_write) {
+		if (session->ctx->read_only) {
+			return FALSE;
+		}
+
 		if (session->ctx->update_ips != NULL) {
 			if (rspamd_match_radix_map_addr (session->ctx->update_ips,
 					session->addr) == NULL) {
@@ -315,6 +319,7 @@ struct rspamd_fuzzy_updates_cbdata {
 	struct rspamd_http_message *msg;
 	struct fuzzy_slave_connection *conn;
 	struct rspamd_fuzzy_mirror *m;
+	GArray *updates_pending;
 };
 
 static void
@@ -336,12 +341,13 @@ fuzzy_mirror_updates_version_cb (guint64 rev64, void *ud)
 	ctx = cbdata->ctx;
 	msg = cbdata->msg;
 	m = cbdata->m;
-	g_free (cbdata);
+
 	rev32 = GUINT32_TO_LE (rev32);
 	len = sizeof (guint32) * 2; /* revision + last chunk */
 
-	for (i = 0; i < ctx->updates_pending->len; i ++) {
-		io_cmd = &g_array_index (ctx->updates_pending, struct fuzzy_peer_cmd, i);
+	for (i = 0; i < cbdata->updates_pending->len; i ++) {
+		io_cmd = &g_array_index (cbdata->updates_pending,
+				struct fuzzy_peer_cmd, i);
 
 		if (io_cmd->is_shingle) {
 			len += sizeof (guint32) + sizeof (guint32) +
@@ -357,8 +363,8 @@ fuzzy_mirror_updates_version_cb (guint64 rev64, void *ud)
 	reply = rspamd_fstring_append (reply, (const char *)&rev32,
 			sizeof (rev32));
 
-	for (i = 0; i < ctx->updates_pending->len; i ++) {
-		io_cmd = &g_array_index (ctx->updates_pending, struct fuzzy_peer_cmd, i);
+	for (i = 0; i < cbdata->updates_pending->len; i ++) {
+		io_cmd = &g_array_index (cbdata->updates_pending, struct fuzzy_peer_cmd, i);
 
 		if (io_cmd->is_shingle) {
 			len = sizeof (guint32) +
@@ -385,13 +391,17 @@ fuzzy_mirror_updates_version_cb (guint64 rev64, void *ud)
 			conn->sock,
 			&tv, ctx->ev_base);
 	msg_info ("send update request to %s", m->name);
+
+	g_array_free (cbdata->updates_pending, TRUE);
+	g_free (cbdata);
 }
 
 static void
 fuzzy_mirror_updates_to_http (struct rspamd_fuzzy_mirror *m,
-		struct fuzzy_slave_connection *conn,
-		struct rspamd_fuzzy_storage_ctx *ctx,
-		struct rspamd_http_message *msg)
+							  struct fuzzy_slave_connection *conn,
+							  struct rspamd_fuzzy_storage_ctx *ctx,
+							  struct rspamd_http_message *msg,
+							  GArray *updates)
 {
 
 	struct rspamd_fuzzy_updates_cbdata *cbdata;
@@ -401,6 +411,10 @@ fuzzy_mirror_updates_to_http (struct rspamd_fuzzy_mirror *m,
 	cbdata->msg = msg;
 	cbdata->conn = conn;
 	cbdata->m = m;
+	/* Copy queue */
+	cbdata->updates_pending = g_array_sized_new (FALSE, FALSE,
+			sizeof (struct fuzzy_peer_cmd), updates->len);
+	g_array_append_vals (cbdata->updates_pending, updates->data, updates->len);
 	rspamd_fuzzy_backend_version (ctx->backend, local_db_name,
 			fuzzy_mirror_updates_version_cb, cbdata);
 }
@@ -432,7 +446,7 @@ fuzzy_mirror_finish_handler (struct rspamd_http_connection *conn,
 
 static void
 rspamd_fuzzy_send_update_mirror (struct rspamd_fuzzy_storage_ctx *ctx,
-		struct rspamd_fuzzy_mirror *m)
+		struct rspamd_fuzzy_mirror *m, GArray *updates)
 {
 	struct fuzzy_slave_connection *conn;
 	struct rspamd_http_message *msg;
@@ -471,10 +485,11 @@ rspamd_fuzzy_send_update_mirror (struct rspamd_fuzzy_storage_ctx *ctx,
 	rspamd_http_connection_set_key (conn->http_conn,
 			ctx->sync_keypair);
 	msg->peer_key = rspamd_pubkey_ref (m->key);
-	fuzzy_mirror_updates_to_http (m, conn, ctx, msg);
+	fuzzy_mirror_updates_to_http (m, conn, ctx, msg, updates);
 }
 
 struct rspamd_updates_cbdata {
+	GArray *updates_pending;
 	struct rspamd_fuzzy_storage_ctx *ctx;
 	gchar *source;
 };
@@ -529,16 +544,17 @@ rspamd_fuzzy_updates_cb (gboolean success,
 			for (i = 0; i < ctx->mirrors->len; i ++) {
 				m = g_ptr_array_index (ctx->mirrors, i);
 
-				rspamd_fuzzy_send_update_mirror (ctx, m);
+				rspamd_fuzzy_send_update_mirror (ctx, m,
+						cbdata->updates_pending);
 			}
 		}
 
 		msg_info ("successfully updated fuzzy storage: %d updates in queue; "
-			"%d added, %d deleted, %d extended, %d duplicates",
+				  "%d pending currently; "
+				  "%d added, %d deleted, %d extended, %d duplicates",
+				cbdata->updates_pending->len,
 				ctx->updates_pending->len,
 				nadded, ndeleted, nextended, nignored);
-		/* Clear updates */
-		ctx->updates_pending->len = 0;
 		rspamd_fuzzy_backend_version (ctx->backend, source,
 				fuzzy_update_version_callback, g_strdup (source));
 		ctx->updates_failed = 0;
@@ -546,17 +562,22 @@ rspamd_fuzzy_updates_cb (gboolean success,
 	else {
 		if (++ctx->updates_failed > ctx->updates_maxfail) {
 			msg_err ("cannot commit update transaction to fuzzy backend, discard "
-					"%ud updates after %d retries",
-					ctx->updates_pending->len,
+					 "%ud updates after %d retries",
+					cbdata->updates_pending->len,
 					ctx->updates_maxfail);
 			ctx->updates_failed = 0;
-			ctx->updates_pending->len = 0;
 		}
 		else {
 			msg_err ("cannot commit update transaction to fuzzy backend, "
-					"%ud updates are still pending, %d updates left",
+					 "%ud updates are still left; %ud currently pending;"
+					 " %d updates left",
+					cbdata->updates_pending->len,
 					ctx->updates_pending->len,
 					ctx->updates_maxfail - ctx->updates_failed);
+			/* Move the remaining updates to ctx queue */
+			g_array_append_vals (ctx->updates_pending,
+					cbdata->updates_pending->data,
+					cbdata->updates_pending->len);
 		}
 	}
 
@@ -570,6 +591,7 @@ rspamd_fuzzy_updates_cb (gboolean success,
 		event_base_loopexit (ctx->ev_base, &tv);
 	}
 
+	g_array_free (cbdata->updates_pending, TRUE);
 	g_free (cbdata->source);
 	g_free (cbdata);
 }
@@ -584,8 +606,13 @@ rspamd_fuzzy_process_updates_queue (struct rspamd_fuzzy_storage_ctx *ctx,
 	if ((forced ||ctx->updates_pending->len > 0)) {
 		cbdata = g_malloc (sizeof (*cbdata));
 		cbdata->ctx = ctx;
+		cbdata->updates_pending = ctx->updates_pending;
+		ctx->updates_pending = g_array_sized_new (FALSE, FALSE,
+				sizeof (struct fuzzy_peer_cmd),
+				MAX (cbdata->updates_pending->len, 1024));
 		cbdata->source = g_strdup (source);
-		rspamd_fuzzy_backend_process_updates (ctx->backend, ctx->updates_pending,
+		rspamd_fuzzy_backend_process_updates (ctx->backend,
+				cbdata->updates_pending,
 				source, rspamd_fuzzy_updates_cb, cbdata);
 	}
 }
@@ -809,7 +836,7 @@ rspamd_fuzzy_check_callback (struct rspamd_fuzzy_reply *result, void *ud)
 	rspamd_fuzzy_make_reply (cmd, result, session, encrypted, is_shingle);
 
 	/* Refresh hash if found with strong confidence */
-	if (result->v1.prob > 0.9) {
+	if (result->v1.prob > 0.9 && !session->ctx->read_only) {
 		struct fuzzy_peer_cmd up_cmd;
 		struct fuzzy_peer_request *up_req;
 
@@ -2468,42 +2495,6 @@ init_fuzzy (struct rspamd_config *cfg)
 
 	rspamd_rcl_register_worker_option (cfg,
 			type,
-			"hashfile",
-			rspamd_rcl_parse_struct_string,
-			ctx,
-			G_STRUCT_OFFSET (struct rspamd_fuzzy_storage_ctx, hashfile),
-			0,
-			"Path to fuzzy database");
-
-	rspamd_rcl_register_worker_option (cfg,
-			type,
-			"hash_file",
-			rspamd_rcl_parse_struct_string,
-			ctx,
-			G_STRUCT_OFFSET (struct rspamd_fuzzy_storage_ctx, hashfile),
-			0,
-			"Path to fuzzy database (alias for hashfile)");
-
-	rspamd_rcl_register_worker_option (cfg,
-			type,
-			"file",
-			rspamd_rcl_parse_struct_string,
-			ctx,
-			G_STRUCT_OFFSET (struct rspamd_fuzzy_storage_ctx, hashfile),
-			0,
-			"Path to fuzzy database (alias for hashfile)");
-
-	rspamd_rcl_register_worker_option (cfg,
-			type,
-			"database",
-			rspamd_rcl_parse_struct_string,
-			ctx,
-			G_STRUCT_OFFSET (struct rspamd_fuzzy_storage_ctx, hashfile),
-			0,
-			"Path to fuzzy database (alias for hashfile)");
-
-	rspamd_rcl_register_worker_option (cfg,
-			type,
 			"sync",
 			rspamd_rcl_parse_struct_time,
 			ctx,
@@ -2561,6 +2552,15 @@ init_fuzzy (struct rspamd_config *cfg)
 			G_STRUCT_OFFSET (struct rspamd_fuzzy_storage_ctx, encrypted_only),
 			0,
 			"Allow encrypted requests only (and forbid all unknown keys or plaintext requests)");
+
+	rspamd_rcl_register_worker_option (cfg,
+			type,
+			"read_only",
+			rspamd_rcl_parse_struct_boolean,
+			ctx,
+			G_STRUCT_OFFSET (struct rspamd_fuzzy_storage_ctx, read_only),
+			0,
+			"Work in read only mode");
 
 	rspamd_rcl_register_worker_option (cfg,
 			type,

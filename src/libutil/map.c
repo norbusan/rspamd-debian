@@ -340,9 +340,11 @@ rspamd_map_cache_cb (gint fd, short what, gpointer ud)
 {
 	struct rspamd_http_map_cached_cbdata *cache_cbd = ud;
 	struct rspamd_map *map;
+	struct http_map_data *data;
 	struct timeval tv;
 
 	map = cache_cbd->map;
+	data = cache_cbd->data;
 
 	if (cache_cbd->gen != cache_cbd->data->gen) {
 		/* We have another update, so this cache element is obviously expired */
@@ -367,8 +369,8 @@ rspamd_map_cache_cb (gint fd, short what, gpointer ud)
 		event_add (&cache_cbd->timeout, &tv);
 	}
 	else {
-		map->cur_cache_cbd = NULL;
-		g_atomic_int_set (&map->cache->available, 0);
+		data->cur_cache_cbd = NULL;
+		g_atomic_int_set (&data->cache->available, 0);
 		MAP_RELEASE (cache_cbd->shm, "rspamd_http_map_cached_cbdata");
 		msg_info_map ("cached data is now expired for %s", map->name);
 		event_del (&cache_cbd->timeout);
@@ -438,6 +440,7 @@ http_map_finish (struct rspamd_http_connection *conn,
 	struct http_callback_data *cbd = conn->ud;
 	struct rspamd_map *map;
 	struct rspamd_map_backend *bk;
+	struct http_map_data *data;
 	struct rspamd_http_map_cached_cbdata *cache_cbd;
 	struct timeval tv;
 	const rspamd_ftok_t *expires_hdr, *etag_hdr;
@@ -447,6 +450,7 @@ http_map_finish (struct rspamd_http_connection *conn,
 
 	map = cbd->map;
 	bk = cbd->bk;
+	data = bk->data.hd;
 
 	if (msg->code == 200) {
 
@@ -455,8 +459,8 @@ http_map_finish (struct rspamd_http_connection *conn,
 			/* Reset the whole chain */
 			cbd->periodic->cur_backend = 0;
 			/* Reset cache, old cached data will be cleaned on timeout */
-			g_atomic_int_set (&map->cache->available, 0);
-			map->cur_cache_cbd = NULL;
+			g_atomic_int_set (&data->cache->available, 0);
+			data->cur_cache_cbd = NULL;
 
 			rspamd_map_periodic_callback (-1, EV_TIMEOUT, cbd->periodic);
 			MAP_RELEASE (cbd, "http_callback_data");
@@ -663,12 +667,12 @@ read_data:
 		/*
 		 * We know that a map is in the locked state
 		 */
-		g_atomic_int_set (&map->cache->available, 1);
+		g_atomic_int_set (&data->cache->available, 1);
 		/* Store cached data */
-		rspamd_strlcpy (map->cache->shmem_name, cbd->shmem_data->shm_name,
-				sizeof (map->cache->shmem_name));
-		map->cache->len = cbd->data_len;
-		map->cache->last_modified = cbd->data->last_modified;
+		rspamd_strlcpy (data->cache->shmem_name, cbd->shmem_data->shm_name,
+				sizeof (data->cache->shmem_name));
+		data->cache->len = cbd->data_len;
+		data->cache->last_modified = cbd->data->last_modified;
 		cache_cbd = g_malloc0 (sizeof (*cache_cbd));
 		cache_cbd->shm = cbd->shmem_data;
 		cache_cbd->map = map;
@@ -681,7 +685,7 @@ read_data:
 				cache_cbd);
 		event_base_set (cbd->ev_base, &cache_cbd->timeout);
 		event_add (&cache_cbd->timeout, &tv);
-		map->cur_cache_cbd = cache_cbd;
+		data->cur_cache_cbd = cache_cbd;
 
 		if (map->next_check) {
 			rspamd_http_date_format (next_check_date, sizeof (next_check_date),
@@ -1296,20 +1300,24 @@ rspamd_map_read_cached (struct rspamd_map *map, struct rspamd_map_backend *bk,
 {
 	gsize len;
 	gpointer in;
+	struct http_map_data *data;
 
-	in = rspamd_shmem_xmap (map->cache->shmem_name, PROT_READ, &len);
+	data = bk->data.hd;
+
+	in = rspamd_shmem_xmap (data->cache->shmem_name, PROT_READ, &len);
 
 	if (in == NULL) {
-		msg_err ("cannot map cache from %s: %s", map->cache->shmem_name,
+		msg_err ("cannot map cache from %s: %s", data->cache->shmem_name,
 				strerror (errno));
 		return FALSE;
 	}
 
-	if (len < map->cache->len) {
+	if (len < data->cache->len) {
 		msg_err ("cannot map cache from %s: bad length %z, %z expected",
-				map->cache->shmem_name,
-				len, map->cache->len);
+				data->cache->shmem_name,
+				len, data->cache->len);
 		munmap (in, len);
+
 		return FALSE;
 	}
 
@@ -1553,10 +1561,10 @@ rspamd_map_common_http_callback (struct rspamd_map *map,
 
 	data = bk->data.hd;
 
-	if (g_atomic_int_get (&map->cache->available) == 1) {
+	if (g_atomic_int_get (&data->cache->available) == 1) {
 		/* Read cached data */
 		if (check) {
-			if (data->last_modified < map->cache->last_modified) {
+			if (data->last_modified < data->cache->last_modified) {
 				periodic->need_modify = TRUE;
 				/* Reset the whole chain */
 				periodic->cur_backend = 0;
@@ -1578,13 +1586,13 @@ rspamd_map_common_http_callback (struct rspamd_map *map,
 		}
 		else {
 			if (map->active_http &&
-					data->last_modified > map->cache->last_modified) {
+					data->last_modified > data->cache->last_modified) {
 				goto check;
 			}
 			else if (rspamd_map_read_cached (map, bk, periodic, data->host)) {
 				/* Switch to the next backend */
 				periodic->cur_backend++;
-				data->last_modified = map->cache->last_modified;
+				data->last_modified = data->cache->last_modified;
 				rspamd_map_periodic_callback (-1, EV_TIMEOUT, periodic);
 
 				return;
@@ -1914,7 +1922,8 @@ rspamd_map_watch (struct rspamd_config *cfg,
 
 			if (map->poll_timeout >= cfg->map_timeout &&
 					cfg->map_file_watch_multiplier < 1.0) {
-				map->poll_timeout = map->poll_timeout * cfg->map_file_watch_multiplier;
+				map->poll_timeout =
+						map->poll_timeout * cfg->map_file_watch_multiplier;
 			}
 		}
 
@@ -1945,7 +1954,10 @@ rspamd_map_preload (struct rspamd_config *cfg)
 				if (bk->protocol == MAP_PROTO_HTTP ||
 						bk->protocol == MAP_PROTO_HTTPS) {
 					if (!rspamd_map_has_http_cached_file (map, bk)) {
-						map_ok = FALSE;
+
+						if (!map->fallback_backend) {
+							map_ok = FALSE;
+						}
 						break;
 					}
 					else {
@@ -1987,8 +1999,22 @@ rspamd_map_preload (struct rspamd_config *cfg)
 						 bk->protocol == MAP_PROTO_HTTPS) {
 					if (!rspamd_map_read_http_cached_file (map, bk, bk->data.hd,
 							&fake_cbd.cbdata)) {
-						succeed = FALSE;
-						break;
+
+						if (map->fallback_backend) {
+							/* Try fallback */
+							g_assert (map->fallback_backend->protocol ==
+									  MAP_PROTO_FILE);
+							if (!read_map_file (map,
+									map->fallback_backend->data.fd,
+									map->fallback_backend, &fake_cbd)) {
+								succeed = FALSE;
+								break;
+							}
+						}
+						else {
+							succeed = FALSE;
+							break;
+						}
 					}
 				}
 				else {
@@ -2025,17 +2051,6 @@ rspamd_map_remove_all (struct rspamd_config *cfg)
 	for (cur = cfg->maps; cur != NULL; cur = g_list_next (cur)) {
 		map = cur->data;
 
-		if (g_atomic_int_compare_and_exchange (&map->cache->available, 1, 0)) {
-			if (map->cur_cache_cbd) {
-				MAP_RELEASE (map->cur_cache_cbd->shm, "rspamd_http_map_cached_cbdata");
-				event_del (&map->cur_cache_cbd->timeout);
-				g_free (map->cur_cache_cbd);
-				map->cur_cache_cbd = NULL;
-			}
-
-			unlink (map->cache->shmem_name);
-		}
-
 		if (map->tmp_dtor) {
 			map->tmp_dtor (map->tmp_dtor_data);
 		}
@@ -2051,7 +2066,12 @@ rspamd_map_remove_all (struct rspamd_config *cfg)
 
 		for (i = 0; i < map->backends->len; i ++) {
 			bk = g_ptr_array_index (map->backends, i);
+
 			MAP_RELEASE (bk, "rspamd_map_backend");
+		}
+
+		if (map->fallback_backend) {
+			MAP_RELEASE (map->fallback_backend, "rspamd_map_backend");
 		}
 	}
 
@@ -2070,6 +2090,7 @@ rspamd_map_check_proto (struct rspamd_config *cfg,
 
 	end = pos + strlen (pos);
 
+	/* Static check */
 	if (g_ascii_strcasecmp (pos, "static") == 0) {
 		bk->protocol = MAP_PROTO_STATIC;
 		bk->uri = g_strdup (pos);
@@ -2084,46 +2105,53 @@ rspamd_map_check_proto (struct rspamd_config *cfg,
 		return pos + 4;
 	}
 
-	if (g_ascii_strncasecmp (pos, "sign+", sizeof ("sign+") - 1) == 0) {
-		bk->is_signed = TRUE;
-		pos += sizeof ("sign+") - 1;
-	}
-
-	if (g_ascii_strncasecmp (pos, "key=", sizeof ("key=") - 1) == 0) {
-		pos += sizeof ("key=") - 1;
-		end_key = memchr (pos, '+', end - pos);
-
-		if (end_key != NULL) {
-			bk->trusted_pubkey = rspamd_pubkey_from_base32 (pos, end_key - pos,
-					RSPAMD_KEYPAIR_SIGN, RSPAMD_CRYPTOBOX_MODE_25519);
-
-			if (bk->trusted_pubkey == NULL) {
-				msg_err_config ("cannot read pubkey from map: %s",
-						map_line);
-				return NULL;
-			}
-			pos = end_key + 1;
+	for (;;) {
+		if (g_ascii_strncasecmp (pos, "sign+", sizeof ("sign+") - 1) == 0) {
+			bk->is_signed = TRUE;
+			pos += sizeof ("sign+") - 1;
 		}
-		else if (end - pos > 64) {
-			/* Try hex encoding */
-			bk->trusted_pubkey = rspamd_pubkey_from_hex (pos, 64,
-					RSPAMD_KEYPAIR_SIGN, RSPAMD_CRYPTOBOX_MODE_25519);
+		else if (g_ascii_strncasecmp (pos, "fallback+", sizeof ("fallback+") - 1) == 0) {
+			bk->is_fallback = TRUE;
+			pos += sizeof ("fallback+") - 1;
+		}
+		else if (g_ascii_strncasecmp (pos, "key=", sizeof ("key=") - 1) == 0) {
+			pos += sizeof ("key=") - 1;
+			end_key = memchr (pos, '+', end - pos);
 
-			if (bk->trusted_pubkey == NULL) {
+			if (end_key != NULL) {
+				bk->trusted_pubkey = rspamd_pubkey_from_base32 (pos, end_key - pos,
+						RSPAMD_KEYPAIR_SIGN, RSPAMD_CRYPTOBOX_MODE_25519);
+
+				if (bk->trusted_pubkey == NULL) {
+					msg_err_config ("cannot read pubkey from map: %s",
+							map_line);
+					return NULL;
+				}
+				pos = end_key + 1;
+			} else if (end - pos > 64) {
+				/* Try hex encoding */
+				bk->trusted_pubkey = rspamd_pubkey_from_hex (pos, 64,
+						RSPAMD_KEYPAIR_SIGN, RSPAMD_CRYPTOBOX_MODE_25519);
+
+				if (bk->trusted_pubkey == NULL) {
+					msg_err_config ("cannot read pubkey from map: %s",
+							map_line);
+					return NULL;
+				}
+				pos += 64;
+			} else {
 				msg_err_config ("cannot read pubkey from map: %s",
 						map_line);
 				return NULL;
 			}
-			pos += 64;
+
+			if (*pos == '+' || *pos == ':') {
+				pos++;
+			}
 		}
 		else {
-			msg_err_config ("cannot read pubkey from map: %s",
-					map_line);
-			return NULL;
-		}
-
-		if (*pos == '+' || *pos == ':') {
-			pos ++;
+			/* No known flags */
+			break;
 		}
 	}
 
@@ -2156,7 +2184,6 @@ rspamd_map_check_proto (struct rspamd_config *cfg,
 		return NULL;
 	}
 
-
 	return pos;
 }
 
@@ -2171,6 +2198,9 @@ rspamd_map_is_map (const gchar *map_line)
 		ret = TRUE;
 	}
 	else if (g_ascii_strncasecmp (map_line, "sign+", sizeof ("sign+") - 1) == 0) {
+		ret = TRUE;
+	}
+	else if (g_ascii_strncasecmp (map_line, "fallback+", sizeof ("fallback+") - 1) == 0) {
 		ret = TRUE;
 	}
 	else if (g_ascii_strncasecmp (map_line, "file://", sizeof ("file://") - 1) == 0) {
@@ -2210,11 +2240,25 @@ rspamd_map_backend_dtor (struct rspamd_map_backend *bk)
 	case MAP_PROTO_HTTP:
 	case MAP_PROTO_HTTPS:
 		if (bk->data.hd) {
-			g_free (bk->data.hd->host);
-			g_free (bk->data.hd->path);
+			struct http_map_data *data = bk->data.hd;
 
-			if (bk->data.hd->etag) {
-				rspamd_fstring_free (bk->data.hd->etag);
+			g_free (data->host);
+			g_free (data->path);
+
+			if (data->etag) {
+				rspamd_fstring_free (data->etag);
+			}
+
+			if (g_atomic_int_compare_and_exchange (&data->cache->available, 1, 0)) {
+				if (data->cur_cache_cbd) {
+					MAP_RELEASE (data->cur_cache_cbd->shm,
+							"rspamd_http_map_cached_cbdata");
+					event_del (&data->cur_cache_cbd->timeout);
+					g_free (data->cur_cache_cbd);
+					data->cur_cache_cbd = NULL;
+				}
+
+				unlink (data->cache->shmem_name);
 			}
 
 			g_free (bk->data.hd);
@@ -2244,6 +2288,12 @@ rspamd_map_parse_backend (struct rspamd_config *cfg, const gchar *map_line)
 	REF_INIT_RETAIN (bk, rspamd_map_backend_dtor);
 
 	if (!rspamd_map_check_proto (cfg, map_line, bk)) {
+		goto err;
+	}
+
+	if (bk->is_fallback && bk->protocol != MAP_PROTO_FILE) {
+		msg_err_config ("fallback backend must be file for %s", bk->uri);
+
 		goto err;
 	}
 
@@ -2316,6 +2366,9 @@ rspamd_map_parse_backend (struct rspamd_config *cfg, const gchar *map_line)
 				hdata->path = rspamd_ftokdup (&tok);
 			}
 		}
+
+		hdata->cache = rspamd_mempool_alloc0_shared (cfg->cfg_pool,
+						sizeof (*hdata->cache));
 
 		bk->data.hd = hdata;
 	}
@@ -2406,6 +2459,13 @@ rspamd_map_add (struct rspamd_config *cfg,
 		return NULL;
 	}
 
+	if (bk->is_fallback) {
+		msg_err_config ("cannot add map with fallback only backend: %s", bk->uri);
+		REF_RELEASE (bk);
+
+		return NULL;
+	}
+
 	map = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (struct rspamd_map));
 	map->read_callback = read_callback;
 	map->fin_callback = fin_callback;
@@ -2415,8 +2475,6 @@ rspamd_map_add (struct rspamd_config *cfg,
 	map->id = rspamd_random_uint64_fast ();
 	map->locked =
 		rspamd_mempool_alloc0_shared (cfg->cfg_pool, sizeof (gint));
-	map->cache =
-			rspamd_mempool_alloc0_shared (cfg->cfg_pool, sizeof (*map->cache));
 	map->backends = g_ptr_array_sized_new (1);
 	rspamd_mempool_add_destructor (cfg->cfg_pool, rspamd_ptr_array_free_hard,
 			map->backends);
@@ -2439,6 +2497,22 @@ rspamd_map_add (struct rspamd_config *cfg,
 	cfg->maps = g_list_prepend (cfg->maps, map);
 
 	return map;
+}
+
+static inline void
+rspamd_map_add_backend (struct rspamd_map *map, struct rspamd_map_backend *bk)
+{
+	if (bk->is_fallback) {
+		if (map->fallback_backend) {
+			msg_warn_map ("redefining fallback backend from %s to %s",
+					map->fallback_backend->uri, bk->uri);
+		}
+
+		map->fallback_backend = bk;
+	}
+	else {
+		g_ptr_array_add (map->backends, bk);
+	}
 }
 
 struct rspamd_map*
@@ -2473,8 +2547,6 @@ rspamd_map_add_from_ucl (struct rspamd_config *cfg,
 	map->id = rspamd_random_uint64_fast ();
 	map->locked =
 			rspamd_mempool_alloc0_shared (cfg->cfg_pool, sizeof (gint));
-	map->cache =
-				rspamd_mempool_alloc0_shared (cfg->cfg_pool, sizeof (*map->cache));
 	map->backends = g_ptr_array_new ();
 	rspamd_mempool_add_destructor (cfg->cfg_pool, rspamd_ptr_array_free_hard,
 			map->backends);
@@ -2491,11 +2563,7 @@ rspamd_map_add_from_ucl (struct rspamd_config *cfg,
 				bk = rspamd_map_parse_backend (cfg, ucl_object_tostring (cur));
 
 				if (bk != NULL) {
-					if (bk->protocol == MAP_PROTO_FILE) {
-						map->poll_timeout = (map->poll_timeout *
-								cfg->map_file_watch_multiplier);
-					}
-					g_ptr_array_add (map->backends, bk);
+					rspamd_map_add_backend (map, bk);
 
 					if (!map->name) {
 						map->name = rspamd_mempool_strdup (cfg->cfg_pool,
@@ -2548,10 +2616,7 @@ rspamd_map_add_from_ucl (struct rspamd_config *cfg,
 					bk = rspamd_map_parse_backend (cfg, ucl_object_tostring (cur));
 
 					if (bk != NULL) {
-						if (bk->protocol == MAP_PROTO_FILE) {
-							map->poll_timeout = (map->poll_timeout * cfg->map_file_watch_multiplier);
-						}
-						g_ptr_array_add (map->backends, bk);
+						rspamd_map_add_backend (map, bk);
 
 						if (!map->name) {
 							map->name = rspamd_mempool_strdup (cfg->cfg_pool,
@@ -2578,10 +2643,7 @@ rspamd_map_add_from_ucl (struct rspamd_config *cfg,
 			bk = rspamd_map_parse_backend (cfg, ucl_object_tostring (elt));
 
 			if (bk != NULL) {
-				if (bk->protocol == MAP_PROTO_FILE) {
-					map->poll_timeout = (map->poll_timeout * cfg->map_file_watch_multiplier);
-				}
-				g_ptr_array_add (map->backends, bk);
+				rspamd_map_add_backend (map, bk);
 
 				if (!map->name) {
 					map->name = rspamd_mempool_strdup (cfg->cfg_pool,
@@ -2594,59 +2656,69 @@ rspamd_map_add_from_ucl (struct rspamd_config *cfg,
 			msg_err_config ("map has no urls to be loaded: no valid backends");
 			goto err;
 		}
-
-		PTR_ARRAY_FOREACH (map->backends, i, bk) {
-			if (bk->protocol == MAP_PROTO_STATIC) {
-				GString *map_data;
-				/* We need data field in ucl */
-				elt = ucl_object_lookup (obj, "data");
-
-				if (elt == NULL) {
-					msg_err_config ("map has static backend but no `data` field");
-					goto err;
-				}
-
-
-				if (ucl_object_type (elt) == UCL_STRING) {
-					map_data = g_string_sized_new (32);
-
-					if (rspamd_map_add_static_string (cfg, elt, map_data)) {
-						bk->data.sd->data = map_data->str;
-						bk->data.sd->len = map_data->len;
-						g_string_free (map_data, FALSE);
-					}
-					else {
-						g_string_free (map_data, TRUE);
-						msg_err_config ("map has static backend with invalid `data` field");
-						goto err;
-					}
-				}
-				else if (ucl_object_type (elt) == UCL_ARRAY) {
-					map_data = g_string_sized_new (32);
-					it = ucl_object_iterate_new (elt);
-
-					while ((cur = ucl_object_iterate_safe (it, true))) {
-						if (!rspamd_map_add_static_string (cfg, cur, map_data)) {
-							g_string_free (map_data, TRUE);
-							msg_err_config ("map has static backend with invalid "
-											"`data` field");
-							ucl_object_iterate_free (it);
-							goto err;
-						}
-					}
-
-					ucl_object_iterate_free (it);
-					bk->data.sd->data = map_data->str;
-					bk->data.sd->len = map_data->len;
-					g_string_free (map_data, FALSE);
-				}
-			}
-		}
 	}
 	else {
 		msg_err_config ("map has invalid type for value: %s",
 				ucl_object_type_to_string (ucl_object_type (obj)));
 		goto err;
+	}
+
+	gboolean all_local = TRUE;
+
+	PTR_ARRAY_FOREACH (map->backends, i, bk) {
+		if (bk->protocol == MAP_PROTO_STATIC) {
+			GString *map_data;
+			/* We need data field in ucl */
+			elt = ucl_object_lookup (obj, "data");
+
+			if (elt == NULL) {
+				msg_err_config ("map has static backend but no `data` field");
+				goto err;
+			}
+
+
+			if (ucl_object_type (elt) == UCL_STRING) {
+				map_data = g_string_sized_new (32);
+
+				if (rspamd_map_add_static_string (cfg, elt, map_data)) {
+					bk->data.sd->data = map_data->str;
+					bk->data.sd->len = map_data->len;
+					g_string_free (map_data, FALSE);
+				}
+				else {
+					g_string_free (map_data, TRUE);
+					msg_err_config ("map has static backend with invalid `data` field");
+					goto err;
+				}
+			}
+			else if (ucl_object_type (elt) == UCL_ARRAY) {
+				map_data = g_string_sized_new (32);
+				it = ucl_object_iterate_new (elt);
+
+				while ((cur = ucl_object_iterate_safe (it, true))) {
+					if (!rspamd_map_add_static_string (cfg, cur, map_data)) {
+						g_string_free (map_data, TRUE);
+						msg_err_config ("map has static backend with invalid "
+										"`data` field");
+						ucl_object_iterate_free (it);
+						goto err;
+					}
+				}
+
+				ucl_object_iterate_free (it);
+				bk->data.sd->data = map_data->str;
+				bk->data.sd->len = map_data->len;
+				g_string_free (map_data, FALSE);
+			}
+		}
+		else if (bk->protocol != MAP_PROTO_FILE) {
+			all_local = FALSE;
+		}
+	}
+
+	if (all_local) {
+		map->poll_timeout = (map->poll_timeout *
+							 cfg->map_file_watch_multiplier);
 	}
 
 	rspamd_map_calculate_hash (map);
