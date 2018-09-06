@@ -1,4 +1,4 @@
-rspamd (1.7.9-1) UNRELEASED; urgency=medium
+rspamd (1.7.9-1) unstable; urgency=medium
 
   [ Sebastien Badia ]
   * d/rules: Enable libunwind support (upstream)
@@ -11,7 +11,7 @@ rspamd (1.7.9-1) UNRELEASED; urgency=medium
   [ Jérôme Lebleu ]
   * d/scripts: Update require.min.js path coming with 1.7.7
 
- -- Sebastien Badia <sbadia@debian.org>  Sun, 26 Aug 2018 19:52:45 +0200
+ -- Sebastien Badia <sbadia@debian.org>  Thu, 06 Sep 2018 09:59:05 +0200
 
 rspamd (1.7.6-1) unstable; urgency=medium
 
