@@ -276,7 +276,7 @@ local subj_encoded_qp = 'Subject=/\\=\\?\\S+\\?Q\\?/iX'
 reconf['SUBJ_EXCESS_QP'] = {
   re = string.format('%s & !%s', subj_encoded_qp, subj_needs_mime),
   score = 1.2,
-  description = 'Subect is unnecessarily encoded in quoted-printable',
+  description = 'Subject is unnecessarily encoded in quoted-printable',
   group = 'excessqp'
 }
 
@@ -656,13 +656,13 @@ reconf['FAKE_REPLY_C'] = {
 local has_msmail_pri = 'header_exists(X-MSMail-Priority)'
 local has_mimeole = 'header_exists(X-MimeOLE)'
 local has_squirrelmail_in_mailer = 'X-Mailer=/SquirrelMail\\b/H'
-local has_office12145_in_mailer = 'X-Mailer=/^Microsoft (?:Office )?Outlook 1[245]\\.0/'
+local has_office_version_in_mailer = [[X-Mailer=/^Microsoft (?:Office )?Outlook [12]\d\.0/]]
 reconf['MISSING_MIMEOLE'] = {
   re = string.format('(%s) & !(%s) & !(%s) & !(%s)',
       has_msmail_pri,
       has_mimeole,
       has_squirrelmail_in_mailer,
-      has_office12145_in_mailer),
+      has_office_version_in_mailer),
   score = 2.0,
   description = 'Mime-OLE is needed but absent (e.g. fake Outlook or fake Exchange)',
   group = 'header'

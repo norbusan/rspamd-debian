@@ -27,8 +27,10 @@
 define(["jquery", "footable", "humanize"],
     function ($, _, Humanize) {
         "use strict";
+        var rows_per_page = 25;
+
         var ui = {};
-        var ft = {};
+        var prevVersion = null;
         var htmlEscapes = {
             "&": "&amp;",
             "<": "&lt;",
@@ -42,14 +44,14 @@ define(["jquery", "footable", "humanize"],
         var htmlEscaper = /[&<>"'/`=]/g;
         var symbolDescriptions = {};
 
-        var EscapeHTML = function (string) {
-            return (String(string)).replace(htmlEscaper, function (match) {
+        var escapeHTML = function (string) {
+            return String(string).replace(htmlEscaper, function (match) {
                 return htmlEscapes[match];
             });
         };
 
         var escape_HTML_array = function (arr) {
-            arr.forEach(function (d, i) { arr[i] = EscapeHTML(d); });
+            arr.forEach(function (d, i) { arr[i] = escapeHTML(d); });
         };
 
         function unix_time_format(tm) {
@@ -59,31 +61,32 @@ define(["jquery", "footable", "humanize"],
 
         function preprocess_item(item) {
             for (var prop in item) {
+                if (!{}.hasOwnProperty.call(item, prop)) continue;
                 switch (prop) {
-                case "rcpt_mime":
-                case "rcpt_smtp":
-                    escape_HTML_array(item[prop]);
-                    break;
-                case "symbols":
-                    Object.keys(item.symbols).map(function (key) {
-                        var sym = item.symbols[key];
-                        if (!sym.name) {
-                            sym.name = key;
-                        }
-                        sym.name = EscapeHTML(sym.name);
-                        if (sym.description) {
-                            sym.description = EscapeHTML(sym.description);
-                        }
+                    case "rcpt_mime":
+                    case "rcpt_smtp":
+                        escape_HTML_array(item[prop]);
+                        break;
+                    case "symbols":
+                        Object.keys(item.symbols).forEach(function (key) {
+                            var sym = item.symbols[key];
+                            if (!sym.name) {
+                                sym.name = key;
+                            }
+                            sym.name = escapeHTML(sym.name);
+                            if (sym.description) {
+                                sym.description = escapeHTML(sym.description);
+                            }
 
-                        if (sym.options) {
-                            escape_HTML_array(sym.options);
+                            if (sym.options) {
+                                escape_HTML_array(sym.options);
+                            }
+                        });
+                        break;
+                    default:
+                        if (typeof item[prop] === "string") {
+                            item[prop] = escapeHTML(item[prop]);
                         }
-                    });
-                    break;
-                default:
-                    if (typeof (item[prop]) === "string") {
-                        item[prop] = EscapeHTML(item[prop]);
-                    }
                 }
             }
 
@@ -97,12 +100,9 @@ define(["jquery", "footable", "humanize"],
                 item.action = "<div style='font-size:11px' class='label label-info'>" + item.action + "</div>";
             }
 
-            var score_content;
-            if (item.score < item.required_score) {
-                score_content = "<span class='text-success'>" + item.score.toFixed(2) + " / " + item.required_score + "</span>";
-            } else {
-                score_content = "<span class='text-danger'>" + item.score.toFixed(2) + " / " + item.required_score + "</span>";
-            }
+            var score_content = (item.score < item.required_score)
+                ? "<span class='text-success'>" + item.score.toFixed(2) + " / " + item.required_score + "</span>"
+                : "<span class='text-danger'>" + item.score.toFixed(2) + " / " + item.required_score + "</span>";
 
             item.score = {
                 options: {
@@ -123,7 +123,7 @@ define(["jquery", "footable", "humanize"],
             }
             var compare = (getSelector("selSymOrder") === "score")
                 ? function (e1, e2) {
-                    return Math.abs(e1.score) < Math.abs(e2.score);
+                    return Math.abs(e2.score) - Math.abs(e1.score);
                 }
                 : function (e1, e2) {
                     return e1.name.localeCompare(e2.name);
@@ -152,12 +152,12 @@ define(["jquery", "footable", "humanize"],
                             full += item.rcpt_mime.join(", ");
                             shrt += item.rcpt_mime.slice(0, rcpt_lim).join(",&#8203;") + more("rcpt_mime");
                         }
-                        return {full: full, shrt: shrt};
+                        return {full:full, shrt:shrt};
                     }
 
                     preprocess_item(item);
-                    Object.keys(item.symbols).map(function (key) {
-                        var str;
+                    Object.keys(item.symbols).forEach(function (key) {
+                        var str = null;
                         var sym = item.symbols[key];
 
                         if (sym.description) {
@@ -499,38 +499,50 @@ define(["jquery", "footable", "humanize"],
             return func();
         }
 
-        ui.getHistory = function (rspamd, tables, neighbours, checked_server) {
+        function drawTooltips() {
+            // Update symbol description tooltips
+            $.each(symbolDescriptions, function (key, description) {
+                $("abbr[data-sym-key=" + key + "]").tooltip({
+                    placement: "bottom",
+                    html: true,
+                    title: description
+                });
+            });
+        }
+
+        function initHistoryTable(rspamd, tables, data, items) {
+            /* eslint-disable consistent-this, no-underscore-dangle, one-var-declaration-per-line */
             FooTable.actionFilter = FooTable.Filtering.extend({
-                construct : function (instance) {
+                construct: function (instance) {
                     this._super(instance);
                     this.actions = ["reject", "add header", "greylist",
                         "no action", "soft reject", "rewrite subject"];
                     this.def = "Any action";
                     this.$action = null;
                 },
-                $create : function () {
+                $create: function () {
                     this._super();
                     var self = this, $form_grp = $("<div/>", {
-                        class : "form-group"
+                        class: "form-group"
                     }).append($("<label/>", {
-                        class : "sr-only",
-                        text : "Action"
+                        class: "sr-only",
+                        text: "Action"
                     })).prependTo(self.$form);
 
                     self.$action = $("<select/>", {
-                        class : "form-control"
+                        class: "form-control"
                     }).on("change", {
-                        self : self
+                        self: self
                     }, self._onStatusDropdownChanged).append(
                         $("<option/>", {
-                            text : self.def
+                            text: self.def
                         })).appendTo($form_grp);
 
                     $.each(self.actions, function (i, action) {
                         self.$action.append($("<option/>").text(action));
                     });
                 },
-                _onStatusDropdownChanged : function (e) {
+                _onStatusDropdownChanged: function (e) {
                     var self = e.data.self, selected = $(this).val();
                     if (selected !== self.def) {
                         if (selected === "reject") {
@@ -543,7 +555,7 @@ define(["jquery", "footable", "humanize"],
                     }
                     self.filter();
                 },
-                draw : function () {
+                draw: function () {
                     this._super();
                     var action = this.find("action");
                     if (action instanceof FooTable.Filter) {
@@ -557,130 +569,122 @@ define(["jquery", "footable", "humanize"],
                     }
                 }
             });
+            /* eslint-enable consistent-this, no-underscore-dangle, one-var-declaration-per-line */
 
-            var drawTooltips = function () {
-            // Update symbol description tooltips
-                $.each(symbolDescriptions, function (key, description) {
-                    $("abbr[data-sym-key=" + key + "]").tooltip({
-                        placement: "bottom",
-                        html: true,
-                        title: description
-                    });
-                });
-            };
+            tables.history = FooTable.init("#historyTable", {
+                columns: get_history_columns(data),
+                rows: items,
+                paging: {
+                    enabled: true,
+                    limit: 5,
+                    size: rows_per_page
+                },
+                filtering: {
+                    enabled: true,
+                    position: "left",
+                    connectors: false
+                },
+                sorting: {
+                    enabled: true
+                },
+                components: {
+                    filtering: FooTable.actionFilter
+                },
+                on: {
+                    "ready.ft.table": drawTooltips,
+                    "after.ft.sorting": drawTooltips,
+                    "after.ft.paging": drawTooltips,
+                    "after.ft.filtering": drawTooltips
+                }
+            });
+        }
 
-            if (checked_server === "All SERVERS") {
-                rspamd.query("history", {
-                    success: function (req_data) {
-                        function differentVersions(neighbours_data) {
-                            var dv = neighbours_data.some(function (e) {
-                                return e.version !== neighbours_data[0].version;
-                            });
-                            if (dv) {
-                                rspamd.alertMessage("alert-error",
-                                    "Neighbours history backend versions do not match. Cannot display history.");
-                                return true;
-                            }
-                        }
-
-                        var neighbours_data = req_data
-                            .filter(function (d) { return d.status; }) // filter out unavailable neighbours
-                            .map(function (d) { return d.data; });
-                        if (neighbours_data.length && !differentVersions(neighbours_data)) {
-                            var data = {};
-                            if (neighbours_data[0].version) {
-                                data.rows = [].concat.apply([], neighbours_data
-                                    .map(function (e) {
-                                        return e.rows;
-                                    }));
-                                data.version = neighbours_data[0].version;
-                            } else {
-                            // Legacy version
-                                data = [].concat.apply([], neighbours_data);
-                            }
-
-                            var items = process_history_data(data);
-                            ft.history = FooTable.init("#historyTable", {
-                                columns: get_history_columns(data),
-                                rows: items,
-                                paging: {
-                                    enabled: true,
-                                    limit: 5,
-                                    size: 25
-                                },
-                                filtering: {
-                                    enabled: true,
-                                    position: "left",
-                                    connectors: false
-                                },
-                                sorting: {
-                                    enabled: true
-                                },
-                                components: {
-                                    filtering: FooTable.actionFilter
-                                },
-                                on: {
-                                    "ready.ft.table": drawTooltips,
-                                    "after.ft.sorting": drawTooltips,
-                                    "after.ft.paging": drawTooltips,
-                                    "after.ft.filtering": drawTooltips
-                                }
-                            });
-                        } else if (ft.history) {
-                            ft.history.destroy();
-                            delete ft.history;
-                        }
-                    }
-                });
-            } else {
-                $.ajax({
-                    dataType: "json",
-                    url: neighbours[checked_server].url + "history",
-                    jsonp: false,
-                    beforeSend: function (xhr) {
-                        xhr.setRequestHeader("Password", rspamd.getPassword());
-                    },
-                    error: function () {
-                        rspamd.alertMessage("alert-error", "Cannot receive history");
-                    },
-                    success: function (data) {
-                        var items = process_history_data(data);
-                        ft.history = FooTable.init("#historyTable", {
-                            columns: get_history_columns(data),
-                            rows: items,
-                            paging: {
-                                enabled: true,
-                                limit: 5,
-                                size: 25
-                            },
-                            filtering: {
-                                enabled: true,
-                                position: "left",
-                                connectors: false
-                            },
-                            sorting: {
-                                enabled: true
-                            },
-                            components: {
-                                filtering: FooTable.actionFilter
-                            },
-                            on: {
-                                "ready.ft.table": drawTooltips,
-                                "after.ft.sorting": drawTooltips,
-                                "after.ft.paging": drawTooltips,
-                                "after.ft.filtering": drawTooltips
-                            }
-                        });
-                    }
-                });
+        function destroyTable(tables, table) {
+            if (tables[table]) {
+                tables[table].destroy();
+                delete tables[table];
             }
+        }
+
+        ui.getHistory = function (rspamd, tables) {
+            function waitForRowsDisplayed(callback, iteration) {
+                var i = (typeof iteration === "undefined") ? 10 : iteration;
+                var num_rows = $("#historyTable > tbody > tr").length;
+                if (num_rows === rows_per_page) {
+                    return callback();
+                } else if (--i) {
+                    setTimeout(function () {
+                        waitForRowsDisplayed(callback, i);
+                    }, 500);
+                }
+                return null;
+            }
+
+            rspamd.query("history", {
+                success: function (req_data) {
+                    function differentVersions(neighbours_data) {
+                        var dv = neighbours_data.some(function (e) {
+                            return e.version !== neighbours_data[0].version;
+                        });
+                        if (dv) {
+                            rspamd.alertMessage("alert-error",
+                                "Neighbours history backend versions do not match. Cannot display history.");
+                            return true;
+                        }
+                        return false;
+                    }
+
+                    var neighbours_data = req_data
+                        .filter(function (d) { return d.status; }) // filter out unavailable neighbours
+                        .map(function (d) { return d.data; });
+                    if (neighbours_data.length && !differentVersions(neighbours_data)) {
+                        var data = {};
+                        var version = neighbours_data[0].version;
+                        if (version) {
+                            data.rows = [].concat.apply([], neighbours_data
+                                .map(function (e) {
+                                    return e.rows;
+                                }));
+                            data.version = version;
+                        } else {
+                            // Legacy version
+                            data = [].concat.apply([], neighbours_data);
+                        }
+                        var items = process_history_data(data);
+
+                        if (Object.prototype.hasOwnProperty.call(tables, "history") &&
+                            version === prevVersion) {
+                            tables.history.rows.load(items);
+                            if (version) { // Non-legacy
+                                // Is there a way to get an event when all rows are loaded?
+                                waitForRowsDisplayed(function () {
+                                    drawTooltips();
+                                });
+                            }
+                        } else {
+                            destroyTable(tables, "history");
+                            // Is there a way to get an event when the table is destroyed?
+                            setTimeout(function () {
+                                initHistoryTable(rspamd, tables, data, items);
+                            }, 200);
+                        }
+                        prevVersion = version;
+                    } else {
+                        destroyTable(tables, "history");
+                    }
+                },
+                errorMessage: "Cannot receive history",
+            });
+        };
+
+        ui.setup = function (rspamd, tables) {
             $("#updateHistory").off("click");
             $("#updateHistory").on("click", function (e) {
                 e.preventDefault();
-                ui.getHistory(rspamd, tables, neighbours, checked_server);
+                ui.getHistory(rspamd, tables);
             });
             $("#selSymOrder").unbind().change(function () {
-                ui.getHistory(rspamd, tables, neighbours, checked_server);
+                ui.getHistory(rspamd, tables);
             });
 
             // @reset history log
@@ -690,46 +694,34 @@ define(["jquery", "footable", "humanize"],
                 if (!confirm("Are you sure you want to reset history log?")) { // eslint-disable-line no-alert
                     return;
                 }
-                if (ft.history) {
-                    ft.history.destroy();
-                    delete ft.history;
-                }
-                if (ft.errors) {
-                    ft.errors.destroy();
-                    delete ft.errors;
-                }
+                destroyTable(tables, "history");
+                destroyTable(tables, "errors");
 
                 rspamd.query("historyreset", {
                     success: function () {
-                        ui.getHistory(rspamd, tables, neighbours, checked_server);
-                        ui.getErrors(rspamd, tables, neighbours, checked_server);
+                        ui.getHistory(rspamd, tables);
+                        ui.getErrors(rspamd, tables);
                     },
                     errorMessage: "Cannot reset history log"
                 });
             });
         };
 
-        function drawErrorsTable(data) {
-            var items = [];
-            $.each(data, function (i, item) {
-                items.push(
-                    item.ts = unix_time_format(item.ts)
-                );
-            });
-            ft.errors = FooTable.init("#errorsLog", {
+        function initErrorsTable(tables, rows) {
+            tables.errors = FooTable.init("#errorsLog", {
                 columns: [
-                    {sorted: true, direction: "DESC", name:"ts", title:"Time", style:{"font-size":"11px", "width":300, "maxWidth":300}},
+                    {sorted:true, direction:"DESC", name:"ts", title:"Time", style:{"font-size":"11px", "width":300, "maxWidth":300}},
                     {name:"type", title:"Worker type", breakpoints:"xs sm", style:{"font-size":"11px", "width":150, "maxWidth":150}},
                     {name:"pid", title:"PID", breakpoints:"xs sm", style:{"font-size":"11px", "width":110, "maxWidth":110}},
                     {name:"module", title:"Module", style:{"font-size":"11px"}},
                     {name:"id", title:"Internal ID", style:{"font-size":"11px"}},
                     {name:"message", title:"Message", breakpoints:"xs sm", style:{"font-size":"11px"}},
                 ],
-                rows: data,
+                rows: rows,
                 paging: {
                     enabled: true,
                     limit: 5,
-                    size: 25
+                    size: rows_per_page
                 },
                 filtering: {
                     enabled: true,
@@ -742,40 +734,34 @@ define(["jquery", "footable", "humanize"],
             });
         }
 
-        ui.getErrors = function (rspamd, tables, neighbours, checked_server) {
+        ui.getErrors = function (rspamd, tables) {
             if (rspamd.read_only) return;
 
-            if (checked_server !== "All SERVERS") {
-                $.ajax({
-                    dataType: "json",
-                    url: neighbours[checked_server].url + "errors",
-                    jsonp: false,
-                    beforeSend: function (xhr) {
-                        xhr.setRequestHeader("Password", rspamd.getPassword());
-                    },
-                    success: function (data) {
-                        drawErrorsTable(data);
-                    },
-                    errorMessage: "Cannot receive errors"
-                });
-            } else {
-                rspamd.query("errors", {
-                    success: function (req_data) {
-                        var neighbours_data = req_data
-                            .filter(function (d) {
-                                return d.status;
-                            }) // filter out unavailable neighbours
-                            .map(function (d) {
-                                return d.data;
-                            });
-                        drawErrorsTable([].concat.apply([], neighbours_data));
+            rspamd.query("errors", {
+                success: function (data) {
+                    var neighbours_data = data
+                        .filter(function (d) {
+                            return d.status;
+                        }) // filter out unavailable neighbours
+                        .map(function (d) {
+                            return d.data;
+                        });
+                    var rows = [].concat.apply([], neighbours_data);
+                    $.each(rows, function (i, item) {
+                        item.ts = unix_time_format(item.ts);
+                    });
+                    if (Object.prototype.hasOwnProperty.call(tables, "errors")) {
+                        tables.errors.rows.load(rows);
+                    } else {
+                        initErrorsTable(tables, rows);
                     }
-                });
-            }
+                }
+            });
+
             $("#updateErrors").off("click");
             $("#updateErrors").on("click", function (e) {
                 e.preventDefault();
-                ui.getErrors(rspamd, tables, neighbours, checked_server);
+                ui.getErrors(rspamd, tables);
             });
         };
 

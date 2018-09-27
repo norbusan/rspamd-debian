@@ -40,7 +40,7 @@ gint rspamd_log_open (rspamd_logger_t *logger);
 /**
  * Close log file or destroy other structures
  */
-void rspamd_log_close (rspamd_logger_t *logger);
+void rspamd_log_close (rspamd_logger_t *logger, gboolean termination);
 
 /**
  * Close and open log again
@@ -55,7 +55,7 @@ gint rspamd_log_open_priv (rspamd_logger_t *logger, uid_t uid, gid_t gid);
 /**
  * Close log file or destroy other structures for privileged processes
  */
-void rspamd_log_close_priv (rspamd_logger_t *logger, uid_t uid, gid_t gid);
+void rspamd_log_close_priv (rspamd_logger_t *logger, gboolean termination, uid_t uid, gid_t gid);
 
 /**
  * Close and open log again for privileged processes
@@ -182,6 +182,12 @@ const guint64* rspamd_log_counters (rspamd_logger_t *logger);
  * @return
  */
 ucl_object_t * rspamd_log_errorbuf_export (const rspamd_logger_t *logger);
+
+/**
+ * Returns the current logger object
+ * @return
+ */
+rspamd_logger_t* rspamd_logger_get_singleton (void);
 
 /* Typical functions */
 

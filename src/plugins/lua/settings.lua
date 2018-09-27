@@ -25,6 +25,13 @@ end
 local rspamd_logger = require "rspamd_logger"
 local rspamd_maps = require "lua_maps"
 local lua_squeeze = require "lua_squeeze_rules"
+local lua_util = require "lua_util"
+local rspamd_ip = require "rspamd_ip"
+local rspamd_regexp = require "rspamd_regexp"
+local lua_selectors = require "lua_selectors"
+local ucl = require "ucl"
+local fun = require "fun"
+
 local redis_params
 
 local settings = {}
@@ -32,10 +39,8 @@ local N = "settings"
 local settings_ids = {}
 local settings_initialized = false
 local max_pri = 0
-local rspamd_ip = require "rspamd_ip"
-local rspamd_regexp = require "rspamd_regexp"
-local ucl = require "ucl"
-local fun = require "fun"
+
+local selectors_cache = {} -- Used to speed up selectors in settings
 
 local function apply_settings(task, to_apply)
   task:set_settings(to_apply)
@@ -187,7 +192,7 @@ local function check_settings(task)
     return false
   end
 
-  local function check_specific_setting(_, rule, ip, client_ip, from, rcpt,
+  local function check_specific_setting(rule_name, rule, ip, client_ip, from, rcpt,
       user, auth_user)
     local res = false
 
@@ -308,6 +313,24 @@ local function check_settings(task)
       end
       if not res then
         return nil
+      end
+    end
+
+    if rule['selector'] then
+      local sel = selectors_cache[rule_name]
+      if not sel then
+        sel = lua_selectors.create_selector_closure(rspamd_config, rule.selector,
+            rule.delimiter or "")
+
+        if sel then
+          selectors_cache[rule_name] = sel
+        end
+      end
+
+      if sel then
+        if sel(task) then
+          res = true
+        end
       end
     end
 
@@ -684,7 +707,7 @@ local function gen_redis_callback(handler, id)
     end
 
     if not key then
-      rspamd_logger.debugm(N, task, 'handler number %s returned nil', id)
+      lua_util.debugm(N, task, 'handler number %s returned nil', id)
       return
     end
 

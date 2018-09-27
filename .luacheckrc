@@ -5,6 +5,7 @@ exclude_files = {
   '/**/contrib/**',
   '/**/test/lua/**',
   '/**/test/functional/lua/miltertest/**',
+  '/**/test/functional/lua/rspamadm/**',
 }
 
 globals = {
@@ -28,6 +29,7 @@ globals = {
   'rspamd_maps',
   'rspamd_plugins_state',
   'rspamadm',
+  'loadstring'
 }
 
 ignore = {
@@ -48,6 +50,10 @@ files['/**/src/plugins/lua/greylist.lua'].globals = {
 files['/**/lualib/lua_util.lua'].globals = {
   'table.unpack',
   'unpack',
+}
+
+files['/**/lualib/lua_redis.lua'].globals = {
+  'rspamadm_ev_base',
 }
 
 files['/**/src/rspamadm/*'].globals = {
