@@ -33,7 +33,7 @@ define(["jquery"],
 
         // @upload text
         function uploadText(rspamd, data, source, headers) {
-            var url;
+            var url = null;
             if (source === "spam") {
                 url = "learnspam";
             } else if (source === "ham") {
@@ -43,53 +43,32 @@ define(["jquery"],
             } else if (source === "scan") {
                 url = "scan";
             }
-            $.ajax({
+            rspamd.query(url, {
                 data: data,
-                dataType: "json",
-                type: "POST",
-                url: url,
-                processData: false,
-                jsonp: false,
-                beforeSend: function (xhr) {
-                    xhr.setRequestHeader("Password", rspamd.getPassword());
-                    $.each(headers, function (name, value) {
-                        xhr.setRequestHeader(name, value);
-                    });
+                params: {
+                    processData: false,
                 },
+                method: "POST",
+                headers: headers,
                 success: function (json) {
                     cleanTextUpload(source);
-                    if (json.success) {
+                    if (json[0].data.success) {
                         rspamd.alertMessage("alert-success", "Data successfully uploaded");
                     }
-                },
-                error: function (xhr, textStatus, errorThrown) {
-                    var errorMsg;
-
-                    try {
-                        var json = $.parseJSON(xhr.responseText);
-                        errorMsg = $("<a>").text(json.error).html();
-                    } catch (err) {
-                        errorMsg = $("<a>").text("Error: [" + textStatus + "] " + errorThrown).html();
-                    }
-                    rspamd.alertMessage("alert-error", errorMsg);
                 }
             });
         }
         // @upload text
-        function scanText(rspamd, data) {
-            var url = "scan";
+        function scanText(rspamd, data, server) {
             var items = [];
-            $.ajax({
+            rspamd.query("scan", {
                 data: data,
-                dataType: "json",
-                type: "POST",
-                url: url,
-                processData: false,
-                jsonp: false,
-                beforeSend: function (xhr) {
-                    xhr.setRequestHeader("Password", rspamd.getPassword());
+                params: {
+                    processData: false,
                 },
-                success: function (json) {
+                method: "POST",
+                success: function (neighbours_status) {
+                    var json = neighbours_status[0].data;
                     if (json.action) {
                         rspamd.alertMessage("alert-success", "Data successfully scanned");
                         var action = "";
@@ -159,45 +138,50 @@ define(["jquery"],
                     503: function () {
                         rspamd.alertMessage("alert-error", "Cannot tokenize message: no text data");
                     }
-                }
+                },
+                server: server
             });
         }
 
         ui.setup = function (rspamd) {
-            $("textarea").change(function () {
-                if ($(this).val().length !== "") {
-                    $(this).closest("form").find("button").removeAttr("disabled").removeClass("disabled");
-                } else {
-                    $(this).closest("form").find("button").attr("disabled").addClass("disabled");
-                }
+            function getSelector(id) {
+                var e = document.getElementById(id);
+                return e.options[e.selectedIndex].value;
+            }
+
+            $("textarea").keyup(function () {
+                var $this = $(this);
+                $this.closest("form").find("button")
+                    .prop("disabled", ($.trim($this.val()).length === 0));
             });
 
             $("#scanClean").on("click", function () {
                 $("#scanTextSource").val("");
                 $("#scanResult").hide();
                 $("#scanOutput tbody").remove();
-                $("html, body").animate({scrollTop: 0}, 1000);
+                $("html, body").animate({scrollTop:0}, 1000);
                 return false;
             });
             // @init upload
             $("[data-upload]").on("click", function () {
                 var source = $(this).data("upload");
-                var data;
-                var headers = {};
-                data = $("#" + source + "TextSource").val();
-                if (source === "fuzzy") {
-                // To access the proper
-                    headers.flag = $("#fuzzyFlagText").val();
-                    headers.weight = $("#fuzzyWeightText").val();
-                } else {
-                    data = $("#" + source + "TextSource").val();
-                }
-                if (data.length > 0) {
+                var data = $("#" + source + "TextSource").val();
+                var headers = (source === "fuzzy")
+                    ? {
+                        flag: $("#fuzzyFlagText").val(),
+                        weight: $("#fuzzyWeightText").val()
+                    }
+                    : {};
+                if ($.trim(data).length > 0) {
                     if (source === "scan") {
-                        scanText(rspamd, data);
+                        var checked_server = getSelector("selSrv");
+                        var server = (checked_server === "All SERVERS") ? "local" : checked_server;
+                        scanText(rspamd, data, server);
                     } else {
                         uploadText(rspamd, data, source, headers);
                     }
+                } else {
+                    rspamd.alertMessage("alert-error", "Message source field cannot be blank");
                 }
                 return false;
             });

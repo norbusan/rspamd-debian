@@ -71,7 +71,7 @@ rspamadm_confighelp_help (gboolean full_help, const struct rspamadm_command *cmd
 				"-P: use specific Lua plugins path\n"
 				"--no-color: disable coloured output\n"
 				"--short: show only option names\n"
-				"--no-examples: do not show examples (impied by --short)\n"
+				"--no-examples: do not show examples (implied by --short)\n"
 				"--help: shows available options and commands";
 	}
 	else {
@@ -106,8 +106,7 @@ rspamadm_confighelp_show (struct rspamd_config *cfg, gint argc, gchar **argv,
 			rspamd_fprintf (stdout, "Showing help for all options:\n");
 		}
 
-		rspamadm_execute_lua_ucl_subr (cfg->lua_state,
-				argc,
+		rspamadm_execute_lua_ucl_subr (argc,
 				argv,
 				obj,
 				"confighelp",
@@ -228,7 +227,7 @@ rspamadm_confighelp (gint argc, gchar **argv, const struct rspamadm_command *cmd
 	}
 
 	cfg = rspamd_config_new (RSPAMD_CONFIG_INIT_SKIP_LUA);
-	cfg->lua_state = L;
+	cfg->lua_state = rspamd_main->cfg->lua_state;
 	cfg->compiled_modules = modules;
 	cfg->compiled_workers = workers;
 

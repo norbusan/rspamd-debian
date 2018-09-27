@@ -34,7 +34,7 @@ define(["jquery", "d3pie", "humanize"],
             var hours = seconds % 31536000 % 2628000 % 86400 / 3600 >> 0;
             var minutes = seconds % 31536000 % 2628000 % 86400 % 3600 / 60 >> 0;
             /* eslint-enable no-bitwise */
-            var out;
+            var out = null;
             if (years > 0) {
                 if (months > 0) {
                     out = years + "yr " + months + "mth";
@@ -67,7 +67,7 @@ define(["jquery", "d3pie", "humanize"],
 
             $.each(data, function (i, item) {
                 var widget = "";
-                if (i === "auth" || i === "error") { return true; } // Skip to the next iteration
+                if (i === "auth" || i === "error") return; // Skip to the next iteration
                 if (i === "version") {
                     widget = "<div class=\"left\"><strong>" + item + "</strong>" +
                     i + "</div>";
@@ -136,42 +136,42 @@ define(["jquery", "d3pie", "humanize"],
 
         function getChart(rspamd, pie, checked_server) {
             var creds = JSON.parse(sessionStorage.getItem("Credentials"));
-            if (creds && creds[checked_server]) {
-                var data = creds[checked_server].data;
-                var new_data = [{
-                    color : "#66CC00",
-                    label : "Clean",
-                    data : data.clean,
-                    value : data.clean
-                }, {
-                    color : "#BF8040",
-                    label : "Temporarily rejected",
-                    data : data.soft_reject,
-                    value : data.soft_reject
-                }, {
-                    color : "#FFAD00",
-                    label : "Probable spam",
-                    data : data.probable,
-                    value : data.probable
-                }, {
-                    color : "#436EEE",
-                    label : "Greylisted",
-                    data : data.greylist,
-                    value : data.greylist
-                }, {
-                    color : "#FF0000",
-                    label : "Rejected",
-                    data : data.reject,
-                    value : data.reject
-                }];
+            if (!creds || !creds[checked_server]) return null;
 
-                return rspamd.drawPie(pie, "chart", new_data);
-            }
+            var data = creds[checked_server].data;
+            var new_data = [{
+                color: "#66CC00",
+                label: "Clean",
+                data: data.clean,
+                value: data.clean
+            }, {
+                color: "#BF8040",
+                label: "Temporarily rejected",
+                data: data.soft_reject,
+                value: data.soft_reject
+            }, {
+                color: "#FFAD00",
+                label: "Probable spam",
+                data: data.probable,
+                value: data.probable
+            }, {
+                color: "#436EEE",
+                label: "Greylisted",
+                data: data.greylist,
+                value: data.greylist
+            }, {
+                color: "#FF0000",
+                label: "Rejected",
+                data: data.reject,
+                value: data.reject
+            }];
+
+            return rspamd.drawPie(pie, "chart", new_data);
         }
         // Public API
         var ui = {
             statWidgets: function (rspamd, graphs, checked_server) {
-                rspamd.query("/auth", {
+                rspamd.query("auth", {
                     success: function (neighbours_status) {
                         var neighbours_sum = {
                             version: neighbours_status[0].data.version,
@@ -184,7 +184,6 @@ define(["jquery", "d3pie", "humanize"],
                             soft_reject: 0,
                             scanned: 0,
                             learned: 0,
-                            read_only: neighbours_status[0].data.read_only,
                             config_id: ""
                         };
                         var status_count = 0;

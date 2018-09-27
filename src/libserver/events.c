@@ -21,9 +21,10 @@
 
 #define RSPAMD_SESSION_FLAG_WATCHING (1 << 0)
 #define RSPAMD_SESSION_FLAG_DESTROYING (1 << 1)
+#define RSPAMD_SESSION_FLAG_CLEANUP (1 << 2)
 
 #define RSPAMD_SESSION_IS_WATCHING(s) ((s)->flags & RSPAMD_SESSION_FLAG_WATCHING)
-#define RSPAMD_SESSION_IS_DESTROYING(s) ((s)->flags & RSPAMD_SESSION_FLAG_DESTROYING)
+#define RSPAMD_SESSION_CAN_ADD_EVENT(s) (!((s)->flags & (RSPAMD_SESSION_FLAG_DESTROYING|RSPAMD_SESSION_FLAG_CLEANUP)))
 
 #define msg_err_session(...) rspamd_default_log_function(G_LOG_LEVEL_CRITICAL, \
         "events", session->pool->tag.uid, \
@@ -160,9 +161,10 @@ rspamd_session_create (rspamd_mempool_t * pool,
 
 struct rspamd_async_event *
 rspamd_session_add_event (struct rspamd_async_session *session,
-	event_finalizer_t fin,
-	void *user_data,
-	GQuark subsystem)
+						  struct rspamd_async_watcher *w,
+						  event_finalizer_t fin,
+						  gpointer user_data,
+						  GQuark subsystem)
 {
 	struct rspamd_async_event *new_event;
 	gint ret;
@@ -172,29 +174,50 @@ rspamd_session_add_event (struct rspamd_async_session *session,
 		g_assert_not_reached ();
 	}
 
+	if (!RSPAMD_SESSION_CAN_ADD_EVENT (session)) {
+		msg_debug_session ("skip adding event subsystem: %s: "
+					 "session is destroying/cleaning",
+				g_quark_to_string (subsystem));
+
+		return NULL;
+	}
+
 	new_event = rspamd_mempool_alloc (session->pool,
 			sizeof (struct rspamd_async_event));
 	new_event->fin = fin;
 	new_event->user_data = user_data;
 	new_event->subsystem = subsystem;
 
-	if (RSPAMD_SESSION_IS_WATCHING (session)) {
-		new_event->w = session->cur_watcher;
-		new_event->w->remain ++;
+	if (w == NULL) {
+		if (RSPAMD_SESSION_IS_WATCHING (session)) {
+			new_event->w = session->cur_watcher;
+			new_event->w->remain++;
+			msg_debug_session ("added event: %p, pending %d events, "
+							   "subsystem: %s, watcher: %d (%d)",
+					user_data,
+					kh_size (session->events),
+					g_quark_to_string (subsystem),
+					new_event->w->id,
+					new_event->w->remain);
+		} else {
+			new_event->w = NULL;
+			msg_debug_session ("added event: %p, pending %d events, "
+							   "subsystem: %s, no watcher!",
+					user_data,
+					kh_size (session->events),
+					g_quark_to_string (subsystem));
+		}
+	}
+	else {
+		new_event->w = w;
+		new_event->w->remain++;
 		msg_debug_session ("added event: %p, pending %d events, "
-				"subsystem: %s, watcher: %d",
+						   "subsystem: %s, explicit watcher: %d (%d)",
 				user_data,
 				kh_size (session->events),
 				g_quark_to_string (subsystem),
-				new_event->w->id);
-	}
-	else {
-		new_event->w = NULL;
-		msg_debug_session ("added event: %p, pending %d events, "
-				"subsystem: %s, no watcher!",
-				user_data,
-				kh_size (session->events),
-				g_quark_to_string (subsystem));
+				new_event->w->id,
+				new_event->w->remain);
 	}
 
 	kh_put (rspamd_events_hash, session->events, new_event, &ret);
@@ -229,6 +252,11 @@ rspamd_session_remove_event (struct rspamd_async_session *session,
 		return;
 	}
 
+	if (!RSPAMD_SESSION_CAN_ADD_EVENT (session)) {
+		/* Session is already cleaned up, ignore this */
+		return;
+	}
+
 	/* Search for event */
 	search_ev.fin = fin;
 	search_ev.user_data = ud;
@@ -260,7 +288,7 @@ rspamd_session_remove_event (struct rspamd_async_session *session,
 				"pending %d events, watcher: %d (%d pending)", ud,
 				g_quark_to_string (found_ev->subsystem),
 				kh_size (session->events),
-				found_ev->w->id, found_ev->w->remain);
+				found_ev->w->id, found_ev->w->remain - 1);
 
 		if (found_ev->w->remain > 0) {
 			if (--found_ev->w->remain == 0) {
@@ -286,7 +314,7 @@ rspamd_session_destroy (struct rspamd_async_session *session)
 		return FALSE;
 	}
 
-	if (!(session->flags & RSPAMD_SESSION_FLAG_DESTROYING)) {
+	if (!rspamd_session_blocked (session)) {
 		session->flags |= RSPAMD_SESSION_FLAG_DESTROYING;
 		rspamd_session_cleanup (session);
 
@@ -302,14 +330,15 @@ void
 rspamd_session_cleanup (struct rspamd_async_session *session)
 {
 	struct rspamd_async_event *ev;
-	gchar t;
 
 	if (session == NULL) {
 		msg_err ("session is NULL");
 		return;
 	}
 
-	kh_foreach (session->events, ev, t, {
+	session->flags |= RSPAMD_SESSION_FLAG_CLEANUP;
+
+	kh_foreach_key (session->events, ev, {
 		/* Call event's finalizer */
 		msg_debug_session ("removed event on destroy: %p, subsystem: %s",
 				ev->user_data,
@@ -320,9 +349,9 @@ rspamd_session_cleanup (struct rspamd_async_session *session)
 		}
 	});
 
-	(void)t;
-
 	kh_clear (rspamd_events_hash, session->events);
+
+	session->flags &= ~RSPAMD_SESSION_FLAG_CLEANUP;
 }
 
 gboolean
@@ -495,6 +524,35 @@ rspamd_session_get_watcher (struct rspamd_async_session *session)
 	}
 }
 
+struct rspamd_async_watcher*
+rspamd_session_replace_watcher (struct rspamd_async_session *s,
+		struct rspamd_async_watcher *w)
+{
+	struct rspamd_async_watcher *res = NULL;
+
+	g_assert (s != NULL);
+
+	if (s->cur_watcher) {
+		res = s->cur_watcher;
+
+		if (!w) {
+			/* We remove watching, so clear watching flag as well */
+			s->flags &= ~RSPAMD_SESSION_FLAG_WATCHING;
+
+		}
+
+		s->cur_watcher = w;
+	}
+	else {
+		if (w) {
+			s->flags |= RSPAMD_SESSION_FLAG_WATCHING;
+		}
+
+		s->cur_watcher = w;
+	}
+
+	return res;
+}
 
 rspamd_mempool_t *
 rspamd_session_mempool (struct rspamd_async_session *session)
@@ -502,4 +560,12 @@ rspamd_session_mempool (struct rspamd_async_session *session)
 	g_assert (session != NULL);
 
 	return session->pool;
+}
+
+gboolean
+rspamd_session_blocked (struct rspamd_async_session *session)
+{
+	g_assert (session != NULL);
+
+	return !RSPAMD_SESSION_CAN_ADD_EVENT (session);
 }

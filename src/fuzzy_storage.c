@@ -3013,11 +3013,11 @@ start_fuzzy (struct rspamd_worker *worker)
 
 			close (fd);
 		}
-
-		g_array_free (ctx->updates_pending, TRUE);
 	}
 
-	rspamd_log_close (worker->srv->logger);
+	if (worker->index == 0) {
+		g_array_free (ctx->updates_pending, TRUE);
+	}
 
 	if (ctx->peer_fd != -1) {
 		if (worker->index == 0) {
@@ -3031,6 +3031,8 @@ start_fuzzy (struct rspamd_worker *worker)
 	}
 
 	REF_RELEASE (ctx->cfg);
+
+	rspamd_log_close (worker->srv->logger, TRUE);
 
 	exit (EXIT_SUCCESS);
 }

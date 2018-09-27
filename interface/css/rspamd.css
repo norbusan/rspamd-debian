@@ -526,6 +526,10 @@ td.maps-cell {
 }
 
 /* Some spacing tweaks */
+.notification-area div > button:not(.close) {
+	margin-right: 9px;
+}
+
 #learning p > button {
     margin-top: 10px;
     }
@@ -683,4 +687,8 @@ background: url("../img/asc.png") no-repeat center right;
 }
 table.dataTable thead .sorting_desc_disabled {
 background: url("../img/desc.png") no-repeat center right;
+}
+
+#nprogress .bar {
+	height: 1px;
 }
