@@ -130,52 +130,53 @@ Files: contrib/zstd/*
 Copyright: 2016-present, Facebook, Inc.
 License: BSD-3-Clause
 
-Files: src/libutil/printf.c
-Copyright: 2002-2015 Igor Sysoev
-           2010-2015 Vsevolod Stakhov <vsevolod@highsecure.ru>
-License: BSD-2-Clause
-
-Files: src/libserver/url.c
-Copyright: 2002-2015 Igor Sysoev
-           2010-2015 Vsevolod Stakhov <vsevolod@highsecure.ru>
-License: BSD-2-Clause
-
-Files: src/plugins/lua/rbl.lua
-Copyright: 2011-2015, Vsevolod Stakhov <vsevolod@highsecure.ru>
-           2013-2015, Andrew Lewis <nerf@judo.za.org>
-License: BSD-2-Clause
-
 Files: doc/doxydown/*
-Copyright: 2014, Vsevolod Stakhov <vsevolod@highsecure.ru>
+Copyright: 2014 Vsevolod Stakhov <vsevolod@highsecure.ru>
 License: MIT
 
 Files: interface/*
-Copyright: 2000-2012 The Apache Software Foundation
-License: Apache-2.0
+Copyright: 2012-2013 Anton Simonov <untone@gmail.com>
+           2014-2015 Vsevolod Stakhov <vsevolod@highsecure.ru>
+License: Expat
 
 Files: src/libcryptobox/curve25519/*
 Copyright: 2008, Google Inc.
 License: BSD-3-Clause
 
-Files: src/libcryptobox/siphash/*
+Files: src/libcryptobox/poly1305/* src/libcryptobox/chacha20/*
+Copyright: 2015, Andrew Moon
+           2015, Vsevolod Stakhov
+License: BSD-2-Clause
+
+Files: src/libcryptobox/siphash/siphash.*
+Copyright: 2016 Vsevolod Stakhov
+License: Apache-2.0
+
+Files: src/libcryptobox/siphash/avx2.S
+Copyright: 2016 Vsevolod Stakhov
+           2015 Google Inc.
+License: Apache-2.0
+
+Files: src/libcryptobox/siphash/ref.c
 Copyright: 2015, Vsevolod Stakhov
            2012-2014 Jean-Philippe Aumasson <jeanphilippe.aumasson@gmail.com>
            2012-2014 Daniel J. Bernstein <djb@cr.yp.to>
 License: BSD-2-Clause
 
-Files: src/libcryptobox/poly1305/*
-Copyright: 2015, Andrew Moon
-           2015, Vsevolod Stakhov
-License: MIT
+Files: src/libutil/printf.c src/libserver/url.c
+Copyright: 2016 Vsevolod Stakhov <vsevolod@highsecure.ru>
+           2002-2015 Igor Sysoev
+           2011-2015 Nginx, Inc.
+License: Apache-2.0 and BSD-2-Clause
 
-Files: src/libcryptobox/chacha20/*
-Copyright: 2015, Andrew Moon
-           2015, Vsevolod Stakhov
-License: MIT
+Files: src/plugins/lua/rbl.lua
+Copyright: 2011-2015, Vsevolod Stakhov <vsevolod@highsecure.ru>
+           2013-2015, Andrew Lewis <nerf@judo.za.org>
+License: Apache-2.0
 
 Files: debian/*
 Copyright: 2011-2015 Vsevolod Stakhov <vsevolod@highsecure.ru>
- 2014-2015 Mikhail Gusarov <dottedmag@dottedmag.net>
+           2014-2015 Mikhail Gusarov <dottedmag@dottedmag.net>
 License: BSD-2-Clause
 
 License: public-domain
