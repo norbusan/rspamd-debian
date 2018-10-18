@@ -9,14 +9,30 @@ Files: *
 Copyright: 2008-2015 Vsevolod Stakhov <vsevolod@highsecure.ru>
 License: BSD-2-Clause
 
-Files: contrib/uthash/*
-Copyright: 2003-2013 Troy D. Hanson http://troydhanson.github.com/uthash/
-License: BSD-1-Clause
+Files: contrib/aho-corasick/*
+Copyright: 2009-2014 Mischa Sandberg <mischasan@gmail.com>
+License: LGPL-3+
+
+Files: contrib/cdb/*
+Copyright: Michael Tokarev <mjt@corpit.ru>
+License: public-domain
+Comment:
+ The exact meaning of "Public domain" mentioned in the file headers was taken from:
+ http://www.corpit.ru/mjt/tinycdb.html
+
+Files: contrib/hiredis/*
+Copyright: 2009-2011, Salvatore Sanfilippo <antirez@gmail.com>
+           2010-2011, Pieter Noordhuis <pcnoordhuis@gmail.com>
+License: BSD-3-Clause
 
 Files: contrib/http-parser/*
 Copyright: 2002-2015 Igor Sysoev
            Joyent, Inc. and other Node contributors
 License: Expat
+
+Files: contrib/lc-btrie/*
+Copyright: 2013, Geoffrey T. Dairiki
+License: BSD-3-Clause
 
 Files: contrib/libottery/*
 Copyright: Nick Mathewson
@@ -27,26 +43,92 @@ Copyright: Ted Krovetz <ted@krovetz.net>
            D. J. Bernstein
 License: public-domain
 
+Files: contrib/libucl/khash.h contrib/libucl/kvec.h
+Copyright: 2008, by Attractive Chaos <attractor@live.co.uk>
+License: Expat
+
+Files: contrib/libucl/tree.h
+Copyright: 2005 Ian Piumarta
+License: Expat
+
+Files: contrib/libucl/ucl_util.c
+Copyright: 2013, Vsevolod Stakhov
+           2015 Allan Jude <allanjude@freebsd.org>
+License: BSD-2-Clause
+
+Files: contrib/linenoise/*
+Copyright: 2010-2014, Salvatore Sanfilippo <antirez@gmail.com>
+           2010-2013, Pieter Noordhuis <pcnoordhuis@gmail.com>
+License: BSD-2-Clause
+
+Files: contrib/lua-argparse/*
+Copyright: 2013 - 2018 Peter Melnichenko
+License: Expat
+
 Files: contrib/lua-fun/*
 Copyright: 2013 Roman Tsisyk <roman@tsisyk.com>
 License: MIT
+
+Files: contrib/lua-lpeg/*
+Copyright: 2007-2015 Lua.org, PUC-Rio.
+License: Expat
+
+Files: contrib/lua-moses/*
+Copyright: 2012-2014 Roland Yonaba
+License: Expat
+
+Files: contrib/lua-tableshape/*
+Copyright: 2018 Leaf Corcoran
+License: Expat
+
+Files: contrib/lua-torch/nn/* contrib/lua-torch/paths/* contrib/lua-torch/torch7/*
+Copyright: 2011-2014 Idiap Research Institute (Ronan Collobert)
+           2012-2014 Deepmind Technologies (Koray Kavukcuoglu)
+           2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
+           2011-2013 NYU (Clement Farabet)
+           2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
+           2006      Idiap Research Institute (Samy Bengio)
+           2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
+License: BSD-3-Clause
+
+Files: contrib/lua-torch/optim/*
+Copyright: 2011-2014 Idiap Research Institute (Ronan Collobert)
+           2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
+           2011-2013 NYU (Clement Farabet)
+           2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
+           2006      Idiap Research Institute (Samy Bengio)
+           2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
+License: BSD-3-Clause
+
+Files: contrib/mumhash/*
+Copyright: 2016 Vladimir Makarov <vmakarov@gcc.gnu.org>
+License: Expat
 
 Files: contrib/publicsuffix/*
 Copyright: 2007-2011, Mozilla Foundation.
 License: MPL-2
 
-Files: contrib/aho-corasick/*
-Copyright: 2009-2014 Mischa Sandberg <mischasan@gmail.com>
-License: LGPL-3+
-
-Files: contrib/xxhash/xxhash.*
-Copyright: 2012-2013, Yann Collet.
-License: BSD-2-Clause
-
 Files: contrib/snowball/*
 Copyright: 2001-2015 Dr Martin Porter
            2002-2015 Richard Boulton
 License: BSD-2-Clause
+
+Files: contrib/t1ha/*
+Copyright: 2016-2018 Positive Technologies, https://www.ptsecurity.com
+           2010-2013 Leonid Yuriev <leo@yuriev.ru>
+License: Zlib
+
+Files: contrib/uthash/*
+Copyright: 2003-2013 Troy D. Hanson http://troydhanson.github.com/uthash/
+License: BSD-1-Clause
+
+Files: contrib/xxhash/*
+Copyright: 2012-2014, Yann Collet
+License: BSD-2-Clause
+
+Files: contrib/zstd/*
+Copyright: 2016-present, Facebook, Inc.
+License: BSD-3-Clause
 
 Files: src/libutil/printf.c
 Copyright: 2002-2015 Igor Sysoev
@@ -71,16 +153,9 @@ Files: interface/*
 Copyright: 2000-2012 The Apache Software Foundation
 License: Apache-2.0
 
-Files: contrib/cdb*
-Copyright: Michael Tokarev <mjt@corpit.ru>
-License: public-domain
-Comment:
- The exact meaning of "Public domain" mentioned in the file headers was taken from:
- http://www.corpit.ru/mjt/tinycdb.html
-
 Files: src/libcryptobox/curve25519/*
 Copyright: 2008, Google Inc.
-License: BSD-3-Clause-Google
+License: BSD-3-Clause
 
 Files: src/libcryptobox/siphash/*
 Copyright: 2015, Vsevolod Stakhov
@@ -149,7 +224,7 @@ License: BSD-2-Clause
  OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  SUCH DAMAGE.
 
-License: BSD-3-Clause-Google
+License: BSD-3-Clause
  Redistribution and use in source and binary forms, with or without
  modification, are permitted provided that the following conditions are
  met:
@@ -162,7 +237,7 @@ License: BSD-3-Clause-Google
  in the documentation and/or other materials provided with the
  distribution.
  .
- Neither the name of Google Inc. nor the names of its
+ Neither the name of the copyright holder nor the names of its
  contributors may be used to endorse or promote products derived from
  this software without specific prior written permission.
  .
@@ -255,3 +330,20 @@ License: MPL-2
  This Source Code Form is subject to the terms of the Mozilla Public License,
  v. 2.0. If a copy of the MPL was not distributed with this file,
  You can obtain one at http://mozilla.org/MPL/2.0/.
+
+License: Zlib
+ This software is provided 'as-is', without any express or implied
+ warranty. In no event will the authors be held liable for any damages
+ arising from the use of this software.
+ .
+ Permission is granted to anyone to use this software for any purpose,
+ including commercial applications, and to alter it and redistribute it
+ freely, subject to the following restrictions:
+ .
+ 1. The origin of this software must not be misrepresented; you must not
+    claim that you wrote the original software. If you use this software
+    in a product, an acknowledgement in the product documentation would be
+    appreciated but is not required.
+ 2. Altered source versions must be plainly marked as such, and must not be
+    misrepresented as being the original software.
+ 3. This notice may not be removed or altered from any source distribution.
