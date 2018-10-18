@@ -1,3 +1,16 @@
+rspamd (1.8.1-1) UNRELEASED; urgency=medium
+
+  [ Jerome Lebleu ]
+  * d/missing-sources: Add NProgress source
+  * d/copyright:
+    + Remove unused clauses
+    + Update and add missing clauses for contrib/*
+    + Correct some clauses license
+    + Normalize licenses regarding Debian format
+  * New upstream version 1.8.1
+
+ -- Jerome Lebleu <jerome@maroufle.fr>  Thu, 18 Oct 2018 09:04:48 +0200
+
 rspamd (1.7.9-1) unstable; urgency=medium
 
   [ Sebastien Badia ]
