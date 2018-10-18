@@ -36,7 +36,7 @@ License: BSD-3-Clause
 
 Files: contrib/libottery/*
 Copyright: Nick Mathewson
-License: CC0
+License: CC0-1.0
 
 Files: contrib/libottery/chacha_merged.c
 Copyright: Ted Krovetz <ted@krovetz.net>
@@ -67,7 +67,7 @@ License: Expat
 
 Files: contrib/lua-fun/*
 Copyright: 2013 Roman Tsisyk <roman@tsisyk.com>
-License: MIT
+License: Expat
 
 Files: contrib/lua-lpeg/*
 Copyright: 2007-2015 Lua.org, PUC-Rio.
@@ -106,7 +106,7 @@ License: Expat
 
 Files: contrib/publicsuffix/*
 Copyright: 2007-2011, Mozilla Foundation.
-License: MPL-2
+License: MPL-2.0
 
 Files: contrib/snowball/*
 Copyright: 2001-2015 Dr Martin Porter
@@ -132,7 +132,7 @@ License: BSD-3-Clause
 
 Files: doc/doxydown/*
 Copyright: 2014 Vsevolod Stakhov <vsevolod@highsecure.ru>
-License: MIT
+License: Expat
 
 Files: interface/*
 Copyright: 2012-2013 Anton Simonov <untone@gmail.com>
@@ -179,8 +179,23 @@ Copyright: 2011-2015 Vsevolod Stakhov <vsevolod@highsecure.ru>
            2014-2015 Mikhail Gusarov <dottedmag@dottedmag.net>
 License: BSD-2-Clause
 
-License: public-domain
- Public domain.
+## Licenses
+
+License: Apache-2.0
+  Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+ .
+ http://www.apache.org/licenses/LICENSE-2.0
+ .
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ .
+ On Debian systems, the complete text of the Apache License can be found
+ in `/usr/share/common-licenses/Apache-2.0'.
 
 License: BSD-1-Clause
  Redistribution and use in source and binary forms, with or without
@@ -254,6 +269,17 @@ License: BSD-3-Clause
  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+License: CC0-1.0
+ To the extent possible under law, the author(s) have dedicated all copyright
+ and related and neighboring rights to this software to the public domain
+ worldwide. This software is distributed without any warranty.
+ .
+ You should have received a copy of the CC0 Public Domain Dedication along with
+ this software. If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
+ .
+ On Debian systems, the complete text of the CC0 1.0 Universal license can be
+ found in ‘/usr/share/common-licenses/CC0-1.0’.
+
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
@@ -292,45 +318,12 @@ License: LGPL-3+
  License version 3 can be found in the file
  `/usr/share/common-licenses/LGPL-3'.
 
-License: Apache-2.0
- On Debian GNU/Linux system you can find the complete text of the
- Apache-2.0 license in `/usr/share/common-licenses/Apache-2.0'
+License: MPL-2.0
+ On Debian systems, the complete text of the GNU Library General Public
+ License can be found in the file `/usr/share/common-licenses/MPL-2.0'.
 
-License: CC0
- This software has been dedicated to the public domain under the CC0
- public domain dedication.
- .
- To the extent possible under law, the person who associated CC0 with
- libottery has waived all copyright and related or neighboring rights
- to libottery.
- .
- You should have received a copy of the CC0 legalcode along with this
- work in doc/cc0.txt.  If not, see
- <http://creativecommons.org/publicdomain/zero/1.0/>.
-
-License: MIT
- Permission is hereby granted, free of charge, to any person obtaining a copy
- of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights
- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- copies of the Software, and to permit persons to whom the Software is
- furnished to do so, subject to the following conditions:
- .
- The above copyright notice and this permission notice shall be included in all
- copies or substantial portions of the Software.
- .
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- SOFTWARE.
-
-License: MPL-2
- This Source Code Form is subject to the terms of the Mozilla Public License,
- v. 2.0. If a copy of the MPL was not distributed with this file,
- You can obtain one at http://mozilla.org/MPL/2.0/.
+License: public-domain
+ Public domain.
 
 License: Zlib
  This software is provided 'as-is', without any express or implied
