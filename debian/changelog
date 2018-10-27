@@ -7,7 +7,7 @@ rspamd (1.8.1-1) UNRELEASED; urgency=medium
     + Update and add missing clauses for contrib/*
     + Correct some clauses license
     + Normalize licenses regarding Debian format
-  * New upstream version 1.8.1
+  * New upstream version 1.8.1 (Closes: #909619)
 
  -- Jerome Lebleu <jerome@maroufle.fr>  Thu, 18 Oct 2018 09:04:48 +0200
 
