@@ -1,4 +1,4 @@
-rspamd (1.8.1-1) UNRELEASED; urgency=medium
+rspamd (1.8.1-1) unstable; urgency=medium
 
   [ Jerome Lebleu ]
   * d/missing-sources: Add NProgress source
@@ -9,7 +9,12 @@ rspamd (1.8.1-1) UNRELEASED; urgency=medium
     + Normalize licenses regarding Debian format
   * New upstream version 1.8.1 (Closes: #909619)
 
- -- Jerome Lebleu <jerome@maroufle.fr>  Thu, 18 Oct 2018 09:04:48 +0200
+  [ Sebastien Badia ]
+  * d/rules: Fix build on aarch64, mips64, ppc64le, parisc64, ia64, ppc64
+    thanks @randomstuff and @alexAubin !
+    refs: https://github.com/rspamd/rspamd/issues/2202#issuecomment-401545304
+
+ -- Sebastien Badia <sbadia@debian.org>  Sat, 10 Nov 2018 15:19:42 +0100
 
 rspamd (1.7.9-1) unstable; urgency=medium
 
