@@ -5,6 +5,13 @@ DPKG_EXPORT_BUILDFLAGS = 1
 include /usr/share/dpkg/buildflags.mk
 export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
 
+# https://github.com/rspamd/rspamd/issues/2202#issuecomment-401545304
+ifneq (,$(filter $(DEB_HOST_ARCH), aarch64, mips64, ppc64le, parisc64, ia64, ppc64))
+  ENABLED_FOR_ARCH = OFF
+else
+  ENABLED_FOR_ARCH = ON
+endif
+
 %:
 	dh $@
 
@@ -29,8 +36,8 @@ override_dh_auto_configure:
 		-DENABLE_FULL_DEBUG=OFF \
 		-DENABLE_GD=OFF \
 		-DENABLE_PCRE2=OFF \
-		-DENABLE_LUAJIT=ON \
-		-DENABLE_TORCH=ON \
+		-DENABLE_LUAJIT=$(ENABLED_FOR_ARCH) \
+		-DENABLE_TORCH=$(ENABLED_FOR_ARCH) \
 		-DENABLE_LIBUNWIND=ON \
 		-DWANT_SYSTEMD_UNITS=ON
 
