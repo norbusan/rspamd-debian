@@ -6,7 +6,8 @@ include /usr/share/dpkg/buildflags.mk
 export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
 
 # https://github.com/rspamd/rspamd/issues/2202#issuecomment-401545304
-ifneq (,$(filter $(DEB_HOST_ARCH), aarch64, mips64, ppc64le, parisc64, ia64, ppc64))
+include /usr/share/dpkg/architecture.mk
+ifneq ($(filter aarch64 mips64 ppc64le parisc64 ia64 ppc64, $(DEB_HOST_GNU_CPU)),)
   ENABLED_FOR_ARCH = OFF
 else
   ENABLED_FOR_ARCH = ON
