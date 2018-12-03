@@ -666,6 +666,14 @@ rspamd_controller_check_password (struct rspamd_http_connection_entry *entry,
 			}
 			else {
 				check_enable = FALSE;
+
+				if (check_normal) {
+					/*
+					 * If no enable password is specified use normal password as
+					 * enable password
+					 */
+					session->is_enable = TRUE;
+				}
 			}
 		}
 	}
@@ -814,7 +822,7 @@ rspamd_controller_handle_symbols (struct rspamd_http_connection_entry *conn_ent,
 					"description", 0, false);
 			}
 
-			if (rspamd_symbols_cache_stat_symbol (session->ctx->cfg->cache,
+			if (rspamd_symcache_stat_symbol (session->ctx->cfg->cache,
 					sym->name, &freq, &freq_dev, &tm, NULL)) {
 				ucl_object_insert_key (sym_obj,
 						ucl_object_fromdouble (freq),
@@ -1514,10 +1522,9 @@ rspamd_controller_handle_lua_history (lua_State *L,
 
 			if (lua_isfunction (L, -1)) {
 				task = rspamd_task_new (session->ctx->worker, session->cfg,
-						session->pool, ctx->lang_det);
+						session->pool, ctx->lang_det, ctx->ev_base);
 
 				task->resolver = ctx->resolver;
-				task->ev_base = ctx->ev_base;
 				task->s = rspamd_session_create (session->pool,
 						rspamd_controller_history_lua_fin_task,
 						NULL,
@@ -1815,11 +1822,9 @@ rspamd_controller_handle_lua (struct rspamd_http_connection_entry *conn_ent,
 	}
 
 	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool,
-			ctx->lang_det);
+			ctx->lang_det, ctx->ev_base);
 
 	task->resolver = ctx->resolver;
-	task->ev_base = ctx->ev_base;
-
 	task->s = rspamd_session_create (session->pool,
 			rspamd_controller_lua_fin_task,
 			NULL,
@@ -2000,12 +2005,9 @@ rspamd_controller_handle_learn_common (
 	}
 
 	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool,
-			session->ctx->lang_det);
+			session->ctx->lang_det, ctx->ev_base);
 
 	task->resolver = ctx->resolver;
-	task->ev_base = ctx->ev_base;
-
-
 	task->s = rspamd_session_create (session->pool,
 			rspamd_controller_learn_fin_task,
 			NULL,
@@ -2101,12 +2103,9 @@ rspamd_controller_handle_scan (struct rspamd_http_connection_entry *conn_ent,
 	}
 
 	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool,
-			ctx->lang_det);
-	task->ev_base = session->ctx->ev_base;
+			ctx->lang_det, ctx->ev_base);
 
 	task->resolver = ctx->resolver;
-	task->ev_base = ctx->ev_base;
-
 	task->s = rspamd_session_create (session->pool,
 			rspamd_controller_check_fin_task,
 			NULL,
@@ -2592,9 +2591,8 @@ rspamd_controller_handle_stat_common (
 	ctx = session->ctx;
 
 	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool,
-			ctx->lang_det);
+			ctx->lang_det, ctx->ev_base);
 	task->resolver = ctx->resolver;
-	task->ev_base = ctx->ev_base;
 	cbdata = rspamd_mempool_alloc0 (session->pool, sizeof (*cbdata));
 	cbdata->conn_ent = conn_ent;
 	cbdata->task = task;
@@ -2735,7 +2733,7 @@ rspamd_controller_handle_counters (
 {
 	struct rspamd_controller_session *session = conn_ent->ud;
 	ucl_object_t *top;
-	struct symbols_cache *cache;
+	struct rspamd_symcache *cache;
 
 	if (!rspamd_controller_check_password (conn_ent, session, msg, FALSE)) {
 		return 0;
@@ -2744,7 +2742,7 @@ rspamd_controller_handle_counters (
 	cache = session->ctx->cfg->cache;
 
 	if (cache != NULL) {
-		top = rspamd_symbols_cache_counters (cache);
+		top = rspamd_symcache_counters (cache);
 		rspamd_controller_send_ucl (conn_ent, top);
 		ucl_object_unref (top);
 	}
@@ -2762,13 +2760,32 @@ rspamd_controller_handle_custom (struct rspamd_http_connection_entry *conn_ent,
 	struct rspamd_controller_session *session = conn_ent->ud;
 	struct rspamd_custom_controller_command *cmd;
 	gchar *url_str;
+	struct http_parser_url u;
+	rspamd_ftok_t lookup;
 
-	url_str = rspamd_fstring_cstr (msg->url);
+	http_parser_parse_url (msg->url->str, msg->url->len, TRUE, &u);
+
+	if (u.field_set & (1 << UF_PATH)) {
+		guint unnorm_len;
+		lookup.begin = msg->url->str + u.field_data[UF_PATH].off;
+		lookup.len = u.field_data[UF_PATH].len;
+
+		rspamd_http_normalize_path_inplace ((gchar *)lookup.begin,
+				lookup.len,
+				&unnorm_len);
+		lookup.len = unnorm_len;
+	}
+	else {
+		lookup.begin = msg->url->str;
+		lookup.len = msg->url->len;
+	}
+
+	url_str = rspamd_ftok_cstr (&lookup);
 	cmd = g_hash_table_lookup (session->ctx->custom_commands, url_str);
 	g_free (url_str);
 
 	if (cmd == NULL || cmd->handler == NULL) {
-		msg_err_session ("custom command %V has not been found", msg->url);
+		msg_err_session ("custom command %T has not been found", &lookup);
 		rspamd_controller_send_error (conn_ent, 404, "No command associated");
 		return 0;
 	}
@@ -2783,6 +2800,33 @@ rspamd_controller_handle_custom (struct rspamd_http_connection_entry *conn_ent,
 			400,
 			"Empty body is not permitted");
 		return 0;
+	}
+
+	/* Transfer query arguments to headers */
+	if (u.field_set & (1u << UF_QUERY)) {
+		GHashTable *query_args;
+		GHashTableIter it;
+		gpointer k, v;
+		rspamd_ftok_t *key, *value;
+
+		/* In case if we have a query, we need to store it somewhere */
+		query_args = rspamd_http_message_parse_query (msg);
+
+		/* Insert the rest of query params as HTTP headers */
+		g_hash_table_iter_init (&it, query_args);
+
+		while (g_hash_table_iter_next (&it, &k, &v)) {
+			key = k;
+			value = v;
+			/* Steal strings */
+			g_hash_table_iter_steal (&it);
+			url_str = rspamd_ftok_cstr (key);
+			rspamd_http_message_add_header_len (msg, url_str,
+					value->begin, value->len);
+			g_free (url_str);
+		}
+
+		g_hash_table_unref (query_args);
 	}
 
 	return cmd->handler (conn_ent, msg, cmd->ctx);
@@ -2955,11 +2999,9 @@ rspamd_controller_handle_lua_plugin (struct rspamd_http_connection_entry *conn_e
 	}
 
 	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool,
-			ctx->lang_det);
+			ctx->lang_det, ctx->ev_base);
 
 	task->resolver = ctx->resolver;
-	task->ev_base = ctx->ev_base;
-
 	task->s = rspamd_session_create (session->pool,
 			rspamd_controller_lua_fin_task,
 			NULL,
@@ -3829,7 +3871,7 @@ start_controller_worker (struct rspamd_worker *worker)
 
 	rspamd_upstreams_library_config (worker->srv->cfg, worker->srv->cfg->ups_ctx,
 			ctx->ev_base, ctx->resolver->r);
-	rspamd_symbols_cache_start_refresh (worker->srv->cfg->cache, ctx->ev_base,
+	rspamd_symcache_start_refresh (worker->srv->cfg->cache, ctx->ev_base,
 			worker);
 	rspamd_stat_init (worker->srv->cfg, ctx->ev_base);
 

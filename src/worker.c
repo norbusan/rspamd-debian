@@ -97,9 +97,8 @@ rspamd_worker_call_finish_handlers (struct rspamd_worker *worker)
 	if (cfg->finish_callbacks) {
 		ctx = worker->ctx;
 		/* Create a fake task object for async events */
-		task = rspamd_task_new (worker, cfg, NULL, NULL);
+		task = rspamd_task_new (worker, cfg, NULL, NULL, ctx->ev_base);
 		task->resolver = ctx->resolver;
-		task->ev_base = ctx->ev_base;
 		task->flags |= RSPAMD_TASK_FLAG_PROCESSING;
 		task->s = rspamd_session_create (task->task_pool,
 				rspamd_worker_finalize,
@@ -343,7 +342,7 @@ accept_socket (gint fd, short what, void *arg)
 	struct rspamd_worker_ctx *ctx;
 	struct rspamd_task *task;
 	rspamd_inet_addr_t *addr;
-	gint nfd;
+	gint nfd, http_opts = 0;
 
 	ctx = worker->ctx;
 
@@ -364,7 +363,7 @@ accept_socket (gint fd, short what, void *arg)
 		return;
 	}
 
-	task = rspamd_task_new (worker, ctx->cfg, NULL, ctx->lang_det);
+	task = rspamd_task_new (worker, ctx->cfg, NULL, ctx->lang_det, ctx->ev_base);
 
 	msg_info_task ("accepted connection from %s port %d, task ptr: %p",
 		rspamd_inet_address_to_string (addr),
@@ -387,15 +386,18 @@ accept_socket (gint fd, short what, void *arg)
 	/* TODO: allow to disable autolearn in protocol */
 	task->flags |= RSPAMD_TASK_FLAG_LEARN_AUTO;
 
+	if (ctx->encrypted_only && !rspamd_inet_address_is_local (addr, FALSE)) {
+		http_opts = RSPAMD_HTTP_REQUIRE_ENCRYPTION;
+	}
+
 	task->http_conn = rspamd_http_connection_new (rspamd_worker_body_handler,
 			rspamd_worker_error_handler,
 			rspamd_worker_finish_handler,
-			0,
+			http_opts,
 			RSPAMD_HTTP_SERVER,
 			ctx->keys_cache,
 			NULL);
 	rspamd_http_connection_set_max_size (task->http_conn, task->cfg->max_message);
-	task->ev_base = ctx->ev_base;
 	worker->nconns++;
 	rspamd_mempool_add_destructor (task->task_pool,
 		(rspamd_mempool_destruct_t)reduce_tasks_count, worker);
@@ -549,30 +551,13 @@ init_worker (struct rspamd_config *cfg)
 
 	rspamd_rcl_register_worker_option (cfg,
 			type,
-			"http",
+			"encrypted_only",
 			rspamd_rcl_parse_struct_boolean,
 			ctx,
-			G_STRUCT_OFFSET (struct rspamd_worker_ctx, is_http),
+			G_STRUCT_OFFSET (struct rspamd_worker_ctx, encrypted_only),
 			0,
 			"Deprecated: always true now");
 
-	rspamd_rcl_register_worker_option (cfg,
-			type,
-			"json",
-			rspamd_rcl_parse_struct_boolean,
-			ctx,
-			G_STRUCT_OFFSET (struct rspamd_worker_ctx, is_json),
-			0,
-			"Deprecated: always true now");
-
-	rspamd_rcl_register_worker_option (cfg,
-			type,
-			"allow_learn",
-			rspamd_rcl_parse_struct_boolean,
-			ctx,
-			G_STRUCT_OFFSET (struct rspamd_worker_ctx, allow_learn),
-			0,
-			"Deprecated: disabled and forgotten");
 
 	rspamd_rcl_register_worker_option (cfg,
 			type,
@@ -670,7 +655,7 @@ start_worker (struct rspamd_worker *worker)
 	ctx->cfg = worker->srv->cfg;
 	ctx->ev_base = rspamd_prepare_worker (worker, "normal", accept_socket);
 	msec_to_tv (ctx->timeout, &ctx->io_tv);
-	rspamd_symbols_cache_start_refresh (worker->srv->cfg->cache, ctx->ev_base,
+	rspamd_symcache_start_refresh (worker->srv->cfg->cache, ctx->ev_base,
 			worker);
 
 	ctx->resolver = dns_resolver_init (worker->srv->logger,

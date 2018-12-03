@@ -132,8 +132,16 @@ LUA_FUNCTION_DEF (textpart, get_stats);
 LUA_FUNCTION_DEF (textpart, get_words_count);
 
 /***
- * @method mime_part:get_words()
- * Get words in the part
+ * @method mime_part:get_words([how])
+ * Get words in the part. Optional `how` argument defines type of words returned:
+ * - `stem`: stemmed words (default)
+ * - `norm`: normalised words (utf normalised + lowercased)
+ * - `raw`: raw words in utf (if possible)
+ * - `full`: list of tables, each table has the following fields:
+ *   - [1] - stemmed word
+ *   - [2] - normalised word
+ *   - [3] - raw word
+ *   - [4] - flags (table of strings)
  * @return {table/strings} words in the part
  */
 LUA_FUNCTION_DEF (textpart, get_words);
@@ -162,6 +170,13 @@ LUA_FUNCTION_DEF (textpart, get_html);
  * @return {string} short abbreviation (such as `ru`) for the script's language
  */
 LUA_FUNCTION_DEF (textpart, get_language);
+
+/***
+ * @method text_part:get_charset()
+ * Returns part real charset
+ * @return {string} charset of the part
+ */
+LUA_FUNCTION_DEF (textpart, get_charset);
 /***
  * @method text_part:get_languages()
  * Returns array of tables of all languages detected for a part:
@@ -205,6 +220,7 @@ static const struct luaL_reg textpartlib_m[] = {
 	LUA_INTERFACE_DEF (textpart, is_html),
 	LUA_INTERFACE_DEF (textpart, get_html),
 	LUA_INTERFACE_DEF (textpart, get_language),
+	LUA_INTERFACE_DEF (textpart, get_charset),
 	LUA_INTERFACE_DEF (textpart, get_languages),
 	LUA_INTERFACE_DEF (textpart, get_mimepart),
 	LUA_INTERFACE_DEF (textpart, get_stats),
@@ -355,6 +371,12 @@ LUA_FUNCTION_DEF (mimepart, get_image);
  * @return {bool} true if a part is an archive
  */
 LUA_FUNCTION_DEF (mimepart, is_archive);
+/***
+ * @method mime_part:is_attachment()
+ * Returns true if mime part looks like an attachment
+ * @return {bool} true if a part looks like an attachment
+ */
+LUA_FUNCTION_DEF (mimepart, is_attachment);
 
 /***
  * @method mime_part:get_archive()
@@ -402,6 +424,13 @@ LUA_FUNCTION_DEF (mimepart, get_text);
  * @return {string} 128 characters hex string with digest of the part
  */
 LUA_FUNCTION_DEF (mimepart, get_digest);
+
+/***
+ * @method mime_part:get_id()
+ * Returns the order of the part in parts list
+ * @return {number} index of the part (starting from 1 as it is Lua API)
+ */
+LUA_FUNCTION_DEF (mimepart, get_id);
 /***
  * @method mime_part:is_broken()
  * Returns true if mime part has incorrectly specified content type
@@ -442,8 +471,10 @@ static const struct luaL_reg mimepartlib_m[] = {
 	LUA_INTERFACE_DEF (mimepart, get_children),
 	LUA_INTERFACE_DEF (mimepart, is_text),
 	LUA_INTERFACE_DEF (mimepart, is_broken),
+	LUA_INTERFACE_DEF (mimepart, is_attachment),
 	LUA_INTERFACE_DEF (mimepart, get_text),
 	LUA_INTERFACE_DEF (mimepart, get_digest),
+	LUA_INTERFACE_DEF (mimepart, get_id),
 	LUA_INTERFACE_DEF (mimepart, headers_foreach),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
@@ -725,7 +756,7 @@ lua_textpart_get_words_count (lua_State *L)
 		lua_pushinteger (L, 0);
 	}
 	else {
-		lua_pushinteger (L, part->utf_words->len);
+		lua_pushinteger (L, part->nwords);
 	}
 
 	return 1;
@@ -736,8 +767,7 @@ lua_textpart_get_words (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_mime_text_part *part = lua_check_textpart (L);
-	rspamd_stat_token_t *w;
-	guint i;
+	enum rspamd_lua_words_type how = RSPAMD_LUA_WORDS_STEM;
 
 	if (part == NULL) {
 		return luaL_error (L, "invalid arguments");
@@ -747,14 +777,27 @@ lua_textpart_get_words (lua_State *L)
 		lua_createtable (L, 0, 0);
 	}
 	else {
-		lua_createtable (L, part->utf_words->len, 0);
+		if (lua_type (L, 2) == LUA_TSTRING) {
+			const gchar *how_str = lua_tostring (L, 2);
 
-		for (i = 0; i < part->utf_words->len; i ++) {
-			w = &g_array_index (part->utf_words, rspamd_stat_token_t, i);
-
-			lua_pushlstring (L, w->begin, w->len);
-			lua_rawseti (L, -2, i + 1);
+			if (strcmp (how_str, "stem") == 0) {
+				how = RSPAMD_LUA_WORDS_STEM;
+			}
+			else if (strcmp (how_str, "norm") == 0) {
+				how = RSPAMD_LUA_WORDS_NORM;
+			}
+			else if (strcmp (how_str, "raw") == 0) {
+				how = RSPAMD_LUA_WORDS_RAW;
+			}
+			else if (strcmp (how_str, "full") == 0) {
+				how = RSPAMD_LUA_WORDS_FULL;
+			}
+			else {
+				return luaL_error (L, "unknown words type: %s", how_str);
+			}
 		}
+
+		return rspamd_lua_push_words (L, part->utf_words, how);
 	}
 
 	return 1;
@@ -834,6 +877,28 @@ lua_textpart_get_language (lua_State * L)
 }
 
 static gint
+lua_textpart_get_charset (lua_State * L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_mime_text_part *part = lua_check_textpart (L);
+
+	if (part != NULL) {
+		if (part->real_charset != NULL) {
+			lua_pushstring (L, part->real_charset);
+			return 1;
+		}
+		else {
+			lua_pushnil (L);
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
 lua_textpart_get_languages (lua_State * L)
 {
 	LUA_TRACE_POINT;
@@ -878,8 +943,8 @@ struct lua_shingle_data {
 #define STORE_TOKEN(i, t) do { \
     if ((i) < part->utf_words->len) { \
         word = &g_array_index (part->utf_words, rspamd_stat_token_t, (i)); \
-        sd->t.begin = word->begin; \
-        sd->t.len = word->len; \
+        sd->t.begin = word->stemmed.begin; \
+        sd->t.len = word->stemmed.len; \
     } \
     }while (0)
 
@@ -938,7 +1003,8 @@ lua_textpart_get_fuzzy_hashes (lua_State * L)
 
 		for (i = 0; i < part->utf_words->len; i ++) {
 			word = &g_array_index (part->utf_words, rspamd_stat_token_t, i);
-			rspamd_cryptobox_hash_update (&st, word->begin, word->len);
+			rspamd_cryptobox_hash_update (&st,
+					word->stemmed.begin, word->stemmed.len);
 		}
 
 		rspamd_cryptobox_hash_final (&st, digest);
@@ -1318,6 +1384,37 @@ lua_mimepart_is_multipart (lua_State * L)
 }
 
 static gint
+lua_mimepart_is_attachment (lua_State * L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	if (!(part->flags & (RSPAMD_MIME_PART_IMAGE|RSPAMD_MIME_PART_TEXT))) {
+		if (part->cd && part->cd->type == RSPAMD_CT_ATTACHMENT) {
+			lua_pushboolean (L, true);
+		}
+		else {
+			if (part->cd && part->cd->filename.len > 0) {
+				/* We still have filename and it is not an image */
+				lua_pushboolean (L, true);
+			}
+			else {
+				lua_pushboolean (L, false);
+			}
+		}
+	}
+	else {
+		lua_pushboolean (L, false);
+	}
+
+	return 1;
+}
+
+static gint
 lua_mimepart_is_text (lua_State * L)
 {
 	LUA_TRACE_POINT;
@@ -1467,6 +1564,21 @@ lua_mimepart_get_digest (lua_State * L)
 	rspamd_encode_hex_buf (part->digest, sizeof (part->digest),
 			digestbuf, sizeof (digestbuf));
 	lua_pushstring (L, digestbuf);
+
+	return 1;
+}
+
+static gint
+lua_mimepart_get_id (lua_State * L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	lua_pushnumber (L, part->id);
 
 	return 1;
 }

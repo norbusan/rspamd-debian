@@ -33,6 +33,7 @@
 #endif
 
 #include <math.h>
+#include <unicode/uchar.h>
 
 #define GTUBE_SYMBOL "GTUBE"
 
@@ -60,108 +61,46 @@ static void
 rspamd_mime_part_extract_words (struct rspamd_task *task,
 		struct rspamd_mime_text_part *part)
 {
-#ifdef WITH_SNOWBALL
-	struct sb_stemmer *stem = NULL;
-#endif
 	rspamd_stat_token_t *w;
-	gchar *temp_word;
-	const guchar *r;
-	guint i, nlen, total_len = 0, short_len = 0;
-	gdouble avg_len = 0;
+	guint i, total_len = 0, short_len = 0;
 
 	if (part->utf_words) {
-#ifdef WITH_SNOWBALL
-		static GHashTable *stemmers = NULL;
-
-		if (part->language && part->language[0] != '\0' && IS_PART_UTF (part)) {
-
-			if (!stemmers) {
-				stemmers = g_hash_table_new (rspamd_strcase_hash,
-						rspamd_strcase_equal);
-			}
-
-			stem = g_hash_table_lookup (stemmers, part->language);
-
-			if (stem == NULL) {
-
-				stem = sb_stemmer_new (part->language, "UTF_8");
-
-				if (stem == NULL) {
-					msg_debug_task (
-							"<%s> cannot create lemmatizer for %s language",
-							task->message_id, part->language);
-				} else {
-					g_hash_table_insert (stemmers, g_strdup (part->language),
-							stem);
-				}
-			}
-		}
-#endif
-
+		rspamd_stem_words (part->utf_words, task->task_pool, part->language,
+					task->lang_det);
 
 		for (i = 0; i < part->utf_words->len; i++) {
 			guint64 h;
 
 			w = &g_array_index (part->utf_words, rspamd_stat_token_t, i);
-			r = NULL;
-#ifdef WITH_SNOWBALL
-			if (stem) {
-				r = sb_stemmer_stem (stem, w->begin, w->len);
-			}
-#endif
 
-			if (w->len > 0 && (w->flags & RSPAMD_STAT_TOKEN_FLAG_TEXT)) {
-				avg_len = avg_len + (w->len - avg_len) / (double) (i + 1);
-
-				if (r != NULL) {
-					nlen = strlen (r);
-					nlen = MIN (nlen, w->len);
-					temp_word = rspamd_mempool_alloc (task->task_pool, nlen);
-					memcpy (temp_word, r, nlen);
-
-					if (IS_PART_UTF (part)) {
-						rspamd_str_lc_utf8 (temp_word, nlen);
-					}
-					else {
-						rspamd_str_lc (temp_word, nlen);
-					}
-
-					w->begin = temp_word;
-					w->len = nlen;
-				}
-				else {
-					temp_word = rspamd_mempool_alloc (task->task_pool, w->len);
-					memcpy (temp_word, w->begin, w->len);
-
-					if (IS_PART_UTF (part)) {
-						rspamd_str_lc_utf8 (temp_word, w->len);
-					}
-					else {
-						rspamd_str_lc (temp_word, w->len);
-					}
-
-					w->begin = temp_word;
-				}
-			}
-
-			if (w->len > 0) {
+			if (w->stemmed.len > 0) {
 				/*
 				 * We use static hash seed if we would want to use that in shingles
 				 * computation in future
 				 */
 				h = rspamd_cryptobox_fast_hash_specific (
 						RSPAMD_CRYPTOBOX_HASHFAST_INDEPENDENT,
-						w->begin, w->len, words_hash_seed);
+						w->stemmed.begin, w->stemmed.len, words_hash_seed);
 				g_array_append_val (part->normalized_hashes, h);
-				total_len += w->len;
+				total_len += w->stemmed.len;
 
-				if (w->len <= 3) {
+				if (w->stemmed.len <= 3) {
 					short_len++;
 				}
 			}
+
+			if (w->flags & RSPAMD_STAT_TOKEN_FLAG_TEXT) {
+				part->nwords ++;
+			}
+
+			if (w->flags & (RSPAMD_STAT_TOKEN_FLAG_BROKEN_UNICODE|
+						RSPAMD_STAT_TOKEN_FLAG_NORMALISED|
+					RSPAMD_STAT_TOKEN_FLAG_INVISIBLE_SPACES)) {
+				task->flags |= RSPAMD_TASK_FLAG_BAD_UNICODE;
+			}
 		}
 
-		if (part->utf_words && part->utf_words->len) {
+		if (part->utf_words->len) {
 			gdouble *avg_len_p, *short_len_p;
 
 			avg_len_p = rspamd_mempool_get_variable (task->task_pool,
@@ -202,7 +141,37 @@ rspamd_mime_part_create_words (struct rspamd_task *task,
 	enum rspamd_tokenize_type tok_type;
 
 	if (IS_PART_UTF (part)) {
+
+#if U_ICU_VERSION_MAJOR_NUM < 50
+		/* Hack to prevent hang with Thai in old libicu */
+		const gchar *p = part->utf_stripped_content->data, *end;
+		guint i = 0;
+		end = p + part->utf_stripped_content->len;
+		gint32 uc, sc;
+
 		tok_type = RSPAMD_TOKENIZE_UTF;
+
+		while (p + i < end) {
+			U8_NEXT (p, i, part->utf_stripped_content->len, uc);
+
+			if (((gint32) uc) < 0) {
+				tok_type = RSPAMD_TOKENIZE_RAW;
+				break;
+			}
+
+			if (u_isalpha (uc)) {
+				sc = ublock_getCode (uc);
+
+				if (sc == UBLOCK_THAI) {
+					msg_info_task ("enable workaround for Thai characters for old libicu");
+					tok_type = RSPAMD_TOKENIZE_RAW;
+					break;
+				}
+			}
+		}
+#else
+		tok_type = RSPAMD_TOKENIZE_UTF;
+#endif
 	}
 	else {
 		tok_type = RSPAMD_TOKENIZE_RAW;
@@ -214,12 +183,13 @@ rspamd_mime_part_create_words (struct rspamd_task *task,
 			&part->utf_stripped_text,
 			tok_type, task->cfg,
 			part->exceptions,
-			NULL);
+			NULL, NULL);
 
 
 	if (part->utf_words) {
 		part->normalized_hashes = g_array_sized_new (FALSE, FALSE,
 				sizeof (guint64), part->utf_words->len);
+		rspamd_normalize_words (part->utf_words, task->task_pool);
 	}
 
 }
@@ -680,7 +650,6 @@ rspamd_message_process_plain_text_part (struct rspamd_task *task,
 	if (text_part->utf_raw_content != NULL) {
 		/* Different from HTML, where we also parse HTML and strip tags */
 		text_part->utf_content = text_part->utf_raw_content;
-		text_part->unicode_content = text_part->unicode_raw_content;
 	}
 	else {
 		/*
@@ -727,17 +696,9 @@ rspamd_message_process_html_text_part (struct rspamd_task *task,
 		text_part->flags |= RSPAMD_MIME_TEXT_PART_FLAG_EMPTY;
 	}
 
-	/* Also add unicode content */
-	text_part->unicode_content =  g_array_sized_new (FALSE, FALSE,
-			sizeof (UChar), text_part->utf_content->len + 1);
-	rspamd_utf_to_unicode (text_part->utf_content, text_part->unicode_content);
-
 	rspamd_mempool_add_destructor (task->task_pool,
 			(rspamd_mempool_destruct_t) free_byte_array_callback,
 			text_part->utf_content);
-	rspamd_mempool_add_destructor (task->task_pool,
-			rspamd_array_free_hard,
-			text_part->unicode_content);
 
 	return TRUE;
 }
@@ -780,7 +741,35 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 				found_html = TRUE;
 			}
 			else {
-				found_txt = TRUE;
+				/* We need to be extra careful with some stupid things here */
+
+				html_tok.begin = "plain";
+				html_tok.len = 5;
+
+				if (rspamd_ftok_cmp (&mime_part->ct->subtype, &html_tok) == 0) {
+					found_txt = TRUE;
+				}
+				else {
+					if (mime_part->cd && mime_part->cd->filename.len > 4) {
+						const gchar *pos = mime_part->cd->filename.begin +
+										   mime_part->cd->filename.len -
+										   sizeof (".txt") + 1;
+						if (rspamd_lc_cmp (pos, ".txt", sizeof ("txt") - 1) == 0) {
+							found_txt = TRUE;
+						}
+						else {
+							msg_debug_task ("found mime part with incorrect content-type: %T/%T, "
+										   "filename: %T",
+									&mime_part->ct->type,
+									&mime_part->ct->subtype,
+									&mime_part->cd->filename);
+						}
+					}
+					else {
+						/* For something like Content-Type: text */
+						found_txt = TRUE;
+					}
+				}
 			}
 
 			if (found_html) {
@@ -1235,7 +1224,7 @@ rspamd_message_process (struct rspamd_task *task)
 						sel = p2;
 					}
 					else {
-						if (p1->unicode_content->len > p2->unicode_content->len) {
+						if (p1->utf_content->len > p2->utf_content->len) {
 							sel = p1;
 						}
 						else {
@@ -1308,7 +1297,7 @@ rspamd_message_process (struct rspamd_task *task)
 		rspamd_mime_part_extract_words (task, text_part);
 
 		if (text_part->utf_words) {
-			total_words += text_part->utf_words->len;
+			total_words += text_part->nwords;
 		}
 	}
 
@@ -1327,6 +1316,8 @@ rspamd_message_process (struct rspamd_task *task)
 			*var /= (double)total_words;
 		}
 	}
+
+	rspamd_tokenize_meta_words (task);
 }
 
 

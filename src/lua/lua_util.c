@@ -734,7 +734,7 @@ lua_util_config_from_ucl (lua_State *L)
 		cfg->lua_state = L;
 
 		cfg->rcl_obj = obj;
-		cfg->cache = rspamd_symbols_cache_new (cfg);
+		cfg->cache = rspamd_symcache_new (cfg);
 		top = rspamd_rcl_config_init (cfg, NULL);
 
 		if (!rspamd_rcl_parse (top, cfg, cfg, cfg->cfg_pool, cfg->rcl_obj, &err)) {
@@ -743,6 +743,11 @@ lua_util_config_from_ucl (lua_State *L)
 			lua_pushnil (L);
 		}
 		else {
+
+			if (int_options & RSPAMD_CONFIG_INIT_LIBS) {
+				cfg->libs_ctx = rspamd_init_libs ();
+			}
+
 			rspamd_config_post_load (cfg, int_options);
 			pcfg = lua_newuserdata (L, sizeof (struct rspamd_config *));
 			rspamd_lua_setclass (L, "rspamd{config}", -1);
@@ -780,8 +785,7 @@ lua_util_process_message (lua_State *L)
 	if (cfg != NULL && message != NULL) {
 		base = event_init ();
 		rspamd_init_filters (cfg, FALSE);
-		task = rspamd_task_new (NULL, cfg, NULL, NULL);
-		task->ev_base = base;
+		task = rspamd_task_new (NULL, cfg, NULL, NULL, base);
 		task->msg.begin = rspamd_mempool_alloc (task->task_pool, mlen);
 		rspamd_strlcpy ((gpointer)task->msg.begin, message, mlen);
 		task->msg.len = mlen;
@@ -1116,7 +1120,7 @@ lua_util_tokenize_text (lua_State *L)
 					ex = g_malloc0 (sizeof (*ex));
 					ex->pos = pos;
 					ex->len = ex_len;
-					ex->type = RSPAMD_EXCEPTION_URL;
+					ex->type = RSPAMD_EXCEPTION_GENERIC;
 					exceptions = g_list_prepend (exceptions, ex);
 				}
 			}
@@ -1140,7 +1144,7 @@ lua_util_tokenize_text (lua_State *L)
 			&utxt,
 			RSPAMD_TOKENIZE_UTF, NULL,
 			exceptions,
-			NULL);
+			NULL, NULL);
 
 	if (res == NULL) {
 		lua_pushnil (L);
@@ -1150,7 +1154,7 @@ lua_util_tokenize_text (lua_State *L)
 
 		for (i = 0; i < res->len; i ++) {
 			w = &g_array_index (res, rspamd_stat_token_t, i);
-			lua_pushlstring (L, w->begin, w->len);
+			lua_pushlstring (L, w->original.begin, w->original.len);
 			lua_rawseti (L, -2, i + 1);
 		}
 	}
@@ -1873,7 +1877,7 @@ lua_util_create_file (lua_State *L)
 			mode = lua_tointeger (L, 2);
 		}
 
-		fd = rspamd_file_xopen (fpath, O_RDWR | O_CREAT | O_EXCL, mode, 0);
+		fd = rspamd_file_xopen (fpath, O_RDWR | O_CREAT | O_TRUNC, mode, 0);
 
 		if (fd == -1) {
 			lua_pushnil (L);
@@ -2454,7 +2458,7 @@ static gint
 lua_util_readline (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	const gchar *prompt = NULL;
+	const gchar *prompt = "";
 	gchar *input;
 
 	if (lua_type (L, 1) == LUA_TSTRING) {
