@@ -20,7 +20,7 @@
 #include "config.h"
 #include "mem_pool.h"
 #include "upstream.h"
-#include "symbols_cache.h"
+#include "rspamd_symcache.h"
 #include "cfg_rcl.h"
 #include "ucl.h"
 #include "regexp.h"
@@ -174,6 +174,8 @@ struct rspamd_classifier_config {
 	gchar *name;                                    /**< unique name of classifier							*/
 	guint32 min_tokens;                             /**< minimal number of tokens to process classifier 	*/
 	guint32 max_tokens;                             /**< maximum number of tokens							*/
+	guint min_token_hits;                           /**< minimum number of hits for a token to be considered */
+	gdouble min_prob_strength;                      /**< use only tokens with probability in [0.5 - MPS, 0.5 + MPS] */
 	guint min_learns;                               /**< minimum number of learns for each statfile			*/
 	guint flags;
 };
@@ -375,7 +377,7 @@ struct rspamd_config {
 	gdouble monitored_interval;                     /**< interval between monitored checks					*/
 	gboolean disable_monitored;                     /**< disable monitoring completely						*/
 
-	struct symbols_cache *cache;                    /**< symbols cache object								*/
+	struct rspamd_symcache *cache;                    /**< symbols cache object								*/
 	gchar *cache_filename;                          /**< filename of cache file								*/
 	gdouble cache_reload_time;                      /**< how often cache reload should be performed			*/
 	gchar * checksum;                               /**< real checksum of config file						*/

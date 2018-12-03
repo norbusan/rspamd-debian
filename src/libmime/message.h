@@ -51,11 +51,16 @@ struct rspamd_mime_part {
 	rspamd_ftok_t raw_data;
 	rspamd_ftok_t parsed_data;
 	struct rspamd_mime_part *parent_part;
-	GHashTable *raw_headers;
+
 	GQueue *headers_order;
+	GHashTable *raw_headers;
+
 	gchar *raw_headers_str;
 	gsize raw_headers_len;
+
 	enum rspamd_cte cte;
+	enum rspamd_mime_part_flags flags;
+	guint id;
 
 	union {
 		struct rspamd_mime_multipart mp;
@@ -64,7 +69,6 @@ struct rspamd_mime_part {
 		struct rspamd_archive *arch;
 	} specific;
 
-	enum rspamd_mime_part_flags flags;
 	guchar digest[rspamd_cryptobox_HASHBYTES];
 };
 
@@ -100,10 +104,6 @@ struct rspamd_mime_text_part {
 	GArray *utf_words;
 	UText utf_stripped_text; /* Used by libicu to represent the utf8 content */
 
-	/* Unicode content, used by libicu */
-	GArray *unicode_raw_content; /* unicode raw content (of UChar) */
-	GArray *unicode_content; /* unicode processed content (of UChar) */
-
 	GPtrArray *newlines;	/**< positions of newlines in text, relative to content*/
 	struct html_content *html;
 	GList *exceptions;	/**< list of offsets of urls						*/
@@ -112,6 +112,7 @@ struct rspamd_mime_text_part {
 	guint flags;
 	guint nlines;
 	guint spaces;
+	guint nwords;
 	guint non_ascii_chars;
 	guint ascii_chars;
 	guint double_spaces;

@@ -137,7 +137,7 @@ rspamd_email_address_add (rspamd_mempool_t *pool,
 	}
 
 	if (name->len > 0) {
-		elt->name = rspamd_mime_header_decode (pool, name->str, name->len);
+		elt->name = rspamd_mime_header_decode (pool, name->str, name->len, NULL);
 	}
 
 	g_ptr_array_add (ar, elt);
@@ -202,6 +202,7 @@ rspamd_email_address_check_and_add (const gchar *start, gsize len,
 	struct rspamd_email_address addr;
 
 	/* The whole email is likely address */
+	memset (&addr, 0, sizeof (addr));
 	rspamd_smtp_addr_parse (start, len, &addr);
 
 	if (addr.flags & RSPAMD_EMAIL_ADDR_VALID) {
