@@ -1,4 +1,4 @@
-/var/log/rspamd/rspamd.log{
+/var/log/rspamd/rspamd.log {
        daily
        rotate 4
        delaycompress
@@ -6,7 +6,7 @@
        notifempty
        missingok
        postrotate
-          service rspamd reopenlog >/dev/null 2>&1 || true
+          systemctl kill --signal=SIGUSR1 rspamd >/dev/null 2>&1 \
+             || service rspamd reopenlog >/dev/null 2>&1 || true
        endscript
 }
-
