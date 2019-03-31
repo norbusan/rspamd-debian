@@ -2,6 +2,13 @@
 
 set -x
 
+# refs: #914477
+sleep 15
+
 systemctl status rspamd
 
+# refs: #914477
+sleep 5
+
+# TODO: more complicated tests ?
 curl -s http://127.0.0.1:11334
