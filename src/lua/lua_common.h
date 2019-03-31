@@ -7,6 +7,7 @@
 #include <lua.h>
 #include <lauxlib.h>
 #include <lualib.h>
+#include <stdbool.h>
 
 #include "rspamd.h"
 #include "ucl.h"
@@ -281,6 +282,7 @@ void luaopen_fann (lua_State *L);
 void luaopen_sqlite3 (lua_State *L);
 void luaopen_cryptobox (lua_State *L);
 void luaopen_dns (lua_State *L);
+void luaopen_udp (lua_State * L);
 
 void rspamd_lua_dostring (const gchar *line);
 
@@ -433,6 +435,13 @@ gboolean rspamd_lua_require_function (lua_State *L, const gchar *modname,
 gboolean rspamd_lua_try_load_redis (lua_State *L, const ucl_object_t *obj,
 		struct rspamd_config *cfg, gint *ref_id);
 
+struct rspamd_stat_token_s;
+/**
+ * Pushes a single word into Lua
+ * @param L
+ * @param word
+ */
+void rspamd_lua_push_full_word (lua_State *L, struct rspamd_stat_token_s *word);
 
 enum rspamd_lua_words_type {
 	RSPAMD_LUA_WORDS_STEM = 0,
@@ -456,6 +465,7 @@ gint rspamd_lua_push_words (lua_State *L, GArray *words,
 #define RSPAMD_DBDIR_INDEX "DBDIR"
 #define RSPAMD_LOGDIR_INDEX "LOGDIR"
 #define RSPAMD_PLUGINSDIR_INDEX "PLUGINSDIR"
+#define RSPAMD_SHAREDIR_INDEX "SHAREDIR"
 #define RSPAMD_RULESDIR_INDEX "RULESDIR"
 #define RSPAMD_LUALIBDIR_INDEX "LUALIBDIR"
 #define RSPAMD_WWWDIR_INDEX "WWWDIR"

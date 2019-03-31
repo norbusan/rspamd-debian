@@ -20,7 +20,6 @@
 #include "dns.h"
 #include "rspamd.h"
 #include "utlist.h"
-#include "uthash.h"
 #include "rdns_event.h"
 #include "unix-std.h"
 
@@ -257,7 +256,7 @@ rspamd_dns_server_init (struct upstream *up, guint idx, gpointer ud)
 	void *serv;
 	struct rdns_upstream_elt *elt;
 
-	addr = rspamd_upstream_addr (up);
+	addr = rspamd_upstream_addr_next (up);
 
 	if (r->cfg) {
 		serv = rdns_resolver_add_server (r->r, rspamd_inet_address_to_string (addr),
@@ -499,7 +498,12 @@ rspamd_dns_resolver_config_ucl (struct rspamd_config *cfg,
 				ucl_object_iterate_free (rep_it);
 
 				if (replies) {
-					msg_info_config ("added fake record: %s(%s)", name, rdns_str_from_type (rtype));
+					struct rdns_reply_entry *tmp_entry;
+					guint i = 0;
+					DL_COUNT (replies, tmp_entry, i);
+
+					msg_info_config ("added fake record: %s(%s); %d replies", name,
+							rdns_str_from_type (rtype), i);
 					rdns_resolver_set_fake_reply (dns_resolver->r,
 							name, rtype, rcode, replies);
 				}

@@ -15,7 +15,7 @@
  */
 #include "config.h"
 #include "libutil/util.h"
-#include "libutil/http.h"
+#include "libutil/http_connection.h"
 #include "libutil/http_private.h"
 #include "rspamdclient.h"
 #include "utlist.h"
@@ -67,6 +67,7 @@ static gchar *key = NULL;
 static gchar *user_agent = "rspamc";
 static GList *children;
 static GPatternSpec **exclude_compiled = NULL;
+static struct rspamd_http_context *http_ctx;
 
 static gint retcode = EXIT_SUCCESS;
 
@@ -553,10 +554,6 @@ add_options (GQueue *opts)
 	GString *numbuf;
 	gchar **hdr, **rcpt;
 
-	if (user_agent) {
-		ADD_CLIENT_HEADER (opts, "User-Agent", user_agent);
-	}
-
 	if (ip != NULL) {
 		rspamd_inet_addr_t *addr = NULL;
 
@@ -887,7 +884,15 @@ rspamc_symbols_output (FILE *out, ucl_object_t *obj)
 		}
 	}
 
-	PRINT_PROTOCOL_STRING ("dkim-signature", "DKIM-Signature");
+	elt = ucl_object_lookup (obj, "dkim-signature");
+	if (elt && elt->type == UCL_STRING) {
+		rspamd_fprintf (out, "DKIM-Signature: %s\n", ucl_object_tostring (elt));
+	} else if (elt && elt->type == UCL_ARRAY) {
+		mit = NULL;
+		while ((cmesg = ucl_object_iterate (elt, &mit, true)) != NULL) {
+			rspamd_fprintf (out, "DKIM-Signature: %s\n", ucl_object_tostring (cmesg));
+		}
+	}
 
 	elt = ucl_object_lookup (obj, "profile");
 
@@ -1372,11 +1377,16 @@ rspamc_mime_output (FILE *out, ucl_object_t *result, GString *input,
 		g_string_free (folded_symbuf, TRUE);
 		g_string_free (symbuf, TRUE);
 
-		if (ucl_object_lookup (result, "dkim-signature")) {
+		res = ucl_object_lookup (result, "dkim-signature");
+		if (res && res->type == UCL_STRING) {
 			rspamd_printf_gstring (added_headers, "DKIM-Signature: %s%s",
-					ucl_object_tostring (
-							ucl_object_lookup (result, "dkim-signature")),
-					line_end);
+					ucl_object_tostring (res), line_end);
+		} else if (res && res->type == UCL_ARRAY) {
+			it = NULL;
+			while ((cur = ucl_object_iterate (res, &it, true)) != NULL) {
+				rspamd_printf_gstring (added_headers, "DKIM-Signature: %s%s",
+					ucl_object_tostring (cur), line_end);
+			}
 		}
 
 		if (json || raw || compact) {
@@ -1655,7 +1665,7 @@ rspamc_process_input (struct event_base *ev_base, struct rspamc_command *cmd,
 
 	}
 
-	conn = rspamd_client_init (ev_base, hostbuf, port, timeout, key);
+	conn = rspamd_client_init (http_ctx, ev_base, hostbuf, port, timeout, key);
 
 	if (conn != NULL) {
 		cbdata = g_malloc0 (sizeof (struct rspamc_callback_data));
@@ -1880,6 +1890,15 @@ main (gint argc, gchar **argv, gchar **env)
 
 	rspamd_init_libs ();
 	ev_base = event_base_new ();
+
+	struct rspamd_http_context_cfg http_config;
+
+	memset (&http_config, 0, sizeof (http_config));
+	http_config.kp_cache_size_client = 32;
+	http_config.kp_cache_size_server = 0;
+	http_config.user_agent = user_agent;
+	http_ctx = rspamd_http_context_create_config (&http_config,
+			ev_base);
 
 	/* Ignore sigpipe */
 	sigemptyset (&sigpipe_act.sa_mask);

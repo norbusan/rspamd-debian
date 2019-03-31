@@ -22,9 +22,10 @@
 #include "unix-std.h"
 #include "logger.h"
 #include "ottery.h"
-#include "libutil/http.h"
+#include "libutil/http_connection.h"
 #include "libutil/http_private.h"
 #include "libserver/protocol_internal.h"
+#include "libserver/cfg_file_private.h"
 #include "libmime/filter.h"
 #include "libserver/worker_util.h"
 #include "utlist.h"
@@ -234,6 +235,7 @@ static void
 rspamd_milter_on_protocol_error (struct rspamd_milter_session *session,
 		struct rspamd_milter_private *priv, GError *err)
 {
+	msg_debug_milter ("protocol error: %e", err);
 	priv->state = RSPAMD_MILTER_WANNA_DIE;
 	REF_RETAIN (session);
 	priv->err_cb (priv->fd, session, priv->ud, err);
@@ -1188,6 +1190,7 @@ rspamd_milter_send_action (struct rspamd_milter_session *session,
 	case RSPAMD_MILTER_REJECT:
 	case RSPAMD_MILTER_TEMPFAIL:
 		/* No additional arguments */
+		msg_debug_milter ("send %c command", cmd);
 		SET_COMMAND (cmd, 0, reply, pos);
 		break;
 	case RSPAMD_MILTER_QUARANTINE:
@@ -1198,6 +1201,7 @@ rspamd_milter_send_action (struct rspamd_milter_session *session,
 		}
 
 		len = strlen (reason);
+		msg_debug_milter ("send quarantine action %s", reason);
 		SET_COMMAND (cmd, len + 1, reply, pos);
 		memcpy (pos, reason, len + 1);
 		break;
@@ -1206,6 +1210,7 @@ rspamd_milter_send_action (struct rspamd_milter_session *session,
 		value = va_arg (ap, GString *);
 
 		/* Name and value must be zero terminated */
+		msg_debug_milter ("add header command - \"%v\"=\"%v\"", name, value);
 		SET_COMMAND (cmd, name->len + value->len + 2, reply, pos);
 		memcpy (pos, name->str, name->len + 1);
 		pos += name->len + 1;
@@ -1213,13 +1218,16 @@ rspamd_milter_send_action (struct rspamd_milter_session *session,
 		break;
 	case RSPAMD_MILTER_CHGHEADER:
 	case RSPAMD_MILTER_INSHEADER:
-		idx = htonl (va_arg (ap, guint32));
+		idx = va_arg (ap, guint32);
 		name = va_arg (ap, GString *);
 		value = va_arg (ap, GString *);
 
+		msg_debug_milter ("change/insert header command pos = %d- \"%v\"=\"%v\"",
+				idx, name, value);
 		/* Name and value must be zero terminated */
 		SET_COMMAND (cmd, name->len + value->len + 2 + sizeof (guint32),
 				reply, pos);
+		idx = htonl (idx);
 		memcpy (pos, &idx, sizeof (idx));
 		pos += sizeof (idx);
 		memcpy (pos, name->str, name->len + 1);
@@ -1232,14 +1240,20 @@ rspamd_milter_send_action (struct rspamd_milter_session *session,
 	case RSPAMD_MILTER_CHGFROM:
 		/* Single GString * argument */
 		value = va_arg (ap, GString *);
+		msg_debug_milter ("command %c; value=%v", cmd, value);
 		SET_COMMAND (cmd, value->len + 1, reply, pos);
 		memcpy (pos, value->str, value->len + 1);
 		break;
 	case RSPAMD_MILTER_OPTNEG:
-		ver = htonl (va_arg (ap, guint32));
-		actions = htonl (va_arg (ap, guint32));
-		protocol = htonl (va_arg (ap, guint32));
+		ver = va_arg (ap, guint32);
+		actions = va_arg (ap, guint32);
+		protocol = va_arg (ap, guint32);
 
+		msg_debug_milter ("optneg reply: ver=%d, actions=%d, protocol=%d",
+				ver, actions, protocol);
+		ver = htonl (ver);
+		actions = htonl (actions);
+		protocol = htonl (protocol);
 		SET_COMMAND (cmd, sizeof (guint32) * 3, reply, pos);
 		memcpy (pos, &ver, sizeof (ver));
 		pos += sizeof (ver);
@@ -1530,9 +1544,9 @@ rspamd_milter_remove_header_safe (struct rspamd_milter_session *session,
 					RSPAMD_MILTER_CHGHEADER,
 					nhdr, hname, hvalue);
 		}
-		else if (nhdr == 0) {
+		else if (nhdr == 0 && ar->len > 0) {
 			/* We need to clear all headers */
-			for (i = 1; i <= ar->len; i ++) {
+			for (i = ar->len; i > 0; i --) {
 				rspamd_milter_send_action (session,
 						RSPAMD_MILTER_CHGHEADER,
 						i, hname, hvalue);
@@ -1557,7 +1571,7 @@ rspamd_milter_remove_header_safe (struct rspamd_milter_session *session,
  */
 static gboolean
 rspamd_milter_process_milter_block (struct rspamd_milter_session *session,
-		const ucl_object_t *obj, gint action)
+		const ucl_object_t *obj, struct rspamd_action *action)
 {
 	const ucl_object_t *elt, *cur, *cur_elt;
 	ucl_object_iter_t it;
@@ -1731,7 +1745,7 @@ rspamd_milter_process_milter_block (struct rspamd_milter_session *session,
 		}
 	}
 
-	if (action == METRIC_ACTION_ADD_HEADER) {
+	if (action->action_type == METRIC_ACTION_ADD_HEADER) {
 		elt = ucl_object_lookup (obj, "spam_header");
 
 		if (elt) {
@@ -1783,7 +1797,7 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 	const ucl_object_t *elt;
 	struct rspamd_milter_private *priv = session->priv;
 	const gchar *str_action;
-	gint action = METRIC_ACTION_REJECT;
+	struct rspamd_action *action;
 	rspamd_fstring_t *xcode = NULL, *rcode = NULL, *reply = NULL;
 	GString *hname, *hvalue;
 	gboolean processed = FALSE;
@@ -1805,7 +1819,14 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 	}
 
 	str_action = ucl_object_tostring (elt);
-	rspamd_action_from_str (str_action, &action);
+	action = rspamd_config_get_action (milter_ctx->cfg, str_action);
+
+	if (action == NULL) {
+		msg_err_milter ("action %s has not been registered", str_action);
+		rspamd_milter_send_action (session, RSPAMD_MILTER_TEMPFAIL);
+
+		goto cleanup;
+	}
 
 	elt = ucl_object_lookup (results, "messages");
 	if (elt) {
@@ -1833,12 +1854,35 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 
 	if (elt) {
 		hname = g_string_new (RSPAMD_MILTER_DKIM_HEADER);
-		hvalue = g_string_new (ucl_object_tostring (elt));
 
-		rspamd_milter_send_action (session, RSPAMD_MILTER_INSHEADER,
-				1, hname, hvalue);
+		if (ucl_object_type (elt) == UCL_STRING) {
+			hvalue = g_string_new (ucl_object_tostring (elt));
+
+			rspamd_milter_send_action (session, RSPAMD_MILTER_INSHEADER,
+					1, hname, hvalue);
+
+			g_string_free (hvalue, TRUE);
+		}
+		else {
+			ucl_object_iter_t it;
+			const ucl_object_t *cur;
+			int i = 1;
+
+			it = ucl_object_iterate_new (elt);
+
+			while ((cur = ucl_object_iterate_safe (it, true)) != NULL) {
+				hvalue = g_string_new (ucl_object_tostring (cur));
+
+				rspamd_milter_send_action (session, RSPAMD_MILTER_INSHEADER,
+						i++, hname, hvalue);
+
+				g_string_free (hvalue, TRUE);
+			}
+
+			ucl_object_iterate_free (it);
+		}
+
 		g_string_free (hname, TRUE);
-		g_string_free (hvalue, TRUE);
 	}
 
 	if (processed) {
@@ -1860,7 +1904,7 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 		goto cleanup;
 	}
 
-	switch (action) {
+	switch (action->action_type) {
 	case METRIC_ACTION_REJECT:
 		if (priv->discard_on_reject) {
 			rspamd_milter_send_action (session, RSPAMD_MILTER_DISCARD);
@@ -1939,6 +1983,17 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 		rspamd_milter_send_action (session, RSPAMD_MILTER_ACCEPT);
 		break;
 
+	case METRIC_ACTION_QUARANTINE:
+		/* TODO: be more flexible about SMTP messages */
+		rspamd_milter_send_action (session, RSPAMD_MILTER_QUARANTINE,
+				RSPAMD_MILTER_QUARANTINE_MESSAGE);
+
+		/* Quarantine also requires accept action, all hail Sendmail */
+		rspamd_milter_send_action (session, RSPAMD_MILTER_ACCEPT);
+		break;
+	case METRIC_ACTION_DISCARD:
+		rspamd_milter_send_action (session, RSPAMD_MILTER_DISCARD);
+		break;
 	case METRIC_ACTION_GREYLIST:
 	case METRIC_ACTION_NOACTION:
 	default:

@@ -27,6 +27,8 @@ enum rspamd_url_flags {
 	RSPAMD_URL_FLAG_HAS_USER = 1 << 14,
 	RSPAMD_URL_FLAG_SCHEMALESS = 1 << 15,
 	RSPAMD_URL_FLAG_UNNORMALISED = 1 << 16,
+	RSPAMD_URL_FLAG_ZW_SPACES = 1 << 17,
+	RSPAMD_URL_FLAG_DISPLAY_URL = 1 << 18,
 };
 
 struct rspamd_url_tag {
@@ -47,6 +49,7 @@ struct rspamd_url {
 	gchar *fragment;
 	gchar *surbl;
 	gchar *tld;
+	gchar *visible_part;
 
 	struct rspamd_url *phished_url;
 
@@ -78,12 +81,13 @@ enum uri_errno {
 };
 
 enum rspamd_url_protocol {
-	PROTOCOL_FILE = 0,
-	PROTOCOL_FTP,
-	PROTOCOL_HTTP,
-	PROTOCOL_HTTPS,
-	PROTOCOL_MAILTO,
-	PROTOCOL_UNKNOWN
+	PROTOCOL_FILE = 1u << 0,
+	PROTOCOL_FTP = 1u << 1,
+	PROTOCOL_HTTP = 1u << 2,
+	PROTOCOL_HTTPS = 1u << 3,
+	PROTOCOL_MAILTO = 1u << 4,
+	PROTOCOL_TELEPHONE = 1u << 5,
+	PROTOCOL_UNKNOWN = 1u << 31,
 };
 
 /**
@@ -104,6 +108,12 @@ void rspamd_url_text_extract (rspamd_mempool_t *pool,
 	struct rspamd_mime_text_part *part,
 	gboolean is_html);
 
+enum rspamd_url_parse_flags {
+	RSPAMD_URL_PARSE_TEXT = 0,
+	RSPAMD_URL_PARSE_HREF = (1u << 0),
+	RSPAMD_URL_PARSE_CHECK = (1 << 1),
+};
+
 /*
  * Parse a single url into an uri structure
  * @param pool memory pool
@@ -111,9 +121,10 @@ void rspamd_url_text_extract (rspamd_mempool_t *pool,
  * @param uri url object, must be pre allocated
  */
 enum uri_errno rspamd_url_parse (struct rspamd_url *uri,
-	gchar *uristring,
-	gsize len,
-	rspamd_mempool_t *pool);
+								 gchar *uristring,
+								 gsize len,
+								 rspamd_mempool_t *pool,
+								 enum rspamd_url_parse_flags flags);
 
 /*
  * Try to extract url from a text
@@ -194,12 +205,15 @@ void rspamd_url_add_tag (struct rspamd_url *url, const gchar *tag,
 
 guint rspamd_url_hash (gconstpointer u);
 guint rspamd_email_hash (gconstpointer u);
+guint rspamd_url_host_hash (gconstpointer u);
+
 
 /* Compare two emails for building emails hash */
 gboolean rspamd_emails_cmp (gconstpointer a, gconstpointer b);
 
 /* Compare two urls for building emails hash */
 gboolean rspamd_urls_cmp (gconstpointer a, gconstpointer b);
+gboolean rspamd_urls_host_cmp (gconstpointer a, gconstpointer b);
 
 /**
  * Decode URL encoded string in-place and return new length of a string, src and dst are NULL terminated
@@ -220,4 +234,26 @@ gsize rspamd_url_decode (gchar *dst, const gchar *src, gsize size);
 const gchar * rspamd_url_encode (struct rspamd_url *url, gsize *dlen,
 		rspamd_mempool_t *pool);
 
+
+/**
+ * Returns if a character is domain character
+ * @param c
+ * @return
+ */
+gboolean rspamd_url_is_domain (int c);
+
+/**
+ * Returns symbolic name for protocol
+ * @param proto
+ * @return
+ */
+const gchar* rspamd_url_protocol_name (enum rspamd_url_protocol proto);
+
+
+/**
+ * Converts string to a numeric protocol
+ * @param str
+ * @return
+ */
+enum rspamd_url_protocol rspamd_url_protocol_from_string (const gchar *str);
 #endif

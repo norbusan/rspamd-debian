@@ -35,6 +35,7 @@ local common_schema = ts.shape {
   sentinels = (ts.string + ts.array_of(ts.string)):is_optional(),
   sentinel_watch_time = (ts.number + ts.string / lutil.parse_time_interval):is_optional(),
   sentinel_masters_pattern = ts.string:is_optional(),
+  sentinel_master_maxerrors = (ts.number + ts.string / tonumber):is_optional(),
 }
 
 local config_schema =
@@ -137,17 +138,24 @@ local function redis_query_sentinel(ev_base, params, initialised)
       )
 
       for _,slave in ipairs(master.slaves) do
-        read_servers_tbl[#read_servers_tbl + 1] = string.format(
-            '%s:%s', slave.ip, slave.port
-        )
+        if slave['master-link-status'] == 'ok' then
+          read_servers_tbl[#read_servers_tbl + 1] = string.format(
+              '%s:%s', slave.ip, slave.port
+          )
+        end
       end
     end
 
+    table.sort(read_servers_tbl)
+    table.sort(write_servers_tbl)
+
     local read_servers_str = table.concat(read_servers_tbl, ',')
-    local write_servers_str = table.concat(read_servers_tbl, ',')
+    local write_servers_str = table.concat(write_servers_tbl, ',')
 
     lutil.debugm(N, rspamd_config,
-        'new servers list: %s read; %s write', read_servers_str, write_servers_str)
+        'new servers list: %s read; %s write',
+        read_servers_str,
+        write_servers_str)
 
     if read_servers_str ~= params.read_servers_str then
       local upstream_list = require "rspamd_upstream_list"
@@ -174,6 +182,19 @@ local function redis_query_sentinel(ev_base, params, initialised)
             addr:get_addr():to_string(true), write_servers_str)
         params.write_servers = write_upstreams
         params.write_servers_str = write_servers_str
+
+        local queried = false
+
+        local function monitor_failures(up, _, count)
+          if count > params.sentinel_master_maxerrors and not queried then
+            logger.infox(rspamd_config, 'sentinel: master with address %s, caused %s failures, try to query sentinel',
+                up:get_addr():to_string(true), count)
+            queried = true -- Avoid multiple checks caused by this monitor
+            redis_query_sentinel(ev_base, params, true)
+          end
+        end
+
+        write_upstreams:add_watcher('failure', monitor_failures)
       end
     end
 
@@ -203,6 +224,10 @@ local function add_redis_sentinels(params)
 
   if not params.sentinel_watch_time then
     params.sentinel_watch_time = 60 -- Each minute
+  end
+
+  if not params.sentinel_master_maxerrors then
+    params.sentinel_master_maxerrors = 2 -- Maximum number of errors before rechecking
   end
 
   rspamd_config:add_on_load(function(cfg, ev_base, worker)

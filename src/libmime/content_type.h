@@ -34,23 +34,33 @@ enum rspamd_content_type_flags {
 #define IS_CT_TEXT(ct) ((ct) && ((ct)->flags & RSPAMD_CONTENT_TYPE_TEXT))
 #define IS_CT_MESSAGE(ct) ((ct) &&((ct)->flags & RSPAMD_CONTENT_TYPE_MESSAGE))
 
+enum rspamd_content_param_flags {
+	RSPAMD_CONTENT_PARAM_NORMAL = 0,
+	RSPAMD_CONTENT_PARAM_RFC2231 = (1 << 0),
+	RSPAMD_CONTENT_PARAM_PIECEWISE = (1 << 1),
+	RSPAMD_CONTENT_PARAM_BROKEN = (1 << 2),
+};
+
 struct rspamd_content_type_param {
 	rspamd_ftok_t name;
 	rspamd_ftok_t value;
+	guint rfc2231_id;
+	enum rspamd_content_param_flags flags;
 	struct rspamd_content_type_param *prev, *next;
 };
 
 struct rspamd_content_type {
-	gchar *lc_data;
+	gchar *cpy;
 	rspamd_ftok_t type;
 	rspamd_ftok_t subtype;
 	rspamd_ftok_t charset;
 	rspamd_ftok_t boundary;
+	rspamd_ftok_t orig_boundary;
 	enum rspamd_content_type_flags flags;
 	GHashTable *attrs; /* Can be empty */
 };
 
-enum rspamd_contetn_disposition_type {
+enum rspamd_content_disposition_type {
 	RSPAMD_CT_UNKNOWN = 0,
 	RSPAMD_CT_INLINE = 1,
 	RSPAMD_CT_ATTACHMENT = 2,
@@ -58,7 +68,7 @@ enum rspamd_contetn_disposition_type {
 
 struct rspamd_content_disposition {
 	gchar *lc_data;
-	enum rspamd_contetn_disposition_type type;
+	enum rspamd_content_disposition_type type;
 	rspamd_ftok_t filename;
 	GHashTable *attrs; /* Can be empty */
 };
@@ -66,16 +76,16 @@ struct rspamd_content_disposition {
 /**
  * Adds new parameter to content type structure
  * @param ct
- * @param name_start
+ * @param name_start (can be modified)
  * @param name_end
- * @param value_start
+ * @param value_start (can be modified)
  * @param value_end
  */
 void
 rspamd_content_type_add_param (rspamd_mempool_t *pool,
-		struct rspamd_content_type *ct,
-		const gchar *name_start, const gchar *name_end,
-		const gchar *value_start, const gchar *value_end);
+							   struct rspamd_content_type *ct,
+							   gchar *name_start,  gchar *name_end,
+							   gchar *value_start,  gchar *value_end);
 
 /**
  * Parse content type from the header (performs copy + lowercase)

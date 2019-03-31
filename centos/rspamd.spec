@@ -73,6 +73,7 @@ lua.
         -DRUNDIR=%{_localstatedir}/run/rspamd \
 %if 0%{?el6}
         -DWANT_SYSTEMD_UNITS=OFF \
+        -DDISABLE_PTHREAD_MUTEX=1 \
 %else
         -DWANT_SYSTEMD_UNITS=ON \
         -DSYSTEMDDIR=%{_unitdir} \
@@ -87,7 +88,7 @@ lua.
 %endif
         -DLOGDIR=%{_localstatedir}/log/rspamd \
         -DEXAMPLESDIR=%{_datadir}/examples/rspamd \
-        -DPLUGINSDIR=%{_datadir}/rspamd \
+        -DSHAREDIR=%{_datadir}/rspamd \
         -DLIBDIR=%{_libdir}/rspamd/ \
         -DINCLUDEDIR=%{_includedir} \
         -DNO_SHARED=ON \

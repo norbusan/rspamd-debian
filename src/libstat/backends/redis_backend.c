@@ -151,7 +151,6 @@ rspamd_redis_expand_object (const gchar *pattern,
 	GString *tb;
 	const gchar *rcpt = NULL;
 	gint err_idx;
-	gboolean expansion_errored = FALSE;
 
 	g_assert (ctx != NULL);
 	stcf = ctx->stcf;
@@ -214,9 +213,6 @@ rspamd_redis_expand_object (const gchar *pattern,
 				if (elt) {
 					tlen += strlen (elt);
 				}
-				else {
-					expansion_errored = TRUE;
-				}
 				break;
 			case 'r':
 
@@ -229,9 +225,6 @@ rspamd_redis_expand_object (const gchar *pattern,
 
 				if (elt) {
 					tlen += strlen (elt);
-				}
-				else {
-					expansion_errored = TRUE;
 				}
 				break;
 			case 'l':
@@ -277,8 +270,8 @@ rspamd_redis_expand_object (const gchar *pattern,
 	}
 
 
-	if (target == NULL || task == NULL || expansion_errored) {
-		return tlen;
+	if (target == NULL || task == NULL) {
+		return -1;
 	}
 
 	*target = rspamd_mempool_alloc (task->task_pool, tlen + 1);
@@ -982,7 +975,7 @@ rspamd_redis_async_stat_cb (struct rspamd_stat_async_elt *elt, gpointer d)
 					0);
 
 	g_assert (cbdata->selected != NULL);
-	addr = rspamd_upstream_addr (cbdata->selected);
+	addr = rspamd_upstream_addr_next (cbdata->selected);
 	g_assert (addr != NULL);
 
 	if (rspamd_inet_address_get_af (addr) == AF_UNIX) {
@@ -1305,12 +1298,13 @@ rspamd_redis_parse_classifier_opts (struct redis_stat_ctx *backend,
 	}
 	else {
 		backend->enable_users = FALSE;
+		backend->cbref_user = -1;
 	}
 
 	elt = ucl_object_lookup (obj, "prefix");
 	if (elt == NULL || ucl_object_type (elt) != UCL_STRING) {
 		/* Default non-users statistics */
-		if (backend->enable_users && backend->cbref_user == -1) {
+		if (backend->enable_users || backend->cbref_user != -1) {
 			backend->redis_object = REDIS_DEFAULT_USERS_OBJECT;
 		}
 		else {
@@ -1528,7 +1522,7 @@ rspamd_redis_runtime (struct rspamd_task *task,
 	rt->stcf = stcf;
 	rt->redis_object_expanded = object_expanded;
 
-	addr = rspamd_upstream_addr (up);
+	addr = rspamd_upstream_addr_next (up);
 	g_assert (addr != NULL);
 
 	if (rspamd_inet_address_get_af (addr) == AF_UNIX) {
@@ -1699,7 +1693,7 @@ rspamd_redis_learn_tokens (struct rspamd_task *task, GPtrArray *tokens,
 		}
 	}
 
-	addr = rspamd_upstream_addr (up);
+	addr = rspamd_upstream_addr_next (up);
 	g_assert (addr != NULL);
 
 	if (rspamd_inet_address_get_af (addr) == AF_UNIX) {

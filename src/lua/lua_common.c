@@ -237,7 +237,8 @@ rspamd_lua_set_path (lua_State *L, const ucl_object_t *cfg_obj, GHashTable *vars
 	const gchar *pluginsdir = RSPAMD_PLUGINSDIR,
 			*rulesdir = RSPAMD_RULESDIR,
 			*lualibdir = RSPAMD_LUALIBDIR,
-			*libdir = RSPAMD_LIBDIR;
+			*libdir = RSPAMD_LIBDIR,
+			*sharedir = RSPAMD_SHAREDIR;
 	const gchar *t;
 
 	gchar path_buf[PATH_MAX];
@@ -246,7 +247,7 @@ rspamd_lua_set_path (lua_State *L, const ucl_object_t *cfg_obj, GHashTable *vars
 	lua_getfield (L, -1, "path");
 	old_path = luaL_checkstring (L, -1);
 
-	if (strstr (old_path, RSPAMD_PLUGINSDIR) != NULL) {
+	if (strstr (old_path, RSPAMD_LUALIBDIR) != NULL) {
 		/* Path has been already set, do not touch it */
 		lua_pop (L, 2);
 		return;
@@ -263,6 +264,11 @@ rspamd_lua_set_path (lua_State *L, const ucl_object_t *cfg_obj, GHashTable *vars
 	}
 
 	/* Try environment */
+	t = getenv ("SHAREDIR");
+	if (t) {
+		sharedir = t;
+	}
+
 	t = getenv ("PLUGINSDIR");
 	if (t) {
 		pluginsdir = t;
@@ -294,6 +300,11 @@ rspamd_lua_set_path (lua_State *L, const ucl_object_t *cfg_obj, GHashTable *vars
 			pluginsdir = t;
 		}
 
+		t = g_hash_table_lookup (vars, "SHAREDIR");
+		if (t) {
+			sharedir = t;
+		}
+
 		t = g_hash_table_lookup (vars, "RULESDIR");
 		if (t) {
 			rulesdir = t;
@@ -318,25 +329,25 @@ rspamd_lua_set_path (lua_State *L, const ucl_object_t *cfg_obj, GHashTable *vars
 	if (additional_path) {
 		rspamd_snprintf (path_buf, sizeof (path_buf),
 				"%s/lua/?.lua;"
-						"%s/lua/?.lua;"
-						"%s/?.lua;"
-						"%s/?.lua;"
-						"%s/?/init.lua;"
-						"%s;"
-						"%s",
-				pluginsdir, RSPAMD_CONFDIR, rulesdir,
+				"%s/?.lua;"
+				"%s/?.lua;"
+				"%s/?/init.lua;"
+				"%s;"
+				"%s",
+				RSPAMD_CONFDIR,
+				rulesdir,
 				lualibdir, lualibdir,
 				additional_path, old_path);
 	}
 	else {
 		rspamd_snprintf (path_buf, sizeof (path_buf),
 				"%s/lua/?.lua;"
-						"%s/lua/?.lua;"
-						"%s/?.lua;"
-						"%s/?.lua;"
-						"%s/?/init.lua;"
-						"%s",
-				pluginsdir, RSPAMD_CONFDIR, rulesdir,
+				"%s/?.lua;"
+				"%s/?.lua;"
+				"%s/?/init.lua;"
+				"%s",
+				RSPAMD_CONFDIR,
+				rulesdir,
 				lualibdir, lualibdir,
 				old_path);
 	}
@@ -592,10 +603,16 @@ rspamd_lua_set_globals (struct rspamd_config *cfg, lua_State *L,
 				*pluginsdir = RSPAMD_PLUGINSDIR,
 				*rulesdir = RSPAMD_RULESDIR,
 				*lualibdir = RSPAMD_LUALIBDIR,
-				*prefix = RSPAMD_PREFIX;
+				*prefix = RSPAMD_PREFIX,
+				*sharedir = RSPAMD_SHAREDIR;
 		const gchar *t;
 
 		/* Try environment */
+		t = getenv ("SHAREDIR");
+		if (t) {
+			sharedir = t;
+		}
+
 		t = getenv ("PLUGINSDIR");
 		if (t) {
 			pluginsdir = t;
@@ -643,6 +660,11 @@ rspamd_lua_set_globals (struct rspamd_config *cfg, lua_State *L,
 
 
 		if (vars) {
+			t = g_hash_table_lookup (vars, "SHAREDIR");
+			if (t) {
+				sharedir = t;
+			}
+
 			t = g_hash_table_lookup (vars, "PLUGINSDIR");
 			if (t) {
 				pluginsdir = t;
@@ -691,6 +713,7 @@ rspamd_lua_set_globals (struct rspamd_config *cfg, lua_State *L,
 
 		lua_createtable (L, 0, 9);
 
+		rspamd_lua_table_set (L, RSPAMD_SHAREDIR_INDEX, sharedir);
 		rspamd_lua_table_set (L, RSPAMD_CONFDIR_INDEX, confdir);
 		rspamd_lua_table_set (L, RSPAMD_LOCAL_CONFDIR_INDEX, local_confdir);
 		rspamd_lua_table_set (L, RSPAMD_RUNDIR_INDEX, rundir);
@@ -761,6 +784,7 @@ rspamd_lua_init ()
 	luaopen_sqlite3 (L);
 	luaopen_cryptobox (L);
 	luaopen_dns (L);
+	luaopen_udp (L);
 
 	luaL_newmetatable (L, "rspamd{ev_base}");
 	lua_pushstring (L, "class");
@@ -2408,12 +2432,90 @@ rspamd_lua_try_load_redis (lua_State *L, const ucl_object_t *obj,
 	return FALSE;
 }
 
+void
+rspamd_lua_push_full_word (lua_State *L, rspamd_stat_token_t *w)
+{
+	gint fl_cnt;
+
+	lua_createtable (L, 4, 0);
+
+	if (w->stemmed.len > 0) {
+		lua_pushlstring (L, w->stemmed.begin, w->stemmed.len);
+		lua_rawseti (L, -2, 1);
+	}
+	else {
+		lua_pushstring (L, "");
+		lua_rawseti (L, -2, 1);
+	}
+
+	if (w->normalized.len > 0) {
+		lua_pushlstring (L, w->normalized.begin, w->normalized.len);
+		lua_rawseti (L, -2, 2);
+	}
+	else {
+		lua_pushstring (L, "");
+		lua_rawseti (L, -2, 2);
+	}
+
+	if (w->original.len > 0) {
+		lua_pushlstring (L, w->original.begin, w->original.len);
+		lua_rawseti (L, -2, 3);
+	}
+	else {
+		lua_pushstring (L, "");
+		lua_rawseti (L, -2, 3);
+	}
+
+	/* Flags part */
+	fl_cnt = 1;
+	lua_createtable (L, 4, 0);
+
+	if (w->flags & RSPAMD_STAT_TOKEN_FLAG_NORMALISED) {
+		lua_pushstring (L, "normalised");
+		lua_rawseti (L, -2, fl_cnt ++);
+	}
+	if (w->flags & RSPAMD_STAT_TOKEN_FLAG_BROKEN_UNICODE) {
+		lua_pushstring (L, "broken_unicode");
+		lua_rawseti (L, -2, fl_cnt ++);
+	}
+	if (w->flags & RSPAMD_STAT_TOKEN_FLAG_UTF) {
+		lua_pushstring (L, "utf");
+		lua_rawseti (L, -2, fl_cnt ++);
+	}
+	if (w->flags & RSPAMD_STAT_TOKEN_FLAG_TEXT) {
+		lua_pushstring (L, "text");
+		lua_rawseti (L, -2, fl_cnt ++);
+	}
+	if (w->flags & RSPAMD_STAT_TOKEN_FLAG_HEADER) {
+		lua_pushstring (L, "header");
+		lua_rawseti (L, -2, fl_cnt ++);
+	}
+	if (w->flags & (RSPAMD_STAT_TOKEN_FLAG_META|RSPAMD_STAT_TOKEN_FLAG_LUA_META)) {
+		lua_pushstring (L, "meta");
+		lua_rawseti (L, -2, fl_cnt ++);
+	}
+	if (w->flags & RSPAMD_STAT_TOKEN_FLAG_STOP_WORD) {
+		lua_pushstring (L, "stop_word");
+		lua_rawseti (L, -2, fl_cnt ++);
+	}
+	if (w->flags & RSPAMD_STAT_TOKEN_FLAG_INVISIBLE_SPACES) {
+		lua_pushstring (L, "invisible_spaces");
+		lua_rawseti (L, -2, fl_cnt ++);
+	}
+	if (w->flags & RSPAMD_STAT_TOKEN_FLAG_STEMMED) {
+		lua_pushstring (L, "stemmed");
+		lua_rawseti (L, -2, fl_cnt ++);
+	}
+
+	lua_rawseti (L, -2, 4);
+}
+
 gint
 rspamd_lua_push_words (lua_State *L, GArray *words,
 							enum rspamd_lua_words_type how)
 {
 	rspamd_stat_token_t *w;
-	guint i, cnt, fl_cnt;
+	guint i, cnt;
 
 	lua_createtable (L, words->len, 0);
 
@@ -2440,78 +2542,7 @@ rspamd_lua_push_words (lua_State *L, GArray *words,
 			}
 			break;
 		case RSPAMD_LUA_WORDS_FULL:
-			lua_createtable (L, 4, 0);
-
-			if (w->stemmed.len > 0) {
-				lua_pushlstring (L, w->stemmed.begin, w->stemmed.len);
-				lua_rawseti (L, -2, 1);
-			}
-			else {
-				lua_pushstring (L, "");
-				lua_rawseti (L, -2, 1);
-			}
-
-			if (w->normalized.len > 0) {
-				lua_pushlstring (L, w->normalized.begin, w->normalized.len);
-				lua_rawseti (L, -2, 2);
-			}
-			else {
-				lua_pushstring (L, "");
-				lua_rawseti (L, -2, 2);
-			}
-
-			if (w->original.len > 0) {
-				lua_pushlstring (L, w->original.begin, w->original.len);
-				lua_rawseti (L, -2, 3);
-			}
-			else {
-				lua_pushstring (L, "");
-				lua_rawseti (L, -2, 3);
-			}
-
-			/* Flags part */
-			fl_cnt = 1;
-			lua_createtable (L, 4, 0);
-
-			if (w->flags & RSPAMD_STAT_TOKEN_FLAG_NORMALISED) {
-				lua_pushstring (L, "normalised");
-				lua_rawseti (L, -2, fl_cnt ++);
-			}
-			if (w->flags & RSPAMD_STAT_TOKEN_FLAG_BROKEN_UNICODE) {
-				lua_pushstring (L, "broken_unicode");
-				lua_rawseti (L, -2, fl_cnt ++);
-			}
-			if (w->flags & RSPAMD_STAT_TOKEN_FLAG_UTF) {
-				lua_pushstring (L, "utf");
-				lua_rawseti (L, -2, fl_cnt ++);
-			}
-			if (w->flags & RSPAMD_STAT_TOKEN_FLAG_TEXT) {
-				lua_pushstring (L, "text");
-				lua_rawseti (L, -2, fl_cnt ++);
-			}
-			if (w->flags & RSPAMD_STAT_TOKEN_FLAG_HEADER) {
-				lua_pushstring (L, "header");
-				lua_rawseti (L, -2, fl_cnt ++);
-			}
-			if (w->flags & (RSPAMD_STAT_TOKEN_FLAG_META|RSPAMD_STAT_TOKEN_FLAG_LUA_META)) {
-				lua_pushstring (L, "meta");
-				lua_rawseti (L, -2, fl_cnt ++);
-			}
-			if (w->flags & RSPAMD_STAT_TOKEN_FLAG_STOP_WORD) {
-				lua_pushstring (L, "stop_word");
-				lua_rawseti (L, -2, fl_cnt ++);
-			}
-			if (w->flags & RSPAMD_STAT_TOKEN_FLAG_INVISIBLE_SPACES) {
-				lua_pushstring (L, "invisible_spaces");
-				lua_rawseti (L, -2, fl_cnt ++);
-			}
-			if (w->flags & RSPAMD_STAT_TOKEN_FLAG_STEMMED) {
-				lua_pushstring (L, "stemmed");
-				lua_rawseti (L, -2, fl_cnt ++);
-			}
-
-			lua_rawseti (L, -2, 4);
-
+			rspamd_lua_push_full_word (L, w);
 			/* Push to the resulting vector */
 			lua_rawseti (L, -2, cnt ++);
 			break;

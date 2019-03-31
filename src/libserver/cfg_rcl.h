@@ -445,6 +445,7 @@ ucl_object_t *rspamd_rcl_add_doc_by_example (struct rspamd_config *cfg,
  */
 gboolean rspamd_rcl_add_lua_plugins_path (struct rspamd_config *cfg,
 		const gchar *path,
+		GHashTable *modules_seen,
 		GError **err);
 
 
@@ -478,6 +479,8 @@ void rspamd_config_calculate_cksum (struct rspamd_config *cfg);
 gboolean rspamd_config_parse_ucl (struct rspamd_config *cfg,
 								  const gchar *filename,
 								  GHashTable *vars,
+								  ucl_include_trace_func_t inc_trace,
+								  void *trace_data,
 								  GError **err);
 gboolean rspamd_config_read (struct rspamd_config *cfg,
 							 const gchar *filename,

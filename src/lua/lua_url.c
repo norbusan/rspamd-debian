@@ -51,6 +51,7 @@ LUA_FUNCTION_DEF (url, tostring);
 LUA_FUNCTION_DEF (url, get_raw);
 LUA_FUNCTION_DEF (url, get_tld);
 LUA_FUNCTION_DEF (url, get_flags);
+LUA_FUNCTION_DEF (url, get_protocol);
 LUA_FUNCTION_DEF (url, to_table);
 LUA_FUNCTION_DEF (url, is_phished);
 LUA_FUNCTION_DEF (url, is_redirected);
@@ -62,6 +63,7 @@ LUA_FUNCTION_DEF (url, get_tag);
 LUA_FUNCTION_DEF (url, get_count);
 LUA_FUNCTION_DEF (url, get_tags);
 LUA_FUNCTION_DEF (url, add_tag);
+LUA_FUNCTION_DEF (url, get_visible);
 LUA_FUNCTION_DEF (url, create);
 LUA_FUNCTION_DEF (url, init);
 LUA_FUNCTION_DEF (url, all);
@@ -77,6 +79,7 @@ static const struct luaL_reg urllib_m[] = {
 	LUA_INTERFACE_DEF (url, get_text),
 	LUA_INTERFACE_DEF (url, get_tld),
 	LUA_INTERFACE_DEF (url, get_raw),
+	LUA_INTERFACE_DEF (url, get_protocol),
 	LUA_INTERFACE_DEF (url, to_table),
 	LUA_INTERFACE_DEF (url, is_phished),
 	LUA_INTERFACE_DEF (url, is_redirected),
@@ -87,6 +90,7 @@ static const struct luaL_reg urllib_m[] = {
 	LUA_INTERFACE_DEF (url, get_tag),
 	LUA_INTERFACE_DEF (url, get_tags),
 	LUA_INTERFACE_DEF (url, add_tag),
+	LUA_INTERFACE_DEF (url, get_visible),
 	LUA_INTERFACE_DEF (url, get_count),
 	LUA_INTERFACE_DEF (url, get_flags),
 	{"get_redirected", lua_url_get_phished},
@@ -607,6 +611,27 @@ lua_url_get_tld (lua_State *L)
 }
 
 /***
+ * @method url:get_protocol()
+ * Get protocol name
+ * @return {string} protocol as a string
+ */
+static gint
+lua_url_get_protocol (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_url *url = lua_check_url (L, 1);
+
+	if (url != NULL && url->url->protocol != PROTOCOL_UNKNOWN) {
+		lua_pushstring (L, rspamd_url_protocol_name (url->url->protocol));
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+/***
  * @method url:get_count()
  * Return number of occurrencies for this particular URL
  * @return {number} number of occurrencies
@@ -625,6 +650,27 @@ lua_url_get_count (lua_State *L)
 	}
 
 	return 1;
+}
+
+ /***
+* @method url:get_visible()
+* Get visible part of the url with html tags stripped
+* @return {string} url string
+*/
+static gint
+lua_url_get_visible (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_url *url = lua_check_url (L, 1);
+
+	if (url != NULL && url->url->visible_part) {
+		lua_pushstring (L, url->url->visible_part);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+return 1;
 }
 
 /***
@@ -697,28 +743,7 @@ lua_url_to_table (lua_State *L)
 
 
 		lua_pushstring (L, "protocol");
-
-		switch (u->protocol) {
-		case PROTOCOL_FILE:
-			lua_pushstring (L, "file");
-			break;
-		case PROTOCOL_FTP:
-			lua_pushstring (L, "ftp");
-			break;
-		case PROTOCOL_HTTP:
-			lua_pushstring (L, "http");
-			break;
-		case PROTOCOL_HTTPS:
-			lua_pushstring (L, "https");
-			break;
-		case PROTOCOL_MAILTO:
-			lua_pushstring (L, "mailto");
-			break;
-		case PROTOCOL_UNKNOWN:
-		default:
-			lua_pushstring (L, "unknown");
-			break;
-		}
+		lua_pushstring (L, rspamd_url_protocol_name (u->protocol));
 		lua_settable (L, -3);
 	}
 	else {
@@ -875,6 +900,8 @@ lua_url_all (lua_State *L)
  * - `has_user`: URL has user part
  * - `schemaless`: URL has no schema
  * - `unnormalised`: URL has some unicode unnormalities
+ * - `zw_spaces`: URL has some zero width spaces
+ * - `url_displayed`: URL has some other url-like string in visible part
  * @return {table} URL flags
  */
 #define PUSH_FLAG(fl, name) do { \
@@ -914,6 +941,8 @@ lua_url_get_flags (lua_State *L)
 		PUSH_FLAG (RSPAMD_URL_FLAG_HAS_USER, "has_user");
 		PUSH_FLAG (RSPAMD_URL_FLAG_SCHEMALESS, "schemaless");
 		PUSH_FLAG (RSPAMD_URL_FLAG_UNNORMALISED, "unnormalised");
+		PUSH_FLAG (RSPAMD_URL_FLAG_ZW_SPACES, "zw_spaces");
+		PUSH_FLAG (RSPAMD_URL_FLAG_DISPLAY_URL, "url_displayed");
 	}
 	else {
 		return luaL_error (L, "invalid arguments");

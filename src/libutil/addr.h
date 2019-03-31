@@ -113,6 +113,17 @@ gboolean rspamd_parse_inet_address (rspamd_inet_addr_t **target,
 		gsize srclen);
 
 /**
+ * Use memory pool allocated inet address
+ * @param src
+ * @param srclen
+ * @param pool
+ * @return
+ */
+rspamd_inet_addr_t* rspamd_parse_inet_address_pool (const char *src,
+													 gsize srclen,
+													 rspamd_mempool_t *pool);
+
+/**
  * Returns string representation of inet address
  * @param addr
  * @return statically allocated string pointer (not thread safe)
@@ -140,6 +151,14 @@ uint16_t rspamd_inet_address_get_port (const rspamd_inet_addr_t *addr);
  */
 gint rspamd_inet_address_get_af (const rspamd_inet_addr_t *addr);
 
+/**
+ * Returns sockaddr and size for this address
+ * @param addr
+ * @param sz
+ * @return
+ */
+struct sockaddr* rspamd_inet_address_get_sa (const rspamd_inet_addr_t *addr,
+		socklen_t *sz);
 
 /**
  * Makes a radix key from inet address
@@ -244,7 +263,7 @@ void rspamd_inet_address_apply_mask (rspamd_inet_addr_t *addr, guint mask);
  * @return
  */
 gint rspamd_inet_address_compare (const rspamd_inet_addr_t *a1,
-		const rspamd_inet_addr_t *a2);
+		const rspamd_inet_addr_t *a2, gboolean compare_ports);
 
 /**
  * Utility function to compare addresses by in g_ptr_array
@@ -262,15 +281,16 @@ gint rspamd_inet_address_compare_ptr (gconstpointer a1,
 rspamd_inet_addr_t *rspamd_inet_address_copy (const rspamd_inet_addr_t *addr);
 
 /**
- * Returns hash for inet address
+ * Returns hash for inet address (ignoring port)
  */
 guint rspamd_inet_address_hash (gconstpointer a);
-
+guint rspamd_inet_address_port_hash (gconstpointer a);
 
 /**
  * Returns true if two address are equal
  */
 gboolean rspamd_inet_address_equal (gconstpointer a, gconstpointer b);
+gboolean rspamd_inet_address_port_equal (gconstpointer a, gconstpointer b);
 
 /**
  * Returns TRUE if an address belongs to some local address

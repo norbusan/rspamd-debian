@@ -19,14 +19,18 @@
 #include "config.h"
 
 struct rspamd_task;
+struct rspamd_mime_part;
 
 enum rspamd_mime_parse_error {
 	RSPAMD_MIME_PARSE_OK = 0,
 	RSPAMD_MIME_PARSE_FATAL,
 	RSPAMD_MIME_PARSE_NESTING,
+	RSPAMD_MIME_PARSE_NO_PART,
 };
 
 enum rspamd_mime_parse_error rspamd_mime_parse_task (struct rspamd_task *task,
 		GError **err);
+
+void rspamd_mime_parser_calc_digest (struct rspamd_mime_part *part);
 
 #endif /* SRC_LIBMIME_MIME_PARSER_H_ */

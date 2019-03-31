@@ -17,7 +17,7 @@
 #define TASK_H_
 
 #include "config.h"
-#include "http.h"
+#include "http_connection.h"
 #include "events.h"
 #include "util.h"
 #include "mem_pool.h"
@@ -125,6 +125,7 @@ enum rspamd_task_stage {
 #define RSPAMD_TASK_IS_CLASSIFIED(task) (((task)->processed_stages & RSPAMD_TASK_STAGE_CLASSIFIERS))
 #define RSPAMD_TASK_IS_EMPTY(task) (((task)->flags & RSPAMD_TASK_FLAG_EMPTY))
 #define RSPAMD_TASK_IS_PROFILING(task) (((task)->flags & RSPAMD_TASK_FLAG_PROFILE))
+#define RSPAMD_TASK_IS_MIME(task) (((task)->flags & RSPAMD_TASK_FLAG_MIME))
 
 struct rspamd_email_address;
 struct rspamd_lang_detector;
@@ -149,7 +150,7 @@ struct rspamd_task {
 	gchar *deliver_to;								/**< address to deliver								*/
 	gchar *user;									/**< user to deliver								*/
 	gchar *subject;									/**< subject (for non-mime)							*/
-	gchar *hostname;								/**< hostname reported by MTA						*/
+	const gchar *hostname;							/**< hostname reported by MTA						*/
 	GHashTable *request_headers;					/**< HTTP headers in a request						*/
 	GHashTable *reply_headers;						/**< Custom reply headers							*/
 	struct {
@@ -355,5 +356,12 @@ gdouble* rspamd_task_profile_get (struct rspamd_task *task, const gchar *key);
  * @return
  */
 gboolean rspamd_task_set_finish_time (struct rspamd_task *task);
+
+/**
+ * Returns task processing stage name
+ * @param stg
+ * @return
+ */
+const gchar *rspamd_task_stage_name (enum rspamd_task_stage stg);
 
 #endif /* TASK_H_ */

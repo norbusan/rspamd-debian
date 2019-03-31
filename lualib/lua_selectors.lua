@@ -199,6 +199,27 @@ the second optional argument is optional hash type (`blake2`, `sha256`, `sha1`, 
     end,
     ['description'] = 'Get all attachments files',
   },
+  -- Get languages for text parts
+  ['languages'] = {
+    ['get_value'] = function(task)
+      local text_parts = task:get_text_parts() or E
+      local languages = {}
+
+      for _,p in ipairs(text_parts) do
+        local lang = p:get_language()
+        if lang then
+          table.insert(languages, lang)
+        end
+      end
+
+      if #languages > 0 then
+        return languages,'string_list'
+      end
+
+      return nil
+    end,
+    ['description'] = 'Get languages for text parts',
+  },
   -- Get helo value
   ['helo'] = {
     ['get_value'] = function(task)
@@ -443,7 +464,7 @@ the second argument is optional hash type (`blake2`, `sha256`, `sha1`, `sha512`,
 
       return inp:sub(start_pos, end_pos), 'string'
     end,
-    ['description'] = 'Extracts substring',
+    ['description'] = 'Extracts substring; the first argument is start, the second is the last (like in Lua)',
     ['args_schema'] = {(ts.number + ts.string / tonumber):is_optional(),
                        (ts.number + ts.string / tonumber):is_optional()}
   },
@@ -497,6 +518,22 @@ the second argument is optional hash type (`blake2`, `sha256`, `sha1`, `sha512`,
     ['description'] = 'Drops input value and return values from function\'s arguments or an empty string',
     ['args_schema'] = (ts.string + ts.array_of(ts.string)):is_optional()
   },
+  ['equal'] = {
+    ['types'] = {
+      ['string'] = true,
+    },
+    ['map_type'] = 'string',
+    ['process'] = function(inp, _, args)
+      if inp == args[1] then
+        return inp,'string'
+      end
+
+      return nil
+    end,
+    ['description'] = [[Boolean function equal.
+Returns either nil or its argument if input is equal to argument]],
+    ['args_schema'] = {ts.string}
+  },
   -- Boolean function in, returns either nil or its input if input is in args list
   ['in'] = {
     ['types'] = {
@@ -524,7 +561,57 @@ Returns either nil or its input if input is in args list]],
 Returns either nil or its input if input is not in args list]],
     ['args_schema'] = ts.array_of(ts.string)
   },
+  ['inverse'] = {
+    ['types'] = {
+      ['string'] = true,
+    },
+    ['map_type'] = 'string',
+    ['process'] = function(inp, _, args)
+      if inp then
+        return nil
+      else
+        return (args[1] or 'true'),'string'
+      end
+    end,
+    ['description'] = [[Inverses input.
+Empty string comes the first argument or 'true', non-empty string comes nil]],
+    ['args_schema'] = {ts.string:is_optional()}
+  },
+  ['ipmask'] = {
+    ['types'] = {
+      ['string'] = true,
+    },
+    ['map_type'] = 'string',
+    ['process'] = function(inp, _, args)
+      local rspamd_ip = require "rspamd_ip"
+      -- Non optimal: convert string to an IP address
+      local ip = rspamd_ip.from_string(inp)
+
+      if not ip or not ip:is_valid() then
+        lua_util.debugm(M, "cannot convert %s to IP", inp)
+        return nil
+      end
+
+      if ip:get_version() == 4 then
+        local mask = tonumber(args[1])
+
+        return ip:apply_mask(mask):to_string(),'string'
+      else
+        -- IPv6 takes the second argument or the first one...
+        local mask_str = args[2] or args[1]
+        local mask = tonumber(mask_str)
+
+        return ip:apply_mask(mask):to_string(),'string'
+      end
+    end,
+    ['description'] = 'Applies mask to IP address.' ..
+        ' The first argument is the mask for IPv4 addresses, the second is the mask for IPv6 addresses.',
+    ['args_schema'] = {(ts.number + ts.string / tonumber),
+                       (ts.number + ts.string / tonumber):is_optional()}
+  },
 }
+
+transform_function.match = transform_function.regexp
 
 local function process_selector(task, sel)
   local function allowed_type(t)
