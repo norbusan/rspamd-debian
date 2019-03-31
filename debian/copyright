@@ -177,6 +177,8 @@ License: Apache-2.0
 Files: debian/*
 Copyright: 2011-2015 Vsevolod Stakhov <vsevolod@highsecure.ru>
            2014-2015 Mikhail Gusarov <dottedmag@dottedmag.net>
+           2018-2019 Jerome Lebleu <jerome@maroufle.fr>
+           2018-2019 Sebastien Badia <seb@sebian.fr>
 License: BSD-2-Clause
 
 ## Licenses
