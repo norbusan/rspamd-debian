@@ -1,8 +1,13 @@
-rspamd (1.8.3-1) UNRELEASED; urgency=medium
+rspamd (1.9.0-1) experimental; urgency=medium
 
-  * New upstream version 1.8.3
+  * New upstream version 1.9.0
+  * d/rules: Slashing: Distinguish lualibdir, pluginsdir and sharedir
+  * d/logrotate: Fix log rotation if SystemD is used (Closes: #919789)
+                 Thanks Alexandre !
+  * d/tests: Ugly-patch for flaky tests… (Closes: #914477)
+  * d/copyright: Added Jerome and I on debian/*
 
- -- Sebastien Badia <sbadia@debian.org>  Mon, 03 Dec 2018 21:58:30 +0100
+ -- Sebastien Badia <sbadia@debian.org>  Mon, 01 Apr 2019 00:32:39 +0200
 
 rspamd (1.8.1-2) unstable; urgency=medium
 
