@@ -89,6 +89,18 @@ gsize rspamd_strlcpy_safe (gchar *dst, const gchar *src, gsize siz);
 #  define rspamd_strlcpy rspamd_strlcpy_fast
 #endif
 
+/**
+ * Copies `srclen` characters from `src` to `dst` ignoring \0
+ * @param src
+ * @param srclen
+ * @param dest
+ * @param destlen
+ * @return number of bytes copied
+ */
+gsize
+rspamd_null_safe_copy (const gchar *src, gsize srclen,
+					   gchar *dest, gsize destlen);
+
 /*
  * Try to convert string of length to long
  */
@@ -172,6 +184,7 @@ gint rspamd_decode_base32_buf (const gchar *in, gsize inlen,
 gint rspamd_encode_hex_buf (const guchar *in, gsize inlen, gchar *out,
 		gsize outlen);
 
+
 /**
  * Decode string using hex encoding
  * @param in input
@@ -183,6 +196,23 @@ gint rspamd_encode_hex_buf (const guchar *in, gsize inlen, gchar *out,
 gssize rspamd_decode_hex_buf (const gchar *in, gsize inlen,
 		guchar *out, gsize outlen);
 
+/**
+ * Common version of base64 encoder
+ * @param in
+ * @param inlen
+ * @param str_len
+ * @param outlen
+ * @param fold
+ * @param how
+ * @return
+ */
+gchar *
+rspamd_encode_base64_common (const guchar *in,
+							 gsize inlen,
+							 gint str_len,
+							 gsize *outlen,
+							 gboolean fold,
+							 enum rspamd_newlines_type how);
 /**
  * Encode string using base64 encoding
  * @param in input
@@ -202,6 +232,16 @@ gchar * rspamd_encode_base64 (const guchar *in, gsize inlen, gint str_len,
  */
 gchar * rspamd_encode_base64_fold (const guchar *in, gsize inlen, gint str_len,
 		gsize *outlen, enum rspamd_newlines_type how);
+
+/**
+ * Encode and fold string using quoted printable encoding
+ * @param in input
+ * @param inlen input length
+ * @param str_len maximum string length (if <= 0 then no lines are split)
+ * @return freshly allocated base64 encoded value or NULL if input is invalid
+ */
+gchar * rspamd_encode_qp_fold (const guchar *in, gsize inlen, gint str_len,
+								   gsize *outlen, enum rspamd_newlines_type how);
 
 /**
  * Decode quoted-printable encoded buffer, input and output must not overlap
@@ -392,6 +432,14 @@ struct UConverter *rspamd_get_utf8_converter (void);
 struct UNormalizer2;
 const struct UNormalizer2 *rspamd_get_unicode_normalizer (void);
 
+enum rspamd_normalise_result {
+	RSPAMD_UNICODE_NORM_NORMAL = 0,
+	RSPAMD_UNICODE_NORM_UNNORMAL = (1 << 0),
+	RSPAMD_UNICODE_NORM_ZERO_SPACES = (1 << 1),
+	RSPAMD_UNICODE_NORM_ERROR = (1 << 2),
+	RSPAMD_UNICODE_NORM_OVERFLOW = (1 << 3)
+};
+
 /**
  * Gets a string in UTF8 and normalises it to NFKC_Casefold form
  * @param pool optional memory pool used for logging purposes
@@ -399,13 +447,14 @@ const struct UNormalizer2 *rspamd_get_unicode_normalizer (void);
  * @param len
  * @return TRUE if a string has been normalised
  */
-gboolean rspamd_normalise_unicode_inplace (rspamd_mempool_t *pool,
+enum rspamd_normalise_result rspamd_normalise_unicode_inplace (rspamd_mempool_t *pool,
 		gchar *start, guint *len);
 
 enum rspamd_regexp_escape_flags {
 	RSPAMD_REGEXP_ESCAPE_ASCII = 0,
 	RSPAMD_REGEXP_ESCAPE_UTF = 1u << 0,
 	RSPAMD_REGEXP_ESCAPE_GLOB = 1u << 1,
+	RSPAMD_REGEXP_ESCAPE_RE = 1u << 2,
 };
 /**
  * Escapes special characters when reading plain data to be processed in pcre
@@ -428,5 +477,29 @@ rspamd_str_regexp_escape (const gchar *pattern, gsize slen,
  * @return
  */
 gchar * rspamd_str_make_utf_valid (const gchar *src, gsize slen, gsize *dstlen);
+
+/**
+ * Strips characters in `strip_chars` from start and end of the GString
+ * @param s
+ * @param strip_chars
+ */
+gsize rspamd_gstring_strip (GString *s, const gchar *strip_chars);
+
+/**
+ * Strips characters in `strip_chars` from start and end of the sized string
+ * @param s
+ * @param strip_chars
+ */
+const gchar* rspamd_string_len_strip (const gchar *in,
+		gsize *len, const gchar *strip_chars);
+
+#define IS_ZERO_WIDTH_SPACE(uc) ((uc) == 0x200B || \
+								(uc) == 0x200C || \
+								(uc) == 0x200D || \
+								(uc) == 0xFEFF)
+#define IS_OBSCURED_CHAR(uc) (((uc) >= 0x200B && (uc) <= 0x200F) || \
+								((uc) >= 0x2028 && (uc) <= 0x202F) || \
+								((uc) >= 0x205F && (uc) <= 0x206F) || \
+								(uc) == 0xFEFF)
 
 #endif /* SRC_LIBUTIL_STR_UTIL_H_ */

@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <contrib/libucl/ucl.h>
 #include "config.h"
 #include "util.h"
 #include "cfg_file.h"
@@ -117,7 +118,8 @@ struct rspamd_function_atom {
 enum rspamd_mime_atom_type {
 	MIME_ATOM_REGEXP = 0,
 	MIME_ATOM_INTERNAL_FUNCTION,
-	MIME_ATOM_LUA_FUNCTION
+	MIME_ATOM_LUA_FUNCTION,
+	MIME_ATOM_LOCAL_LUA_FUNCTION, /* New style */
 };
 
 struct rspamd_mime_atom {
@@ -126,6 +128,7 @@ struct rspamd_mime_atom {
 		struct rspamd_regexp_atom *re;
 		struct rspamd_function_atom *func;
 		const gchar *lua_function;
+		gint lua_cbref;
 	} d;
 	enum rspamd_mime_atom_type type;
 };
@@ -637,8 +640,9 @@ rspamd_mime_expr_parse (const gchar *line, gsize len,
 {
 	rspamd_expression_atom_t *a = NULL;
 	struct rspamd_mime_atom *mime_atom = NULL;
-	const gchar *p, *end;
-	struct rspamd_config *cfg = ud;
+	const gchar *p, *end, *c = NULL;
+	struct rspamd_mime_expr_ud *real_ud = (struct rspamd_mime_expr_ud *)ud;
+	struct rspamd_config *cfg;
 	rspamd_regexp_t *own_re;
 	gchar t;
 	gint type = MIME_ATOM_REGEXP, obraces = 0, ebraces = 0;
@@ -652,6 +656,7 @@ rspamd_mime_expr_parse (const gchar *line, gsize len,
 		in_flags_brace,
 		got_obrace,
 		in_function,
+		in_local_function,
 		got_ebrace,
 		end_atom,
 		bad_atom
@@ -659,6 +664,7 @@ rspamd_mime_expr_parse (const gchar *line, gsize len,
 
 	p = line;
 	end = p + len;
+	cfg = real_ud->cfg;
 
 	while (p < end) {
 		t = *p;
@@ -674,11 +680,20 @@ rspamd_mime_expr_parse (const gchar *line, gsize len,
 				state = got_obrace;
 			}
 			else if (!g_ascii_isalnum (t) && t != '_' && t != '-' && t != '=') {
-				/* Likely lua function, identified by just a string */
-				type = MIME_ATOM_LUA_FUNCTION;
-				state = end_atom;
-				/* Do not increase p */
-				continue;
+				if (t == ':') {
+					if (p - line == 3 && memcmp (line, "lua", 3) == 0) {
+						type = MIME_ATOM_LOCAL_LUA_FUNCTION;
+						state = in_local_function;
+						c = p + 1;
+					}
+				}
+				else {
+					/* Likely lua function, identified by just a string */
+					type = MIME_ATOM_LUA_FUNCTION;
+					state = end_atom;
+					/* Do not increase p */
+					continue;
+				}
 			}
 			else if (g_ascii_isspace (t)) {
 				state = bad_atom;
@@ -743,6 +758,15 @@ rspamd_mime_expr_parse (const gchar *line, gsize len,
 				}
 			}
 			p ++;
+			break;
+		case in_local_function:
+			if (!(g_ascii_isalnum (t) || t == '-' || t == '_')) {
+				g_assert (c != NULL);
+				state = end_atom;
+			}
+			else {
+				p++;
+			}
 			break;
 		case got_ebrace:
 			state = end_atom;
@@ -851,7 +875,58 @@ set:
 
 			goto err;
 		}
+
 		lua_pop (cfg->lua_state, 1);
+	}
+	else if (type == MIME_ATOM_LOCAL_LUA_FUNCTION) {
+		/* p pointer is set to the start of Lua function name */
+
+		if (real_ud->conf_obj == NULL) {
+			g_set_error (err, rspamd_mime_expr_quark(), 300,
+					"no config object for '%s'",
+					mime_atom->str);
+			goto err;
+		}
+
+		const ucl_object_t *functions = ucl_object_lookup (real_ud->conf_obj,
+				"functions");
+
+		if (functions == NULL) {
+			g_set_error (err, rspamd_mime_expr_quark(), 310,
+					"no functions defined for '%s'",
+					mime_atom->str);
+			goto err;
+		}
+
+		if (ucl_object_type (functions) != UCL_OBJECT) {
+			g_set_error (err, rspamd_mime_expr_quark(), 320,
+					"functions is not a table for '%s'",
+					mime_atom->str);
+			goto err;
+		}
+
+		const ucl_object_t *function_obj;
+
+		function_obj = ucl_object_lookup_len (functions, c,
+				p - c);
+
+		if (function_obj == NULL) {
+			g_set_error (err, rspamd_mime_expr_quark(), 320,
+					"function %*.s is not found for '%s'",
+					(int)(p - c), c, mime_atom->str);
+			goto err;
+		}
+
+		if (ucl_object_type (function_obj) != UCL_USERDATA) {
+			g_set_error (err, rspamd_mime_expr_quark(), 320,
+					"function %*.s has invalid type for '%s'",
+					(int)(p - c), c, mime_atom->str);
+			goto err;
+		}
+
+		struct ucl_lua_funcdata *fd = function_obj->value.ud;
+
+		mime_atom->d.lua_cbref = fd->idx;
 	}
 	else {
 		mime_atom->d.func = rspamd_mime_expr_parse_function_atom (pool,
@@ -933,6 +1008,7 @@ rspamd_mime_expr_priority (rspamd_expression_atom_t *atom)
 		ret = 50;
 		break;
 	case MIME_ATOM_LUA_FUNCTION:
+	case MIME_ATOM_LOCAL_LUA_FUNCTION:
 		ret = 50;
 		break;
 	case MIME_ATOM_REGEXP:
@@ -1035,6 +1111,41 @@ rspamd_mime_expr_process (struct rspamd_expr_process_data *process_data, rspamd_
 			/* Remove result */
 			lua_pop (L, 1);
 		}
+	}
+	else if (mime_atom->type == MIME_ATOM_LOCAL_LUA_FUNCTION) {
+		gint err_idx;
+		GString *tb;
+
+		L = task->cfg->lua_state;
+		lua_pushcfunction (L, &rspamd_lua_traceback);
+		err_idx = lua_gettop (L);
+
+		lua_rawgeti (L, LUA_REGISTRYINDEX, mime_atom->d.lua_cbref);
+		rspamd_lua_task_push (L, task);
+
+		if (lua_pcall (L, 1, 1, err_idx) != 0) {
+			tb = lua_touserdata (L, -1);
+			msg_info_task ("lua call to local function for atom '%s' failed: %v",
+					mime_atom->str,
+					tb);
+			if (tb) {
+				g_string_free (tb, TRUE);
+			}
+		}
+		else {
+			if (lua_type (L, -1) == LUA_TBOOLEAN) {
+				ret = lua_toboolean (L, -1);
+			}
+			else if (lua_type (L, -1) == LUA_TNUMBER) {
+				ret = lua_tonumber (L, 1);
+			}
+			else {
+				msg_err_task ("%s returned wrong return type: %s",
+						mime_atom->str, lua_typename (L, lua_type (L, -1)));
+			}
+		}
+
+		lua_settop (L, 0);
 	}
 	else {
 		ret = rspamd_mime_expr_process_function (mime_atom->d.func, task,
@@ -1391,7 +1502,7 @@ rspamd_is_html_balanced (struct rspamd_task * task, GArray * args, void *unused)
 	for (i = 0; i < task->text_parts->len; i ++) {
 
 		p = g_ptr_array_index (task->text_parts, i);
-		if (!IS_PART_EMPTY (p) && IS_PART_HTML (p)) {
+		if (IS_PART_HTML (p)) {
 			if (p->flags & RSPAMD_MIME_TEXT_PART_FLAG_BALANCED) {
 				res = TRUE;
 			}
@@ -1428,7 +1539,7 @@ rspamd_has_html_tag (struct rspamd_task * task, GArray * args, void *unused)
 	for (i = 0; i < task->text_parts->len; i ++) {
 		p = g_ptr_array_index (task->text_parts, i);
 
-		if (!IS_PART_EMPTY (p) && IS_PART_HTML (p) && p->html) {
+		if (IS_PART_HTML (p) && p->html) {
 			res = rspamd_html_tag_seen (p->html, arg->data);
 		}
 
@@ -1451,7 +1562,7 @@ rspamd_has_fake_html (struct rspamd_task * task, GArray * args, void *unused)
 	for (i = 0; i < task->text_parts->len; i ++) {
 		p = g_ptr_array_index (task->text_parts, i);
 
-		if (!IS_PART_EMPTY (p) && IS_PART_HTML (p) && p->html->html_tags == NULL) {
+		if (IS_PART_HTML (p) && (p->html == NULL || p->html->html_tags == NULL)) {
 			res = TRUE;
 		}
 
@@ -1627,12 +1738,45 @@ rspamd_check_smtp_data (struct rspamd_task *task, GArray * args, void *unused)
 	return FALSE;
 }
 
+static inline gboolean
+rspamd_check_ct_attr (const gchar *begin, gsize len,
+		struct expression_argument *arg_pattern)
+{
+	rspamd_regexp_t *re;
+	gboolean r = FALSE;
+
+	if (arg_pattern->type == EXPRESSION_ARGUMENT_REGEXP) {
+		re = arg_pattern->data;
+
+		if (len > 0) {
+			r = rspamd_regexp_search (re,
+					begin, len,
+					NULL, NULL, FALSE, NULL);
+		}
+
+		if (r) {
+			return TRUE;
+		}
+	}
+	else {
+		/* Just do strcasecmp */
+		gsize plen = strlen (arg_pattern->data);
+
+		if (plen == len &&
+			g_ascii_strncasecmp (arg_pattern->data, begin, len) == 0) {
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
 static gboolean
 rspamd_content_type_compare_param (struct rspamd_task * task,
 	GArray * args,
 	void *unused)
 {
-	rspamd_regexp_t *re;
+
 	struct expression_argument *arg, *arg1, *arg_pattern;
 	gboolean recursive = FALSE;
 	struct rspamd_mime_part *cur_part;
@@ -1640,7 +1784,6 @@ rspamd_content_type_compare_param (struct rspamd_task * task,
 	rspamd_ftok_t srch;
 	struct rspamd_content_type_param *found = NULL, *cur;
 	const gchar *param_name;
-	gboolean r = FALSE;
 
 	if (args == NULL || args->len < 2) {
 		msg_warn_task ("no parameters to function");
@@ -1672,32 +1815,33 @@ rspamd_content_type_compare_param (struct rspamd_task * task,
 			}
 		}
 
-		if (cur_part->ct->attrs) {
-			RSPAMD_FTOK_FROM_STR (&srch, param_name);
+		rspamd_ftok_t lit;
+		RSPAMD_FTOK_FROM_STR (&srch, param_name);
+		RSPAMD_FTOK_FROM_STR (&lit, "charset");
 
+		if (rspamd_ftok_equal (&srch, &lit)) {
+			if (rspamd_check_ct_attr (cur_part->ct->charset.begin,
+					cur_part->ct->charset.len, arg_pattern)) {
+				return TRUE;
+			}
+		}
+
+		RSPAMD_FTOK_FROM_STR (&lit, "boundary");
+		if (rspamd_ftok_equal (&srch, &lit)) {
+			if (rspamd_check_ct_attr (cur_part->ct->orig_boundary.begin,
+					cur_part->ct->orig_boundary.len, arg_pattern)) {
+				return TRUE;
+			}
+		}
+
+		if (cur_part->ct->attrs) {
 			found = g_hash_table_lookup (cur_part->ct->attrs, &srch);
 
 			if (found) {
 				DL_FOREACH (found, cur) {
-					if (arg_pattern->type == EXPRESSION_ARGUMENT_REGEXP) {
-						re = arg_pattern->data;
-
-						if (cur->value.len > 0) {
-							r = rspamd_regexp_search (re,
-									cur->value.begin, cur->value.len,
-									NULL, NULL, FALSE, NULL);
-						}
-
-						if (r) {
-							return TRUE;
-						}
-					}
-					else {
-						/* Just do strcasecmp */
-						RSPAMD_FTOK_FROM_STR (&srch, arg_pattern->data);
-						if (rspamd_ftok_casecmp (&srch, &cur->value) == 0) {
-							return TRUE;
-						}
+					if (rspamd_check_ct_attr (cur->value.begin,
+							cur->value.len, arg_pattern)) {
+						return TRUE;
 					}
 				}
 			}
@@ -1753,9 +1897,25 @@ rspamd_content_type_has_param (struct rspamd_task * task,
 			}
 		}
 
-		if (cur_part->ct->attrs) {
-			RSPAMD_FTOK_FROM_STR (&srch, param_name);
 
+		rspamd_ftok_t lit;
+		RSPAMD_FTOK_FROM_STR (&srch, param_name);
+		RSPAMD_FTOK_FROM_STR (&lit, "charset");
+
+		if (rspamd_ftok_equal (&srch, &lit)) {
+			if (cur_part->ct->charset.len > 0) {
+				return TRUE;
+			}
+		}
+
+		RSPAMD_FTOK_FROM_STR (&lit, "boundary");
+		if (rspamd_ftok_equal (&srch, &lit)) {
+			if (cur_part->ct->boundary.len > 0) {
+				return TRUE;
+			}
+		}
+
+		if (cur_part->ct->attrs) {
 			found = g_hash_table_lookup (cur_part->ct->attrs, &srch);
 
 			if (found) {

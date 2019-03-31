@@ -24,6 +24,9 @@
  * This module is used to manage rspamd maps and map like objects
  *
  * @module rspamd_map
+ *
+ * All maps could be obtained by function `rspamd_config:get_maps()`
+ * Also see [`lua_maps` module description](lua_maps.html).
  */
 
 /***
@@ -413,7 +416,7 @@ lua_map_read (gchar *chunk, gint len,
 }
 
 static void
-lua_map_fin (struct map_cb_data *data)
+lua_map_fin (struct map_cb_data *data, void **target)
 {
 	struct lua_map_callback_data *cbdata;
 	struct rspamd_lua_map **pmap;
@@ -427,10 +430,6 @@ lua_map_fin (struct map_cb_data *data)
 	else {
 		msg_err_map ("no data read for map");
 		return;
-	}
-
-	if (data->prev_data) {
-		data->prev_data = NULL;
 	}
 
 	if (cbdata->ref == -1) {
@@ -451,6 +450,14 @@ lua_map_fin (struct map_cb_data *data)
 	}
 
 	cbdata->data = rspamd_fstring_assign (cbdata->data, "", 0);
+
+	if (target) {
+		*target = data->cur_data;
+	}
+
+	if (data->prev_data) {
+		data->prev_data = NULL;
+	}
 }
 
 static void

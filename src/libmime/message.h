@@ -43,10 +43,12 @@ struct rspamd_mime_text_part;
 
 struct rspamd_mime_multipart {
 	GPtrArray *children;
+	rspamd_ftok_t boundary;
 };
 
 struct rspamd_mime_part {
 	struct rspamd_content_type *ct;
+	struct rspamd_content_type *detected_ct;
 	struct rspamd_content_disposition *cd;
 	rspamd_ftok_t raw_data;
 	rspamd_ftok_t parsed_data;
@@ -63,7 +65,7 @@ struct rspamd_mime_part {
 	guint id;
 
 	union {
-		struct rspamd_mime_multipart mp;
+		struct rspamd_mime_multipart *mp;
 		struct rspamd_mime_text_part *txt;
 		struct rspamd_image *img;
 		struct rspamd_archive *arch;
@@ -121,36 +123,6 @@ struct rspamd_mime_text_part {
 	guint capital_letters;
 	guint numeric_characters;
 	guint unicode_scripts;
-};
-
-enum rspamd_received_type {
-	RSPAMD_RECEIVED_SMTP = 0,
-	RSPAMD_RECEIVED_ESMTP,
-	RSPAMD_RECEIVED_ESMTPA,
-	RSPAMD_RECEIVED_ESMTPS,
-	RSPAMD_RECEIVED_ESMTPSA,
-	RSPAMD_RECEIVED_LMTP,
-	RSPAMD_RECEIVED_IMAP,
-	RSPAMD_RECEIVED_UNKNOWN
-};
-
-#define RSPAMD_RECEIVED_FLAG_ARTIFICIAL (1 << 0)
-#define RSPAMD_RECEIVED_FLAG_SSL (1 << 1)
-#define RSPAMD_RECEIVED_FLAG_AUTHENTICATED (1 << 2)
-
-struct received_header {
-	gchar *from_hostname;
-	gchar *from_ip;
-	gchar *real_hostname;
-	gchar *real_ip;
-	gchar *by_hostname;
-	gchar *for_mbox;
-	gchar *comment_ip;
-	rspamd_inet_addr_t *addr;
-	struct rspamd_mime_header *hdr;
-	time_t timestamp;
-	enum rspamd_received_type type;
-	gint flags;
 };
 
 /**

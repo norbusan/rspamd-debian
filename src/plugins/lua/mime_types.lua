@@ -21,6 +21,8 @@ end
 -- This plugin implements mime types checks for mail messages
 local logger = require "rspamd_logger"
 local lua_util = require "lua_util"
+local rspamd_util = require "rspamd_util"
+local lua_maps = require "lua_maps"
 local N = "mime_types"
 local settings = {
   file = '',
@@ -32,6 +34,7 @@ local settings = {
   symbol_archive_in_archive = 'MIME_ARCHIVE_IN_ARCHIVE',
   symbol_double_extension = 'MIME_DOUBLE_BAD_EXTENSION',
   symbol_bad_extension = 'MIME_BAD_EXTENSION',
+  symbol_bad_unicode = 'MIME_BAD_UNICODE',
   regexp = false,
   extension_map = { -- extension -> mime_type
     html = 'text/html',
@@ -139,7 +142,6 @@ local settings = {
     scf = 2,
     shs = 2,
     theme = 2,
-    tmp = 2,
     url = 2,
     vbp = 2,
     vsmacros = 2,
@@ -284,7 +286,7 @@ local full_extensions_map = {
   {"csh", "application/x-csh"},
   {"csproj", "text/plain"},
   {"css", "text/css"},
-  {"csv", "text/csv"},
+  {"csv", {"application/vnd.ms-excel", "text/csv", "text/plain"}},
   {"cur", "application/octet-stream"},
   {"cxx", "text/plain"},
   {"dat", {"application/octet-stream", "application/ms-tnef"}},
@@ -305,7 +307,12 @@ local full_extensions_map = {
   {"dlm", "text/dlm"},
   {"doc", "application/msword"},
   {"docm", "application/vnd.ms-word.document.macroEnabled.12"},
-  {"docx", {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword", "application/vnd.ms-word.document.12", "application/octet-stream"}},
+  {"docx", {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+    "application/vnd.ms-word.document.12",
+    "application/octet-stream",
+  }},
   {"dot", "application/msword"},
   {"dotm", "application/vnd.ms-word.template.macroEnabled.12"},
   {"dotx", "application/vnd.openxmlformats-officedocument.wordprocessingml.template"},
@@ -327,7 +334,7 @@ local full_extensions_map = {
   {"etl", "application/etl"},
   {"etx", "text/x-setext"},
   {"evy", "application/envoy"},
-  {"exe", "application/x-dosexec"},
+  {"exe", {"application/x-dosexec", "application/x-msdownload"}},
   {"exe.config", "text/xml"},
   {"fdf", "application/vnd.fdf"},
   {"fif", "application/fractals"},
@@ -472,7 +479,7 @@ local full_extensions_map = {
   {"mqv", "video/quicktime"},
   {"ms", "application/x-troff-ms"},
   {"msg", "application/vnd.ms-outlook"},
-  {"msi", "application/octet-stream"},
+  {"msi", {"application/x-msi", "application/octet-stream"}},
   {"mso", "application/octet-stream"},
   {"mts", "video/vnd.dlna.mpeg-tts"},
   {"mtx", "application/xml"},
@@ -599,7 +606,7 @@ local full_extensions_map = {
   {"roff", "application/x-troff"},
   {"rpm", "audio/x-pn-realaudio-plugin"},
   {"rqy", "text/x-ms-rqy"},
-  {"rtf", {"application/rtf","application/msword", "text/richtext"}},
+  {"rtf", {"application/rtf","application/msword", "text/richtext", "text/rtf"}},
   {"rtx", "text/richtext"},
   {"rvt", "application/octet-stream" },
   {"ruleset", "application/xml"},
@@ -770,10 +777,19 @@ local full_extensions_map = {
   {"xlk", "application/vnd.ms-excel"},
   {"xll", "application/vnd.ms-excel"},
   {"xlm", "application/vnd.ms-excel"},
-  {"xls", {"application/vnd.ms-excel", "application/vnd.ms-office", "application/x-excel", "application/octet-stream"}},
+  {"xls", {
+    "application/vnd.ms-excel",
+    "application/vnd.ms-office",
+    "application/x-excel",
+    "application/octet-stream"
+  }},
   {"xlsb", "application/vnd.ms-excel.sheet.binary.macroEnabled.12"},
   {"xlsm", "application/vnd.ms-excel.sheet.macroEnabled.12"},
-  {"xlsx", {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel.12", "application/octet-stream"}},
+  {"xlsx", {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel.12",
+    "application/octet-stream"
+  }},
   {"xlt", "application/vnd.ms-excel"},
   {"xltm", "application/vnd.ms-excel.template.macroEnabled.12"},
   {"xltx", "application/vnd.openxmlformats-officedocument.spreadsheetml.template"},
@@ -797,13 +813,17 @@ local full_extensions_map = {
   {"xtp", "application/octet-stream"},
   {"xwd", "image/x-xwindowdump"},
   {"z", "application/x-compress"},
-  {"zip", {"application/zip", "application/x-zip-compressed", "application/octet-stream"}},
+  {"zip", {
+    "application/zip",
+    "application/x-zip-compressed",
+    "application/octet-stream"
+  }},
   {"zlib", "application/zlib"},
 }
 
 local function check_mime_type(task)
   local function gen_extension(fname)
-    local parts = rspamd_str_split(fname, '.')
+    local parts = lua_util.str_split(fname or '', '.')
 
     local ext = {}
     for n = 1, 2 do
@@ -814,6 +834,25 @@ local function check_mime_type(task)
   end
 
   local function check_filename(fname, ct, is_archive, part)
+
+    local has_bad_unicode, char, ch_pos = rspamd_util.has_obscured_unicode(fname)
+    if has_bad_unicode then
+      task:insert_result(settings.symbol_bad_unicode, 1.0,
+          string.format("0x%xd after %s", char,
+              fname:sub(1, ch_pos)))
+    end
+
+    -- Replace potentially bad characters with '?'
+    fname = fname:gsub('[^%s%g]', '?')
+
+    -- Check file is in filename whitelist
+    if settings.filename_whitelist and
+        settings.filename_whitelist:get_key(fname) then
+      logger.debugm("mime_types", task, "skip checking of %s - file is in filename whitelist",
+        fname)
+      return
+    end
+
     local ext,ext2,parts = gen_extension(fname)
     -- ext is the last extension, LOWERCASED
     -- ext2 is the one before last extension LOWERCASED
@@ -823,7 +862,7 @@ local function check_mime_type(task)
       if #parts > 2 then
         -- We need to ensure that next-to-last extension is an extension,
         -- so we check for its length and if it is not a number or date
-        if #ext2 <= 4 and not string.match(ext2, '^%d+$') then
+        if #ext2 <= 4 and not string.match(ext2, '^%d+[%]%)]?$') then
 
           -- Use the greatest badness multiplier
           if not badness_mult or
@@ -871,7 +910,7 @@ local function check_mime_type(task)
       else
         if ext2 then
           check_extension(settings['bad_extensions'][ext],
-            settings['bad_extensions'][ext2])
+              settings['bad_extensions'][ext2])
           -- Check for archive cloaking like .zip.gz
           if settings['archive_extensions'][ext2]
             -- Exclude multipart archive extensions, e.g. .zip.001
@@ -911,6 +950,7 @@ local function check_mime_type(task)
   if parts then
     for _,p in ipairs(parts) do
       local mtype,subtype = p:get_type()
+      local dtype,dsubtype = p:get_detected_type()
 
       if not mtype then
         task:insert_result(settings['symbol_unknown'], 1.0, 'missing content type')
@@ -920,9 +960,12 @@ local function check_mime_type(task)
         -- Check for attachment
         local filename = p:get_filename()
         local ct = string.format('%s/%s', mtype, subtype):lower()
+        local detected_ct
+        if dtype and dsubtype then
+          detected_ct = string.format('%s/%s', dtype, dsubtype)
+        end
 
         if filename then
-          filename = filename:gsub('[^%s%g]', '?')
           check_filename(filename, ct, false, p)
         end
 
@@ -950,12 +993,9 @@ local function check_mime_type(task)
           if check then
             local fl = arch:get_files_full()
 
-            for _,f in ipairs(fl) do
-              -- Strip bad characters
-              if f['name'] then
-                f['name'] = f['name']:gsub('[\128-\255%s%G]', '?')
-              end
+            local nfiles = #fl
 
+            for _,f in ipairs(fl) do
               if f['encrypted'] then
                 task:insert_result(settings['symbol_encrypted_archive'],
                     1.0, f['name'])
@@ -967,23 +1007,59 @@ local function check_mime_type(task)
                 check_filename(f['name'], nil, true, p)
               end
             end
+
+            if nfiles == 1 and fl[1].name then
+              -- We check that extension of the file inside archive is
+              -- the same as double extension of the file
+              local _,ext2 = gen_extension(filename)
+
+              if ext2 then
+                local enc_ext = gen_extension(fl[1].name)
+
+                if enc_ext
+                    and settings['bad_extensions'][enc_ext]
+                    and not string.match(ext2, '^%d+$')
+                    and enc_ext ~= ext2 then
+                  task:insert_result(settings['symbol_double_extension'], 2.0,
+                      string.format("%s!=%s", ext2, enc_ext))
+                end
+              end
+            end
           end
         end
 
         if map then
-          local v = map:get_key(ct)
+          local v
+          local detected_different = false
+          if detected_ct and detected_ct ~= ct then
+            v = map:get_key(detected_ct)
+            detected_different = true
+          else
+            v = map:get_key(ct)
+          end
           if v then
             local n = tonumber(v)
 
             if n then
               if n > 0 then
-                task:insert_result(settings['symbol_bad'], n, ct)
+                if detected_different then
+                  -- Penalize case
+                  n = n * 1.5
+                  task:insert_result(settings['symbol_bad'], n,
+                      string.format('%s:%s', ct, detected_ct))
+                else
+                  task:insert_result(settings['symbol_bad'], n, ct)
+                end
                 task:insert_result('MIME_TRACE', 0.0,
                     string.format("%s:%s", p:get_id(), '-'))
               elseif n < 0 then
                 task:insert_result(settings['symbol_good'], -n, ct)
                 task:insert_result('MIME_TRACE', 0.0,
                     string.format("%s:%s", p:get_id(), '+'))
+              else
+                -- Neutral content type
+                task:insert_result('MIME_TRACE', 0.0,
+                    string.format("%s:%s", p:get_id(), '~'))
               end
             else
               logger.warnx(task, 'unknown value: "%s" for content type %s in the map',
@@ -1005,6 +1081,9 @@ if opts then
   for k,v in pairs(opts) do
     settings[k] = v
   end
+
+  settings.filename_whitelist = lua_maps.rspamd_map_add('mime_types', 'filename_whitelist', 'regexp',
+    'filename whitelist')
 
   local function change_extension_map_entry(ext, ct, mult)
     if type(ct) == 'table' then
@@ -1095,6 +1174,12 @@ if opts then
     rspamd_config:register_symbol({
       type = 'virtual',
       name = settings['symbol_bad_extension'],
+      parent = id,
+      group = 'mime_types',
+    })
+    rspamd_config:register_symbol({
+      type = 'virtual',
+      name = settings['symbol_bad_unicode'],
       parent = id,
       group = 'mime_types',
     })

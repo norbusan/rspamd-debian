@@ -50,10 +50,11 @@ define(["jquery"],
                 },
                 method: "POST",
                 headers: headers,
-                success: function (json) {
+                success: function (json, jqXHR) {
                     cleanTextUpload(source);
-                    if (json[0].data.success) {
-                        rspamd.alertMessage("alert-success", "Data successfully uploaded");
+                    rspamd.alertMessage("alert-success", "Data successfully uploaded");
+                    if (jqXHR.status !== 200) {
+                        rspamd.alertMessage("alert-info", jqXHR.statusText);
                     }
                 }
             });
@@ -73,9 +74,9 @@ define(["jquery"],
                         rspamd.alertMessage("alert-success", "Data successfully scanned");
                         var action = "";
 
-                        if (json.action === "clean" || "no action") {
+                        if (json.action === "clean" || json.action === "no action") {
                             action = "label-success";
-                        } else if (json.action === "rewrite subject" || "add header" || "probable spam") {
+                        } else if (json.action === "rewrite subject" || json.action === "add header" || json.action === "probable spam") {
                             action = "label-warning";
                         } else if (json.action === "spam") {
                             action = "label-danger";

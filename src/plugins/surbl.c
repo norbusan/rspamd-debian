@@ -73,6 +73,7 @@ static const gchar *M = "surbl";
 #define SURBL_OPTION_RESOLVEIP (1 << 1)
 #define SURBL_OPTION_CHECKIMAGES (1 << 2)
 #define SURBL_OPTION_CHECKDKIM (1 << 3)
+#define SURBL_OPTION_FULLDOMAIN (1 << 4)
 #define MAX_LEVELS 10
 
 struct surbl_ctx {
@@ -97,10 +98,11 @@ struct suffix_item {
 	const gchar *monitored_domain;
 	const gchar *suffix;
 	const gchar *symbol;
-	guint32 options;
 	GArray *bits;
 	GHashTable *ips;
 	struct rspamd_monitored *m;
+	guint32 options;
+	gboolean reported_offline;
 	gint callback_id;
 	gint url_process_cbref;
 };
@@ -269,10 +271,14 @@ read_exceptions_list (gchar * chunk,
 }
 
 static void
-fin_exceptions_list (struct map_cb_data *data)
+fin_exceptions_list (struct map_cb_data *data, void **target)
 {
 	GHashTable **t;
 	gint i;
+
+	if (target) {
+		*target = data->cur_data;
+	}
 
 	if (data->prev_data) {
 		t = data->prev_data;
@@ -384,10 +390,14 @@ read_redirectors_list (gchar * chunk,
 			   final);
 }
 
-void
-fin_redirectors_list (struct map_cb_data *data)
+static void
+fin_redirectors_list (struct map_cb_data *data, void **target)
 {
 	GHashTable *tld_hash;
+
+	if (target) {
+		*target = data->cur_data;
+	}
 
 	if (data->prev_data) {
 		tld_hash = data->prev_data;
@@ -396,7 +406,7 @@ fin_redirectors_list (struct map_cb_data *data)
 	}
 }
 
-void
+static void
 dtor_redirectors_list (struct map_cb_data *data)
 {
 	GHashTable *tld_hash;
@@ -590,6 +600,15 @@ surbl_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 			0,
 			NULL,
 			0);
+	rspamd_rcl_add_doc_by_path (cfg,
+			"surbl.rule",
+			"Check full domain name instead of eSLD",
+			"full_domain",
+			UCL_BOOLEAN,
+			NULL,
+			0,
+			NULL,
+			0);
 
 	return 0;
 }
@@ -611,9 +630,16 @@ register_bit_symbols (struct rspamd_config *cfg, struct suffix_item *suffix,
 
 		while (g_hash_table_iter_next (&it, &k, &v)) {
 			bit = v;
-			rspamd_symcache_add_symbol (cfg->cache, bit->symbol,
-					0, NULL, NULL,
-					SYMBOL_TYPE_VIRTUAL, parent_id);
+
+			/*
+			 * We can have multiple IPs mapped to a single symbol,
+			 * so skip symbol's registration to avoid duplicates
+			 */
+			if (rspamd_symcache_find_symbol (cfg->cache, bit->symbol) == -1) {
+				rspamd_symcache_add_symbol (cfg->cache, bit->symbol,
+						0, NULL, NULL,
+						SYMBOL_TYPE_VIRTUAL, parent_id);
+			}
 			msg_debug_config ("bit: %d", bit->bit);
 		}
 	}
@@ -632,6 +658,42 @@ register_bit_symbols (struct rspamd_config *cfg, struct suffix_item *suffix,
 	}
 }
 
+static void
+surbl_module_add_ip (const ucl_object_t *ip, const gchar *symbol,
+					 struct suffix_item* suffix,
+					 struct rspamd_config* cfg)
+{
+	gchar* p;
+	guint32 bit;
+	const gchar* ip_val;
+	struct surbl_bit_item* new_bit;
+
+	ip_val = ucl_obj_tostring (ip);
+	new_bit = rspamd_mempool_alloc (
+			cfg->cfg_pool,
+			sizeof(struct surbl_bit_item));
+	if (inet_pton (AF_INET, ip_val, &bit) != 1) {
+		msg_err_config ("cannot parse ip %s: %s", ip_val,
+				strerror (errno));
+		return;
+	}
+
+	new_bit->bit = bit;
+	new_bit->symbol = rspamd_mempool_strdup (
+			cfg->cfg_pool,
+			symbol);
+	/* Convert to uppercase */
+	p = new_bit->symbol;
+	while (*p) {
+		*p = g_ascii_toupper (*p);
+		p++;
+	}
+	msg_debug_config ("add new IP suffix: %d with symbol: %s",
+			(gint)new_bit->bit, new_bit->symbol);
+	g_hash_table_insert (suffix->ips, &new_bit->bit,
+			new_bit);
+}
+
 static gint
 surbl_module_parse_rule (const ucl_object_t* value, struct rspamd_config* cfg)
 {
@@ -640,7 +702,7 @@ surbl_module_parse_rule (const ucl_object_t* value, struct rspamd_config* cfg)
 	gint cb_id;
 	gint nrules = 0;
 	struct suffix_item* new_suffix;
-	const gchar* ip_val, *monitored_domain = NULL;
+	const gchar *monitored_domain = NULL;
 	struct surbl_bit_item* new_bit;
 	ucl_object_t *ropts;
 	struct surbl_ctx *surbl_module_ctx = surbl_get_context (cfg);
@@ -753,6 +815,13 @@ surbl_module_parse_rule (const ucl_object_t* value, struct rspamd_config* cfg)
 			}
 		}
 
+		cur = ucl_object_lookup (cur_rule, "full_domain");
+		if (cur != NULL && cur->type == UCL_BOOLEAN) {
+			if (ucl_object_toboolean (cur)) {
+				new_suffix->options |= SURBL_OPTION_FULLDOMAIN;
+			}
+		}
+
 		if ((new_suffix->options & (SURBL_OPTION_RESOLVEIP | SURBL_OPTION_NOIP))
 				== (SURBL_OPTION_NOIP | SURBL_OPTION_RESOLVEIP)) {
 			/* Mutually exclusive options */
@@ -826,7 +895,6 @@ surbl_module_parse_rule (const ucl_object_t* value, struct rspamd_config* cfg)
 		if (cur != NULL && cur->type == UCL_OBJECT) {
 			ucl_object_iter_t it = NULL;
 			const ucl_object_t* cur_bit;
-			guint32 bit;
 
 			new_suffix->ips = g_hash_table_new (g_int_hash, g_int_equal);
 			rspamd_mempool_add_destructor (cfg->cfg_pool,
@@ -835,30 +903,28 @@ surbl_module_parse_rule (const ucl_object_t* value, struct rspamd_config* cfg)
 
 			while ((cur_bit = ucl_object_iterate (cur, &it, true)) != NULL) {
 				if (ucl_object_key (cur_bit) != NULL) {
-					gchar* p;
-					ip_val = ucl_obj_tostring (cur_bit);
-					new_bit = rspamd_mempool_alloc (
-							cfg->cfg_pool,
-							sizeof(struct surbl_bit_item));
-					if (inet_pton (AF_INET, ip_val, &bit) != 1) {
-						msg_err_config ("cannot parse ip %s: %s", ip_val,
-								strerror (errno));
-						continue;
+					if (ucl_object_type (cur_bit) == UCL_STRING) {
+						/* Single IP */
+						surbl_module_add_ip (cur_bit, ucl_object_key (cur_bit),
+								new_suffix, cfg);
 					}
-					new_bit->bit = bit;
-					new_bit->symbol = rspamd_mempool_strdup (
-							cfg->cfg_pool,
-							ucl_object_key (cur_bit));
-					/* Convert to uppercase */
-					p = new_bit->symbol;
-					while (*p) {
-						*p = g_ascii_toupper (*p);
-						p++;
+					else if (ucl_object_type (cur_bit) == UCL_ARRAY) {
+						ucl_object_iter_t ar_it = NULL;
+						const ucl_object_t* cur_ar;
+
+						/* Array of IPs */
+						while ((cur_ar = ucl_object_iterate (cur_bit, &ar_it,
+								true)) != NULL) {
+							if (ucl_object_type (cur_ar) == UCL_STRING) {
+								surbl_module_add_ip (cur_ar,
+										ucl_object_key (cur_bit),
+										new_suffix, cfg);
+							}
+							else {
+								msg_err_config ("garbadge in ips element");
+							}
+						}
 					}
-					msg_debug_config ("add new IP suffix: %d with symbol: %s",
-							(gint)new_bit->bit, new_bit->symbol);
-					g_hash_table_insert (new_suffix->ips, &new_bit->bit,
-							new_bit);
 				}
 			}
 		}
@@ -1230,62 +1296,76 @@ format_surbl_request (rspamd_mempool_t * pool,
 	else {
 		/* Not a numeric url */
 		result = rspamd_mempool_alloc (pool, len);
-		/* Now we should try to check for exceptions */
-		if (!forced && surbl_module_ctx->exceptions) {
-			for (i = MAX_LEVELS - 1; i >= 0; i--) {
-				t = surbl_module_ctx->exceptions[i];
-				if (t != NULL && dots_num >= i + 1) {
-					f.begin = dots[dots_num - i - 1] + 1;
-					f.len = hostname->len -
-						(dots[dots_num - i - 1] - hostname->begin + 1);
-					if (g_hash_table_lookup (t, &f) != NULL) {
-						level = dots_num - i - 1;
-						found_exception = TRUE;
-						break;
+
+		if (suffix->options & SURBL_OPTION_FULLDOMAIN) {
+			/* Full domain case */
+			r = rspamd_snprintf (result,
+					len,
+					"%*s",
+					url->hostlen,
+					url->host);
+		}
+		else {
+			/* Now we should try to check for exceptions */
+			if (!forced && surbl_module_ctx->exceptions) {
+				for (i = MAX_LEVELS - 1; i >= 0; i--) {
+					t = surbl_module_ctx->exceptions[i];
+					if (t != NULL && dots_num >= i + 1) {
+						f.begin = dots[dots_num - i - 1] + 1;
+						f.len = hostname->len -
+								(dots[dots_num - i - 1] - hostname->begin + 1);
+						if (g_hash_table_lookup (t, &f) != NULL) {
+							level = dots_num - i - 1;
+							found_exception = TRUE;
+							break;
+						}
 					}
 				}
 			}
-		}
 
-		if (found_exception || url->tldlen == 0) {
-			if (level != MAX_LEVELS) {
-				if (level == 0) {
+			if (found_exception || url->tldlen == 0) {
+				if (level != MAX_LEVELS) {
+					if (level == 0) {
+						r = rspamd_snprintf (result,
+								len,
+								"%T",
+								hostname);
+					}
+					else {
+						r = rspamd_snprintf (result, len, "%*s",
+								(gint) (hostname->len -
+										(dots[level - 1] - hostname->begin + 1)),
+								dots[level - 1] + 1);
+					}
+				}
+				else if (dots_num >= 2) {
+					r = rspamd_snprintf (result, len, "%*s",
+							(gint) (hostname->len -
+									(dots[dots_num - 2] - hostname->begin + 1)),
+							dots[dots_num - 2] + 1);
+				}
+				else {
 					r = rspamd_snprintf (result,
 							len,
 							"%T",
 							hostname);
 				}
-				else {
-					r = rspamd_snprintf (result, len, "%*s",
-							(gint)(hostname->len -
-									(dots[level - 1] - hostname->begin + 1)),
-									dots[level - 1] + 1);
-				}
-			}
-			else if (dots_num >= 2) {
-				r = rspamd_snprintf (result, len, "%*s",
-						(gint)(hostname->len -
-								(dots[dots_num - 2] - hostname->begin + 1)),
-								dots[dots_num - 2] + 1);
 			}
 			else {
+				/* No exception */
 				r = rspamd_snprintf (result,
-						len,
-						"%T",
-						hostname);
-			}
-		}
-		else {
-			r = rspamd_snprintf (result,
 						len,
 						"%*s",
 						url->tldlen,
 						url->tld);
+			}
 		}
 	}
 
-	url->surbl = result;
-	url->surbllen = r;
+	if (url->surbl == NULL) {
+		url->surbl = result;
+		url->surbllen = r;
+	}
 
 	if (!forced &&
 			rspamd_match_hash_map (surbl_module_ctx->whitelist, result) != NULL) {
@@ -1334,11 +1414,11 @@ format_surbl_request (rspamd_mempool_t * pool,
 	}
 
 	msg_debug_pool ("request: %s, dots: %d, level: %d, orig: %*s",
-		result,
-		dots_num,
-		level,
-		(gint)hostname->len,
-		hostname->begin);
+			result,
+			dots_num,
+			level,
+			(gint)hostname->len,
+			hostname->begin);
 
 	return result;
 }
@@ -1623,7 +1703,8 @@ surbl_redirector_error (struct rspamd_http_connection *conn,
 
 	task = param->task;
 	msg_err_surbl ("connection with http server %s terminated incorrectly: %e",
-		rspamd_inet_address_to_string (rspamd_upstream_addr (param->redirector)),
+		rspamd_inet_address_to_string (
+				rspamd_upstream_addr_cur (param->redirector)),
 		err);
 	rspamd_upstream_fail (param->redirector, FALSE);
 	rspamd_session_remove_event (param->task->s, free_redirector_session,
@@ -1660,7 +1741,7 @@ surbl_redirector_finish (struct rspamd_http_connection *conn,
 					sizeof (*redirected_url));
 			rspamd_strlcpy (urlstr, hdr->begin, urllen + 1);
 			r = rspamd_url_parse (redirected_url, urlstr, urllen,
-					task->task_pool);
+					task->task_pool, RSPAMD_URL_PARSE_TEXT);
 
 			if (r == URI_ERRNO_OK) {
 				if ((existing = g_hash_table_lookup (task->urls, redirected_url)) == NULL) {
@@ -1714,7 +1795,7 @@ register_redirector_call (struct rspamd_url *url, struct rspamd_task *task,
 				RSPAMD_UPSTREAM_ROUND_ROBIN, url->host, url->hostlen);
 
 		if (selected) {
-			s = rspamd_inet_address_connect (rspamd_upstream_addr (selected),
+			s = rspamd_inet_address_connect (rspamd_upstream_addr_next (selected),
 					SOCK_STREAM, TRUE);
 		}
 
@@ -1732,12 +1813,12 @@ register_redirector_call (struct rspamd_url *url, struct rspamd_task *task,
 		param->url = url;
 		param->task = task;
 		param->conn = rspamd_http_connection_new (NULL,
+				s,
+				NULL,
 				surbl_redirector_error,
 				surbl_redirector_finish,
 				RSPAMD_HTTP_CLIENT_SIMPLE,
-				RSPAMD_HTTP_CLIENT,
-				NULL,
-				NULL);
+				RSPAMD_HTTP_CLIENT);
 		param->ctx = surbl_module_ctx;
 		msg = rspamd_http_new_message (HTTP_REQUEST);
 		msg->url = rspamd_fstring_assign (msg->url, url->string, url->urllen);
@@ -1756,7 +1837,7 @@ register_redirector_call (struct rspamd_url *url, struct rspamd_task *task,
 		}
 
 		rspamd_http_connection_write_message (param->conn, msg, NULL,
-				NULL, param, s, timeout, task->ev_base);
+				NULL, param, timeout);
 
 		msg_info_surbl (
 				"<%s> registered redirector call for %*s to %s, according to rule: %s",
@@ -1907,6 +1988,11 @@ surbl_tree_url_callback (gpointer key, gpointer value, void *data)
 		return;
 	}
 
+	if (url->flags & RSPAMD_URL_FLAG_HTML_DISPLAYED) {
+		/* Skip urls that are displayed only */
+		return;
+	}
+
 	task = param->task;
 	surbl_module_ctx = param->ctx;
 
@@ -1940,13 +2026,17 @@ surbl_test_url (struct rspamd_task *task,
 	struct surbl_ctx *surbl_module_ctx = surbl_get_context (task->cfg);
 
 	if (!rspamd_monitored_alive (suffix->m)) {
-		msg_info_surbl ("disable surbl %s as it is reported to be offline",
-				suffix->suffix);
+		if (!suffix->reported_offline) {
+			msg_info_surbl ("disable surbl %s as it is reported to be offline",
+					suffix->suffix);
+			suffix->reported_offline = TRUE;
+		}
 		rspamd_symcache_finalize_item (task, item);
 
 		return;
 	}
 
+	suffix->reported_offline = FALSE;
 	param = rspamd_mempool_alloc0 (task->task_pool, sizeof (*param));
 	param->task = task;
 	param->suffix = suffix;
@@ -2115,7 +2205,7 @@ surbl_is_redirector_handler (lua_State *L)
 		url_cpy = rspamd_mempool_alloc (task->task_pool, len);
 		memcpy (url_cpy, url, len);
 
-		if (rspamd_url_parse (&uri, url_cpy, len, task->task_pool)) {
+		if (rspamd_url_parse (&uri, url_cpy, len, task->task_pool, RSPAMD_URL_PARSE_TEXT)) {
 			msg_debug_surbl ("check url redirection %*s", uri.urllen,
 					uri.string);
 
@@ -2193,7 +2283,7 @@ surbl_continue_process_handler (lua_State *L)
 					sizeof (*redirected_url));
 			rspamd_strlcpy (urlstr, nurl, urllen + 1);
 			r = rspamd_url_parse (redirected_url, urlstr, urllen,
-					task->task_pool);
+					task->task_pool, RSPAMD_URL_PARSE_TEXT);
 
 			if (r == URI_ERRNO_OK) {
 				if (!g_hash_table_lookup (task->urls, redirected_url)) {

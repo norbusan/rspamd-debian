@@ -98,6 +98,13 @@ enum lua_var_type {
 	LUA_VAR_UNKNOWN
 };
 
+enum rspamd_symbol_group_flags {
+	RSPAMD_SYMBOL_GROUP_NORMAL = 0,
+	RSPAMD_SYMBOL_GROUP_DISABLED = (1 << 0),
+	RSPAMD_SYMBOL_GROUP_ONE_SHOT = (1 << 1),
+	RSPAMD_SYMBOL_GROUP_UNGROUPED = (1 << 2),
+};
+
 /**
  * Symbols group
  */
@@ -106,16 +113,18 @@ struct rspamd_symbols_group {
 	gchar *name;
 	GHashTable *symbols;
 	gdouble max_score;
-	gboolean disabled;
-	gboolean one_shot;
+	enum rspamd_symbol_group_flags flags;
 };
 
-#define RSPAMD_SYMBOL_FLAG_IGNORE (1 << 1)
-#define RSPAMD_SYMBOL_FLAG_ONEPARAM (1 << 2)
-#define RSPAMD_SYMBOL_FLAG_UNGROUPPED (1 << 3)
+enum rspamd_symbol_flags {
+	RSPAMD_SYMBOL_FLAG_NORMAL = 0,
+	RSPAMD_SYMBOL_FLAG_IGNORE = (1 << 1),
+	RSPAMD_SYMBOL_FLAG_ONEPARAM = (1 << 2),
+	RSPAMD_SYMBOL_FLAG_UNGROUPPED = (1 << 3),
+};
 
 /**
- * Symbol definition
+ * Symbol config definition
  */
 struct rspamd_symbol {
 	gchar *name;
@@ -125,7 +134,7 @@ struct rspamd_symbol {
 	guint priority;
 	struct rspamd_symbols_group *gr; /* Main group */
 	GPtrArray *groups; /* Other groups */
-	guint flags;
+	enum rspamd_symbol_flags flags;
 	gint nshots;
 };
 
@@ -258,6 +267,9 @@ struct rspamd_log_format {
 	struct rspamd_log_format *prev, *next;
 };
 
+/**
+ * Standard actions
+ */
 enum rspamd_action_type {
 	METRIC_ACTION_REJECT = 0,
 	METRIC_ACTION_SOFT_REJECT,
@@ -265,14 +277,22 @@ enum rspamd_action_type {
 	METRIC_ACTION_ADD_HEADER,
 	METRIC_ACTION_GREYLIST,
 	METRIC_ACTION_NOACTION,
-	METRIC_ACTION_MAX
+	METRIC_ACTION_MAX,
+	METRIC_ACTION_CUSTOM = 999,
+	METRIC_ACTION_DISCARD,
+	METRIC_ACTION_QUARANTINE
 };
 
-struct rspamd_action {
-	enum rspamd_action_type action;
-	gdouble score;
-	guint priority;
+enum rspamd_action_flags {
+	RSPAMD_ACTION_NORMAL = 0,
+	RSPAMD_ACTION_NO_THRESHOLD = (1u << 0),
+	RSPAMD_ACTION_THRESHOLD_ONLY = (1u << 1),
+	RSPAMD_ACTION_HAM = (1u << 2),
+	RSPAMD_ACTION_MILTER = (1u << 3),
 };
+
+
+struct rspamd_action;
 
 struct rspamd_config_post_load_script {
 	gint cbref;
@@ -300,8 +320,8 @@ struct rspamd_config {
 	gdouble grow_factor;                            /**< grow factor for metric							*/
 	GHashTable *symbols;                            /**< weights of symbols in metric					*/
 	const gchar *subject;                           /**< subject rewrite string							*/
-	GHashTable * groups; 		                    /**< groups of symbols								*/
-	struct rspamd_action actions[METRIC_ACTION_MAX]; /**< all actions of the metric						*/
+	GHashTable * groups;                            /**< groups of symbols								*/
+	struct rspamd_action *actions;                  /**< all actions of the metric						*/
 
 	gboolean raw_mode;                              /**< work in raw mode instead of utf one				*/
 	gboolean one_shot_mode;                         /**< rules add only one symbol							*/
@@ -317,14 +337,15 @@ struct rspamd_config {
 	gboolean disable_pcre_jit;                      /**< Disable pcre JIT									*/
 	gboolean disable_lua_squeeze;                   /**< Disable lua rules squeezing						*/
 	gboolean own_lua_state;                         /**< True if we have created lua_state internally		*/
+	gboolean soft_reject_on_timeout;                /**< If true emit soft reject on task timeout (if not reject) */
 
-	gsize max_diff;                                 /**< maximum diff size for text parts					*/
 	gsize max_cores_size;                           /**< maximum size occupied by rspamd core files			*/
 	gsize max_cores_count;                          /**< maximum number of core files						*/
 	gchar *cores_dir;                               /**< directory for core files							*/
 	gsize max_message;                              /**< maximum size for messages							*/
 	gsize max_pic_size;                             /**< maximum size for a picture to process				*/
 	gsize images_cache_size;                        /**< size of LRU cache for DCT data from images			*/
+	gdouble task_timeout;                           /**< maximum message processing time					*/
 	gint default_max_shots;                         /**< default maximum count of symbols hits permitted (-1 for unlimited) */
 
 	enum rspamd_log_type log_type;                  /**< log type											*/
@@ -336,7 +357,6 @@ struct rspamd_config {
 	guint32 log_buf_size;                           /**< length of log buffer								*/
 	const ucl_object_t *debug_ip_map;               /**< turn on debugging for specified ip addresses       */
 	gboolean log_urls;                              /**< whether we should log URLs                         */
-	GList *debug_symbols;                           /**< symbols to debug									*/
 	GHashTable *debug_modules;                      /**< logging modules to debug							*/
 	struct rspamd_cryptobox_pubkey *log_encryption_key; /**< encryption key for logs						*/
 	guint log_flags;                                /**< logging flags										*/
@@ -626,14 +646,23 @@ gboolean rspamd_config_add_symbol_group (struct rspamd_config *cfg,
  * @param cfg config file
  * @param metric metric name (or NULL for default metric)
  * @param action_name symbolic name of action
- * @param score score limit
- * @param priority priority for action
+ * @param obj data to set for action
  * @return TRUE if symbol has been inserted or FALSE if action already exists with higher priority
  */
 gboolean rspamd_config_set_action_score (struct rspamd_config *cfg,
 		const gchar *action_name,
-		gdouble score,
-		guint priority);
+		const ucl_object_t *obj);
+
+/**
+ * Check priority and maybe disable action completely
+ * @param cfg
+ * @param action_name
+ * @param priority
+ * @return
+ */
+gboolean rspamd_config_maybe_disable_action (struct rspamd_config *cfg,
+											 const gchar *action_name,
+											 guint priority);
 
 /**
  * Checks if a specified C or lua module is enabled or disabled in the config.
@@ -662,6 +691,11 @@ gboolean rspamd_action_from_str (const gchar *data, gint *result);
 const gchar * rspamd_action_to_str (enum rspamd_action_type action);
 const gchar * rspamd_action_to_str_alt (enum rspamd_action_type action);
 
+/*
+ * Resort all actions (needed to operate with thresholds)
+ */
+void rspamd_actions_sort (struct rspamd_config *cfg);
+
 /**
  * Parse radix tree or radix map from ucl object
  * @param cfg configuration object
@@ -676,6 +710,18 @@ gboolean rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 		const gchar *description,
 		struct rspamd_radix_map_helper **target,
 		GError **err);
+
+/**
+ * Returns action object by name
+ * @param cfg
+ * @param name
+ * @return
+ */
+struct rspamd_action * rspamd_config_get_action (struct rspamd_config *cfg,
+												 const gchar *name);
+
+struct rspamd_action * rspamd_config_get_action_by_type (struct rspamd_config *cfg,
+												 enum rspamd_action_type type);
 
 #define msg_err_config(...) rspamd_default_log_function (G_LOG_LEVEL_CRITICAL, \
         cfg->cfg_pool->tag.tagname, cfg->checksum, \

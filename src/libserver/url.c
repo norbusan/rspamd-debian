@@ -46,6 +46,7 @@
 #include "message.h"
 #include "multipattern.h"
 #include "contrib/uthash/utlist.h"
+#include "contrib/http-parser/http_parser.h"
 #include <unicode/utf8.h>
 #include <unicode/uchar.h>
 
@@ -98,6 +99,16 @@ static const struct {
 				.len = 6
 		},
 		{
+				.proto = PROTOCOL_TELEPHONE,
+				.name = "tel",
+				.len = 3
+		},
+		{
+				.proto = PROTOCOL_TELEPHONE,
+				.name = "callto",
+				.len = 3
+		},
+		{
 				.proto = PROTOCOL_UNKNOWN,
 				.name = NULL,
 				.len = 0
@@ -120,36 +131,44 @@ struct url_matcher {
 };
 
 static gboolean url_file_start (struct url_callback_data *cb,
-		const gchar *pos,
-		url_match_t *match);
+								const gchar *pos,
+								url_match_t *match);
 
 static gboolean url_file_end (struct url_callback_data *cb,
-		const gchar *pos,
-		url_match_t *match);
+							  const gchar *pos,
+							  url_match_t *match);
 
 static gboolean url_web_start (struct url_callback_data *cb,
-		const gchar *pos,
-		url_match_t *match);
+							   const gchar *pos,
+							   url_match_t *match);
 
 static gboolean url_web_end (struct url_callback_data *cb,
-		const gchar *pos,
-		url_match_t *match);
+							 const gchar *pos,
+							 url_match_t *match);
 
 static gboolean url_tld_start (struct url_callback_data *cb,
-		const gchar *pos,
-		url_match_t *match);
+							   const gchar *pos,
+							   url_match_t *match);
 
 static gboolean url_tld_end (struct url_callback_data *cb,
-		const gchar *pos,
-		url_match_t *match);
+							 const gchar *pos,
+							 url_match_t *match);
 
 static gboolean url_email_start (struct url_callback_data *cb,
-		const gchar *pos,
-		url_match_t *match);
+								 const gchar *pos,
+								 url_match_t *match);
 
 static gboolean url_email_end (struct url_callback_data *cb,
-		const gchar *pos,
-		url_match_t *match);
+							   const gchar *pos,
+							   url_match_t *match);
+
+static gboolean url_tel_start (struct url_callback_data *cb,
+							   const gchar *pos,
+							   url_match_t *match);
+
+static gboolean url_tel_end (struct url_callback_data *cb,
+							 const gchar *pos,
+							 url_match_t *match);
 
 struct url_matcher static_matchers[] = {
 		/* Common prefixes */
@@ -173,11 +192,13 @@ struct url_matcher static_matchers[] = {
 				0, 0},
 		{"telnet://", "",          url_web_start,   url_web_end,
 				0, 0},
+		{"tel:", "",               url_tel_start,   url_tel_end,
+				0, 0},
 		{"webcal://", "",          url_web_start,   url_web_end,
 				0, 0},
 		{"mailto:",   "",          url_email_start, url_email_end,
 				0, 0},
-		{"callto://", "",          url_web_start,   url_web_end,
+		{"callto:", "",            url_tel_start,   url_tel_end,
 				0, 0},
 		{"h323:",     "",          url_web_start,   url_web_end,
 				0, 0},
@@ -439,7 +460,7 @@ rspamd_url_parse_tld_file (const gchar *fname,
 
 		m.flags = flags;
 		rspamd_multipattern_add_pattern (url_scanner->search_trie, p,
-				RSPAMD_MULTIPATTERN_TLD | RSPAMD_MULTIPATTERN_ICASE);
+				RSPAMD_MULTIPATTERN_TLD|RSPAMD_MULTIPATTERN_ICASE|RSPAMD_MULTIPATTERN_UTF8);
 		m.pattern = rspamd_multipattern_get_pattern (url_scanner->search_trie,
 				rspamd_multipattern_get_npatterns (url_scanner->search_trie) - 1);
 		m.patlen = strlen (m.pattern);
@@ -502,13 +523,13 @@ rspamd_url_init (const gchar *tld_file)
 		url_scanner->matchers = g_array_sized_new (FALSE, TRUE,
 				sizeof (struct url_matcher), 13000);
 		url_scanner->search_trie = rspamd_multipattern_create_sized (13000,
-				RSPAMD_MULTIPATTERN_TLD | RSPAMD_MULTIPATTERN_ICASE);
+				RSPAMD_MULTIPATTERN_TLD|RSPAMD_MULTIPATTERN_ICASE|RSPAMD_MULTIPATTERN_UTF8);
 	}
 	else {
 		url_scanner->matchers = g_array_sized_new (FALSE, TRUE,
 				sizeof (struct url_matcher), 128);
 		url_scanner->search_trie = rspamd_multipattern_create_sized (128,
-				RSPAMD_MULTIPATTERN_TLD | RSPAMD_MULTIPATTERN_ICASE);
+				RSPAMD_MULTIPATTERN_TLD|RSPAMD_MULTIPATTERN_ICASE|RSPAMD_MULTIPATTERN_UTF8);
 	}
 
 	rspamd_url_add_static_matchers (url_scanner);
@@ -523,8 +544,10 @@ rspamd_url_init (const gchar *tld_file)
 		g_error_free (err);
 	}
 
-	msg_debug ("initialized trie of %ud elements",
-			url_scanner->matchers->len);
+	if (tld_file != NULL) {
+		msg_info ("initialized %ud url tld suffixes from '%s'",
+				url_scanner->matchers->len, tld_file);
+	}
 }
 
 #define SET_U(u, field) do {                                                \
@@ -564,8 +587,10 @@ is_url_end (gchar c)
 }
 
 static gint
-rspamd_mailto_parse (struct http_parser_url *u, const gchar *str, gsize len,
-		gchar const **end, gboolean strict, guint *flags)
+rspamd_mailto_parse (struct http_parser_url *u,
+					 const gchar *str, gsize len,
+					 gchar const **end,
+					 enum rspamd_url_parse_flags parse_flags, guint *flags)
 {
 	const gchar *p = str, *c = str, *last = str + len;
 	gchar t;
@@ -711,7 +736,145 @@ rspamd_mailto_parse (struct http_parser_url *u, const gchar *str, gsize len,
 		*end = p;
 	}
 
-	if (!strict) {
+	if ((parse_flags & RSPAMD_URL_PARSE_CHECK)) {
+		return 0;
+	}
+
+	return ret;
+}
+
+static gint
+rspamd_telephone_parse (struct http_parser_url *u,
+						const gchar *str, gsize len,
+						gchar const **end,
+						enum rspamd_url_parse_flags parse_flags,
+						guint *flags)
+{
+	enum {
+		parse_protocol,
+		parse_semicolon,
+		parse_slash,
+		parse_slash_slash,
+		parse_spaces,
+		parse_plus,
+		parse_phone_start,
+		parse_phone,
+	} st = parse_protocol;
+
+	const gchar *p = str, *c = str, *last = str + len;
+	gchar t;
+	gint ret = 1, i;
+	UChar32 uc;
+
+	if (u != NULL) {
+		memset (u, 0, sizeof (*u));
+	}
+
+	while (p < last) {
+		t = *p;
+
+		switch (st) {
+		case parse_protocol:
+			if (t == ':') {
+				st = parse_semicolon;
+				SET_U (u, UF_SCHEMA);
+			}
+			p++;
+			break;
+		case parse_semicolon:
+			if (t == '/' || t == '\\') {
+				st = parse_slash;
+				p++;
+			}
+			else {
+				st = parse_slash_slash;
+			}
+			break;
+		case parse_slash:
+			if (t == '/' || t == '\\') {
+				st = parse_slash_slash;
+			}
+			else {
+				goto out;
+			}
+			p++;
+			break;
+		case parse_slash_slash:
+			if (g_ascii_isspace (t)) {
+				st = parse_spaces;
+				p++;
+			}
+			else if (t == '+') {
+				c = p;
+				st = parse_plus;
+			}
+			else if (t == '/') {
+				/* Skip multiple slashes */
+				p++;
+			}
+			else {
+				st = parse_phone_start;
+				c = p;
+			}
+			break;
+		case parse_spaces:
+			if (t == '+') {
+				c = p;
+				st = parse_plus;
+			}
+			else if (!g_ascii_isspace (t)) {
+				st = parse_phone_start;
+				c = p;
+			}
+			else {
+				p ++;
+			}
+			break;
+		case parse_plus:
+			c = p;
+			p ++;
+			st = parse_phone_start;
+			break;
+		case parse_phone_start:
+			if (*p == '%' || *p == '(' || g_ascii_isdigit (*p)) {
+				st = parse_phone;
+				p ++;
+			}
+			else {
+				goto out;
+			}
+			break;
+		case parse_phone:
+			i = p - str;
+			U8_NEXT (str, i, len, uc);
+			p = str + i;
+
+			if (u_isdigit (uc) || uc == '(' || uc == ')' || uc == '[' || uc == ']'
+				|| u_isspace (uc) || uc == '%') {
+				p ++;
+			}
+			else if (uc <= 0 || is_url_end (uc)) {
+				ret = 0;
+				goto set;
+			}
+			break;
+		}
+	}
+
+	set:
+	if (st == parse_phone) {
+		if (p - c != 0) {
+			SET_U (u, UF_HOST);
+			ret = 0;
+		}
+	}
+
+	out:
+	if (end != NULL) {
+		*end = p;
+	}
+
+	if ((parse_flags & RSPAMD_URL_PARSE_CHECK)) {
 		return 0;
 	}
 
@@ -720,7 +883,9 @@ rspamd_mailto_parse (struct http_parser_url *u, const gchar *str, gsize len,
 
 static gint
 rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
-		gchar const **end, gboolean strict, guint *flags)
+				  gchar const **end,
+				  enum rspamd_url_parse_flags parse_flags,
+				  guint *flags)
 {
 	const gchar *p = str, *c = str, *last = str + len, *slash = NULL,
 			*password_start = NULL, *user_start = NULL;
@@ -763,7 +928,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					SET_U (u, UF_SCHEMA);
 				}
 				else if (!g_ascii_isalnum (t) && t != '+' && t != '-') {
-					if (!strict && p > c) {
+					if ((parse_flags & RSPAMD_URL_PARSE_CHECK) && p > c) {
 						/* We might have some domain, but no protocol */
 						st = parse_domain;
 						p = c;
@@ -985,7 +1150,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					}
 					else if (*p != '.' && *p != '-' && *p != '_' && *p != '%') {
 						if (*p & 0x80) {
-							*flags |= RSPAMD_URL_FLAG_IDN;
+							(*flags) |= RSPAMD_URL_FLAG_IDN;
 							guint i = 0;
 
 							U8_NEXT (p, i, last - p, uc);
@@ -997,11 +1162,18 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 
 							if (!u_isalnum (uc)) {
 								/* Bad symbol */
-								if (strict) {
-									goto out;
+								if (IS_ZERO_WIDTH_SPACE (uc)) {
+									(*flags) |= RSPAMD_URL_FLAG_OBSCURED;
 								}
 								else {
-									goto set;
+									if (!u_isgraph (uc)) {
+										if (!(parse_flags & RSPAMD_URL_PARSE_CHECK)) {
+											goto out;
+										}
+										else {
+											goto set;
+										}
+									}
 								}
 							}
 
@@ -1011,11 +1183,18 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 							p ++;
 						}
 						else {
-							if (strict) {
-								goto out;
+							if (parse_flags & RSPAMD_URL_PARSE_HREF) {
+								/* We have to use all shit we are given here */
+								p ++;
+								(*flags) |= RSPAMD_URL_FLAG_OBSCURED;
 							}
 							else {
-								goto set;
+								if (!(parse_flags & RSPAMD_URL_PARSE_CHECK)) {
+									goto out;
+								}
+								else {
+									goto set;
+								}
 							}
 						}
 					}
@@ -1117,7 +1296,8 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					goto set;
 				}
 				else if (!g_ascii_isdigit (t)) {
-					if (strict || !g_ascii_isspace (t)) {
+					if (!(parse_flags & RSPAMD_URL_PARSE_CHECK) ||
+						!g_ascii_isspace (t)) {
 						goto out;
 					}
 					else {
@@ -1148,7 +1328,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					goto set;
 				}
 				else if (is_lwsp (t)) {
-					if (strict) {
+					if (!(parse_flags & RSPAMD_URL_PARSE_CHECK)) {
 						if (g_ascii_isspace (t)) {
 							goto set;
 						}
@@ -1172,7 +1352,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					goto set;
 				}
 				else if (is_lwsp (t)) {
-					if (strict) {
+					if (!(parse_flags & RSPAMD_URL_PARSE_CHECK)) {
 						if (g_ascii_isspace (t)) {
 							goto set;
 						}
@@ -1189,7 +1369,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 					goto set;
 				}
 				else if (is_lwsp (t)) {
-					if (strict) {
+					if (!(parse_flags & RSPAMD_URL_PARSE_CHECK)) {
 						if (g_ascii_isspace (t)) {
 							goto set;
 						}
@@ -1208,7 +1388,7 @@ rspamd_web_parse (struct http_parser_url *u, const gchar *str, gsize len,
 	/* Parse remaining */
 	switch (st) {
 		case parse_domain:
-			if (p - c == 0) {
+			if (p - c == 0 || !is_domain (*(p - 1)) || !is_domain (*c)) {
 				goto out;
 			}
 			SET_U (u, UF_HOST);
@@ -1601,9 +1781,45 @@ rspamd_url_shift (struct rspamd_url *uri, gsize nlen,
 	}
 }
 
+static void
+rspamd_telephone_normalise_inplace (struct rspamd_url *uri)
+{
+	gchar *t, *h, *end;
+	gint i = 0, w, orig_len;
+	UChar32 uc;
+
+	t = uri->host;
+	h = t;
+	end = uri->host + uri->hostlen;
+	orig_len = uri->hostlen;
+
+	if (*h == '+') {
+		h ++;
+		t ++;
+	}
+
+	while (h < end) {
+		i = 0;
+		U8_NEXT (h, i, end - h, uc);
+
+		if (u_isdigit (uc)) {
+			w = 0;
+			U8_APPEND_UNSAFE (t, w, uc);
+			t += w;
+		}
+
+		h += i;
+	}
+
+	uri->hostlen = t - uri->host;
+	uri->urllen -= (orig_len - uri->hostlen);
+}
+
 enum uri_errno
-rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
-		rspamd_mempool_t *pool)
+rspamd_url_parse (struct rspamd_url *uri,
+				  gchar *uristring, gsize len,
+				  rspamd_mempool_t *pool,
+				  enum rspamd_url_parse_flags parse_flags)
 {
 	struct http_parser_url u;
 	gchar *p, *comp;
@@ -1620,18 +1836,27 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 	}
 
 	p = uristring;
+	uri->protocol = PROTOCOL_UNKNOWN;
 
 	if (len > sizeof ("mailto:") - 1) {
 		/* For mailto: urls we also need to add slashes to make it a valid URL */
 		if (g_ascii_strncasecmp (p, "mailto:", sizeof ("mailto:") - 1) == 0) {
-			ret = rspamd_mailto_parse (&u, uristring, len, &end, TRUE, &flags);
+			ret = rspamd_mailto_parse (&u, uristring, len, &end, parse_flags,
+					&flags);
+		}
+		else if (g_ascii_strncasecmp (p, "tel:", sizeof ("tel:") - 1) == 0 ||
+				 g_ascii_strncasecmp (p, "callto:", sizeof ("callto:") - 1) == 0) {
+			ret = rspamd_telephone_parse (&u, uristring, len, &end, parse_flags,
+					&flags);
+			uri->protocol = PROTOCOL_TELEPHONE;
 		}
 		else {
-			ret = rspamd_web_parse (&u, uristring, len, &end, TRUE, &flags);
+			ret = rspamd_web_parse (&u, uristring, len, &end, parse_flags,
+					&flags);
 		}
 	}
 	else {
-		ret = rspamd_web_parse (&u, uristring, len, &end, TRUE, &flags);
+		ret = rspamd_web_parse (&u, uristring, len, &end, parse_flags, &flags);
 	}
 
 	if (ret != 0) {
@@ -1715,9 +1940,11 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 			uri->protocollen);
 	rspamd_url_shift (uri, unquoted_len, UF_SCHEMA);
 	unquoted_len = rspamd_url_decode (uri->host, uri->host, uri->hostlen);
+
 	if (rspamd_normalise_unicode_inplace (pool, uri->host, &unquoted_len)) {
 		uri->flags |= RSPAMD_URL_FLAG_UNNORMALISED;
 	}
+
 	rspamd_url_shift (uri, unquoted_len, UF_HOST);
 
 	if (uri->datalen) {
@@ -1730,6 +1957,7 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 		rspamd_http_normalize_path_inplace (uri->data, uri->datalen, &unquoted_len);
 		rspamd_url_shift (uri, unquoted_len, UF_PATH);
 	}
+
 	if (uri->querylen) {
 		unquoted_len = rspamd_url_decode (uri->query,
 				uri->query,
@@ -1739,6 +1967,7 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 		}
 		rspamd_url_shift (uri, unquoted_len, UF_QUERY);
 	}
+
 	if (uri->fragmentlen) {
 		unquoted_len = rspamd_url_decode (uri->fragment,
 				uri->fragment,
@@ -1752,32 +1981,59 @@ rspamd_url_parse (struct rspamd_url *uri, gchar *uristring, gsize len,
 	rspamd_str_lc (uri->string, uri->protocollen);
 	rspamd_str_lc_utf8 (uri->host, uri->hostlen);
 
-	uri->protocol = PROTOCOL_UNKNOWN;
-
-	for (i = 0; i < G_N_ELEMENTS (rspamd_url_protocols); i++) {
-		if (uri->protocollen == rspamd_url_protocols[i].len) {
-			if (memcmp (uri->string, rspamd_url_protocols[i].name, uri->protocollen) ==
-				0) {
-				uri->protocol = i;
-				break;
+	if (uri->protocol == PROTOCOL_UNKNOWN) {
+		for (i = 0; i < G_N_ELEMENTS (rspamd_url_protocols); i++) {
+			if (uri->protocollen == rspamd_url_protocols[i].len) {
+				if (memcmp (uri->string,
+						rspamd_url_protocols[i].name, uri->protocollen) == 0) {
+					uri->protocol = rspamd_url_protocols[i].proto;
+					break;
+				}
 			}
 		}
 	}
 
-	/* Find TLD part */
-	rspamd_multipattern_lookup (url_scanner->search_trie,
+	if (uri->protocol & (PROTOCOL_HTTP|PROTOCOL_HTTPS|PROTOCOL_MAILTO|PROTOCOL_FTP)) {
+		/* Find TLD part */
+		rspamd_multipattern_lookup (url_scanner->search_trie,
 				uri->host, uri->hostlen,
 				rspamd_tld_trie_callback, uri, NULL);
 
-	if (uri->tldlen == 0) {
-		/* Ignore URL's without TLD if it is not a numeric URL */
-		if (!rspamd_url_is_ip (uri, pool)) {
-			return URI_ERRNO_TLD_MISSING;
+		if (uri->tldlen == 0) {
+			if (!(parse_flags & RSPAMD_URL_PARSE_HREF)) {
+				/* Ignore URL's without TLD if it is not a numeric URL */
+				if (!rspamd_url_is_ip (uri, pool)) {
+					return URI_ERRNO_TLD_MISSING;
+				}
+			} else {
+				/* Assume tld equal to host */
+				uri->tld = uri->host;
+				uri->tldlen = uri->hostlen;
+			}
+		}
+	}
+	else if (uri->protocol & PROTOCOL_TELEPHONE) {
+		/* We need to normalise phone number: remove all spaces and braces */
+		rspamd_telephone_normalise_inplace (uri);
+
+		if (uri->host[0] == '+') {
+			uri->tld = uri->host + 1;
+			uri->tldlen = uri->hostlen - 1;
+		}
+		else {
+			uri->tld = uri->host;
+			uri->tldlen = uri->hostlen;
 		}
 	}
 
 	if (uri->protocol == PROTOCOL_UNKNOWN) {
-		return URI_ERRNO_INVALID_PROTOCOL;
+		if (!(parse_flags & RSPAMD_URL_PARSE_HREF)) {
+			return URI_ERRNO_INVALID_PROTOCOL;
+		}
+		else {
+			/* Hack, hack, hack */
+			uri->protocol = PROTOCOL_UNKNOWN;
+		}
 	}
 
 	return URI_ERRNO_OK;
@@ -2089,7 +2345,8 @@ url_web_end (struct url_callback_data *cb,
 		len = MIN (len, match->newline_pos - pos);
 	}
 
-	if (rspamd_web_parse (NULL, pos, len, &last, FALSE, &flags) != 0) {
+	if (rspamd_web_parse (NULL, pos, len, &last,
+			RSPAMD_URL_PARSE_CHECK, &flags) != 0) {
 		return FALSE;
 	}
 
@@ -2157,7 +2414,8 @@ url_email_end (struct url_callback_data *cb,
 
 	if (!match->prefix || match->prefix[0] == '\0') {
 		/* We have mailto:// at the beginning */
-		if (rspamd_mailto_parse (&u, pos, len, &last, FALSE, &flags) != 0) {
+		if (rspamd_mailto_parse (&u, pos, len, &last,
+				RSPAMD_URL_PARSE_CHECK, &flags) != 0) {
 			return FALSE;
 		}
 
@@ -2235,6 +2493,53 @@ url_email_end (struct url_callback_data *cb,
 
 	return FALSE;
 }
+
+static gboolean
+url_tel_start (struct url_callback_data *cb,
+			   const gchar *pos,
+			   url_match_t *match)
+{
+	match->m_begin = pos;
+
+	if (pos >= cb->begin + 1) {
+		match->st = *(pos - 1);
+	}
+	else {
+		match->st = '\0';
+	}
+
+	return TRUE;
+}
+
+static gboolean
+url_tel_end (struct url_callback_data *cb,
+			 const gchar *pos,
+			 url_match_t *match)
+{
+	const gchar *last = NULL;
+	struct http_parser_url u;
+	gint len = cb->end - pos;
+	guint flags = 0;
+
+	if (match->newline_pos && match->st != '<') {
+		/* We should also limit our match end to the newline */
+		len = MIN (len, match->newline_pos - pos);
+	}
+
+	if (rspamd_telephone_parse (&u, pos, len, &last,
+			RSPAMD_URL_PARSE_CHECK, &flags) != 0) {
+		return FALSE;
+	}
+
+	if (!(u.field_set & (1 << UF_HOST))) {
+		return FALSE;
+	}
+
+	match->m_len = (last - pos);
+
+	return TRUE;
+}
+
 
 static gboolean
 rspamd_url_trie_is_match (struct url_matcher *matcher, const gchar *pos,
@@ -2470,7 +2775,9 @@ rspamd_url_trie_generic_callback_common (struct rspamd_multipattern *mp,
 		cb->fin = m.m_begin + m.m_len;
 		url = rspamd_mempool_alloc0 (pool, sizeof (struct rspamd_url));
 		g_strstrip (cb->url_str);
-		rc = rspamd_url_parse (url, cb->url_str, strlen (cb->url_str), pool);
+		rc = rspamd_url_parse (url, cb->url_str,
+				strlen (cb->url_str), pool,
+				RSPAMD_URL_PARSE_TEXT);
 
 		if (rc == URI_ERRNO_OK && url->hostlen > 0) {
 			if (cb->prefix_added) {
@@ -2583,7 +2890,8 @@ rspamd_url_text_part_callback (struct rspamd_url *url, gsize start_offset,
 			rc = rspamd_url_parse (query_url,
 					url_str,
 					strlen (url_str),
-					task->task_pool);
+					task->task_pool,
+					RSPAMD_URL_PARSE_TEXT);
 
 			if (rc == URI_ERRNO_OK &&
 					query_url->hostlen > 0) {
@@ -2737,7 +3045,8 @@ rspamd_url_task_subject_callback (struct rspamd_url *url, gsize start_offset,
 			rc = rspamd_url_parse (query_url,
 					url_str,
 					strlen (url_str),
-					task->task_pool);
+					task->task_pool,
+					RSPAMD_URL_PARSE_TEXT);
 
 			if (rc == URI_ERRNO_OK &&
 					url->hostlen > 0) {
@@ -2794,15 +3103,26 @@ guint
 rspamd_url_hash (gconstpointer u)
 {
 	const struct rspamd_url *url = u;
-	rspamd_cryptobox_fast_hash_state_t st;
-
-	rspamd_cryptobox_fast_hash_init (&st, rspamd_hash_seed ());
 
 	if (url->urllen > 0) {
-		rspamd_cryptobox_fast_hash_update (&st, url->string, url->urllen);
+		return rspamd_cryptobox_fast_hash (url->string, url->urllen,
+				rspamd_hash_seed ());
 	}
 
-	return rspamd_cryptobox_fast_hash_final (&st);
+	return 0;
+}
+
+guint
+rspamd_url_host_hash (gconstpointer u)
+{
+	const struct rspamd_url *url = u;
+
+	if (url->hostlen > 0) {
+		return rspamd_cryptobox_fast_hash (url->host, url->hostlen,
+				rspamd_hash_seed ());
+	}
+
+	return 0;
 }
 
 guint
@@ -2863,6 +3183,22 @@ rspamd_urls_cmp (gconstpointer a, gconstpointer b)
 	}
 	else {
 		r = memcmp (u1->string, u2->string, u1->urllen);
+	}
+
+	return r == 0;
+}
+
+gboolean
+rspamd_urls_host_cmp (gconstpointer a, gconstpointer b)
+{
+	const struct rspamd_url *u1 = a, *u2 = b;
+	int r = 0;
+
+	if (u1->hostlen != u2->hostlen) {
+		return FALSE;
+	}
+	else {
+		r = memcmp (u1->host, u2->host, u1->hostlen);
 	}
 
 	return r == 0;
@@ -3078,8 +3414,16 @@ rspamd_url_encode (struct rspamd_url *url, gsize *pdlen,
 	dest = rspamd_mempool_alloc (pool, dlen + 1);
 	d = dest;
 	dend = d + dlen;
-	d += rspamd_snprintf ((gchar *)d, dend - d,
-			"%*s://", url->protocollen, rspamd_url_protocols[url->protocol].name);
+
+	if (url->protocollen > 0) {
+		d += rspamd_snprintf ((gchar *) d, dend - d,
+				"%*s://",
+				url->protocollen,
+				rspamd_url_protocol_name (url->protocol));
+	}
+	else {
+		d += rspamd_snprintf ((gchar *) d, dend - d, "http://");
+	}
 
 	if (url->userlen > 0) {
 		ENCODE_URL_COMPONENT ((guchar *)url->user, url->userlen,
@@ -3111,4 +3455,68 @@ rspamd_url_encode (struct rspamd_url *url, gsize *pdlen,
 	*pdlen = (d - dest);
 
 	return (const gchar *)dest;
+}
+
+gboolean
+rspamd_url_is_domain (int c)
+{
+	return is_domain ((guchar)c);
+}
+
+const gchar*
+rspamd_url_protocol_name (enum rspamd_url_protocol proto)
+{
+	const gchar *ret = "unknown";
+
+	switch (proto) {
+	case PROTOCOL_HTTP:
+		ret = "http";
+		break;
+	case PROTOCOL_HTTPS:
+		ret = "https";
+		break;
+	case PROTOCOL_FTP:
+		ret = "ftp";
+		break;
+	case PROTOCOL_FILE:
+		ret = "file";
+		break;
+	case PROTOCOL_MAILTO:
+		ret = "mailto";
+		break;
+	case PROTOCOL_TELEPHONE:
+		ret = "telephone";
+		break;
+	default:
+		break;
+	}
+
+	return ret;
+}
+
+enum rspamd_url_protocol
+rspamd_url_protocol_from_string (const gchar *str)
+{
+	enum rspamd_url_protocol ret = PROTOCOL_UNKNOWN;
+
+	if (strcmp (str, "http") == 0) {
+		ret = PROTOCOL_HTTP;
+	}
+	else if (strcmp (str, "https") == 0) {
+		ret = PROTOCOL_HTTPS;
+	}
+	else if (strcmp (str, "mailto") == 0) {
+		ret = PROTOCOL_MAILTO;
+	}
+	else if (strcmp (str, "ftp") == 0) {
+		ret = PROTOCOL_FTP;
+	}
+	else if (strcmp (str, "file") == 0) {
+		ret = PROTOCOL_FILE;
+	}
+	else if (strcmp (str, "telephone") == 0) {
+		ret = PROTOCOL_TELEPHONE;
+	}
+
+	return ret;
 }

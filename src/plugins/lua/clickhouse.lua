@@ -30,7 +30,7 @@ end
 local data_rows = {}
 local custom_rows = {}
 local nrows = 0
-local schema_version = 2 -- Current schema version
+local schema_version = 3 -- Current schema version
 
 local settings = {
   limit = 1000,
@@ -54,6 +54,11 @@ local settings = {
   use_https = false,
   use_gzip = true,
   allow_local = false,
+  insert_subject = false,
+  subject_privacy = false, -- subject privacy is off
+  subject_privacy_alg = 'blake2', -- default hash-algorithm to obfuscate subject
+  subject_privacy_prefix = 'obf', -- prefix to show it's obfuscated
+  subject_privacy_length = 16, -- cut the length of the hash
   user = nil,
   password = nil,
   no_ssl_verify = false,
@@ -91,6 +96,7 @@ CREATE TABLE rspamd
     RcptUser String,
     RcptDomain String,
     ListId String,
+    Subject String,
     `Attachments.FileName` Array(String),
     `Attachments.ContentType` Array(String),
     `Attachments.Length` Array(UInt32),
@@ -132,6 +138,13 @@ local migrations = {
     -- Add explicit version
     [[CREATE TABLE rspamd_version ( Version UInt32) ENGINE = TinyLog]],
     [[INSERT INTO rspamd_version (Version) Values (2)]],
+  },
+  [2] = {
+    -- Add `Subject` column
+    [[ALTER TABLE rspamd
+      ADD COLUMN Subject String AFTER ListId]],
+    -- New version
+    [[INSERT INTO rspamd_version (Version) Values (3)]],
   }
 }
 
@@ -159,7 +172,8 @@ local function clickhouse_main_row(res)
     'RcptUser',
     'RcptDomain',
     'ListId',
-    'Digest'
+    'Subject',
+    'Digest',
   }
 
   for _,v in ipairs(fields) do table.insert(res, v) end
@@ -435,6 +449,11 @@ local function clickhouse_collect(task)
   local action = task:get_metric_action('default')
   local digest = task:get_digest()
 
+  local subject = ''
+  if settings.insert_subject then
+    subject = lua_util.maybe_obfuscate_subject(task:get_subject() or '', settings)
+  end
+
   local row = {
     today(timestamp),
     timestamp,
@@ -457,6 +476,7 @@ local function clickhouse_collect(task)
     rcpt_user,
     rcpt_domain,
     list_id,
+    subject,
     digest
   }
 
@@ -668,7 +688,8 @@ local function clickhouse_remove_old_partitions(cfg, ev_base)
   end
 
   local upstream = settings.upstream:get_upstream_round_robin()
-  local partition_to_remove_sql = "SELECT distinct partition, table FROM system.parts WHERE table in ('${tables}') and max_date <= toDate(now() - interval ${month} month);"
+  local partition_to_remove_sql = "SELECT distinct partition, table FROM system.parts WHERE " ..
+      "table in ('${tables}') and max_date <= toDate(now() - interval ${month} month);"
 
   local table_names = {'rspamd'}
   local tables = table.concat(table_names, "', '")
@@ -811,7 +832,8 @@ local function check_clickhouse_upstream(upstream, ev_base, cfg)
       local sql = rspamd_lua_utils.template(rule.schema, settings)
       local err, _ = lua_clickhouse.generic_sync(upstream, settings, ch_params, sql)
       if err then
-        rspamd_logger.errx(rspamd_config, "cannot send custom schema %s to clickhouse server %s: cannot make request (%s)",
+        rspamd_logger.errx(rspamd_config, 'cannot send custom schema %s to clickhouse server %s: ' ..
+        'cannot make request (%s)',
             k, upstream:get_addr():to_string(true), err)
       end
     end
@@ -903,7 +925,7 @@ if opts then
         type = 'idempotent',
         callback = clickhouse_collect,
         priority = 10,
-        flags = 'empty',
+        flags = 'empty,explicit_disable,ignore_passthrough',
       })
       rspamd_config:register_finish_script(function(task)
         if nrows > 0 then
@@ -919,14 +941,18 @@ if opts then
             check_clickhouse_upstream(up, ev_base, cfg)
           end
 
-          if settings.retention.enable and settings.retention.method ~= 'drop' and settings.retention.method ~= 'detach' then
-            rspamd_logger.errx(rspamd_config, "retention.method should be either 'drop' or 'detach' (now: %s). Disabling retention",
-                    settings.retention.method)
+          if settings.retention.enable and settings.retention.method ~= 'drop' and
+              settings.retention.method ~= 'detach' then
+            rspamd_logger.errx(rspamd_config,
+                "retention.method should be either 'drop' or 'detach' (now: %s). Disabling retention",
+                settings.retention.method)
             settings.retention.enable = false
           end
-          if settings.retention.enable and settings.retention.period_months < 1 or settings.retention.period_months > 1000 then
-            rspamd_logger.errx(rspamd_config, "please, set retention.period_months between 1 and 1000 (now: %s). Disabling retention",
-                    settings.retention.period_months)
+          if settings.retention.enable and settings.retention.period_months < 1 or
+              settings.retention.period_months > 1000 then
+            rspamd_logger.errx(rspamd_config,
+                "please, set retention.period_months between 1 and 1000 (now: %s). Disabling retention",
+                settings.retention.period_months)
             settings.retention.enable = false
           end
           local period = lua_util.parse_time_interval(settings.retention.run_every)
@@ -938,8 +964,9 @@ if opts then
 
           if settings.retention.enable then
             settings.retention.period = period
-            rspamd_logger.infox(rspamd_config, "retention will be performed each %s seconds for %s month with method %s",
-                    period, settings.retention.period_months, settings.retention.method)
+            rspamd_logger.infox(rspamd_config,
+                "retention will be performed each %s seconds for %s month with method %s",
+                period, settings.retention.period_months, settings.retention.method)
             rspamd_config:add_periodic(ev_base, 0, clickhouse_remove_old_partitions, false)
           end
         end

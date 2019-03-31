@@ -65,7 +65,8 @@ rspamd_config.MISSING_DATE = {
   end,
   score = 1.0,
   description = 'Message date is missing',
-  group = 'headers'
+  group = 'headers',
+  type = 'mime',
 }
 
 rspamd_config.DATE_IN_FUTURE = {
@@ -80,7 +81,8 @@ rspamd_config.DATE_IN_FUTURE = {
   end,
   score = 4.0,
   description = 'Message date is in future',
-  group = 'headers'
+  group = 'headers',
+  type = 'mime',
 }
 
 rspamd_config.DATE_IN_PAST = {
@@ -95,26 +97,43 @@ rspamd_config.DATE_IN_PAST = {
   end,
   score = 1.0,
   description = 'Message date is in past',
-  group = 'headers'
+  group = 'headers',
+  type = 'mime',
 }
 
-rspamd_config.R_SUSPICIOUS_URL = {
+local obscured_id = rspamd_config:register_symbol{
   callback = function(task)
     local urls = task:get_urls()
 
     if urls then
       for _,u in ipairs(urls) do
-        if u:is_obscured() then
+        local fl = u:get_flags()
+        if fl.obscured then
           task:insert_result('R_SUSPICIOUS_URL', 1.0, u:get_host())
+        end
+        if fl.zw_spaces then
+          task:insert_result('ZERO_WIDTH_SPACE_URL', 1.0, u:get_host())
         end
       end
     end
+
     return false
   end,
+  name = 'R_SUSPICIOUS_URL',
   score = 5.0,
   one_shot = true,
   description = 'Obfusicated or suspicious URL has been found in a message',
   group = 'url'
+}
+
+rspamd_config:register_symbol{
+  type = 'virtual',
+  name = 'ZERO_WIDTH_SPACE_URL',
+  score = 7.0,
+  one_shot = true,
+  description = 'Zero width space in url',
+  group = 'url',
+  parent = obscured_id,
 }
 
 
@@ -157,7 +176,8 @@ rspamd_config.ENVFROM_PRVS = {
   end,
   score = 0.0,
   description = "Envelope From is a PRVS address that matches the From address",
-  group = 'headers'
+  group = 'headers',
+  type = 'mime',
 }
 
 rspamd_config.ENVFROM_VERP = {
@@ -185,7 +205,8 @@ rspamd_config.ENVFROM_VERP = {
   end,
   score = 0.0,
   description = "Envelope From is a VERP address",
-  group = "headers"
+  group = "headers",
+  type = 'mime',
 }
 
 local check_rcvd = rspamd_config:register_symbol{
@@ -193,7 +214,7 @@ local check_rcvd = rspamd_config:register_symbol{
   group = 'headers',
   callback = function (task)
     local rcvds = task:get_received_headers()
-    if not rcvds then return false end
+    if not rcvds or #rcvds == 0 then return false end
 
     local all_tls = fun.all(function(rc)
       return rc.flags and rc.flags['ssl']
@@ -224,7 +245,8 @@ local check_rcvd = rspamd_config:register_symbol{
     if auth then
       task:insert_result('RCVD_VIA_SMTP_AUTH', 1.0)
     end
-  end
+  end,
+  type = 'callback,mime',
 }
 
 rspamd_config:register_symbol{
@@ -282,6 +304,7 @@ rspamd_config.RCVD_HELO_USER = {
   end,
   description = 'HELO User spam pattern',
   group = 'headers',
+  type = 'mime',
   score = 3.0
 }
 
@@ -350,26 +373,31 @@ rspamd_config.OMOGRAPH_URL = {
       local bad_omographs = 0
       local single_bad_omograps = 0
       local bad_urls = {}
+      local seen = {}
 
       fun.each(function(u)
         if u:is_phished() then
+
           local h1 = u:get_host()
           local h2 = u:get_phished():get_host()
           if h1 and h2 then
-            if util.is_utf_spoofed(h1, h2) then
-              table.insert(bad_urls, string.format('%s->%s', h1, h2))
+            local selt = string.format('%s->%s', h1, h2)
+            if not seen[selt] and util.is_utf_spoofed(h1, h2) then
+              bad_urls[#bad_urls + 1] = selt
               bad_omographs = bad_omographs + 1
             end
+            seen[selt] = true
           end
         end
         if not u:is_html_displayed() then
           local h = u:get_tld()
 
           if h then
-            if util.is_utf_spoofed(h) then
-              table.insert(bad_urls, string.format('%s', h))
+            if not seen[h] and util.is_utf_spoofed(h) then
+              bad_urls[#bad_urls + 1] = h
               single_bad_omograps = single_bad_omograps + 1
             end
+            seen[h] = true
           end
         end
       end, urls)
@@ -415,6 +443,7 @@ rspamd_config.URL_IN_SUBJECT = {
   end,
   score = 4.0,
   group = 'subject',
+  type = 'mime',
   description = 'URL found in Subject'
 
 }
@@ -486,7 +515,7 @@ rspamd_config:register_symbol{
 }
 
 local check_from_display_name = rspamd_config:register_symbol{
-  type = 'callback',
+  type = 'callback,mime',
   name = 'FROM_DISPLAY_CALLBACK',
   callback = function (task)
     local from = task:get_from(2)
@@ -582,6 +611,7 @@ rspamd_config.SPOOF_REPLYTO = {
     return false
   end,
   group = 'headers',
+  type = 'mime',
   description = 'Reply-To is being used to spoof and trick the recipient to send an off-domain reply',
   score = 6.0
 }
@@ -607,7 +637,8 @@ rspamd_config.INFO_TO_INFO_LU = {
   end,
   description = 'info@ From/To address with List-Unsubscribe headers',
   group = 'headers',
-  score = 2.0
+  score = 2.0,
+  type = 'mime',
 }
 
 -- Detects bad content-transfer-encoding for text parts
@@ -639,7 +670,8 @@ rspamd_config.R_BAD_CTE_7BIT = {
   end,
   score = 3.5,
   description = 'Detects bad content-transfer-encoding for text parts',
-  group = 'headers'
+  group = 'headers',
+  type = 'mime',
 }
 
 
@@ -696,7 +728,7 @@ local check_encrypted_name = rspamd_config:register_symbol{
   end,
   score = 10.0,
   description = 'Bogus mix of encrypted and text/html payloads',
-  group = 'mime_types'
+  group = 'mime_types',
 }
 
 rspamd_config:register_symbol{

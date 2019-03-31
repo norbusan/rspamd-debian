@@ -91,6 +91,7 @@ local settings = {
 }
 
 local function parse_arc_header(hdr, target)
+  -- Split elements by ';' and trim spaces
   local arr = fun.totable(fun.map(
     function(val)
       return fun.totable(fun.map(lua_util.rspamd_str_trim,
@@ -102,8 +103,9 @@ local function parse_arc_header(hdr, target)
   -- Now we have two tables in format:
   -- [sigs] -> [{sig1_elts}, {sig2_elts}...]
   for i,elts in ipairs(arr) do
+    if not target[i] then target[i] = {} end
+    -- Split by kv pair, like k=v
     fun.each(function(v)
-      if not target[i] then target[i] = {} end
       if v[1] and v[2] then
         target[i][v[1]] = v[2]
       end
@@ -508,11 +510,14 @@ end
 local function arc_signing_cb(task)
   local arc_seals = task:cache_get('arc-seals')
 
-  local ret,p = dkim_sign_tools.prepare_dkim_signing(N, task, settings)
+  local ret, selectors = dkim_sign_tools.prepare_dkim_signing(N, task, settings)
 
   if not ret then
     return
   end
+
+  -- TODO: support multiple signatures here
+  local p = selectors[1]
 
   p.arc_cv = 'none'
   p.arc_idx = 1
@@ -562,7 +567,8 @@ local function arc_signing_cb(task)
       rspamd_logger.infox(rspamd_config, "Using selector prefix %s for domain %s", settings.selector_prefix, p.domain);
       local function redis_selector_cb(err, data)
         if err or type(data) ~= 'string' then
-          rspamd_logger.infox(rspamd_config, "cannot make request to load DKIM selector for domain %s: %s", p.domain, err)
+          rspamd_logger.infox(rspamd_config, "cannot make request to load DKIM selector for domain %s: %s",
+              p.domain, err)
         else
           try_redis_key(data)
         end
@@ -640,7 +646,8 @@ if settings.use_redis then
   redis_params = rspamd_parse_redis_server('arc')
 
   if not redis_params then
-    rspamd_logger.errx(rspamd_config, 'no servers are specified, but module is configured to load keys from redis, disable arc signing')
+    rspamd_logger.errx(rspamd_config, 'no servers are specified, '..
+        'but module is configured to load keys from redis, disable arc signing')
     return
   end
 end

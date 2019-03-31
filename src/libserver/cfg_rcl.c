@@ -15,9 +15,7 @@
  */
 #include "cfg_rcl.h"
 #include "rspamd.h"
-#include "../../contrib/mumhash/mum.h"
-#define HASH_CASELESS
-#include "uthash_strcase.h"
+#include "cfg_file_private.h"
 #include "utlist.h"
 #include "cfg_file.h"
 #include "lua/lua_common.h"
@@ -328,7 +326,7 @@ rspamd_rcl_group_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 {
 	struct rspamd_config *cfg = ud;
 	struct rspamd_symbols_group *gr;
-	const ucl_object_t *val;
+	const ucl_object_t *val, *elt;
 	struct rspamd_rcl_section *subsection;
 	struct rspamd_rcl_symbol_data sd;
 
@@ -343,6 +341,51 @@ rspamd_rcl_group_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 	if (!rspamd_rcl_section_parse_defaults (cfg, section, pool, obj,
 			gr, err)) {
 		return FALSE;
+	}
+
+	if ((elt = ucl_object_lookup (obj, "one_shot")) != NULL) {
+		if (ucl_object_type (elt) != UCL_BOOLEAN) {
+			g_set_error (err,
+					CFG_RCL_ERROR,
+					EINVAL,
+					"one_shot attribute is not boolean for symbol: '%s'",
+					key);
+
+			return FALSE;
+		}
+		if (ucl_object_toboolean (elt)) {
+			gr->flags |= RSPAMD_SYMBOL_GROUP_ONE_SHOT;
+		}
+	}
+
+	if ((elt = ucl_object_lookup (obj, "disabled")) != NULL) {
+		if (ucl_object_type (elt) != UCL_BOOLEAN) {
+			g_set_error (err,
+					CFG_RCL_ERROR,
+					EINVAL,
+					"disabled attribute is not boolean for symbol: '%s'",
+					key);
+
+			return FALSE;
+		}
+		if (ucl_object_toboolean (elt)) {
+			gr->flags |= RSPAMD_SYMBOL_GROUP_DISABLED;
+		}
+	}
+
+	if ((elt = ucl_object_lookup (obj, "enabled")) != NULL) {
+		if (ucl_object_type (elt) != UCL_BOOLEAN) {
+			g_set_error (err,
+					CFG_RCL_ERROR,
+					EINVAL,
+					"enabled attribute is not boolean for symbol: '%s'",
+					key);
+
+			return FALSE;
+		}
+		if (!ucl_object_toboolean (elt)) {
+			gr->flags |= RSPAMD_SYMBOL_GROUP_DISABLED;
+		}
 	}
 
 	sd.gr = gr;
@@ -527,39 +570,32 @@ rspamd_rcl_actions_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 		const gchar *key, gpointer ud,
 		struct rspamd_rcl_section *section, GError **err)
 {
-	gdouble action_score;
 	struct rspamd_config *cfg = ud;
-	gint action_value;
 	const ucl_object_t *cur;
 	ucl_object_iter_t it;
 
 	it = ucl_object_iterate_new (obj);
 
 	while ((cur = ucl_object_iterate_safe (it, true)) != NULL) {
-		if (!rspamd_action_from_str (ucl_object_key (cur), &action_value)) {
-			continue;
-		}
-		else {
-			if (ucl_object_type (cur) == UCL_NULL) {
-				action_score = NAN;
-			}
-			else {
-				if (!ucl_object_todouble_safe (cur, &action_score)) {
-					g_set_error (err,
-							CFG_RCL_ERROR,
-							EINVAL,
-							"invalid action definition: '%s'",
-							ucl_object_key (cur));
-					ucl_object_iterate_free (it);
+		gint type = ucl_object_type (cur);
 
-					return FALSE;
-				}
-			}
-
-			rspamd_config_set_action_score (cfg,
-					ucl_object_key (cur),
-					action_score,
+		if (type == UCL_NULL) {
+			rspamd_config_maybe_disable_action (cfg, ucl_object_key (cur),
 					ucl_object_get_priority (cur));
+		}
+		else if (type == UCL_OBJECT || type == UCL_FLOAT || type == UCL_INT) {
+			if (!rspamd_config_set_action_score (cfg,
+					ucl_object_key (cur),
+					cur)) {
+				g_set_error (err,
+						CFG_RCL_ERROR,
+						EINVAL,
+						"invalid action definition for: '%s'",
+						ucl_object_key (cur));
+				ucl_object_iterate_free (it);
+
+				return FALSE;
+			}
 		}
 	}
 
@@ -794,22 +830,31 @@ rspamd_rcl_lua_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 gboolean
 rspamd_rcl_add_lua_plugins_path (struct rspamd_config *cfg,
 		const gchar *path,
+		GHashTable *modules_seen,
 		GError **err)
 {
 	struct stat st;
-	struct script_module *cur_mod;
+	struct script_module *cur_mod, *seen_mod;
 	GPtrArray *paths;
 	gchar *fname, *ext_pos;
 	guint i;
 
 	if (stat (path, &st) == -1) {
-		g_set_error (err,
-			CFG_RCL_ERROR,
-			errno,
-			"cannot stat path %s, %s",
-			path,
-			strerror (errno));
-		return FALSE;
+
+		if (errno != ENOENT) {
+			g_set_error (err,
+					CFG_RCL_ERROR,
+					errno,
+					"cannot stat path %s, %s",
+					path,
+					strerror (errno));
+			return FALSE;
+		}
+		else {
+			msg_info_config ("plugins path %s is absent, skip it", path);
+
+			return TRUE;
+		}
 	}
 
 	/* Handle directory */
@@ -834,6 +879,16 @@ rspamd_rcl_add_lua_plugins_path (struct rspamd_config *cfg,
 				*ext_pos = '\0';
 			}
 
+			if (modules_seen) {
+				seen_mod = g_hash_table_lookup (modules_seen, cur_mod->name);
+
+				if (seen_mod != NULL) {
+					msg_info_config ("already seen module %s at %s, skip %s",
+							cur_mod->name, seen_mod->path, cur_mod->path);
+					continue;
+				}
+			}
+
 			if (cfg->script_modules == NULL) {
 				cfg->script_modules = g_list_append (cfg->script_modules,
 						cur_mod);
@@ -843,6 +898,10 @@ rspamd_rcl_add_lua_plugins_path (struct rspamd_config *cfg,
 			} else {
 				cfg->script_modules = g_list_append (cfg->script_modules,
 						cur_mod);
+			}
+
+			if (modules_seen) {
+				g_hash_table_insert (modules_seen, cur_mod->name, cur_mod);
 			}
 		}
 
@@ -862,6 +921,17 @@ rspamd_rcl_add_lua_plugins_path (struct rspamd_config *cfg,
 			*ext_pos = '\0';
 		}
 
+		if (modules_seen) {
+			seen_mod = g_hash_table_lookup (modules_seen, cur_mod->name);
+
+			if (seen_mod != NULL) {
+				msg_info_config ("already seen module %s at %s, skip %s",
+						cur_mod->name, seen_mod->path, cur_mod->path);
+
+				return TRUE;
+			}
+		}
+
 		if (cfg->script_modules == NULL) {
 			cfg->script_modules = g_list_append (cfg->script_modules,
 					cur_mod);
@@ -872,6 +942,10 @@ rspamd_rcl_add_lua_plugins_path (struct rspamd_config *cfg,
 		else {
 			cfg->script_modules = g_list_append (cfg->script_modules,
 					cur_mod);
+		}
+
+		if (modules_seen) {
+			g_hash_table_insert (modules_seen, cur_mod->name, cur_mod);
 		}
 	}
 
@@ -888,21 +962,48 @@ rspamd_rcl_modules_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 	const gchar *data;
 
 	if (obj->type == UCL_OBJECT) {
+		GHashTable *mods_seen = g_hash_table_new (rspamd_strcase_hash,
+				rspamd_strcase_equal);
 		val = ucl_object_lookup (obj, "path");
 
-		LL_FOREACH (val, cur)
-		{
-			if (ucl_object_tostring_safe (cur, &data)) {
-				if (!rspamd_rcl_add_lua_plugins_path (cfg,
-						rspamd_mempool_strdup (cfg->cfg_pool, data), err)) {
-					return FALSE;
+		if (val) {
+			LL_FOREACH (val, cur) {
+				if (ucl_object_tostring_safe (cur, &data)) {
+					if (!rspamd_rcl_add_lua_plugins_path (cfg,
+							rspamd_mempool_strdup (cfg->cfg_pool, data),
+							mods_seen,
+							err)) {
+						return FALSE;
+					}
+				}
+			}
+		}
+		else {
+			g_set_error (err,
+					CFG_RCL_ERROR,
+					EINVAL,
+					"path attribute is missing");
+			return FALSE;
+		}
+
+		val = ucl_object_lookup (obj, "fallback_path");
+
+		if (val) {
+			LL_FOREACH (val, cur) {
+				if (ucl_object_tostring_safe (cur, &data)) {
+					if (!rspamd_rcl_add_lua_plugins_path (cfg,
+							rspamd_mempool_strdup (cfg->cfg_pool, data),
+							mods_seen,
+							err)) {
+						return FALSE;
+					}
 				}
 			}
 		}
 	}
 	else if (ucl_object_tostring_safe (obj, &data)) {
 		if (!rspamd_rcl_add_lua_plugins_path (cfg,
-				rspamd_mempool_strdup (cfg->cfg_pool, data), err)) {
+				rspamd_mempool_strdup (cfg->cfg_pool, data), NULL, err)) {
 			return FALSE;
 		}
 	}
@@ -1251,7 +1352,9 @@ rspamd_rcl_composite_handler (rspamd_mempool_t *pool,
 		}
 
 		rspamd_config_add_symbol (cfg, composite_name, score,
-				description, group, FALSE, FALSE,
+				description, group,
+				0,
+				ucl_object_get_priority (obj), /* No +1 as it is default... */
 				1);
 
 		elt = ucl_object_lookup (obj, "groups");
@@ -1292,7 +1395,7 @@ rspamd_rcl_composite_handler (rspamd_mempool_t *pool,
 
 	if (new) {
 		rspamd_symcache_add_symbol (cfg->cache, composite_name, 0,
-				NULL, NULL, SYMBOL_TYPE_COMPOSITE, -1);
+				NULL, composite, SYMBOL_TYPE_COMPOSITE, -1);
 	}
 
 	return TRUE;
@@ -1541,12 +1644,6 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				0,
 				"Enable debugging log for the specified IP addresses");
 		rspamd_rcl_add_default_handler (sub,
-				"debug_symbols",
-				rspamd_rcl_parse_struct_string_list,
-				G_STRUCT_OFFSET (struct rspamd_config, debug_symbols),
-				0,
-				"Enable debug for the specified symbols");
-		rspamd_rcl_add_default_handler (sub,
 				"debug_modules",
 				rspamd_rcl_parse_struct_string_list,
 				G_STRUCT_OFFSET (struct rspamd_config, debug_modules),
@@ -1715,12 +1812,6 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				0,
 				"Treat text attachments as normal text parts");
 		rspamd_rcl_add_default_handler (sub,
-				"check_attachments",
-				rspamd_rcl_parse_struct_boolean,
-				G_STRUCT_OFFSET (struct rspamd_config, check_text_attachements),
-				0,
-				"Treat text attachments as normal text parts");
-		rspamd_rcl_add_default_handler (sub,
 				"tempdir",
 				rspamd_rcl_parse_struct_string,
 				G_STRUCT_OFFSET (struct rspamd_config, temp_dir),
@@ -1738,12 +1829,6 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				G_STRUCT_OFFSET (struct rspamd_config, filters),
 				0,
 				"List of internal filters enabled");
-		rspamd_rcl_add_default_handler (sub,
-				"max_diff",
-				rspamd_rcl_parse_struct_integer,
-				G_STRUCT_OFFSET (struct rspamd_config, max_diff),
-				RSPAMD_CL_FLAG_INT_SIZE,
-				"Legacy option, do not use");
 		rspamd_rcl_add_default_handler (sub,
 				"map_watch_interval",
 				rspamd_rcl_parse_struct_time,
@@ -1990,6 +2075,24 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				G_STRUCT_OFFSET (struct rspamd_config, max_sessions_cache),
 				0,
 				"Maximum number of sessions in cache before warning (default: 100)");
+		rspamd_rcl_add_default_handler (sub,
+				"task_timeout",
+				rspamd_rcl_parse_struct_time,
+				G_STRUCT_OFFSET (struct rspamd_config, task_timeout),
+				RSPAMD_CL_FLAG_TIME_FLOAT,
+				"Maximum time for checking a message");
+		rspamd_rcl_add_default_handler (sub,
+				"soft_reject_on_timeout",
+				rspamd_rcl_parse_struct_boolean,
+				G_STRUCT_OFFSET (struct rspamd_config, soft_reject_on_timeout),
+				0,
+				"Emit soft reject if task timeout takes place");
+		rspamd_rcl_add_default_handler (sub,
+				"check_timeout",
+				rspamd_rcl_parse_struct_time,
+				G_STRUCT_OFFSET (struct rspamd_config, task_timeout),
+				RSPAMD_CL_FLAG_TIME_FLOAT,
+				"Maximum time for checking a message (alias for task_timeout)");
 
 		/* Neighbours configuration */
 		rspamd_rcl_add_section_doc (&sub->subsections, "neighbours", "name",
@@ -2122,18 +2225,6 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				"Symbols configuration");
 
 		/* Group part */
-		rspamd_rcl_add_default_handler (sub,
-				"disabled",
-				rspamd_rcl_parse_struct_boolean,
-				G_STRUCT_OFFSET (struct rspamd_symbols_group, disabled),
-				0,
-				"Disable symbols group");
-		rspamd_rcl_add_default_handler (sub,
-				"enabled",
-				rspamd_rcl_parse_struct_boolean,
-				G_STRUCT_OFFSET (struct rspamd_symbols_group, disabled),
-				RSPAMD_CL_FLAG_BOOLEAN_INVERSE,
-				"Enable or disable symbols group");
 		rspamd_rcl_add_default_handler (sub,
 				"max_score",
 				rspamd_rcl_parse_struct_double,
@@ -3450,8 +3541,12 @@ rspamd_config_calculate_cksum (struct rspamd_config *cfg)
 }
 
 gboolean
-rspamd_config_parse_ucl (struct rspamd_config *cfg, const gchar *filename,
-					GHashTable *vars, GError **err)
+rspamd_config_parse_ucl (struct rspamd_config *cfg,
+						 const gchar *filename,
+						 GHashTable *vars,
+						 ucl_include_trace_func_t inc_trace,
+						 void *trace_data,
+						 GError **err)
 {
 	struct stat st;
 	gint fd;
@@ -3524,6 +3619,10 @@ rspamd_config_parse_ucl (struct rspamd_config *cfg, const gchar *filename,
 	rspamd_ucl_add_conf_macros (parser, cfg);
 	ucl_parser_set_filevars (parser, filename, true);
 
+	if (inc_trace) {
+		ucl_parser_set_include_tracer (parser, inc_trace, trace_data);
+	}
+
 	if (decrypt_keypair) {
 		struct ucl_parser_special_handler *decrypt_handler;
 
@@ -3564,7 +3663,7 @@ rspamd_config_read (struct rspamd_config *cfg, const gchar *filename,
 	struct rspamd_rcl_section *top, *logger_section;
 	const ucl_object_t *logger_obj;
 
-	if (!rspamd_config_parse_ucl (cfg, filename, vars, &err)) {
+	if (!rspamd_config_parse_ucl (cfg, filename, vars, NULL, NULL, &err)) {
 		msg_err_config_forced ("failed to load config: %e", err);
 		g_error_free (err);
 

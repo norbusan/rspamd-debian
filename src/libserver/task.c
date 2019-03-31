@@ -26,7 +26,10 @@
 #include "utlist.h"
 #include "contrib/zstd/zstd.h"
 #include "libserver/mempool_vars_internal.h"
+#include "libserver/cfg_file_private.h"
 #include "libmime/lang_detection.h"
+#include "libmime/filter_private.h"
+
 #include <math.h>
 
 /*
@@ -249,8 +252,8 @@ rspamd_task_free (struct rspamd_task *task)
 			}
 
 			if (IS_CT_MULTIPART (p->ct)) {
-				if (p->specific.mp.children) {
-					g_ptr_array_free (p->specific.mp.children, TRUE);
+				if (p->specific.mp->children) {
+					g_ptr_array_free (p->specific.mp->children, TRUE);
 				}
 			}
 		}
@@ -816,10 +819,17 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 					if (stat_error == NULL) {
 						g_set_error (&stat_error,
 								g_quark_from_static_string ("stat"), 500,
-								"Unknown statistics error");
+								"Unknown statistics error, found on stage %s;"
+								" classifier: %s",
+								rspamd_task_stage_name (st), task->classifier);
 					}
 
-					msg_err_task ("learn error: %e", stat_error);
+					if (stat_error->code >= 400) {
+						msg_err_task ("learn error: %e", stat_error);
+					}
+					else {
+						msg_notice_task ("skip learning: %e", stat_error);
+					}
 
 					if (!(task->flags & RSPAMD_TASK_FLAG_LEARN_AUTO)) {
 						task->err = stat_error;
@@ -1072,11 +1082,11 @@ rspamd_task_log_metric_res (struct rspamd_task *task,
 	rspamd_fstring_t *symbuf;
 	struct rspamd_symbol_result *sym;
 	GPtrArray *sorted_symbols;
-	enum rspamd_action_type act;
+	struct rspamd_action *act;
 	guint i, j;
 
 	mres = task->result;
-	act = rspamd_check_action_metric (task, mres);
+	act = rspamd_check_action_metric (task);
 
 	if (mres != NULL) {
 		switch (lf->type) {
@@ -1084,7 +1094,7 @@ rspamd_task_log_metric_res (struct rspamd_task *task,
 			if (RSPAMD_TASK_IS_SKIPPED (task)) {
 				res.begin = "S";
 			}
-			else if (act == METRIC_ACTION_REJECT) {
+			else if (!(act->flags & RSPAMD_ACTION_HAM)) {
 				res.begin = "T";
 			}
 			else {
@@ -1094,7 +1104,7 @@ rspamd_task_log_metric_res (struct rspamd_task *task,
 			res.len = 1;
 			break;
 		case RSPAMD_LOG_ACTION:
-			res.begin = rspamd_action_to_str (act);
+			res.begin = act->name;
 			res.len = strlen (res.begin);
 			break;
 		case RSPAMD_LOG_SCORES:
@@ -1441,14 +1451,17 @@ rspamd_task_log_variable (struct rspamd_task *task,
 			if (!isnan (pr->target_score)) {
 				var.len = rspamd_snprintf (numbuf, sizeof (numbuf),
 						"%s \"%s\"; score=%.2f (set by %s)",
-						rspamd_action_to_str (pr->action),
-						pr->message, pr->target_score, pr->module);
+						pr->action->name,
+						pr->message,
+						pr->target_score,
+						pr->module);
 			}
 			else {
 				var.len = rspamd_snprintf (numbuf, sizeof (numbuf),
 						"%s \"%s\"; score=nan (set by %s)",
-						rspamd_action_to_str (pr->action),
-						pr->message, pr->module);
+						pr->action->name,
+						pr->message,
+						pr->module);
 			}
 			var.begin = numbuf;
 		}
@@ -1536,7 +1549,7 @@ rspamd_task_write_log (struct rspamd_task *task)
 gdouble
 rspamd_task_get_required_score (struct rspamd_task *task, struct rspamd_metric_result *m)
 {
-	guint i;
+	gint i;
 
 	if (m == NULL) {
 		m = task->result;
@@ -1546,9 +1559,13 @@ rspamd_task_get_required_score (struct rspamd_task *task, struct rspamd_metric_r
 		}
 	}
 
-	for (i = METRIC_ACTION_REJECT; i < METRIC_ACTION_NOACTION; i ++) {
-		if (!isnan (m->actions_limits[i])) {
-			return m->actions_limits[i];
+	for (i = m->nactions - 1; i >= 0; i --) {
+		struct rspamd_action_result *action_lim = &m->actions_limits[i];
+
+
+		if (!isnan (action_lim->cur_limit) &&
+				!(action_lim->action->flags & (RSPAMD_ACTION_NO_THRESHOLD|RSPAMD_ACTION_HAM))) {
+			return m->actions_limits[i].cur_limit;
 		}
 	}
 
@@ -1686,4 +1703,71 @@ rspamd_task_set_finish_time (struct rspamd_task *task)
 	}
 
 	return FALSE;
+}
+
+const gchar *
+rspamd_task_stage_name (enum rspamd_task_stage stg)
+{
+	const gchar *ret = "unknown stage";
+
+	switch (stg) {
+	case RSPAMD_TASK_STAGE_CONNECT:
+		ret = "connect";
+		break;
+	case RSPAMD_TASK_STAGE_ENVELOPE:
+		ret = "envelope";
+		break;
+	case RSPAMD_TASK_STAGE_READ_MESSAGE:
+		ret = "read_message";
+		break;
+	case RSPAMD_TASK_STAGE_PRE_FILTERS:
+		ret = "prefilters";
+		break;
+	case RSPAMD_TASK_STAGE_PROCESS_MESSAGE:
+		ret = "process_message";
+		break;
+	case RSPAMD_TASK_STAGE_FILTERS:
+		ret = "filters";
+		break;
+	case RSPAMD_TASK_STAGE_CLASSIFIERS_PRE:
+		ret = "classifiers_pre";
+		break;
+	case RSPAMD_TASK_STAGE_CLASSIFIERS:
+		ret = "classifiers";
+		break;
+	case RSPAMD_TASK_STAGE_CLASSIFIERS_POST:
+		ret = "classifiers_post";
+		break;
+	case RSPAMD_TASK_STAGE_COMPOSITES:
+		ret = "composites";
+		break;
+	case RSPAMD_TASK_STAGE_POST_FILTERS:
+		ret = "postfilters";
+		break;
+	case RSPAMD_TASK_STAGE_LEARN_PRE:
+		ret = "learn_pre";
+		break;
+	case RSPAMD_TASK_STAGE_LEARN:
+		ret = "learn";
+		break;
+	case RSPAMD_TASK_STAGE_LEARN_POST:
+		ret = "learn_post";
+		break;
+	case RSPAMD_TASK_STAGE_COMPOSITES_POST:
+		ret = "composites_post";
+		break;
+	case RSPAMD_TASK_STAGE_IDEMPOTENT:
+		ret = "idempotent";
+		break;
+	case RSPAMD_TASK_STAGE_DONE:
+		ret = "done";
+		break;
+	case RSPAMD_TASK_STAGE_REPLIED:
+		ret = "replied";
+		break;
+	default:
+		break;
+	}
+
+	return ret;
 }

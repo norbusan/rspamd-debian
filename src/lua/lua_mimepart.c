@@ -301,6 +301,15 @@ LUA_FUNCTION_DEF (mimepart, get_header_full);
  * @return {number} number of header's occurrencies or 0 if not found
  */
 LUA_FUNCTION_DEF (mimepart, get_header_count);
+
+/***
+ * @method mimepart:get_raw_headers()
+ * Get all undecoded headers of a mime part as a string
+ * @return {rspamd_text} all raw headers for a message as opaque text
+ */
+LUA_FUNCTION_DEF (mimepart, get_raw_headers);
+
+
 /***
  * @method mime_part:get_content()
  * Get the parsed content of part
@@ -332,6 +341,20 @@ LUA_FUNCTION_DEF (mimepart, get_type);
  * @return {string,string,table} content type in form 'type','subtype', {attrs}
  */
 LUA_FUNCTION_DEF (mimepart, get_type_full);
+
+/***
+ * @method mime_part:get_detected_type()
+ * Extract content-type string of the mime part. Use libmagic detection
+ * @return {string,string} content type in form 'type','subtype'
+ */
+LUA_FUNCTION_DEF (mimepart, get_detected_type);
+
+/***
+ * @method mime_part:get_detected_type_full()
+ * Extract content-type string of the mime part with all attributes. Use libmagic detection
+ * @return {string,string,table} content type in form 'type','subtype', {attrs}
+ */
+LUA_FUNCTION_DEF (mimepart, get_detected_type_full);
 
 /***
  * @method mime_part:get_cte()
@@ -399,6 +422,20 @@ LUA_FUNCTION_DEF (mimepart, get_archive);
  */
 LUA_FUNCTION_DEF (mimepart, is_multipart);
 /***
+ * @method mime_part:is_message()
+ * Returns true if mime part is a message part (message/rfc822)
+ * @return {bool} true if a part is is a message part
+ */
+LUA_FUNCTION_DEF (mimepart, is_message);
+/***
+ * @method mime_part:get_boundary()
+ * Returns boundary for a part (extracted from parent multipart for normal parts and
+ * from the part itself for multipart)
+ * @return {string} boundary value or nil
+ */
+LUA_FUNCTION_DEF (mimepart, get_boundary);
+
+/***
  * @method mime_part:get_children()
  * Returns rspamd_mimepart table of part's childer. Returns nil if mime part is not multipart
  * or a message part.
@@ -450,6 +487,13 @@ LUA_FUNCTION_DEF (mimepart, is_broken);
  * @param {table} params optional parameters
  */
 LUA_FUNCTION_DEF (mimepart, headers_foreach);
+/***
+ * @method mime_part:get_parent()
+ * Returns parent part for this part
+ * @return {rspamd_mimepart} parent part or nil
+ */
+LUA_FUNCTION_DEF (mimepart, get_parent);
+
 
 static const struct luaL_reg mimepartlib_m[] = {
 	LUA_INTERFACE_DEF (mimepart, get_content),
@@ -457,18 +501,24 @@ static const struct luaL_reg mimepartlib_m[] = {
 	LUA_INTERFACE_DEF (mimepart, get_length),
 	LUA_INTERFACE_DEF (mimepart, get_type),
 	LUA_INTERFACE_DEF (mimepart, get_type_full),
+	LUA_INTERFACE_DEF (mimepart, get_detected_type),
+	LUA_INTERFACE_DEF (mimepart, get_detected_type_full),
 	LUA_INTERFACE_DEF (mimepart, get_cte),
 	LUA_INTERFACE_DEF (mimepart, get_filename),
+	LUA_INTERFACE_DEF (mimepart, get_boundary),
 	LUA_INTERFACE_DEF (mimepart, get_header),
 	LUA_INTERFACE_DEF (mimepart, get_header_raw),
 	LUA_INTERFACE_DEF (mimepart, get_header_full),
 	LUA_INTERFACE_DEF (mimepart, get_header_count),
+	LUA_INTERFACE_DEF (mimepart, get_raw_headers),
 	LUA_INTERFACE_DEF (mimepart, is_image),
 	LUA_INTERFACE_DEF (mimepart, get_image),
 	LUA_INTERFACE_DEF (mimepart, is_archive),
 	LUA_INTERFACE_DEF (mimepart, get_archive),
 	LUA_INTERFACE_DEF (mimepart, is_multipart),
+	LUA_INTERFACE_DEF (mimepart, is_message),
 	LUA_INTERFACE_DEF (mimepart, get_children),
+	LUA_INTERFACE_DEF (mimepart, get_parent),
 	LUA_INTERFACE_DEF (mimepart, is_text),
 	LUA_INTERFACE_DEF (mimepart, is_broken),
 	LUA_INTERFACE_DEF (mimepart, is_attachment),
@@ -567,7 +617,7 @@ lua_textpart_get_content (lua_State * L)
 	gsize len;
 	const gchar *start, *type = NULL;
 
-	if (part == NULL || IS_PART_EMPTY (part)) {
+	if (part == NULL) {
 		lua_pushnil (L);
 		return 1;
 	}
@@ -576,36 +626,65 @@ lua_textpart_get_content (lua_State * L)
 		type = lua_tostring (L, 2);
 	}
 
-	t = lua_newuserdata (L, sizeof (*t));
-	rspamd_lua_setclass (L, "rspamd{text}", -1);
-
 	if (!type) {
+		if (IS_PART_EMPTY (part)) {
+			lua_pushnil (L);
+			return 1;
+		}
 		start = part->utf_content->data;
 		len = part->utf_content->len;
 	}
 	else if (strcmp (type, "content") == 0) {
+		if (IS_PART_EMPTY (part)) {
+			lua_pushnil (L);
+			return 1;
+		}
+
 		start = part->utf_content->data;
 		len = part->utf_content->len;
 	}
 	else if (strcmp (type, "content_oneline") == 0) {
+		if (IS_PART_EMPTY (part)) {
+			lua_pushnil (L);
+			return 1;
+		}
+
 		start = part->utf_stripped_content->data;
 		len = part->utf_stripped_content->len;
 	}
 	else if (strcmp (type, "raw_parsed") == 0) {
+		if (part->parsed.len == 0) {
+			lua_pushnil (L);
+			return 1;
+		}
+
 		start = part->parsed.begin;
 		len = part->parsed.len;
 	}
 	else if (strcmp (type, "raw_utf") == 0) {
+		if (part->utf_raw_content == NULL || part->utf_raw_content->len == 0) {
+			lua_pushnil (L);
+			return 1;
+		}
+
 		start = part->utf_raw_content->data;
 		len = part->utf_raw_content->len;
 	}
 	else if (strcmp (type, "raw") == 0) {
+		if (part->raw.len == 0) {
+			lua_pushnil (L);
+			return 1;
+		}
+
 		start = part->raw.begin;
 		len = part->raw.len;
 	}
 	else {
 		return luaL_error (L, "invalid content type: %s", type);
 	}
+
+	t = lua_newuserdata (L, sizeof (*t));
+	rspamd_lua_setclass (L, "rspamd{text}", -1);
 
 	t->start = start;
 	t->len = len;
@@ -1189,48 +1268,49 @@ lua_mimepart_get_length (lua_State * L)
 }
 
 static gint
-lua_mimepart_get_type_common (lua_State * L, gboolean full)
+lua_mimepart_get_type_common (lua_State * L, struct rspamd_content_type *ct,
+		gboolean full)
 {
-	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
 	GHashTableIter it;
 	gpointer k, v;
 	struct rspamd_content_type_param *param;
 
-	if (part == NULL) {
+	if (ct == NULL) {
 		lua_pushnil (L);
 		lua_pushnil (L);
 		return 2;
 	}
 
-	lua_pushlstring (L, part->ct->type.begin, part->ct->type.len);
-	lua_pushlstring (L, part->ct->subtype.begin, part->ct->subtype.len);
+	lua_pushlstring (L, ct->type.begin, ct->type.len);
+	lua_pushlstring (L, ct->subtype.begin, ct->subtype.len);
 
 	if (!full) {
 		return 2;
 	}
 
-	lua_createtable (L, 0, 2 + (part->ct->attrs ?
-			g_hash_table_size (part->ct->attrs) : 0));
+	lua_createtable (L, 0, 2 + (ct->attrs ?
+			g_hash_table_size (ct->attrs) : 0));
 
-	if (part->ct->charset.len > 0) {
+	if (ct->charset.len > 0) {
 		lua_pushstring (L, "charset");
-		lua_pushlstring (L, part->ct->charset.begin, part->ct->charset.len);
+		lua_pushlstring (L, ct->charset.begin, ct->charset.len);
 		lua_settable (L, -3);
 	}
 
-	if (part->ct->boundary.len > 0) {
-		lua_pushstring (L, "charset");
-		lua_pushlstring (L, part->ct->boundary.begin, part->ct->boundary.len);
+	if (ct->boundary.len > 0) {
+		lua_pushstring (L, "boundary");
+		lua_pushlstring (L, ct->boundary.begin, ct->boundary.len);
 		lua_settable (L, -3);
 	}
 
-	if (part->ct->attrs) {
-		g_hash_table_iter_init (&it, part->ct->attrs);
+	if (ct->attrs) {
+		g_hash_table_iter_init (&it, ct->attrs);
 
 		while (g_hash_table_iter_next (&it, &k, &v)) {
 			param = v;
 
-			if (param->name.len > 0 && param->name.len > 0) {
+			if (param->name.len > 0 && param->value.len > 0) {
 				/* TODO: think about multiple values here */
 				lua_pushlstring (L, param->name.begin, param->name.len);
 				lua_pushlstring (L, param->value.begin, param->value.len);
@@ -1246,14 +1326,52 @@ static gint
 lua_mimepart_get_type (lua_State * L)
 {
 	LUA_TRACE_POINT;
-	return lua_mimepart_get_type_common (L, FALSE);
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return lua_mimepart_get_type_common (L, part->ct, FALSE);
 }
 
 static gint
 lua_mimepart_get_type_full (lua_State * L)
 {
 	LUA_TRACE_POINT;
-	return lua_mimepart_get_type_common (L, TRUE);
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return lua_mimepart_get_type_common (L, part->ct, TRUE);
+}
+
+static gint
+lua_mimepart_get_detected_type (lua_State * L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return lua_mimepart_get_type_common (L, part->detected_ct, FALSE);
+}
+
+static gint
+lua_mimepart_get_detected_type_full (lua_State * L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return lua_mimepart_get_type_common (L, part->detected_ct, TRUE);
 }
 
 static gint
@@ -1284,6 +1402,35 @@ lua_mimepart_get_filename (lua_State * L)
 	}
 
 	lua_pushlstring (L, part->cd->filename.begin, part->cd->filename.len);
+
+	return 1;
+}
+
+static gint
+lua_mimepart_get_boundary (lua_State * L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_mime_part *part = lua_check_mimepart (L), *parent;
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	if (IS_CT_MULTIPART (part->ct)) {
+		lua_pushlstring (L, part->specific.mp->boundary.begin,
+				part->specific.mp->boundary.len);
+	}
+	else {
+		parent = part->parent_part;
+
+		if (!parent || !IS_CT_MULTIPART (parent->ct)) {
+			lua_pushnil (L);
+		}
+		else {
+			lua_pushlstring (L, parent->specific.mp->boundary.begin,
+					parent->specific.mp->boundary.len);
+		}
+	}
 
 	return 1;
 }
@@ -1339,6 +1486,28 @@ lua_mimepart_get_header_count (lua_State * L)
 }
 
 static gint
+lua_mimepart_get_raw_headers (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+	struct rspamd_lua_text *t;
+
+	if (part) {
+		t = lua_newuserdata (L, sizeof (*t));
+		rspamd_lua_setclass (L, "rspamd{text}", -1);
+		t->start = part->raw_headers_str;
+		t->len = part->raw_headers_len;
+		t->flags = 0;
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+
+	return 1;
+}
+
+static gint
 lua_mimepart_is_image (lua_State * L)
 {
 	LUA_TRACE_POINT;
@@ -1379,6 +1548,21 @@ lua_mimepart_is_multipart (lua_State * L)
 	}
 
 	lua_pushboolean (L, IS_CT_MULTIPART (part->ct) ? true : false);
+
+	return 1;
+}
+
+static gint
+lua_mimepart_is_message (lua_State * L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	lua_pushboolean (L, IS_CT_MESSAGE (part->ct) ? true : false);
 
 	return 1;
 }
@@ -1508,18 +1692,41 @@ lua_mimepart_get_children (lua_State * L)
 		return luaL_error (L, "invalid arguments");
 	}
 
-	if (!IS_CT_MULTIPART (part->ct) || part->specific.mp.children == NULL) {
+	if (!IS_CT_MULTIPART (part->ct) || part->specific.mp->children == NULL) {
 		lua_pushnil (L);
 	}
 	else {
-		lua_createtable (L, part->specific.mp.children->len, 0);
+		lua_createtable (L, part->specific.mp->children->len, 0);
 
-		PTR_ARRAY_FOREACH (part->specific.mp.children, i, cur) {
+		PTR_ARRAY_FOREACH (part->specific.mp->children, i, cur) {
 			pcur = lua_newuserdata (L, sizeof (*pcur));
 			*pcur = cur;
 			rspamd_lua_setclass (L, "rspamd{mimepart}", -1);
 			lua_rawseti (L, -2, i + 1);
 		}
+	}
+
+	return 1;
+}
+
+static gint
+lua_mimepart_get_parent (lua_State * L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+	struct rspamd_mime_part **pparent;
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	if (part->parent_part) {
+		pparent = lua_newuserdata (L, sizeof (*pparent));
+		*pparent = part->parent_part;
+		rspamd_lua_setclass (L, "rspamd{mimepart}", -1);
+	}
+	else {
+		lua_pushnil (L);
 	}
 
 	return 1;
@@ -1578,7 +1785,7 @@ lua_mimepart_get_id (lua_State * L)
 		return luaL_error (L, "invalid arguments");
 	}
 
-	lua_pushnumber (L, part->id);
+	lua_pushinteger (L, part->id);
 
 	return 1;
 }

@@ -47,6 +47,10 @@ enum rspamd_symbol_type {
 	SYMBOL_TYPE_IDEMPOTENT = (1 << 12), /* Symbol cannot change metric */
 	SYMBOL_TYPE_SQUEEZED = (1 << 13), /* Symbol is squeezed inside Lua */
 	SYMBOL_TYPE_TRIVIAL = (1 << 14), /* Symbol is trivial */
+	SYMBOL_TYPE_MIME_ONLY = (1 << 15), /* Symbol is mime only */
+	SYMBOL_TYPE_EXPLICIT_DISABLE = (1 << 16), /* Symbol should be disabled explicitly only */
+	SYMBOL_TYPE_IGNORE_PASSTHROUGH = (1 << 17), /* Symbol ignores passthrough result */
+	SYMBOL_TYPE_USE_CORO = (1 << 18), /* Symbol uses lua coroutines */
 };
 
 /**
@@ -227,16 +231,16 @@ void rspamd_symcache_add_delayed_dependency (struct rspamd_symcache *cache,
  * @param cache
  * @param symbol
  */
-void rspamd_symcache_disable_symbol (struct rspamd_symcache *cache,
-									 const gchar *symbol);
+void rspamd_symcache_disable_symbol_perm (struct rspamd_symcache *cache,
+										  const gchar *symbol);
 
 /**
  * Enable specific symbol in the cache
  * @param cache
  * @param symbol
  */
-void rspamd_symcache_enable_symbol (struct rspamd_symcache *cache,
-									const gchar *symbol);
+void rspamd_symcache_enable_symbol_perm (struct rspamd_symcache *cache,
+										 const gchar *symbol);
 /**
  * Get abstract callback data for a symbol (or its parent symbol)
  * @param cache cache object
@@ -246,7 +250,23 @@ void rspamd_symcache_enable_symbol (struct rspamd_symcache *cache,
 struct rspamd_abstract_callback_data* rspamd_symcache_get_cbdata (
 		struct rspamd_symcache *cache, const gchar *symbol);
 
+/**
+ * Adds flags to a symbol
+ * @param cache
+ * @param symbol
+ * @param flags
+ * @return
+ */
+gboolean rspamd_symcache_add_symbol_flags (struct rspamd_symcache *cache,
+										  const gchar *symbol,
+										  guint flags);
 
+gboolean rspamd_symcache_set_symbol_flags (struct rspamd_symcache *cache,
+										   const gchar *symbol,
+										   guint flags);
+
+guint rspamd_symcache_get_symbol_flags (struct rspamd_symcache *cache,
+										   const gchar *symbol);
 /**
  * Process settings for task
  * @param task
@@ -285,6 +305,28 @@ guint64 rspamd_symcache_get_cksum (struct rspamd_symcache *cache);
 gboolean rspamd_symcache_is_symbol_enabled (struct rspamd_task *task,
 											struct rspamd_symcache *cache,
 											const gchar *symbol);
+
+/**
+ * Enable this symbol for task
+ * @param task
+ * @param cache
+ * @param symbol
+ * @return TRUE if a symbol has been enabled (not executed before)
+ */
+gboolean rspamd_symcache_enable_symbol (struct rspamd_task *task,
+										struct rspamd_symcache *cache,
+										const gchar *symbol);
+
+/**
+ * Enable this symbol for task
+ * @param task
+ * @param cache
+ * @param symbol
+ * @return TRUE if a symbol has been disabled (not executed before)
+ */
+gboolean rspamd_symcache_disable_symbol (struct rspamd_task *task,
+										 struct rspamd_symcache *cache,
+										 const gchar *symbol);
 /**
  * Process specific function for each cache element (in order they are added)
  * @param cache
@@ -351,4 +393,26 @@ gboolean rspamd_symcache_item_async_dec_check_full (struct rspamd_task *task,
 											   const gchar *loc);
 #define rspamd_symcache_item_async_dec_check(task, item, subsystem) \
 	rspamd_symcache_item_async_dec_check_full(task, item, subsystem, G_STRLOC)
+
+/**
+ * Disables execution of all symbols, excluding those specified in `skip_mask`
+ * @param task
+ * @param cache
+ * @param skip_mask
+ */
+void rspamd_symcache_disable_all_symbols (struct rspamd_task *task,
+										  struct rspamd_symcache *cache,
+										  guint skip_mask);
+
+/**
+ * Iterates over the list of the enabled composites calling specified function
+ * @param task
+ * @param cache
+ * @param func
+ * @param fd
+ */
+void rspamd_symcache_composites_foreach (struct rspamd_task *task,
+										 struct rspamd_symcache *cache,
+										 GHFunc func,
+										 gpointer fd);
 #endif

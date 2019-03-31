@@ -34,6 +34,7 @@
 
 #include <math.h>
 #include <unicode/uchar.h>
+#include <src/libserver/cfg_file_private.h>
 
 #define GTUBE_SYMBOL "GTUBE"
 
@@ -215,13 +216,15 @@ rspamd_mime_part_detect_language (struct rspamd_task *task,
 }
 
 static void
-rspamd_strip_newlines_parse (const gchar *begin, const gchar *pe,
+rspamd_strip_newlines_parse (struct rspamd_task *task,
+		const gchar *begin, const gchar *pe,
 		struct rspamd_mime_text_part *part)
 {
 	const gchar *p = begin, *c = begin;
 	gchar last_c = '\0';
 	gboolean crlf_added = FALSE;
 	gboolean url_open_bracket = FALSE;
+	UChar32 uc;
 
 	enum {
 		normal_char,
@@ -230,6 +233,41 @@ rspamd_strip_newlines_parse (const gchar *begin, const gchar *pe,
 	} state = normal_char;
 
 	while (p < pe) {
+		if (IS_PART_UTF (part)) {
+			gint32 off = p - begin;
+			U8_NEXT (begin, off, pe - begin, uc);
+
+			if (uc != -1) {
+				while (p < pe) {
+					if (IS_ZERO_WIDTH_SPACE (uc)) {
+						/* Invisible space ! */
+						task->flags |= RSPAMD_TASK_FLAG_BAD_UNICODE;
+						part->spaces ++;
+
+						if (p > c) {
+							g_byte_array_append (part->utf_stripped_content,
+									(const guint8 *) c, p - c);
+							c = begin + off;
+							p = c;
+						}
+
+						U8_NEXT (begin, off, pe - begin, uc);
+
+						if (!IS_ZERO_WIDTH_SPACE (uc)) {
+							break;
+						}
+
+						part->double_spaces ++;
+						p = begin + off;
+						c = p;
+					}
+					else {
+						break;
+					}
+				}
+			}
+		}
+
 		if (G_UNLIKELY (*p) == '\r') {
 			switch (state) {
 			case normal_char:
@@ -469,7 +507,7 @@ rspamd_normalize_text_part (struct rspamd_task *task,
 		p = (const gchar *)part->utf_content->data;
 		end = p + part->utf_content->len;
 
-		rspamd_strip_newlines_parse (p, end, part);
+		rspamd_strip_newlines_parse (task, p, end, part);
 
 		for (i = 0; i < part->newlines->len; i ++) {
 			ex = rspamd_mempool_alloc (task->task_pool, sizeof (*ex));
@@ -524,8 +562,8 @@ rspamd_words_levenshtein_distance (struct rspamd_task *task,
 	s2len = w2->len;
 
 	if (s1len + s2len > max_words) {
-		msg_err_task ("cannot compare parts with more than %ud words: %ud",
-				max_words, s1len);
+		msg_err_task ("cannot compare parts with more than %ud words: (%ud + %ud)",
+				max_words, s1len, s2len);
 		return 0;
 	}
 
@@ -703,7 +741,7 @@ rspamd_message_process_html_text_part (struct rspamd_task *task,
 	return TRUE;
 }
 
-static void
+static gboolean
 rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 										struct rspamd_mime_part *mime_part)
 {
@@ -712,7 +750,8 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 	gboolean found_html = FALSE, found_txt = FALSE;
 	enum rspamd_action_type act;
 
-	if (IS_CT_TEXT (mime_part->ct)) {
+	if (IS_CT_TEXT (mime_part->ct) && (!mime_part->detected_ct ||
+									   IS_CT_TEXT (mime_part->detected_ct))) {
 		html_tok.begin = "html";
 		html_tok.len = 4;
 		xhtml_tok.begin = "xhtml";
@@ -812,11 +851,11 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 			mime_part->cd && mime_part->cd->type == RSPAMD_CT_ATTACHMENT &&
 			(task->cfg && !task->cfg->check_text_attachements)) {
 		debug_task ("skip attachments for checking as text parts");
-		return;
+		return TRUE;
 	}
 	else if (!(found_txt || found_html)) {
 		/* Not a text part */
-		return;
+		return FALSE;
 	}
 
 	text_part = rspamd_mempool_alloc0 (task->task_pool,
@@ -830,12 +869,12 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 
 	if (found_html) {
 		if (!rspamd_message_process_html_text_part (task, text_part)) {
-			return;
+			return FALSE;
 		}
 	}
 	else {
 		if (!rspamd_message_process_plain_text_part (task, text_part)) {
-			return;
+			return FALSE;
 		}
 	}
 
@@ -845,28 +884,28 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 
 	act = rspamd_check_gtube (task, text_part);
 	if (act != METRIC_ACTION_NOACTION) {
-		struct rspamd_metric_result *mres = task->result;
+		struct rspamd_action *action;
 		gdouble score = NAN;
 
-		if (act == METRIC_ACTION_REJECT) {
-			score = rspamd_task_get_required_score (task, mres);
-		}
-		else {
-			score = mres->actions_limits[act];
-		}
+		action = rspamd_config_get_action_by_type (task->cfg, act);
 
-		rspamd_add_passthrough_result (task, act, RSPAMD_PASSTHROUGH_CRITICAL,
-				score, "Gtube pattern", "GTUBE");
+		if (action) {
+			score = action->threshold;
 
-		if (ucl_object_lookup (task->messages, "smtp_message") == NULL) {
-			ucl_object_replace_key (task->messages,
-					ucl_object_fromstring ("Gtube pattern"), "smtp_message", 0,
-					false);
+			rspamd_add_passthrough_result (task, action,
+					RSPAMD_PASSTHROUGH_CRITICAL,
+					score, "Gtube pattern", "GTUBE");
+
+			if (ucl_object_lookup (task->messages, "smtp_message") == NULL) {
+				ucl_object_replace_key (task->messages,
+						ucl_object_fromstring ("Gtube pattern"),
+						"smtp_message", 0, false);
+			}
 		}
 
 		rspamd_task_insert_result (task, GTUBE_SYMBOL, 0, NULL);
 
-		return;
+		return TRUE;
 	}
 
 	/* Post process part */
@@ -885,6 +924,8 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 	}
 
 	rspamd_mime_part_create_words (task, text_part);
+
+	return TRUE;
 }
 
 /* Creates message from various data using libmagic to detect type */
@@ -897,8 +938,11 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 	const char *mb = NULL;
 	gchar *mid;
 	rspamd_ftok_t srch, *tok;
+	gchar cdbuf[1024];
 
 	g_assert (start != NULL);
+
+	part = rspamd_mempool_alloc0 (task->task_pool, sizeof (*part));
 
 	tok = rspamd_task_get_request_header (task, "Content-Type");
 
@@ -906,9 +950,10 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 		/* We have Content-Type defined */
 		ct = rspamd_content_type_parse (tok->begin, tok->len,
 				task->task_pool);
+		part->ct = ct;
 	}
-	else if (task->cfg && task->cfg->libs_ctx) {
-		/* Try to predict it by content (slow) */
+
+	if (task->cfg && task->cfg->libs_ctx) {
 		mb = magic_buffer (task->cfg->libs_ctx->libmagic,
 				start,
 				len);
@@ -918,16 +963,56 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 			srch.len = strlen (mb);
 			ct = rspamd_content_type_parse (srch.begin, srch.len,
 					task->task_pool);
+
+			if (!part->ct) {
+				msg_info_task ("construct fake mime of type: %s", mb);
+				part->ct = ct;
+			}
+			else {
+				/* Check sanity */
+				if (IS_CT_TEXT (part->ct)) {
+					RSPAMD_FTOK_FROM_STR (&srch, "application");
+
+					if (rspamd_ftok_cmp (&ct->type, &srch) == 0) {
+						msg_info_task ("construct fake mime of type: %s", mb);
+						part->ct = ct;
+					}
+				}
+				else {
+					msg_info_task ("construct fake mime of type: %T/%T, detected %s",
+							&part->ct->type, &part->ct->subtype, mb);
+				}
+			}
+
+			part->detected_ct = ct;
 		}
 	}
 
-	msg_warn_task ("construct fake mime of type: %s", mb);
-	part = rspamd_mempool_alloc0 (task->task_pool, sizeof (*part));
-	part->ct = ct;
 	part->raw_data.begin = start;
 	part->raw_data.len = len;
 	part->parsed_data.begin = start;
 	part->parsed_data.len = len;
+	part->id = task->parts->len;
+	part->raw_headers =  g_hash_table_new_full (rspamd_strcase_hash,
+			rspamd_strcase_equal, NULL, rspamd_ptr_array_free_hard);
+	part->headers_order = g_queue_new ();
+
+
+
+	tok = rspamd_task_get_request_header (task, "Filename");
+
+	if (tok) {
+		rspamd_snprintf (cdbuf, sizeof (cdbuf), "inline; filename=\"%T\"", tok);
+	}
+	else {
+		rspamd_snprintf (cdbuf, sizeof (cdbuf), "inline");
+	}
+
+	part->cd = rspamd_content_disposition_parse (cdbuf, strlen (cdbuf),
+			task->task_pool);
+
+	g_ptr_array_add (task->parts, part);
+	rspamd_mime_parser_calc_digest (part);
 
 	/* Generate message ID */
 	mid = rspamd_mime_message_id_generate ("localhost.localdomain");
@@ -1032,7 +1117,6 @@ rspamd_message_parse (struct rspamd_task *task)
 		}
 	}
 	else {
-		task->flags &= ~RSPAMD_TASK_FLAG_MIME;
 		rspamd_message_from_data (task, p, len);
 	}
 
@@ -1066,7 +1150,7 @@ rspamd_message_parse (struct rspamd_task *task)
 				need_recv_correction = TRUE;
 			}
 			else {
-				if (rspamd_inet_address_compare (raddr, task->from_addr) != 0) {
+				if (rspamd_inet_address_compare (raddr, task->from_addr, FALSE) != 0) {
 					need_recv_correction = TRUE;
 				}
 			}
@@ -1189,11 +1273,46 @@ rspamd_message_process (struct rspamd_task *task)
 		struct rspamd_mime_part *part;
 
 		part = g_ptr_array_index (task->parts, i);
-		rspamd_message_process_text_part_maybe (task, part);
+
+
+		if (!rspamd_message_process_text_part_maybe (task, part) &&
+				part->parsed_data.len > 0) {
+			const gchar *mb = magic_buffer (task->cfg->libs_ctx->libmagic,
+					part->parsed_data.begin,
+					part->parsed_data.len);
+
+			if (mb) {
+				rspamd_ftok_t srch;
+
+				srch.begin = mb;
+				srch.len = strlen (mb);
+				part->detected_ct = rspamd_content_type_parse (srch.begin,
+						srch.len,
+						task->task_pool);
+			}
+
+		}
 	}
 
 	rspamd_images_process (task);
 	rspamd_archives_process (task);
+
+	/* Calculate average words length and number of short words */
+	struct rspamd_mime_text_part *text_part;
+	gdouble *var;
+	guint total_words = 0;
+
+	PTR_ARRAY_FOREACH (task->text_parts, i, text_part) {
+		if (!text_part->language) {
+			rspamd_mime_part_detect_language (task, text_part);
+		}
+
+		rspamd_mime_part_extract_words (task, text_part);
+
+		if (text_part->utf_words) {
+			total_words += text_part->nwords;
+		}
+	}
 
 	/* Calculate distance for 2-parts messages */
 	if (task->text_parts->len == 2) {
@@ -1231,8 +1350,6 @@ rspamd_message_process (struct rspamd_task *task)
 							sel = p2;
 						}
 					}
-
-					rspamd_mime_part_detect_language (task, sel);
 
 					if (sel->language && sel->language[0]) {
 						/* Propagate language */
@@ -1281,23 +1398,6 @@ rspamd_message_process (struct rspamd_task *task)
 		else {
 			debug_task (
 					"message contains two parts but they are in different multi-parts");
-		}
-	}
-
-	/* Calculate average words length and number of short words */
-	struct rspamd_mime_text_part *text_part;
-	gdouble *var;
-	guint total_words = 0;
-
-	PTR_ARRAY_FOREACH (task->text_parts, i, text_part) {
-		if (!text_part->language) {
-			rspamd_mime_part_detect_language (task, text_part);
-		}
-
-		rspamd_mime_part_extract_words (task, text_part);
-
-		if (text_part->utf_words) {
-			total_words += text_part->nwords;
 		}
 	}
 

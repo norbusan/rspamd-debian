@@ -28,7 +28,6 @@ local regexp = require "rspamd_regexp"
 local rspamd_expression = require "rspamd_expression"
 local rspamd_ip = require "rspamd_ip"
 local lua_util = require "lua_util"
-local rspamd_dns = require "rspamd_dns"
 local lua_selectors = require "lua_selectors"
 local redis_params
 local fun = require "fun"
@@ -260,9 +259,15 @@ local function apply_addr_filter(task, filter, input, rule)
     if addr and addr[1] then
       return addr[1]['name']
     end
+  elseif filter == 'ip_addr' then
+    local ip_addr = rspamd_ip.from_string(input)
+
+    if ip_addr and ip_addr:is_valid() then
+      return ip_addr
+    end
   else
     -- regexp case
-    if not rule['re_filter'] then
+  if not rule['re_filter'] then
       local type,pat = string.match(filter, '(regexp:)(.+)')
       if type and pat then
         rule['re_filter'] = regexp.create(pat)
@@ -397,16 +402,17 @@ local function multimap_callback(task, rule)
 
     if r['cdb'] then
       local srch = value
-      if r['type'] == 'ip' then
-        srch = value:to_string()
+      if type(value) == 'userdata' then
+        if value.class == 'rspamd{ip}' then
+          srch = value:tostring()
+        end
       end
       ret = r['cdb']:lookup(srch)
     elseif r['redis_key'] then
       local srch = {value}
       local cmd = 'HGET'
-      if r['type'] == 'ip' or (r['type'] == 'received' and
-        (r['filter'] == 'real_ip' or r['filter'] == 'from_ip' or not r['filter'])) then
-        srch = {value:to_string()}
+      if type(value) == 'userdata' and value.class == 'rspamd{ip}' then
+        srch = {value:tostring()}
         cmd = 'HMGET'
         local maxbits = 128
         local minbits = 32
@@ -415,7 +421,7 @@ local function multimap_callback(task, rule)
             minbits = 8
         end
         for i=maxbits,minbits,-1 do
-            local nip = value:apply_mask(i):to_string() .. "/" .. i
+            local nip = value:apply_mask(i):tostring() .. "/" .. i
             table.insert(srch, nip)
         end
       end
@@ -434,6 +440,11 @@ local function multimap_callback(task, rule)
     elseif r['radix'] then
       ret = r['radix']:get_key(value)
     elseif r['hash'] then
+      if type(value) == 'userdata' then
+        if value.class == 'rspamd{ip}' then
+          value = value:tostring()
+        end
+      end
       ret = r['hash']:get_key(value)
     end
 
@@ -696,46 +707,55 @@ local function multimap_callback(task, rule)
     end
   end
 
-  if rule['expression'] then
+  if rule.expression then
     local res,trace = rule['expression']:process_traced(task)
 
     if not res or res == 0 then
-      lua_util.debugm(N, task, 'condition is false for %s', rule['symbol'])
+      lua_util.debugm(N, task, 'condition is false for %s',
+          rule.symbol)
       return
     else
-      lua_util.debugm(N, task, 'condition is true for %s: %s', rule['symbol'],
-        trace)
+      lua_util.debugm(N, task, 'condition is true for %s: %s',
+          rule.symbol,
+          trace)
     end
   end
 
-  local rt = rule['type']
   local process_rule_funcs = {
+    ip = function()
+      local ip = task:get_from_ip()
+      if ip:is_valid() then
+          match_rule(rule, ip)
+      end
+    end,
     dnsbl = function()
       local ip = task:get_from_ip()
       if ip:is_valid() then
-        if rt == 'ip' then
-          match_rule(rule, ip)
-        else
-          local to_resolve = ip_to_rbl(ip, rule['map'])
+        local to_resolve = ip_to_rbl(ip, rule['map'])
+        local function dns_cb(_, _, results, err)
+          lua_util.debugm(N, rspamd_config,
+              'resolve() finished: results=%1, err=%2, to_resolve=%3',
+              results, err, to_resolve)
 
-          local is_ok, results = rspamd_dns.request({
-            type = "a",
-            task = task,
-            name = to_resolve,
-          })
-
-          lua_util.debugm(N, rspamd_config, 'resolve() finished: results=%1, is_ok=%2, to_resolve=%3', results, is_ok, to_resolve)
-
-          if not is_ok and (results ~= 'requested record is not found' and results ~= 'no records with this name') then
+          if err and
+              (err ~= 'requested record is not found' and
+                  err ~= 'no records with this name') then
             rspamd_logger.errx(task, 'error looking up %s: %s', to_resolve, results)
-          elseif is_ok then
+          elseif results then
             task:insert_result(rule['symbol'], 1, rule['map'])
             if pre_filter then
-              task:set_pre_result(rule['action'], 'Matched map: ' .. rule['symbol'], N)
+              task:set_pre_result(rule['action'],
+                  'Matched map: ' .. rule['symbol'], N)
             end
           end
-
         end
+
+        task:get_resolver():resolve_a({
+          task= task,
+          name = to_resolve,
+          callback = dns_cb,
+          forced = true
+        })
       end
     end,
     header = function()
@@ -862,10 +882,10 @@ local function multimap_callback(task, rule)
     end,
   }
 
-  process_rule_funcs.ip = process_rule_funcs.dnsbl
-  local f = process_rule_funcs[rt]
-  if f then
-    f()
+  local rt = rule.type
+  local process_func = process_rule_funcs[rt]
+  if process_func then
+    process_func()
   else
     rspamd_logger.errx(task, 'Unrecognised rule type: %s', rt)
   end
@@ -985,7 +1005,7 @@ local function add_multimap_rule(key, newrule)
       local map = urls[newrule['map']]
       if map and map['regexp'] == newrule['regexp'] and
           map['glob'] == newrule['glob'] then
-        if newrule['type'] == 'ip' then
+        if newrule['type'] == 'ip' or newrule['filter'] == 'ip_addr' then
           newrule['radix'] = map['map']
         else
           newrule['hash'] = map['map']
@@ -1067,14 +1087,22 @@ local function add_multimap_rule(key, newrule)
           or newrule['type'] == 'mempool'
           or newrule['type'] == 'selector'then
 
-        multimap_load_hash(newrule)
+        if newrule.filter == 'ip_addr' then
+          newrule['radix'] = rspamd_config:add_map ({
+            url = newrule['map'],
+            description = newrule['description'],
+            type = 'radix'
+          })
+        else
+          multimap_load_hash(newrule)
+        end
 
-        if newrule['hash'] then
+        if newrule.hash or newrule.radix then
           ret = true
           if type(newrule['map']) == 'string' then
             urls[newrule['map']] = {
               type = newrule['type'],
-              map = newrule['hash'],
+              map = newrule.hash or newrule.radix,
               regexp = newrule['regexp']
             }
           end
