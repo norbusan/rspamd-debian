@@ -3,7 +3,8 @@ Section: mail
 Priority: optional
 Maintainer: Sebastien Badia <sbadia@debian.org>
 Uploaders: Mikhail Gusarov <dottedmag@debian.org>,
-           Jerome Lebleu <jerome@maroufle.fr>
+           Jerome Lebleu <jerome@maroufle.fr>,
+	   Sergio Durigan Junior <sergiodj@debian.org>
 Build-Depends: cmake,
                debhelper (>= 11~),
                libcurl4-openssl-dev,
