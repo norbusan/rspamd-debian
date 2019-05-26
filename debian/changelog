@@ -1,3 +1,10 @@
+rspamd (1.9.4-2) experimental; urgency=medium
+
+  * d/{control,rules}: Enable build with hyperscan (amd64 only), and add
+    myself to Uploaders.
+
+ -- Sergio Durigan Junior <sergiodj@debian.org>  Sun, 26 May 2019 17:34:59 -0400
+
 rspamd (1.9.4-1) experimental; urgency=medium
 
   [ Jerome Lebleu ]
