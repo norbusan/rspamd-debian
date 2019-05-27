@@ -34,7 +34,7 @@ antivirus {
     # action = "reject";
     # If set, then rejection message is set to this value (mention single quotes)
     # message = '${SCANNER}: virus found: "${VIRUS}"';
-    # Scan mime_parts seperately - otherwise the complete mail will be transfered to AV Scanner
+    # Scan mime_parts separately - otherwise the complete mail will be transferred to AV Scanner
     #scan_mime_parts = true;
     # Scanning Text is suitable for some av scanner databases (e.g. Sanesecurity)
     #scan_text_mime = false;
@@ -88,6 +88,10 @@ local function add_antivirus_rule(sym, opts)
     opts.symbol_fail = opts.symbol .. '_FAIL'
   end
 
+  if not opts.symbol_encrypted then
+    opts.symbol_encrypted = opts.symbol .. '_ENCRYPTED'
+  end
+
   -- WORKAROUND for deprecated attachments_only
   if opts.attachments_only ~= nil then
     opts.scan_mime_parts = opts.attachments_only
@@ -99,6 +103,7 @@ local function add_antivirus_rule(sym, opts)
   local rule = cfg.configure(opts)
   rule.type = opts.type
   rule.symbol_fail = opts.symbol_fail
+  rule.symbol_encrypted = opts.symbol_encrypted
   rule.redis_params = redis_params
 
   if not rule then
@@ -144,16 +149,33 @@ if opts and type(opts) == 'table' then
       if not cb then
         rspamd_logger.errx(rspamd_config, 'cannot add rule: "' .. k .. '"')
       else
-        local id = rspamd_config:register_symbol({
-          type = 'normal',
-          name = m['symbol'],
+
+        local t = {
+          name = m.symbol,
           callback = cb,
+          score = 0.0,
+          group = N
+        }
+
+        if m.symbol_type == 'postfilter' then
+          t.type = 'postfilter'
+          t.priority = 3
+        else
+          t.type = 'normal'
+        end
+
+        local id = rspamd_config:register_symbol(t)
+
+        rspamd_config:register_symbol({
+          type = 'virtual',
+          name = m['symbol_fail'],
+          parent = id,
           score = 0.0,
           group = N
         })
         rspamd_config:register_symbol({
           type = 'virtual',
-          name = m['symbol_fail'],
+          name = m['symbol_encrypted'],
           parent = id,
           score = 0.0,
           group = N

@@ -23,6 +23,8 @@ local logger = require "rspamd_logger"
 local lua_util = require "lua_util"
 local rspamd_util = require "rspamd_util"
 local lua_maps = require "lua_maps"
+local fun = require "fun"
+
 local N = "mime_types"
 local settings = {
   file = '',
@@ -44,12 +46,13 @@ local settings = {
   },
 
   bad_extensions = {
-    scr = 4,
-    lnk = 4,
-    exe = 1,
-    jar = 2,
-    com = 2,
     bat = 2,
+    com = 2,
+    exe = 1,
+    iso = 4,
+    jar = 2,
+    lnk = 4,
+    scr = 4,
     -- Have you ever seen that in legit email?
     ace = 4,
     arj = 2,
@@ -334,7 +337,11 @@ local full_extensions_map = {
   {"etl", "application/etl"},
   {"etx", "text/x-setext"},
   {"evy", "application/envoy"},
-  {"exe", {"application/x-dosexec", "application/x-msdownload"}},
+  {"exe", {
+    "application/x-dosexec",
+    "application/x-msdownload",
+    "application/x-executable",
+  }},
   {"exe.config", "text/xml"},
   {"fdf", "application/vnd.fdf"},
   {"fif", "application/fractals"},
@@ -528,7 +535,7 @@ local full_extensions_map = {
   {"p7c", "application/pkcs7-mime"},
   {"p7m", "application/pkcs7-mime"},
   {"p7r", "application/x-pkcs7-certreqresp"},
-  {"p7s", "application/pkcs7-signature"},
+  {"p7s", {"application/pkcs7-signature", "text/plain"}},
   {"pbm", "image/x-portable-bitmap"},
   {"pcast", "application/x-podcast"},
   {"pct", "image/pict"},
@@ -821,6 +828,9 @@ local full_extensions_map = {
   {"zlib", "application/zlib"},
 }
 
+-- Used to match extension by content type
+local reversed_extensions_map = {}
+
 local function check_mime_type(task)
   local function gen_extension(fname)
     local parts = lua_util.str_split(fname or '', '.')
@@ -833,7 +843,7 @@ local function check_mime_type(task)
     return ext[1],ext[2],parts
   end
 
-  local function check_filename(fname, ct, is_archive, part)
+  local function check_filename(fname, ct, is_archive, part, detected_ct)
 
     local has_bad_unicode, char, ch_pos = rspamd_util.has_obscured_unicode(fname)
     if has_bad_unicode then
@@ -841,6 +851,9 @@ local function check_mime_type(task)
           string.format("0x%xd after %s", char,
               fname:sub(1, ch_pos)))
     end
+
+    -- Decode hex encoded characters
+    fname = string.gsub(fname, '%%(%x%x)', function (hex) return string.char(tonumber(hex,16)) end )
 
     -- Replace potentially bad characters with '?'
     fname = fname:gsub('[^%s%g]', '?')
@@ -856,6 +869,11 @@ local function check_mime_type(task)
     local ext,ext2,parts = gen_extension(fname)
     -- ext is the last extension, LOWERCASED
     -- ext2 is the one before last extension LOWERCASED
+
+    if not ext and detected_ct then
+      -- Try to find extension by real content type
+      ext = reversed_extensions_map[detected_ct]
+    end
 
     local function check_extension(badness_mult, badness_mult2)
       if not badness_mult and not badness_mult2 then return end
@@ -886,18 +904,56 @@ local function check_mime_type(task)
       end
     end
 
+    -- Process settings
+    local extra_table = {}
+    local extra_archive_table = {}
+    local user_settings = task:get_settings()
+    if user_settings and user_settings.plugins then
+      user_settings = user_settings.plugins.mime_types
+    end
+
+    if user_settings then
+      logger.infox(task, 'using special tables from user settings')
+      if user_settings.bad_extensions then
+        if user_settings.bad_extensions[1] then
+          -- Convert to a key-value map
+          extra_table = fun.tomap(
+              fun.map(function(e) return e,1.0 end,
+              user_settings.bad_extensions))
+        else
+          extra_table = user_settings.bad_extensions
+        end
+      end
+      if user_settings.bad_archive_extensions then
+        if user_settings.bad_archive_extensions[1] then
+          -- Convert to a key-value map
+          extra_archive_table = fun.tomap(fun.map(
+              function(e) return e,1.0 end,
+              user_settings.bad_archive_extensions))
+        else
+          extra_archive_table = user_settings.bad_archive_extensions
+        end
+      end
+    end
+
+    local function check_tables(e)
+      if is_archive then
+        return extra_archive_table[e] or settings.bad_archive_extensions[e] or
+          extra_table[e] or settings.bad_extensions[e]
+      end
+
+      return extra_table[e] or settings.bad_extensions[e]
+    end
+
     if ext then
       -- Also check for archive bad extension
       if is_archive then
         if ext2 then
-          local score1 = settings['bad_archive_extensions'][ext] or
-              settings['bad_extensions'][ext]
-          local score2 = settings['bad_archive_extensions'][ext2] or
-              settings['bad_extensions'][ext2]
+          local score1 = check_tables(ext)
+          local score2 = check_tables(ext2)
           check_extension(score1, score2)
         else
-          local score1 = settings['bad_archive_extensions'][ext] or
-              settings['bad_extensions'][ext]
+          local score1 = check_tables(ext)
           check_extension(score1, nil)
         end
 
@@ -909,8 +965,9 @@ local function check_mime_type(task)
         end
       else
         if ext2 then
-          check_extension(settings['bad_extensions'][ext],
-              settings['bad_extensions'][ext2])
+          local score1 = check_tables(ext)
+          local score2 = check_tables(ext2)
+          check_extension(score1, score2)
           -- Check for archive cloaking like .zip.gz
           if settings['archive_extensions'][ext2]
             -- Exclude multipart archive extensions, e.g. .zip.001
@@ -922,7 +979,8 @@ local function check_mime_type(task)
                 string.format("%s:%s", part:get_id(), '-'))
           end
         else
-          check_extension(settings['bad_extensions'][ext], nil)
+          local score1 = check_tables(ext)
+          check_extension(score1, nil)
         end
       end
 
@@ -966,7 +1024,7 @@ local function check_mime_type(task)
         end
 
         if filename then
-          check_filename(filename, ct, false, p)
+          check_filename(filename, ct, false, p, detected_ct)
         end
 
         if p:is_archive() then
@@ -1004,7 +1062,7 @@ local function check_mime_type(task)
               end
 
               if f['name'] then
-                check_filename(f['name'], nil, true, p)
+                check_filename(f['name'], nil, true, p, nil)
               end
             end
 
@@ -1029,13 +1087,12 @@ local function check_mime_type(task)
         end
 
         if map then
-          local v
+          local v = map:get_key(ct)
           local detected_different = false
           if detected_ct and detected_ct ~= ct then
-            v = map:get_key(detected_ct)
+            local v_detected = map:get_key(detected_ct)
+            if not v or v_detected and v_detected > v then v = v_detected end
             detected_different = true
-          else
-            v = map:get_key(ct)
           end
           if v then
             local n = tonumber(v)
@@ -1113,6 +1170,12 @@ if opts then
     local ext, ct = pair[1], pair[2]
     if not settings.extension_map[ext] then
         change_extension_map_entry(ext, ct, settings.other_extensions_mult)
+    end
+  end
+
+  for ext,inner_tbl in pairs(settings.extension_map) do
+    for _,elt in ipairs(inner_tbl) do
+      reversed_extensions_map[elt.ct] = ext
     end
   end
 

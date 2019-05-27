@@ -584,6 +584,21 @@ rspamd_rcl_actions_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 					ucl_object_get_priority (cur));
 		}
 		else if (type == UCL_OBJECT || type == UCL_FLOAT || type == UCL_INT) {
+			/* Exceptions */
+			struct rspamd_rcl_default_handler_data *sec_cur, *sec_tmp;
+			gboolean default_elt = FALSE;
+
+			HASH_ITER (hh, section->default_parser, sec_cur, sec_tmp) {
+				if (strcmp (ucl_object_key (cur), sec_cur->key) == 0) {
+					default_elt = TRUE;
+				}
+			}
+
+			if (default_elt) {
+				continue;
+			}
+
+			/* Something non-default */
 			if (!rspamd_config_set_action_score (cfg,
 					ucl_object_key (cur),
 					cur)) {
@@ -830,6 +845,7 @@ rspamd_rcl_lua_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 gboolean
 rspamd_rcl_add_lua_plugins_path (struct rspamd_config *cfg,
 		const gchar *path,
+		gboolean main_path,
 		GHashTable *modules_seen,
 		GError **err)
 {
@@ -841,7 +857,7 @@ rspamd_rcl_add_lua_plugins_path (struct rspamd_config *cfg,
 
 	if (stat (path, &st) == -1) {
 
-		if (errno != ENOENT) {
+		if (errno != ENOENT || main_path) {
 			g_set_error (err,
 					CFG_RCL_ERROR,
 					errno,
@@ -851,7 +867,7 @@ rspamd_rcl_add_lua_plugins_path (struct rspamd_config *cfg,
 			return FALSE;
 		}
 		else {
-			msg_info_config ("plugins path %s is absent, skip it", path);
+			msg_debug_config ("optional plugins path %s is absent, skip it", path);
 
 			return TRUE;
 		}
@@ -971,6 +987,7 @@ rspamd_rcl_modules_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 				if (ucl_object_tostring_safe (cur, &data)) {
 					if (!rspamd_rcl_add_lua_plugins_path (cfg,
 							rspamd_mempool_strdup (cfg->cfg_pool, data),
+							TRUE,
 							mods_seen,
 							err)) {
 						return FALSE;
@@ -993,6 +1010,23 @@ rspamd_rcl_modules_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 				if (ucl_object_tostring_safe (cur, &data)) {
 					if (!rspamd_rcl_add_lua_plugins_path (cfg,
 							rspamd_mempool_strdup (cfg->cfg_pool, data),
+							FALSE,
+							mods_seen,
+							err)) {
+						return FALSE;
+					}
+				}
+			}
+		}
+
+		val = ucl_object_lookup (obj, "try_path");
+
+		if (val) {
+			LL_FOREACH (val, cur) {
+				if (ucl_object_tostring_safe (cur, &data)) {
+					if (!rspamd_rcl_add_lua_plugins_path (cfg,
+							rspamd_mempool_strdup (cfg->cfg_pool, data),
+							FALSE,
 							mods_seen,
 							err)) {
 						return FALSE;
@@ -1003,7 +1037,7 @@ rspamd_rcl_modules_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 	}
 	else if (ucl_object_tostring_safe (obj, &data)) {
 		if (!rspamd_rcl_add_lua_plugins_path (cfg,
-				rspamd_mempool_strdup (cfg->cfg_pool, data), NULL, err)) {
+				rspamd_mempool_strdup (cfg->cfg_pool, data), TRUE, NULL, err)) {
 			return FALSE;
 		}
 	}
@@ -2093,6 +2127,24 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				G_STRUCT_OFFSET (struct rspamd_config, task_timeout),
 				RSPAMD_CL_FLAG_TIME_FLOAT,
 				"Maximum time for checking a message (alias for task_timeout)");
+		rspamd_rcl_add_default_handler (sub,
+				"lua_gc_step",
+				rspamd_rcl_parse_struct_integer,
+				G_STRUCT_OFFSET (struct rspamd_config, lua_gc_step),
+				RSPAMD_CL_FLAG_UINT,
+				"Lua garbage-collector step (default: 200)");
+		rspamd_rcl_add_default_handler (sub,
+				"lua_gc_pause",
+				rspamd_rcl_parse_struct_integer,
+				G_STRUCT_OFFSET (struct rspamd_config, lua_gc_pause),
+				RSPAMD_CL_FLAG_UINT,
+				"Lua garbage-collector pause (default: 200)");
+		rspamd_rcl_add_default_handler (sub,
+				"full_gc_iters",
+				rspamd_rcl_parse_struct_integer,
+				G_STRUCT_OFFSET (struct rspamd_config, full_gc_iters),
+				RSPAMD_CL_FLAG_UINT,
+				"Task scanned before memory gc is performed (default: 0 - disabled)");
 
 		/* Neighbours configuration */
 		rspamd_rcl_add_section_doc (&sub->subsections, "neighbours", "name",
@@ -2255,13 +2307,13 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				"max_files",
 				rspamd_rcl_parse_struct_integer,
 				G_STRUCT_OFFSET (struct rspamd_worker_conf, rlimit_nofile),
-				RSPAMD_CL_FLAG_INT_32,
+				RSPAMD_CL_FLAG_INT_64,
 				"Maximum number of opened files per worker");
 		rspamd_rcl_add_default_handler (sub,
 				"max_core",
 				rspamd_rcl_parse_struct_integer,
 				G_STRUCT_OFFSET (struct rspamd_worker_conf, rlimit_maxcore),
-				RSPAMD_CL_FLAG_INT_32,
+				RSPAMD_CL_FLAG_INT_64,
 				"Max size of core file in bytes");
 		rspamd_rcl_add_default_handler (sub,
 				"enabled",
@@ -3491,7 +3543,7 @@ rspamd_rcl_maybe_apply_lua_transform (struct rspamd_config *cfg)
 }
 
 static bool
-rspamd_rcl_decrypt_handler(struct ucl_parser *parser,
+rspamd_rcl_decrypt_handler (struct ucl_parser *parser,
 						   const unsigned char *source, size_t source_len,
 						   unsigned char **destination, size_t *dest_len,
 						   void *user_data)
@@ -3506,6 +3558,64 @@ rspamd_rcl_decrypt_handler(struct ucl_parser *parser,
 
 		return false;
 	}
+
+	return true;
+}
+
+static bool
+rspamd_rcl_jinja_handler (struct ucl_parser *parser,
+						   const unsigned char *source, size_t source_len,
+						   unsigned char **destination, size_t *dest_len,
+						   void *user_data)
+{
+	struct rspamd_config *cfg = (struct rspamd_config *)user_data;
+	lua_State *L = cfg->lua_state;
+	gint err_idx;
+
+	lua_pushcfunction (L, &rspamd_lua_traceback);
+	err_idx = lua_gettop (L);
+
+	/* Obtain function */
+	if (!rspamd_lua_require_function (L, "lua_util", "jinja_template")) {
+		msg_err_config ("cannot require lua_util.jinja_template");
+		lua_settop (L, err_idx - 1);
+
+		return false;
+	}
+
+	lua_pushlstring (L, source, source_len);
+	lua_getglobal (L, "rspamd_env");
+	lua_pushboolean (L, false);
+
+	if (lua_pcall (L, 3, 1, err_idx) != 0) {
+		GString *tb;
+
+		tb = lua_touserdata (L, -1);
+		msg_err_config ("cannot call lua jinja_template script: %s", tb->str);
+		g_string_free (tb, TRUE);
+		lua_settop (L, err_idx - 1);
+
+		return false;
+	}
+
+	if (lua_type (L, -1) == LUA_TSTRING) {
+		const char *ndata;
+		gsize nsize;
+
+		ndata = lua_tolstring (L, -1, &nsize);
+		*destination = UCL_ALLOC (nsize);
+		memcpy (*destination, ndata, nsize);
+		*dest_len = nsize;
+	}
+	else {
+		msg_err_config ("invalid return type when templating jinja %s",
+				lua_typename (L, lua_type (L, -1)));
+		lua_settop (L, err_idx - 1);
+
+		return false;
+	}
+
+	lua_settop (L, err_idx - 1);
 
 	return true;
 }
@@ -3546,6 +3656,7 @@ rspamd_config_parse_ucl (struct rspamd_config *cfg,
 						 GHashTable *vars,
 						 ucl_include_trace_func_t inc_trace,
 						 void *trace_data,
+						 gboolean skip_jinja,
 						 GError **err)
 {
 	struct stat st;
@@ -3637,6 +3748,18 @@ rspamd_config_parse_ucl (struct rspamd_config *cfg,
 		ucl_parser_add_special_handler (parser, decrypt_handler);
 	}
 
+	if (!skip_jinja) {
+		struct ucl_parser_special_handler *jinja_handler;
+
+		jinja_handler = rspamd_mempool_alloc0 (cfg->cfg_pool,
+				sizeof (*jinja_handler));
+		jinja_handler->user_data = cfg;
+		jinja_handler->flags = UCL_SPECIAL_HANDLER_PREPROCESS_ALL;
+		jinja_handler->handler = rspamd_rcl_jinja_handler;
+
+		ucl_parser_add_special_handler (parser, jinja_handler);
+	}
+
 	if (!ucl_parser_add_chunk (parser, data, st.st_size)) {
 		g_set_error (err, cfg_rcl_error_quark (), errno,
 				"ucl parser error: %s", ucl_parser_get_error (parser));
@@ -3655,15 +3778,28 @@ rspamd_config_parse_ucl (struct rspamd_config *cfg,
 }
 
 gboolean
-rspamd_config_read (struct rspamd_config *cfg, const gchar *filename,
+rspamd_config_read (struct rspamd_config *cfg,
+					const gchar *filename,
 					rspamd_rcl_section_fin_t logger_fin,
-					gpointer logger_ud, GHashTable *vars)
+					gpointer logger_ud,
+					GHashTable *vars,
+					gboolean skip_jinja,
+					gchar **lua_env)
 {
 	GError *err = NULL;
 	struct rspamd_rcl_section *top, *logger_section;
 	const ucl_object_t *logger_obj;
 
-	if (!rspamd_config_parse_ucl (cfg, filename, vars, NULL, NULL, &err)) {
+	rspamd_lua_set_path (cfg->lua_state, NULL, vars);
+
+	if (!rspamd_lua_set_env (cfg->lua_state, vars, lua_env, &err)) {
+		msg_err_config_forced ("failed to set up environment: %e", err);
+		g_error_free (err);
+
+		return FALSE;
+	}
+
+	if (!rspamd_config_parse_ucl (cfg, filename, vars, NULL, NULL, skip_jinja, &err)) {
 		msg_err_config_forced ("failed to load config: %e", err);
 		g_error_free (err);
 
@@ -3671,8 +3807,9 @@ rspamd_config_read (struct rspamd_config *cfg, const gchar *filename,
 	}
 
 	top = rspamd_rcl_config_init (cfg, NULL);
+	/* Add new paths if defined in options */
 	rspamd_lua_set_path (cfg->lua_state, cfg->rcl_obj, vars);
-	rspamd_lua_set_globals (cfg, cfg->lua_state, vars);
+	rspamd_lua_set_globals (cfg, cfg->lua_state);
 	rspamd_mempool_add_destructor (cfg->cfg_pool, rspamd_rcl_section_free, top);
 	err = NULL;
 
@@ -3696,6 +3833,41 @@ rspamd_config_read (struct rspamd_config *cfg, const gchar *filename,
 				} else {
 					logger_fin (cfg->cfg_pool, logger_ud);
 				}
+
+				/* Init lua logging */
+				lua_State *L = cfg->lua_state;
+				gint err_idx;
+				struct rspamd_config **pcfg;
+
+				lua_pushcfunction (L, &rspamd_lua_traceback);
+				err_idx = lua_gettop (L);
+
+				/* Obtain function */
+				if (!rspamd_lua_require_function (L, "lua_util",
+						"init_debug_logging")) {
+					msg_err_config ("cannot require lua_util.init_debug_logging");
+					lua_settop (L, err_idx - 1);
+
+					return FALSE;
+				}
+
+				pcfg = lua_newuserdata (L, sizeof (*pcfg));
+				*pcfg = cfg;
+				rspamd_lua_setclass (L, "rspamd{config}", -1);
+
+				if (lua_pcall (L, 1, 0, err_idx) != 0) {
+					GString *tb;
+
+					tb = lua_touserdata (L, -1);
+					msg_err_config ("cannot call lua init_debug_logging script: %s",
+							tb->str);
+					g_string_free (tb, TRUE);
+					lua_settop (L, err_idx - 1);
+
+					return FALSE;
+				}
+
+				lua_settop (L, err_idx - 1);
 			}
 
 			HASH_DEL (top, logger_section);

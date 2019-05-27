@@ -49,6 +49,9 @@
 #define DEFAULT_MAX_WORKERS 4
 /* Timeout for task processing */
 #define DEFAULT_TASK_TIMEOUT 8.0
+#define DEFAULT_LUA_GC_STEP 200
+#define DEFAULT_LUA_GC_PAUSE 200
+#define DEFAULT_GC_MAXITERS 0
 
 struct rspamd_ucl_map_cbdata {
 	struct rspamd_config *cfg;
@@ -200,8 +203,13 @@ rspamd_config_new (enum rspamd_config_init_flags flags)
 	cfg->min_word_len = DEFAULT_MIN_WORD;
 	cfg->max_word_len = DEFAULT_MAX_WORD;
 
+	/* GC limits */
+	cfg->lua_gc_pause = DEFAULT_LUA_GC_PAUSE;
+	cfg->lua_gc_step = DEFAULT_LUA_GC_STEP;
+	cfg->full_gc_iters = DEFAULT_GC_MAXITERS;
+
 	if (!(flags & RSPAMD_CONFIG_INIT_SKIP_LUA)) {
-		cfg->lua_state = rspamd_lua_init ();
+		cfg->lua_state = rspamd_lua_init (flags & RSPAMD_CONFIG_INIT_WIPE_LUA_MEM);
 		cfg->own_lua_state = TRUE;
 		cfg->lua_thread_pool = lua_thread_pool_new (cfg->lua_state);
 	}
@@ -1702,7 +1710,7 @@ rspamd_config_add_symbol (struct rspamd_config *cfg,
 
 				if (!(sym_group->flags & RSPAMD_SYMBOL_GROUP_UNGROUPED)) {
 					msg_debug_config ("move symbol %s from group %s to %s",
-							sym_def->gr->name, group);
+							sym_def->name, sym_def->gr->name, group);
 					g_hash_table_remove (sym_def->gr->symbols, sym_def->name);
 					sym_def->gr = sym_group;
 					g_hash_table_insert (sym_group->symbols, sym_def->name, sym_def);

@@ -40,6 +40,7 @@
 
 #include "printf.h"
 #include "str_util.h"
+#include "contrib/fpconv/fpconv.h"
 
 /**
  * From FreeBSD libutil code
@@ -60,14 +61,14 @@ rspamd_humanize_number (gchar *buf, gchar *last, gint64 num, gboolean bytes)
 
 	if (!bytes) {
 		divisor = 1000;
-		prefixes = "\0\0\0k\0\0M\0\0G\0\0T\0\0P\0\0E";
+		prefixes = "\0\0\0\0k\0\0\0M\0\0\0G\0\0\0T\0\0\0P\0\0\0E";
 	}
 	else {
 		divisor = 1024;
-		prefixes = "B\0\0k\0\0M\0\0G\0\0T\0\0P\0\0E";
+		prefixes = "B\0\0\0KiB\0MiB\0GiB\0TiB\0PiB\0EiB";
 	}
 
-#define SCALE2PREFIX(scale)     (&prefixes[(scale) * 3])
+#define SCALE2PREFIX(scale)     (&prefixes[(scale) * 4])
 
 	if (num < 0) {
 		sign = -1;
@@ -590,7 +591,8 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 	const gchar *fmt,
 	va_list args)
 {
-	gchar zero, numbuf[G_ASCII_DTOSTR_BUF_SIZE], dtoabuf[8], *p, *last, c;
+	gchar zero, numbuf[G_ASCII_DTOSTR_BUF_SIZE], dtoabuf[32], *p, *last;
+	guchar c;
 	const gchar *buf_start = fmt, *fmt_start = NULL;
 	gint d;
 	gdouble f;
@@ -838,9 +840,9 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 					}
 
 					while (slen) {
-						hexbuf[0] = hex == 2 ? _HEX[(*p >> 4) & 0xf] :
-								_hex[(*p >> 4) & 0xf];
-						hexbuf[1] = hex == 2 ? _HEX[*p & 0xf] : _hex[*p & 0xf];
+						hexbuf[0] = hex == 2 ? _HEX[(*p >> 4u) & 0xfu] :
+								_hex[(*p >> 4u) & 0xfu];
+						hexbuf[1] = hex == 2 ? _HEX[*p & 0xfu] : _hex[*p & 0xfu];
 						RSPAMD_PRINTF_APPEND_BUF (hexbuf, 2);
 						p++;
 						slen--;
@@ -946,25 +948,32 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 
 
 			case 'f':
+				f = (gdouble) va_arg (args, double);
+				slen = fpconv_dtoa (f, dtoabuf, frac_width, false);
+
+				RSPAMD_PRINTF_APPEND (dtoabuf, slen);
+
+				continue;
+
 			case 'g':
 				f = (gdouble) va_arg (args, double);
-				rspamd_strlcpy (dtoabuf, fmt_start, MIN (sizeof (dtoabuf),
-						(fmt - fmt_start + 2)));
-				g_ascii_formatd (numbuf, sizeof (numbuf), dtoabuf, (double)f);
-				slen = strlen (numbuf);
-				RSPAMD_PRINTF_APPEND (numbuf, slen);
+				slen = fpconv_dtoa (f, dtoabuf, 0, true);
+				RSPAMD_PRINTF_APPEND (dtoabuf, slen);
 
 				continue;
 
 			case 'F':
+				f = (gdouble) va_arg (args, long double);
+				slen = fpconv_dtoa (f, dtoabuf, frac_width, false);
+
+				RSPAMD_PRINTF_APPEND (dtoabuf, slen);
+
+				continue;
+
 			case 'G':
 				f = (gdouble) va_arg (args, long double);
-				slen = rspamd_strlcpy (dtoabuf, fmt_start, MIN (sizeof (dtoabuf),
-						(fmt - fmt_start + 2)));
-				dtoabuf[slen - 1] = g_ascii_tolower (dtoabuf[slen - 1]);
-				g_ascii_formatd (numbuf, sizeof (numbuf), dtoabuf, (double)f);
-				slen = strlen (numbuf);
-				RSPAMD_PRINTF_APPEND (numbuf, slen);
+				slen = fpconv_dtoa (f, dtoabuf, 0, true);
+				RSPAMD_PRINTF_APPEND (dtoabuf, slen);
 
 				continue;
 
@@ -978,12 +987,12 @@ rspamd_vprintf_common (rspamd_printf_append_func func,
 
 			case 'c':
 				c = va_arg (args, gint);
-				c &= 0xff;
+				c &= 0xffu;
 				if (G_UNLIKELY (hex)) {
 					gchar hexbuf[2];
-					hexbuf[0] = hex == 2 ? _HEX[(c >> 4) & 0xf] :
-								_hex[(c >> 4) & 0xf];
-					hexbuf[1] = hex == 2 ? _HEX[c & 0xf] : _hex[c & 0xf];
+					hexbuf[0] = hex == 2 ? _HEX[(c >> 4u) & 0xfu] :
+								_hex[(c >> 4u) & 0xfu];
+					hexbuf[1] = hex == 2 ? _HEX[c & 0xfu] : _hex[c & 0xfu];
 
 					RSPAMD_PRINTF_APPEND (hexbuf, 2);
 				}

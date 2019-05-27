@@ -58,13 +58,15 @@ traceback (lua_State *L)
 void
 rspamd_lua_test_func (void)
 {
-	lua_State *L = rspamd_lua_init ();
+	lua_State *L = (lua_State *)rspamd_main->cfg->lua_state;
 	gchar *rp, rp_buf[PATH_MAX], path_buf[PATH_MAX], *tmp, *dir, *pattern;
 	const gchar *old_path;
 	glob_t globbuf;
 	gint i, len;
 
-	rspamd_lua_set_globals (rspamd_main->cfg, L, NULL);
+	rspamd_lua_set_env (L, NULL, NULL, NULL);
+	rspamd_lua_set_globals (rspamd_main->cfg, L);
+	rspamd_lua_start_gc (rspamd_main->cfg);
 
 	if (lua_test_case) {
 		lua_pushstring (L, lua_test_case);

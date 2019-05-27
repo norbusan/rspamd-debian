@@ -65,8 +65,9 @@ struct rspamd_lua_ip {
 	rspamd_inet_addr_t *addr;
 };
 
-#define RSPAMD_TEXT_FLAG_OWN (1 << 0)
-#define RSPAMD_TEXT_FLAG_MMAPED (1 << 1)
+#define RSPAMD_TEXT_FLAG_OWN (1u << 0u)
+#define RSPAMD_TEXT_FLAG_MMAPED (1u << 1u)
+#define RSPAMD_TEXT_FLAG_WIPE (1u << 2u)
 struct rspamd_lua_text {
 	const gchar *start;
 	guint len;
@@ -164,9 +165,9 @@ gpointer rspamd_lua_check_class (lua_State *L, gint index, const gchar *name);
 /**
  * Initialize lua and bindings
  */
-lua_State *rspamd_lua_init (void);
+lua_State *rspamd_lua_init (bool wipe_mem);
 
-
+void rspamd_lua_start_gc (struct rspamd_config *cfg);
 /**
  * Sets field in a global variable
  * @param L
@@ -283,6 +284,7 @@ void luaopen_sqlite3 (lua_State *L);
 void luaopen_cryptobox (lua_State *L);
 void luaopen_dns (lua_State *L);
 void luaopen_udp (lua_State * L);
+void luaopen_worker (lua_State * L);
 
 void rspamd_lua_dostring (const gchar *line);
 
@@ -306,13 +308,15 @@ void rspamd_lua_set_path (lua_State *L, const ucl_object_t *cfg_obj,
 		GHashTable *vars);
 
 /* Set some lua globals */
-void rspamd_lua_set_globals (struct rspamd_config *cfg, lua_State *L,
-							 GHashTable *vars);
+gboolean rspamd_lua_set_env (lua_State *L, GHashTable *vars, char **lua_env,
+		GError **err);
+void rspamd_lua_set_globals (struct rspamd_config *cfg, lua_State *L);
 
 struct memory_pool_s * rspamd_lua_check_mempool (lua_State * L, gint pos);
 struct rspamd_config * lua_check_config (lua_State * L, gint pos);
 struct rspamd_async_session* lua_check_session (lua_State * L, gint pos);
 struct event_base* lua_check_ev_base (lua_State * L, gint pos);
+struct rspamd_dns_resolver * lua_check_dns_resolver (lua_State * L, gint pos);
 
 /**
  * Extract an arguments from lua table according to format string. Supported arguments are:
@@ -352,7 +356,7 @@ rspamd_lua_get_traceback_string (lua_State *L);
  */
 guint rspamd_lua_table_size (lua_State *L, gint tbl_pos);
 
-void lua_push_emails_address_list (lua_State *L, GPtrArray *addrs);
+void lua_push_emails_address_list (lua_State *L, GPtrArray *addrs, int flags);
 
 
 #define TRACE_POINTS 6
@@ -361,6 +365,16 @@ struct lua_logger_trace {
 	gint cur_level;
 	gconstpointer traces[TRACE_POINTS];
 };
+
+enum lua_logger_escape_type {
+	LUA_ESCAPE_NONE = (0u),
+	LUA_ESCAPE_UNPRINTABLE = (1u << 0u),
+	LUA_ESCAPE_NEWLINES = (1u << 1u),
+	LUA_ESCAPE_8BIT = (1u << 2u),
+};
+
+#define LUA_ESCAPE_LOG (LUA_ESCAPE_UNPRINTABLE|LUA_ESCAPE_NEWLINES)
+#define LUA_ESCAPE_ALL (LUA_ESCAPE_UNPRINTABLE|LUA_ESCAPE_NEWLINES|LUA_ESCAPE_8BIT)
 
 /**
  * Log lua object to string
@@ -371,7 +385,8 @@ struct lua_logger_trace {
  * @return
  */
 gsize lua_logger_out_type (lua_State *L, gint pos, gchar *outbuf,
-		gsize len, struct lua_logger_trace *trace);
+						   gsize len, struct lua_logger_trace *trace,
+						   enum lua_logger_escape_type esc_type);
 
 /**
  * Safely checks userdata to match specified class
@@ -485,7 +500,7 @@ extern ucl_object_t *lua_traces;
  func_obj->value.iv ++; \
 } while(0)
 #else
-#define LUA_TRACE_POINT
+#define LUA_TRACE_POINT do {} while(0)
 #endif
 
 #endif /* WITH_LUA */

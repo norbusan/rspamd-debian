@@ -282,7 +282,8 @@ rspamadm_exec_input (lua_State *L, const gchar *input)
 					rspamd_printf ("local function: %d\n", cbref);
 				} else {
 					memset (&tr, 0, sizeof (tr));
-					lua_logger_out_type (L, i, outbuf, sizeof (outbuf), &tr);
+					lua_logger_out_type (L, i, outbuf, sizeof (outbuf), &tr,
+							LUA_ESCAPE_UNPRINTABLE);
 					rspamd_printf ("%s\n", outbuf);
 				}
 			}
@@ -462,7 +463,8 @@ rspamadm_lua_message_handler (lua_State *L, gint argc, gchar **argv)
 
 				for (j = old_top + 1; j <= lua_gettop (L); j ++) {
 					memset (&tr, 0, sizeof (tr));
-					lua_logger_out_type (L, j, outbuf, sizeof (outbuf), &tr);
+					lua_logger_out_type (L, j, outbuf, sizeof (outbuf), &tr,
+							LUA_ESCAPE_UNPRINTABLE);
 					rspamd_printf ("%s\n", outbuf);
 				}
 			}
@@ -619,8 +621,6 @@ static void
 rspamadm_lua_error_handler (struct rspamd_http_connection_entry *conn_ent,
 	GError *err)
 {
-	struct rspamadm_lua_repl_session *session = conn_ent->ud;
-
 	rspamd_fprintf (stderr, "http error occurred: %s\n", err->message);
 }
 

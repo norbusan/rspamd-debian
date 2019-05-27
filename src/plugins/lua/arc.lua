@@ -90,6 +90,9 @@ local settings = {
   reuse_auth_results = false, -- Reuse the existing authentication results
 }
 
+-- To match normal AR
+local ar_settings = auth_results.default_settings
+
 local function parse_arc_header(hdr, target)
   -- Split elements by ';' and trim spaces
   local arr = fun.totable(fun.map(
@@ -352,7 +355,6 @@ local id = rspamd_config:register_symbol({
 
 rspamd_config:register_symbol({
   name = arc_symbols['allow'],
-  flags = 'nice',
   parent = id,
   type = 'virtual',
   score = -1.0,
@@ -426,10 +428,10 @@ local function arc_sign_seal(task, params, header)
       cur_auth_results = ar_header
     else
       rspamd_logger.debugm(N, task, 'cannot reuse authentication results, header is missing')
-      cur_auth_results = auth_results.gen_auth_results(task) or ''
+      cur_auth_results = auth_results.gen_auth_results(task, ar_settings) or ''
     end
   else
-    cur_auth_results = auth_results.gen_auth_results(task) or ''
+    cur_auth_results = auth_results.gen_auth_results(task, ar_settings) or ''
   end
 
   local sha_ctx = hash.create_specific('sha256')
@@ -507,139 +509,136 @@ local function arc_sign_seal(task, params, header)
   task:insert_result(settings.sign_symbol, 1.0, string.format('i=%d', cur_idx))
 end
 
-local function arc_signing_cb(task)
+local function prepare_arc_selector(task, sel)
   local arc_seals = task:cache_get('arc-seals')
 
+  sel.arc_cv = 'none'
+  sel.arc_idx = 1
+  sel.no_cache = true
+  sel.sign_type = 'arc-sign'
+
+  if arc_seals then
+    sel.arc_idx = #arc_seals + 1
+
+    if task:has_symbol(arc_symbols.allow) then
+      sel.arc_cv = 'pass'
+    else
+      sel.arc_cv = 'fail'
+    end
+  end
+end
+
+local function do_sign(task, p)
+  if p.alg and p.alg ~= 'rsa' then
+    -- No support for ed25519 keys
+    return
+  end
+
+  prepare_arc_selector(task, p)
+
+  if settings.check_pubkey then
+    local resolve_name = p.selector .. "._domainkey." .. p.domain
+    task:get_resolver():resolve_txt({
+      task = task,
+      name = resolve_name,
+      callback = function(_, _, results, err)
+        if not err and results and results[1] then
+          p.pubkey = results[1]
+          p.strict_pubkey_check = not settings.allow_pubkey_mismatch
+        elseif not settings.allow_pubkey_mismatch then
+          rspamd_logger.errx('public key for domain %s/%s is not found: %s, skip signing',
+              p.domain, p.selector, err)
+          return
+        else
+          rspamd_logger.infox('public key for domain %s/%s is not found: %s',
+              p.domain, p.selector, err)
+        end
+
+        local dret, hdr = dkim_sign(task, p)
+        if dret then
+          local sret, _ = arc_sign_seal(task, p, hdr)
+          if sret then
+            task:insert_result(settings.sign_symbol, 1.0)
+          end
+        end
+
+      end,
+      forced = true
+    })
+  else
+    local dret, hdr = dkim_sign(task, p)
+    if dret then
+      local sret, _ = arc_sign_seal(task, p, hdr)
+      if sret then
+        task:insert_result(settings.sign_symbol, 1.0)
+      end
+    end
+  end
+end
+
+local function sign_error(task, msg)
+  rspamd_logger.errx(task, 'signing failure: %s', msg)
+end
+
+local function arc_signing_cb(task)
   local ret, selectors = dkim_sign_tools.prepare_dkim_signing(N, task, settings)
 
   if not ret then
     return
   end
 
-  -- TODO: support multiple signatures here
-  local p = selectors[1]
-
-  p.arc_cv = 'none'
-  p.arc_idx = 1
-  p.no_cache = true
-  p.sign_type = 'arc-sign'
-
-  if arc_seals then
-    p.arc_idx = #arc_seals + 1
-
-    if task:has_symbol(arc_symbols.allow) then
-      p.arc_cv = 'pass'
-    else
-      p.arc_cv = 'fail'
-    end
-  end
-
   if settings.use_redis then
-    local function try_redis_key(selector)
-      p.key = nil
-      p.selector = selector
-      local rk = string.format('%s.%s', p.selector, p.domain)
-      local function redis_key_cb(err, data)
-        if err or type(data) ~= 'string' then
-          rspamd_logger.infox(rspamd_config, "cannot make request to load DKIM key for %s: %s",
-            rk, err)
-        else
-          p.rawkey = data
-          local dret, hdr = dkim_sign(task, p)
-          if dret then
-            return arc_sign_seal(task, p, hdr)
+    dkim_sign_tools.sign_using_redis(N, task, settings, selectors, do_sign, sign_error)
+  else
+    if selectors.vault then
+      dkim_sign_tools.sign_using_vault(N, task, settings, selectors, do_sign, sign_error)
+    else
+      -- TODO: no support for multiple sigs
+      local p = selectors[1]
+      prepare_arc_selector(task, p)
+      if ((p.key or p.rawkey) and p.selector) then
+        if p.key then
+          p.key = lua_util.template(p.key, {
+            domain = p.domain,
+            selector = p.selector
+          })
+
+          local exists,err = rspamd_util.file_exists(p.key)
+          if not exists then
+            if err and err == 'No such file or directory' then
+              lua_util.debugm(N, task, 'cannot read key from %s: %s', p.key, err)
+            else
+              rspamd_logger.warnx(task, 'cannot read key from %s: %s', p.key, err)
+            end
+            return false
           end
         end
-      end
-      local rret = rspamd_redis_make_request(task,
-        redis_params, -- connect params
-        rk, -- hash key
-        false, -- is write
-        redis_key_cb, --callback
-        'HGET', -- command
-        {settings.key_prefix, rk} -- arguments
-      )
-      if not rret then
-        rspamd_logger.infox(rspamd_config, "cannot make request to load DKIM key for %s", rk)
-      end
-    end
-    if settings.selector_prefix then
-      rspamd_logger.infox(rspamd_config, "Using selector prefix %s for domain %s", settings.selector_prefix, p.domain);
-      local function redis_selector_cb(err, data)
-        if err or type(data) ~= 'string' then
-          rspamd_logger.infox(rspamd_config, "cannot make request to load DKIM selector for domain %s: %s",
-              p.domain, err)
-        else
-          try_redis_key(data)
-        end
-      end
-      local rret = rspamd_redis_make_request(task,
-        redis_params, -- connect params
-        p.domain, -- hash key
-        false, -- is write
-        redis_selector_cb, --callback
-        'HGET', -- command
-        {settings.selector_prefix, p.domain} -- arguments
-      )
-      if not rret then
-        rspamd_logger.infox(rspamd_config, "cannot make request to load DKIM selector for %s", p.domain)
-      end
-    else
-      if not p.selector then
-        rspamd_logger.errx(task, 'No selector specified')
+
+        do_sign(task, p)
+      else
+        rspamd_logger.infox(task, 'key path or dkim selector unconfigured; no signing')
         return false
       end
-      try_redis_key(p.selector)
-    end
-  else
-    if ((p.key or p.rawkey) and p.selector) then
-      if p.key then
-        p.key = lua_util.template(p.key, {
-          domain = p.domain,
-          selector = p.selector
-        })
-
-        local exists,err = rspamd_util.file_exists(p.key)
-        if not exists then
-          if err and err == 'No such file or directory' then
-            lua_util.debugm(N, task, 'cannot read key from %s: %s', p.key, err)
-          else
-            rspamd_logger.warnx(task, 'cannot read key from %s: %s', p.key, err)
-          end
-          return false
-        end
-      end
-
-      local dret, hdr = dkim_sign(task, p)
-      if dret then
-        return arc_sign_seal(task, p, hdr)
-      end
-    else
-      rspamd_logger.infox(task, 'key path or dkim selector unconfigured; no signing')
-      return false
     end
   end
 end
 
-for k,v in pairs(opts) do
-  if k == 'sign_networks' then
-    settings[k] = rspamd_map_add(N, k, 'radix', 'DKIM signing networks')
-  elseif k == 'path_map' then
-    settings[k] = rspamd_map_add(N, k, 'map', 'Paths to DKIM signing keys')
-  elseif k == 'selector_map' then
-    settings[k] = rspamd_map_add(N, k, 'map', 'DKIM selectors')
-  else
-    settings[k] = v
-  end
-end
-if not (settings.use_redis or
-    settings.path or
-    settings.domain or
-    settings.path_map or
-    settings.selector_map or
-    settings.use_http_headers) then
+dkim_sign_tools.process_signing_settings(N, settings, opts)
+
+if not dkim_sign_tools.validate_signing_settings(settings) then
   rspamd_logger.infox(rspamd_config, 'mandatory parameters missing, disable arc signing')
   return
+end
+
+local ar_opts = rspamd_config:get_all_opt('milter_headers')
+
+if ar_opts and ar_opts.routines then
+  local routines = ar_opts.routines
+
+  if routines['authentication-results'] then
+    ar_settings = lua_util.override_defaults(ar_settings,
+        routines['authentication-results'])
+  end
 end
 
 if settings.use_redis then
@@ -650,6 +649,8 @@ if settings.use_redis then
         'but module is configured to load keys from redis, disable arc signing')
     return
   end
+
+  settings.redis_params = redis_params
 end
 
 rspamd_config:register_symbol({
