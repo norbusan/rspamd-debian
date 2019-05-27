@@ -65,52 +65,51 @@ local function yield_result(task, rule, vname, dyn_weight, is_fail)
   local all_whitelisted = true
   local patterns
   local symbol
+  local threat_table = {}
+  local threat_info
 
   -- This should be more generic
   if not is_fail then
     patterns = rule.patterns
     symbol = rule.symbol
+    threat_info = rule.detection_category .. 'found'
     if not dyn_weight then dyn_weight = 1.0 end
   elseif is_fail == 'fail' then
     patterns = rule.patterns_fail
     symbol = rule.symbol_fail
+    threat_info = "FAILED with error"
     dyn_weight = 0.0
+  elseif is_fail == 'encrypted' then
+    patterns = rule.patterns
+    symbol = rule.symbol_encrypted
+    threat_info = "Scan has returned that input was encrypted"
+    dyn_weight = 1.0
   end
 
   if type(vname) == 'string' then
-    local symname, symscore = match_patterns(symbol,
-        vname,
-        patterns,
-        dyn_weight)
-    if rule.whitelist and rule.whitelist:get_key(vname) then
-      rspamd_logger.infox(task, '%s: "%s" is in whitelist', rule.log_prefix, vname)
-      return
-    end
-    task:insert_result(symname, symscore, vname)
-    rspamd_logger.infox(task, '%s: %s found: "%s - score: %s"',
-        rule.log_prefix, rule.detection_category, vname, symscore)
+    table.insert(threat_table, vname)
   elseif type(vname) == 'table' then
-    for _, vn in ipairs(vname) do
-      local symname, symscore = match_patterns(symbol, vn, patterns, dyn_weight)
-      if rule.whitelist and rule.whitelist:get_key(vn) then
-        rspamd_logger.infox(task, '%s: "%s" is in whitelist', rule.log_prefix, vn)
-      else
-        all_whitelisted = false
-        task:insert_result(symname, symscore, vn)
-        rspamd_logger.infox(task, '%s: %s found: "%s - score: %s"',
-            rule.log_prefix, rule.detection_category, vn, symscore)
-      end
+    threat_table = vname
+  end
+
+  for _, tm in ipairs(threat_table) do
+    local symname, symscore = match_patterns(symbol, tm, patterns, dyn_weight)
+    if rule.whitelist and rule.whitelist:get_key(tm) then
+      rspamd_logger.infox(task, '%s: "%s" is in whitelist', rule.log_prefix, tm)
+    else
+      all_whitelisted = false
+      task:insert_result(symname, symscore, tm)
+      rspamd_logger.infox(task, '%s: result - %s: "%s - score: %s"',
+          rule.log_prefix, threat_info, tm, symscore)
     end
   end
-  if rule.action and is_fail ~= 'fail' then
-    if type(vname) == 'table' then
-      if all_whitelisted then return end
-      vname = table.concat(vname, '; ')
-    end
+
+  if rule.action and is_fail ~= 'fail' and not all_whitelisted then
+    threat_table = table.concat(threat_table, '; ')
     task:set_pre_result(rule.action,
         lua_util.template(rule.message or 'Rejected', {
           SCANNER = rule.name,
-          VIRUS = vname,
+          VIRUS = threat_table,
         }), rule.name)
   end
 end
@@ -340,6 +339,27 @@ local function check_parts_match(task, rule)
   return fun.filter(filter_func, task:get_parts())
 end
 
+local function check_metric_results(task, rule)
+
+  if rule.action ~= 'reject' then
+    local metric_result = task:get_metric_score('default')
+    local metric_action = task:get_metric_action('default')
+    local has_pre_result = task:has_pre_result()
+
+    if rule.symbol_type == 'postfilter' and metric_action == 'reject' then
+      return true, 'result is already reject'
+    elseif metric_result[1] > metric_result[2]*2 then
+      return true, 'score > 2 * reject_level: ' .. metric_result[1]
+    elseif has_pre_result and metric_action == 'reject' then
+      return true, 'pre_result reject is set'
+    else
+      return false, 'undecided'
+    end
+  else
+    return false, 'dynamic_scan is not possible with config `action=reject;`'
+  end
+end
+
 exports.log_clean = log_clean
 exports.yield_result = yield_result
 exports.match_patterns = match_patterns
@@ -348,6 +368,7 @@ exports.check_av_cache = check_av_cache
 exports.save_av_cache = save_av_cache
 exports.create_regex_table = create_regex_table
 exports.check_parts_match = check_parts_match
+exports.check_metric_results = check_metric_results
 
 setmetatable(exports, {
   __call = function(t, override)

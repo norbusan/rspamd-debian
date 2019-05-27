@@ -1,3 +1,120 @@
+1.9.4: 23 May 2019
+  * [CritFix] Fix case sensitivity when parsing Content-Type
+  * [Fix] Arc: Another bunch of fixes for arc signing
+  * [Fix] Arc: More arc signing fixes
+  * [Fix] Avoid another overflow in fpconv
+  * [Fix] Fix ARC signing after fixing another bug in it...
+  * [Fix] Fix dkim signing exceptions
+  * [Fix] Fix some more corner cases for fpconv
+  * [Fix] Further fixes to printing of the FP numbers
+  * [Fix] Ratelimit: Fix dynamic score
+
+1.9.3: 13 May 2019
+  * [Conf] Add IP_SCORE_FREEMAIL composite rule
+  * [Feature] Add cryptobox method to generate dkim keypairs
+  * [Feature] Add fast hashes to lua cryptobox hash
+  * [Feature] Add least passthrough results
+  * [Feature] Allow oversign if exists mode
+  * [Feature] Clickhouse: Modernise table initial schema
+  * [Feature] Implement IUF interface for specific fast hashes
+  * [Feature] Lua_util: Allow to obfuscate different fields
+  * [Feature] Tune memory management in Rspamd and Lua
+  * [Fix] Avoid buffer overflow when printing long lua strings
+  * [Fix] Change the default oversigning headers to a more sane list
+  * [Fix] Clickhouse: Do not store digest as it is not needed now
+  * [Fix] Clickhouse: Fix lots of storage issues
+  * [Fix] Clickhouse: Support custom actions
+  * [Fix] Deny URLs where hostname is bogus
+  * [Fix] Do not blacklist mail by SPF/DMARC for local/authed users
+  * [Fix] Fix DoS caused by bug in glib
+  * [Fix] Fix UCL parsing of the multiline strings
+  * [Fix] Fix buffer overflow when printing small floats
+  * [Fix] Fix init code for servers keypairs cache
+  * [Fix] Fix issue with urls with no tld (e.g. IP)
+  * [Fix] Fix memory in arc signing logic
+  * [Fix] Fix memory leak in language detector during reloads
+  * [Fix] Fix mixed case content type processing
+  * [Fix] Fix processing of the ip urls in file
+  * [Fix] Fix use after free
+  * [Fix] HTML: Fix `size` attribute processing
+  * [Fix] Hum, it seems that 99ff1c8 was not correct
+  * [Fix] Lua_task: Fix task:get_from method
+  * [Fix] Preserve fd when mapping file to scan
+  * [Fix] Re-use milter_headers settings when doing arc signing
+  * [Fix] Set dmarc force action as least action
+  * [Fix] Switch to GMT
+  * [Fix] allow PKCS7 signatures to be text/plain, too
+  * [Project] Add initial version of the vault management tool
+  * [Project] Add vault support for DKIM and ARC signing
+  * [Project] Implement keys rotation in the vault
+  * [Project] Improve dkim keys generation for vault
+  * [Project] Improve keys creation in rspamadm vault
+  * [Rework] Move lua_worker to a dedicated unit
+  * [WebUI] Add URL fragments (#) support
+  * [WebUI] Fix AJAX request URL
+
+1.9.2: 16 Apr 2019
+  * [Conf] Allow to load users plugins from plugins.d
+  * [Conf] oversign openpgp and autocrypt headers
+  * [Feature] Add SPF FFI library for Lua
+  * [Feature] Add more verbosity for SPF caching
+  * [Feature] Antivirus: Handle encrypted files specially
+  * [Feature] Clickhouse: Slashing - add new fields to CH
+  * [Feature] Dkim_signing: Add OpenDKIM like signing_table and key_table
+  * [Feature] Dkim_signing: Allow to use new options as maps
+  * [Feature] Import fpconv library
+  * [Feature] Lua_maps: Allow static regexp and glob maps
+  * [Feature] Parse ical files
+  * [Feature] Rspamadm: Add dns_tool utility
+  * [Feature] Store SPF records digests
+  * [Feature] Use fpconv girsu2 implementation for printing floats
+  * [Fix] Clickhouse: Use integer seconds when inserting rows
+  * [Fix] Fix floating point printing
+  * [Fix] Fix processing of embedded urls
+  * [Fix] Lua_clickhouse: Fix CH errors processing
+  * [Fix] Make spf digest stable
+  * [Fix] Properly detect encrypted files in zip archives
+  * [Fix] Slashing: Store times in GMT timezone in ClickHouse
+  * [Rules] Add additional conditions to perform BTC checks
+  * [Rules] Fix pay-to-hash addresses validation
+
+1.9.1: 5 Apr 2019
+  * [Conf] Add vendor groups for symbols
+  * [Feature] Add `rspamadm template` command
+  * [Feature] Allow to add messages from settings
+  * [Feature] Allow unconnected DNS servers operations
+  * [Feature] Check limits after being set, migrate to uint64
+  * [Feature] Greylist: Allow to disable greylisting depending on symbols
+  * [Feature] Improve lua binary strings output
+  * [Feature] Mime_types: Implement user configurable extension filters
+  * [Feature] Mime_types: When no extension defined, detect it by content
+  * [Feature] Preprocess config files using jinja templates
+  * [Feature] Replies: Filter replies sender to limit whitelisting to direct messages
+  * [Feature] Treat all tags with HREF as a potential hyperlinks
+  * [Feature] Validate BTC addresses in LEAKED_PASSWORD_SCAM
+  * [Fix] Add crash safety for HTTP async routines
+  * [Fix] Another fix for Redis sentinel
+  * [Fix] Clickhouse: Fix table schema upload
+  * [Fix] Core: Fix squeezed dependencies handling for virtual symbols
+  * [Fix] Finally fix default parameters parsing in actions section
+  * [Fix] Fix ES sending logic (restore from coroutines mess)
+  * [Fix] Fix finishing script for clickhouse collection
+  * [Fix] Fix priority for regexp symbols registriation
+  * [Fix] Fix various issues found by PVS Studio
+  * [Fix] Initialize lua debugging earlier
+  * [Fix] Neural: Fix training
+  * [Fix] Rework cached Redis logic to avoid sentinels breaking
+  * [Fix] SURBL: Fix regression in surbl module
+  * [Fix] Fix double signing in the milter
+  * [Project] Add support of HTTP proxy in requests
+  * [Rework] Change lua global variables registration
+  * [Rework] Rework HTML content urls extraction
+  * [Rework] Start rework of aliasing in Rspamd
+  * [WebUI] Combine Scan and Learning into one tab
+  * [WebUI] Fix symbol score input type
+  * [WebUI] Show grayed out pie
+  * [WebUI] Update Throughput summary values dynamically
+
 1.9.0: 12 Mar 2019
   * [Conf] Add missing includes
   * [Conf] Move to options

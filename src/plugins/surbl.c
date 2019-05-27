@@ -125,7 +125,6 @@ struct redirector_param {
 	GHashTable *tree;
 	struct suffix_item *suffix;
 	struct rspamd_symcache_item *item;
-	gint sock;
 	guint redirector_requests;
 };
 
@@ -854,7 +853,14 @@ surbl_module_parse_rule (const ucl_object_t* value, struct rspamd_config* cfg)
 				0, surbl_test_url, new_suffix, SYMBOL_TYPE_CALLBACK, -1);
 		rspamd_symcache_add_dependency (cfg->cache, cb_id,
 				SURBL_REDIRECTOR_CALLBACK);
+		/* Failure symbol */
+		g_string_append (sym, "_FAIL");
+		rspamd_symcache_add_symbol (cfg->cache, sym->str,
+				0, NULL, NULL, SYMBOL_TYPE_VIRTUAL|SYMBOL_TYPE_NOSTAT, cb_id);
+		rspamd_config_add_symbol (cfg, sym->str, 0.0, "SURBL failure symbol",
+				"surbl", 0, 0, 0);
 		g_string_free (sym, TRUE);
+
 		nrules++;
 		new_suffix->callback_id = cb_id;
 		cur = ucl_object_lookup (cur_rule, "bits");
@@ -1362,10 +1368,8 @@ format_surbl_request (rspamd_mempool_t * pool,
 		}
 	}
 
-	if (url->surbl == NULL) {
-		url->surbl = result;
-		url->surbllen = r;
-	}
+	url->surbl = result;
+	url->surbllen = r;
 
 	if (!forced &&
 			rspamd_match_hash_map (surbl_module_ctx->whitelist, result) != NULL) {
@@ -1479,7 +1483,7 @@ make_surbl_requests (struct rspamd_url *url, struct rspamd_task *task,
 			msg_debug_surbl ("send surbl dns ip request %s to %s", surbl_req,
 					suffix->suffix);
 
-			if (make_dns_request_task (task,
+			if (rspamd_dns_resolver_request_task (task,
 					surbl_dns_ip_callback,
 					(void *) param, RDNS_REQUEST_A, surbl_req)) {
 				param->item = item;
@@ -1506,7 +1510,7 @@ make_surbl_requests (struct rspamd_url *url, struct rspamd_task *task,
 			rspamd_mempool_strdup (task->task_pool, url->surbl);
 		msg_debug_surbl ("send surbl dns request %s", surbl_req);
 
-		if (make_dns_request_task (task,
+		if (rspamd_dns_resolver_request_task (task,
 				surbl_dns_callback,
 				(void *) param, RDNS_REQUEST_A, surbl_req)) {
 			param->item = item;
@@ -1620,9 +1624,19 @@ surbl_dns_callback (struct rdns_reply *reply, gpointer arg)
 		}
 	}
 	else {
-		msg_debug_surbl ("<%s> domain [%s] is not in surbl %s",
-			param->task->message_id, param->host_resolve,
-			param->suffix->suffix);
+		if (reply->code == RDNS_RC_NXDOMAIN || reply->code == RDNS_RC_NOREC) {
+			msg_debug_surbl ("<%s> domain [%s] is not in surbl %s",
+					param->task->message_id, param->host_resolve,
+					param->suffix->suffix);
+		}
+		else {
+			/* Insert failure symbol */
+			GString *sym = g_string_new (param->suffix->symbol);
+
+			g_string_append (sym, "_FAIL");
+			rspamd_task_insert_result (task, sym->str, 1.0,
+					rdns_strerror (reply->code));
+		}
 	}
 
 	rspamd_symcache_item_async_dec_check (param->task, param->item, M);
@@ -1661,7 +1675,7 @@ surbl_dns_ip_callback (struct rdns_reply *reply, gpointer arg)
 						param->host_resolve,
 						to_resolve);
 
-				if (make_dns_request_task (task,
+				if (rspamd_dns_resolver_request_task (task,
 						surbl_dns_callback,
 						param, RDNS_REQUEST_A, to_resolve->str)) {
 					rspamd_symcache_item_async_inc (param->task, param->item, M);
@@ -1691,7 +1705,6 @@ free_redirector_session (void *ud)
 	}
 
 	rspamd_http_connection_unref (param->conn);
-	close (param->sock);
 }
 
 static void
@@ -1782,7 +1795,6 @@ static void
 register_redirector_call (struct rspamd_url *url, struct rspamd_task *task,
 	const gchar *rule)
 {
-	gint s = -1;
 	struct redirector_param *param;
 	struct timeval *timeout;
 	struct upstream *selected;
@@ -1793,13 +1805,19 @@ register_redirector_call (struct rspamd_url *url, struct rspamd_task *task,
 
 		selected = rspamd_upstream_get (surbl_module_ctx->redirectors,
 				RSPAMD_UPSTREAM_ROUND_ROBIN, url->host, url->hostlen);
+		param = rspamd_mempool_alloc0 (task->task_pool,
+						sizeof (struct redirector_param));
 
 		if (selected) {
-			s = rspamd_inet_address_connect (rspamd_upstream_addr_next (selected),
-					SOCK_STREAM, TRUE);
+			param->conn = rspamd_http_connection_new_client (NULL,
+					NULL,
+					surbl_redirector_error,
+					surbl_redirector_finish,
+					RSPAMD_HTTP_CLIENT_SIMPLE,
+					rspamd_upstream_addr_next (selected));
 		}
 
-		if (s == -1) {
+		if (param->conn == NULL) {
 			msg_info_surbl ("<%s> cannot create tcp socket failed: %s",
 					task->message_id,
 					strerror (errno));
@@ -1807,22 +1825,12 @@ register_redirector_call (struct rspamd_url *url, struct rspamd_task *task,
 			return;
 		}
 
-		param =
-				rspamd_mempool_alloc (task->task_pool,
-						sizeof (struct redirector_param));
+
 		param->url = url;
 		param->task = task;
-		param->conn = rspamd_http_connection_new (NULL,
-				s,
-				NULL,
-				surbl_redirector_error,
-				surbl_redirector_finish,
-				RSPAMD_HTTP_CLIENT_SIMPLE,
-				RSPAMD_HTTP_CLIENT);
 		param->ctx = surbl_module_ctx;
 		msg = rspamd_http_new_message (HTTP_REQUEST);
 		msg->url = rspamd_fstring_assign (msg->url, url->string, url->urllen);
-		param->sock = s;
 		param->redirector = selected;
 		timeout = rspamd_mempool_alloc (task->task_pool, sizeof (struct timeval));
 		double_to_tv (surbl_module_ctx->read_timeout, timeout);
@@ -1866,9 +1874,6 @@ surbl_test_tags (struct rspamd_task *task, struct redirector_param *param,
 		tld.len = url->tldlen;
 
 		ftld = rspamd_mempool_ftokdup (task->task_pool, &tld);
-	}
-
-	if (tag) {
 		/* We know results for this URL */
 
 		DL_FOREACH (tag, cur) {
@@ -2199,9 +2204,9 @@ surbl_is_redirector_handler (lua_State *L)
 
 	task = lua_check_task (L, 1);
 	url = luaL_checklstring (L, 2, &len);
-	surbl_module_ctx = surbl_get_context (task->cfg);
 
 	if (task && url) {
+		surbl_module_ctx = surbl_get_context (task->cfg);
 		url_cpy = rspamd_mempool_alloc (task->task_pool, len);
 		memcpy (url_cpy, url, len);
 

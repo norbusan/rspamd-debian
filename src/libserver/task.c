@@ -30,6 +30,14 @@
 #include "libmime/lang_detection.h"
 #include "libmime/filter_private.h"
 
+#ifdef WITH_JEMALLOC
+#include <jemalloc/jemalloc.h>
+#else
+# if defined(__GLIBC__) && defined(_GNU_SOURCE)
+#  include <malloc.h>
+# endif
+#endif
+
 #include <math.h>
 
 /*
@@ -233,6 +241,7 @@ rspamd_task_free (struct rspamd_task *task)
 	struct rspamd_mime_text_part *tp;
 	struct rspamd_email_address *addr;
 	struct rspamd_lua_cached_entry *entry;
+	static guint free_iters = 0;
 	GHashTableIter it;
 	gpointer k, v;
 	guint i;
@@ -341,6 +350,40 @@ rspamd_task_free (struct rspamd_task *task)
 				g_hash_table_unref (task->lua_cache);
 			}
 
+			if (task->cfg->full_gc_iters && (++free_iters > task->cfg->full_gc_iters)) {
+				/* Perform more expensive cleanup cycle */
+				gsize allocated = 0, active = 0, metadata = 0,
+						resident = 0, mapped = 0, old_lua_mem = 0;
+				gdouble t1, t2;
+
+				old_lua_mem = lua_gc (task->cfg->lua_state, LUA_GCCOUNT, 0);
+				t1 = rspamd_get_ticks (FALSE);
+
+#ifdef WITH_JEMALLOC
+				gsize sz = sizeof (gsize);
+				mallctl ("stats.allocated", &allocated, &sz, NULL, 0);
+				mallctl ("stats.active", &active, &sz, NULL, 0);
+				mallctl ("stats.metadata", &metadata, &sz, NULL, 0);
+				mallctl ("stats.resident", &resident, &sz, NULL, 0);
+				mallctl ("stats.mapped", &mapped, &sz, NULL, 0);
+#else
+# if defined(__GLIBC__) && defined(_GNU_SOURCE)
+				malloc_trim (0);
+# endif
+#endif
+				lua_gc (task->cfg->lua_state, LUA_GCCOLLECT, 0);
+				t2 = rspamd_get_ticks (FALSE);
+
+				msg_notice_task ("perform full gc cycle; memory stats: "
+								 "%Hz allocated, %Hz active, %Hz metadata, %Hz resident, %Hz mapped;"
+								 " lua memory: %z kb -> %d kb; %f ms for gc iter",
+						allocated, active, metadata, resident, mapped,
+						old_lua_mem, lua_gc (task->cfg->lua_state, LUA_GCCOUNT, 0),
+						(t2 - t1) * 1000.0);
+				free_iters = rspamd_time_jitter (0,
+						(gdouble)task->cfg->full_gc_iters / 2);
+			}
+
 			REF_RELEASE (task->cfg);
 		}
 
@@ -355,6 +398,7 @@ rspamd_task_free (struct rspamd_task *task)
 struct rspamd_task_map {
 	gpointer begin;
 	gulong len;
+	gint fd;
 };
 
 static void
@@ -363,11 +407,12 @@ rspamd_task_unmapper (gpointer ud)
 	struct rspamd_task_map *m = ud;
 
 	munmap (m->begin, m->len);
+	close (m->fd);
 }
 
 gboolean
 rspamd_task_load_message (struct rspamd_task *task,
-	struct rspamd_http_message *msg, const gchar *start, gsize len)
+						  struct rspamd_http_message *msg, const gchar *start, gsize len)
 {
 	guint control_len, r;
 	struct ucl_parser *parser;
@@ -437,8 +482,6 @@ rspamd_task_load_message (struct rspamd_task *task,
 			return FALSE;
 		}
 
-		close (fd);
-
 		tok = rspamd_task_get_request_header (task, "shm-offset");
 
 		if (tok) {
@@ -446,8 +489,9 @@ rspamd_task_load_message (struct rspamd_task *task,
 
 			if (offset > (gulong)st.st_size) {
 				msg_err_task ("invalid offset %ul (%ul available) for shm "
-						"segment %s", offset, st.st_size, fp);
+							  "segment %s", offset, st.st_size, fp);
 				munmap (map, st.st_size);
+				close (fd);
 
 				return FALSE;
 			}
@@ -462,8 +506,9 @@ rspamd_task_load_message (struct rspamd_task *task,
 
 			if (shmem_size > (gulong)st.st_size) {
 				msg_err_task ("invalid length %ul (%ul available) for %s "
-						"segment %s", shmem_size, st.st_size, ft, fp);
+							  "segment %s", shmem_size, st.st_size, ft, fp);
 				munmap (map, st.st_size);
+				close (fd);
 
 				return FALSE;
 			}
@@ -474,9 +519,10 @@ rspamd_task_load_message (struct rspamd_task *task,
 		m = rspamd_mempool_alloc (task->task_pool, sizeof (*m));
 		m->begin = map;
 		m->len = st.st_size;
+		m->fd = fd;
 
-		msg_info_task ("loaded message from shared memory %s (%ul size, %ul offset)",
-				fp, shmem_size, offset);
+		msg_info_task ("loaded message from shared memory %s (%ul size, %ul offset), fd=%d",
+				fp, shmem_size, offset, fd);
 
 		rspamd_mempool_add_destructor (task->task_pool, rspamd_task_unmapper, m);
 
@@ -540,12 +586,12 @@ rspamd_task_load_message (struct rspamd_task *task,
 				return FALSE;
 			}
 
-			close (fd);
 			task->msg.begin = map;
 			task->msg.len = st.st_size;
 			m = rspamd_mempool_alloc (task->task_pool, sizeof (*m));
 			m->begin = map;
 			m->len = st.st_size;
+			m->fd = fd;
 
 			rspamd_mempool_add_destructor (task->task_pool, rspamd_task_unmapper, m);
 		}
@@ -652,7 +698,7 @@ rspamd_task_load_message (struct rspamd_task *task,
 			task->flags |= RSPAMD_TASK_FLAG_COMPRESSED;
 
 			msg_info_task ("loaded message from zstd compressed stream; "
-					"compressed: %ul; uncompressed: %ul",
+						   "compressed: %ul; uncompressed: %ul",
 					(gulong)zin.size, (gulong)zout.pos);
 
 		}
@@ -932,6 +978,7 @@ rspamd_task_get_principal_recipient (struct rspamd_task *task)
 {
 	const gchar *val;
 	struct rspamd_email_address *addr;
+	guint i;
 
 	val = rspamd_mempool_get_variable (task->task_pool,
 			RSPAMD_MEMPOOL_PRINCIPAL_RECIPIENT);
@@ -945,20 +992,21 @@ rspamd_task_get_principal_recipient (struct rspamd_task *task)
 				strlen (task->deliver_to));
 	}
 	if (task->rcpt_envelope != NULL) {
-		addr = g_ptr_array_index (task->rcpt_envelope, 0);
 
-		if (addr->addr) {
-			return rspamd_task_cache_principal_recipient (task, addr->addr,
-					addr->addr_len);
+		PTR_ARRAY_FOREACH (task->rcpt_envelope, i, addr) {
+			if (addr->addr && !(addr->flags & RSPAMD_EMAIL_ADDR_ORIGINAL)) {
+				return rspamd_task_cache_principal_recipient (task, addr->addr,
+						addr->addr_len);
+			}
 		}
 	}
 
 	if (task->rcpt_mime != NULL && task->rcpt_mime->len > 0) {
-		addr = g_ptr_array_index (task->rcpt_mime, 0);
-
-		if (addr->addr) {
-			return rspamd_task_cache_principal_recipient (task, addr->addr,
-					addr->addr_len);
+		PTR_ARRAY_FOREACH (task->rcpt_mime, i, addr) {
+			if (addr->addr && !(addr->flags & RSPAMD_EMAIL_ADDR_ORIGINAL)) {
+				return rspamd_task_cache_principal_recipient (task, addr->addr,
+						addr->addr_len);
+			}
 		}
 	}
 
@@ -1229,22 +1277,39 @@ rspamd_task_write_ialist (struct rspamd_task *task,
 	rspamd_fstring_t *res = logbuf, *varbuf;
 	rspamd_ftok_t var = {.begin = NULL, .len = 0};
 	struct rspamd_email_address *addr;
-	gint i, nchars = 0, cur_chars;
+	gint i, nchars = 0, wr = 0, cur_chars;
+	gboolean has_orig = FALSE;
 
-	if (lim <= 0) {
+	if (addrs && lim <= 0) {
 		lim = addrs->len;
+	}
+
+	PTR_ARRAY_FOREACH (addrs, i, addr) {
+		if (addr->flags & RSPAMD_EMAIL_ADDR_ORIGINAL) {
+			has_orig = TRUE;
+			break;
+		}
 	}
 
 	varbuf = rspamd_fstring_new ();
 
 	PTR_ARRAY_FOREACH (addrs, i, addr) {
-		if (i >= lim) {
+		if (wr >= lim) {
 			break;
 		}
+
+		if (has_orig) {
+			/* Report merely original addresses */
+			if (!(addr->flags & RSPAMD_EMAIL_ADDR_ORIGINAL)) {
+				continue;
+			}
+		}
+
 		cur_chars = addr->addr_len;
 		varbuf = rspamd_fstring_append (varbuf, addr->addr,
 				cur_chars);
 		nchars += cur_chars;
+		wr ++;
 
 		if (varbuf->len > 0) {
 			if (i != lim - 1) {
@@ -1252,7 +1317,7 @@ rspamd_task_write_ialist (struct rspamd_task *task,
 			}
 		}
 
-		if (i >= max_log_elts || nchars >= max_log_elts * 10) {
+		if (wr >= max_log_elts || nchars >= max_log_elts * 10) {
 			varbuf = rspamd_fstring_append (varbuf, "...", 3);
 			break;
 		}

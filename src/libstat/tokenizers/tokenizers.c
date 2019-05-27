@@ -217,10 +217,10 @@ rspamd_tokenize_check_limit (gboolean decay,
 }
 
 static inline gboolean
-rspamd_utf_word_valid (const gchar *text, const gchar *end,
+rspamd_utf_word_valid (const guchar *text, const guchar *end,
 		gint32 start, gint32 finish)
 {
-	const gchar *st = text + start, *fin = text + finish;
+	const guchar *st = text + start, *fin = text + finish;
 	UChar32 c;
 
 	if (st >= end || fin > end || st >= fin) {
@@ -482,6 +482,13 @@ start_over:
 			}
 
 			if (token.original.len > 0) {
+				if (((gsize)res->len) * sizeof (token) > (0x1ull << 30u)) {
+					/* Due to bug in glib ! */
+					msg_err ("too many words found: %d, stop tokenization to avoid DoS",
+							res->len);
+
+					goto end;
+				}
 				g_array_append_val (res, token);
 			}
 
@@ -490,6 +497,7 @@ start_over:
 		}
 	}
 
+end:
 	if (!decay) {
 		hv = mum_hash_finish (hv);
 	}
