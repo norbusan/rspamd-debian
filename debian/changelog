@@ -1,10 +1,15 @@
-rspamd (1.9.4-1) UNRELEASED; urgency=medium
+rspamd (1.9.4-1) experimental; urgency=medium
 
-  * New upstream version 1.9.4
+  [ Jerome Lebleu ]
+  * New upstream version 1.9.4 (Closes: #929134)
   * d/control: Use shipped version of D3.js instead of libjs-d3
+    (Closes: #918027)
   * d/missing-sources: Add jQuery Sticky Tabs source
 
- -- Jerome Lebleu <jerome@maroufle.fr>  Mon, 27 May 2019 18:28:45 +0200
+  [ Sebastien Badia ]
+  d/control: Bump to Standards-Version 4.3.0 (no changes needed)
+
+ -- Sebastien Badia <sbadia@debian.org>  Thu, 30 May 2019 19:20:23 +0200
 
 rspamd (1.9.0-1) experimental; urgency=medium
 
