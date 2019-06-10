@@ -40,6 +40,9 @@ override_dh_auto_configure:
 		-DENABLE_LUAJIT=$(ENABLED_FOR_ARCH) \
 		-DENABLE_TORCH=$(ENABLED_FOR_ARCH) \
 		-DENABLE_LIBUNWIND=ON \
+ifeq "$(DEB_HOST_ARCH)" "amd64"
+		-DENABLE_HYPERSCAN=ON \
+endif
 		-DWANT_SYSTEMD_UNITS=ON
 
 override_dh_makeshlibs:

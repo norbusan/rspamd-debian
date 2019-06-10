@@ -3,12 +3,14 @@ Section: mail
 Priority: optional
 Maintainer: Sebastien Badia <sbadia@debian.org>
 Uploaders: Mikhail Gusarov <dottedmag@debian.org>,
-           Jerome Lebleu <jerome@maroufle.fr>
+           Jerome Lebleu <jerome@maroufle.fr>,
+           Sergio Durigan Junior <sergiodj@debian.org>
 Build-Depends: cmake,
                debhelper (>= 11~),
                libcurl4-openssl-dev,
                libevent-dev (>= 1.3),
                libglib2.0-dev (>= 2.16.0),
+               libhyperscan-dev [amd64],
                libicu-dev,
                libjemalloc-dev,
                libluajit-5.1-dev [amd64 armel armhf i386 kfreebsd-i386 mips mipsel powerpc powerpcspe] | liblua5.1-dev,
