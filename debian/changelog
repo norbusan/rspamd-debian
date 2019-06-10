@@ -1,4 +1,4 @@
-rspamd (1.9.4-2) experimental; urgency=medium
+rspamd (1.9.4-2) UNRELEASED; urgency=medium
 
   * d/{control,rules}: Enable build with hyperscan (amd64 only), and add
     myself to Uploaders.
