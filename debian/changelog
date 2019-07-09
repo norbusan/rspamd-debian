@@ -1,9 +1,10 @@
-rspamd (1.9.4-2) UNRELEASED; urgency=medium
+rspamd (1.9.4-2) unstable; urgency=medium
 
+  [ Sergio Durigan Junior ]
   * d/{control,rules}: Enable build with hyperscan (amd64 only), and add
     myself to Uploaders.
 
- -- Sergio Durigan Junior <sergiodj@debian.org>  Sun, 26 May 2019 17:34:59 -0400
+ -- Sebastien Badia <sbadia@debian.org>  Tue, 09 Jul 2019 12:10:41 +0200
 
 rspamd (1.9.4-1) experimental; urgency=medium
 
