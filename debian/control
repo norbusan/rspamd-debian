@@ -6,7 +6,7 @@ Uploaders: Mikhail Gusarov <dottedmag@debian.org>,
            Jerome Lebleu <jerome@maroufle.fr>,
            Sergio Durigan Junior <sergiodj@debian.org>
 Build-Depends: cmake,
-               debhelper (>= 11~),
+               debhelper-compat (= 12),
                libcurl4-openssl-dev,
                libevent-dev (>= 1.3),
                libglib2.0-dev (>= 2.16.0),
