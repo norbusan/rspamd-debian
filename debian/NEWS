@@ -1,4 +1,4 @@
-rspamd (0.6.8) unstable; urgency=medium
+rspamd (0.6.10) unstable; urgency=medium
 
   * In order to be uploaded to Debian, rspamd package has been changed in
     incompatible ways compared to packages from Launchpad PPA or OBS
