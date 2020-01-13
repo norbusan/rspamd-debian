@@ -22,6 +22,7 @@ Build-Depends: cmake,
                ragel,
                zlib1g-dev
 Standards-Version: 4.4.0
+Rules-Requires-Root: no
 Homepage: https://rspamd.com
 Vcs-Git: https://salsa.debian.org/debian/rspamd.git
 Vcs-Browser: https://salsa.debian.org/debian/rspamd
