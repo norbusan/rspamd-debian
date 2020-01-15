@@ -6,3 +6,5 @@ rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/human
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/jquery.stickytabs.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/nprogress.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/visibility.min.js
+# ignore contrib examples
+rspamd source: package-does-not-install-examples contrib/snowball/examples/
