@@ -1,17 +1,22 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: rspamd
 Upstream-Contact: Vsevolod Stakhov <vsevolod@highsecure.ru>
-Source: https://github.com/vstakhov/rspamd
+Source: https://github.com/rspamd/rspamd
 Files-Excluded: debian/* .hgtags
 Comment: Do not ship upstream debian files
 
 Files: *
-Copyright: 2008-2015 Vsevolod Stakhov <vsevolod@highsecure.ru>
-License: BSD-2-Clause
+Copyright: 2008-2019 Vsevolod Stakhov <vsevolod@highsecure.ru>
+License: Apache-2.0
 
 Files: contrib/aho-corasick/*
 Copyright: 2009-2014 Mischa Sandberg <mischasan@gmail.com>
 License: LGPL-3+
+
+Files: contrib/aho-corasick/_acism.h
+ contrib/aho-corasick/acism_create.c
+Copyright: 2009-2014 Mischa Sandberg
+License: LGPL-3.0
 
 Files: contrib/cdb/*
 Copyright: Michael Tokarev <mjt@corpit.ru>
@@ -19,6 +24,15 @@ License: public-domain
 Comment:
  The exact meaning of "Public domain" mentioned in the file headers was taken from:
  http://www.corpit.ru/mjt/tinycdb.html
+
+Files: contrib/fastutf8/*
+Copyright: 2019 Yibo Cai
+           2019 Vsevolod Stakhov
+License: Expat
+
+Files: contrib/fpconv/*
+Copyright: Andreas Samoljuk
+License: BSL-1.0
 
 Files: contrib/hiredis/*
 Copyright: 2009-2011, Salvatore Sanfilippo <antirez@gmail.com>
@@ -30,18 +44,46 @@ Copyright: 2002-2015 Igor Sysoev
            Joyent, Inc. and other Node contributors
 License: Expat
 
+Files: contrib/kann/*
+Copyright: 2018-2019 Dana-Farber Cancer Institute
+           2016-2018 Broad Institute
+License: Expat
+
 Files: contrib/lc-btrie/*
 Copyright: 2013, Geoffrey T. Dairiki
 License: BSD-3-Clause
+
+Files: contrib/libev/*
+Copyright: 2007-2013 Marc Alexander Lehmann
+License: BSD-2-Clause
 
 Files: contrib/libottery/*
 Copyright: Nick Mathewson
 License: CC0-1.0
 
+Files: contrib/libottery/aes_cryptobox.c
+ contrib/libottery/chacha_cryptobox.c
+Copyright: 2015-2017 Vsevolod Stakhov
+                2017 Frank Denis
+License: BSD-2-Clause
+
 Files: contrib/libottery/chacha_merged.c
 Copyright: Ted Krovetz <ted@krovetz.net>
            D. J. Bernstein
 License: public-domain
+
+Files: contrib/librdns/*
+Copyright: 2014 Vsevolod Stakhov
+License: BSD-2-Clause
+
+Files: contrib/librdns/punycode.c
+Copyright:      2014 Vsevolod Stakhov
+           2004-2008 Kungliga Tekniska Högskolan
+License: BSD-3-Clause
+
+Files: contrib/libucl/*
+Copyright: 2014 Vsevolod Stakhov
+License: BSD-2-Clause
 
 Files: contrib/libucl/khash.h contrib/libucl/kvec.h
 Copyright: 2008, by Attractive Chaos <attractor@live.co.uk>
@@ -49,20 +91,19 @@ License: Expat
 
 Files: contrib/libucl/tree.h
 Copyright: 2005 Ian Piumarta
-License: Expat
+License: MIT
 
 Files: contrib/libucl/ucl_util.c
 Copyright: 2013, Vsevolod Stakhov
            2015 Allan Jude <allanjude@freebsd.org>
 License: BSD-2-Clause
 
-Files: contrib/linenoise/*
-Copyright: 2010-2014, Salvatore Sanfilippo <antirez@gmail.com>
-           2010-2013, Pieter Noordhuis <pcnoordhuis@gmail.com>
-License: BSD-2-Clause
-
 Files: contrib/lua-argparse/*
 Copyright: 2013 - 2018 Peter Melnichenko
+License: Expat
+
+Files: contrib/lua-bit/*
+Copyright: 2008-2012 Mike Pall
 License: Expat
 
 Files: contrib/lua-fun/*
@@ -73,32 +114,13 @@ Files: contrib/lua-lpeg/*
 Copyright: 2007-2015 Lua.org, PUC-Rio.
 License: Expat
 
-Files: contrib/lua-moses/*
-Copyright: 2012-2014 Roland Yonaba
+Files: contrib/lua-lupa/*
+Copyright: 2015-2019 Mitchell
 License: Expat
 
 Files: contrib/lua-tableshape/*
 Copyright: 2018 Leaf Corcoran
 License: Expat
-
-Files: contrib/lua-torch/nn/* contrib/lua-torch/paths/* contrib/lua-torch/torch7/*
-Copyright: 2011-2014 Idiap Research Institute (Ronan Collobert)
-           2012-2014 Deepmind Technologies (Koray Kavukcuoglu)
-           2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
-           2011-2013 NYU (Clement Farabet)
-           2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
-           2006      Idiap Research Institute (Samy Bengio)
-           2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
-License: BSD-3-Clause
-
-Files: contrib/lua-torch/optim/*
-Copyright: 2011-2014 Idiap Research Institute (Ronan Collobert)
-           2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
-           2011-2013 NYU (Clement Farabet)
-           2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
-           2006      Idiap Research Institute (Samy Bengio)
-           2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
-License: BSD-3-Clause
 
 Files: contrib/mumhash/*
 Copyright: 2016 Vladimir Makarov <vmakarov@gcc.gnu.org>
@@ -107,6 +129,23 @@ License: Expat
 Files: contrib/publicsuffix/*
 Copyright: 2007-2011, Mozilla Foundation.
 License: MPL-2.0
+
+Files: contrib/replxx/*
+Copyright: 2017-2018 Marcin Konarski
+                2010 Salvatore Sanfilippo
+                2010, Pieter Noordhuis
+License: BSD-3-Clause
+
+Files: contrib/replxx/src/ConvertUTF.*
+Copyright: 2001-2004 Unicode, Inc.
+License: Unicode
+
+Files: contrib/replxx/src/wcwidth.cpp
+Copyright: 2007 Markus Kuhn
+License: public-domain
+ Permission to use, copy, modify, and distribute this software
+ for any purpose and without fee is hereby granted. The author
+ disclaims all warranties with regard to this software.
 
 Files: contrib/snowball/*
 Copyright: 2001-2015 Dr Martin Porter
@@ -130,6 +169,21 @@ Files: contrib/zstd/*
 Copyright: 2016-present, Facebook, Inc.
 License: BSD-3-Clause
 
+Files: contrib/zstd/divsufsort.*
+Copyright: 2003-2008 Yuta Mori
+License: Expat
+
+Files: contrib/zstd/bitstream.h
+ contrib/zstd/entropy_common.c
+ contrib/zstd/fse.h
+ contrib/zstd/fse_compress.c
+ contrib/zstd/fse_decompress.c
+ contrib/zstd/huf.h
+ contrib/zstd/huf_compress.c
+ contrib/zstd/huf_decompress.c
+Copyright: 2016 Yann Collet
+License: BSD-2-Clause
+
 Files: doc/doxydown/*
 Copyright: 2014 Vsevolod Stakhov <vsevolod@highsecure.ru>
 License: Expat
@@ -139,29 +193,34 @@ Copyright: 2012-2013 Anton Simonov <untone@gmail.com>
            2014-2015 Vsevolod Stakhov <vsevolod@highsecure.ru>
 License: Expat
 
-Files: src/libcryptobox/curve25519/*
-Copyright: 2008, Google Inc.
-License: BSD-3-Clause
+Files: src/libcryptobox/base64/avx2.c
+Copyright: 2013-2015 Alfred Klomp
+                2018 Vsevolod Stakhov
+License: Apache-2.0 and BSD-2-Clause
 
-Files: src/libcryptobox/poly1305/* src/libcryptobox/chacha20/*
-Copyright: 2015, Andrew Moon
-           2015, Vsevolod Stakhov
+Files: src/libcryptobox/base64/ref.c
+Copyright: 2013-2015 Alfred Klomp
+                2016 Vsevolod Stakhov
 License: BSD-2-Clause
 
-Files: src/libcryptobox/siphash/siphash.*
-Copyright: 2016 Vsevolod Stakhov
-License: Apache-2.0
+Files: src/libcryptobox/base64/sse42.c
+Copyright: 2013-2015 Alfred Klomp
+                2016 Vsevolod Stakhov
+License: Apache-2.0 and BSD-2-Clause
 
-Files: src/libcryptobox/siphash/avx2.S
-Copyright: 2016 Vsevolod Stakhov
-           2015 Google Inc.
-License: Apache-2.0
+Files: src/libcryptobox/catena/catena.c
+Copyright: 2014 cforler
+           2016 Vsevolod Stakhov
+License: Expat
 
-Files: src/libcryptobox/siphash/ref.c
-Copyright: 2015, Vsevolod Stakhov
-           2012-2014 Jean-Philippe Aumasson <jeanphilippe.aumasson@gmail.com>
-           2012-2014 Daniel J. Bernstein <djb@cr.yp.to>
+Files: src/libcryptobox/chacha20/chacha.c
+Copyright: 2015 Vsevolod Stakhov
+           2015 Andrew Moon
 License: BSD-2-Clause
+
+Files: src/libcryptobox/chacha20/chacha.h
+Copyright: 2015 Andrew Moon
+License: Expat
 
 Files: src/libutil/printf.c src/libserver/url.c
 Copyright: 2016 Vsevolod Stakhov <vsevolod@highsecure.ru>
@@ -169,10 +228,25 @@ Copyright: 2016 Vsevolod Stakhov <vsevolod@highsecure.ru>
            2011-2015 Nginx, Inc.
 License: Apache-2.0 and BSD-2-Clause
 
-Files: src/plugins/lua/rbl.lua
-Copyright: 2011-2015, Vsevolod Stakhov <vsevolod@highsecure.ru>
-           2013-2015, Andrew Lewis <nerf@judo.za.org>
-License: Apache-2.0
+Files: test/functional/lua/flags.lua
+Copyright: 2015 Vsevolod Stakhov
+License: BSD-2-Clause
+
+Files: test/lua/compat_env.lua
+Copyright: 2012 David Manura
+License: Expat
+
+Files: test/lua/telescope.lua
+Copyright: 2009-2012 Norman Clarke
+License: Expat
+
+Files: test/lua/unit/folding.lua
+Copyright: 2015 Vsevolod Stakhov
+License: BSD-2-Clause
+
+Files: test/lua/unit/rfc2047.lua
+Copyright: 2016 Vsevolod Stakhov
+License: BSD-2-Clause
 
 Files: debian/*
 Copyright: 2011-2015 Vsevolod Stakhov <vsevolod@highsecure.ru>
@@ -343,3 +417,70 @@ License: Zlib
  2. Altered source versions must be plainly marked as such, and must not be
     misrepresented as being the original software.
  3. This notice may not be removed or altered from any source distribution.
+
+License: BSL-1.0
+ Permission is hereby granted, free of charge, to any person or organization
+ obtaining a copy of the software and accompanying documentation covered by
+ this license (the "Software") to use, reproduce, display, distribute,
+ execute, and transmit the Software, and to prepare derivative works of the
+ Software, and to permit third-parties to whom the Software is furnished to do
+ so, all subject to the following:
+ .
+ The copyright notices in the Software and this entire statement, including
+ the above license grant, this restriction and the following disclaimer, must
+ be included in all copies of the Software, in whole or in part, and all
+ derivative works of the Software, unless such copies or derivative works are
+ solely in the form of machine-executable object code generated by a source
+ language processor.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT. IN NO EVENT
+ SHALL THE COPYRIGHT HOLDERS OR ANYONE DISTRIBUTING THE SOFTWARE BE LIABLE FOR
+ ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
+ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ DEALINGS IN THE SOFTWARE.
+
+License: LGPL-3.0
+ This program is free software; you can redistribute it and/or modify it under
+ the terms of the GNU Lesser General Public License Version 3 as published by
+ the Free Software Foundation. You may not use, modify or distribute this
+ program under any other version of the GNU Lesser General Public License.
+ .
+ This program is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License for more
+ details.
+ .
+ You should have received a copy of the GNU Lesser General Public License
+ along with this program; if not, write to the Free Software Foundation, Inc.,
+ 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+License: Unicode
+ Disclaimer
+ .
+ This source code is provided as is by Unicode, Inc. No claims are made as to
+ fitness for any particular purpose. No warranties of any kind are expressed
+ or implied. The recipient agrees to determine applicability of information
+ provided. If this file has been purchased on magnetic or optical media from
+ Unicode, Inc., the sole remedy for any claim will be exchange of defective
+ media within 90 days of receipt.
+ .
+ Limitations on Rights to Redistribute This Code
+ .
+ Unicode, Inc. hereby grants the right to freely use the information supplied
+ in this file in the creation of products supporting the Unicode Standard,
+ and to make copies of this file in any form for internal or external
+ distribution as long as this notice remains attached.
+
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the 'Software'), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, and/or sell copies of the
+ Software, and to permit persons to whom the Software is furnished to do so,
+ provided that the above copyright notice(s) and this permission notice appear
+ in all copies of the Software and that both the above copyright notice(s) and
+ this permission notice appear in supporting documentation.
+ .
+ THE SOFTWARE IS PROVIDED 'AS IS'.  USE ENTIRELY AT YOUR OWN RISK.
