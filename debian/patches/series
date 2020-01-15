@@ -2,3 +2,4 @@
 0002-Append-CXX-to-the-list-of-needed-languages.patch
 0003-add-versions-to-shared-libraries.patch
 0004-drop-js-scripts-packaged-by-Debian.patch
+0005-drop-unused-examples-directory.patch
