@@ -1,0 +1,5 @@
+#!/bin/sh
+
+set -eu
+
+rspamadm configtest -s -c /etc/rspamd/rspamd.conf

@@ -1,3 +1,3 @@
-Tests: install
+Tests: install configcheck rspamd-stats
 Depends: @, curl
 Restrictions: needs-root,allow-stderr

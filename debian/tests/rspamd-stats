@@ -1,0 +1,6 @@
+#!/bin/sh
+
+set -eu
+
+# test for perl dependencies
+rspamd_stats --log /dev/null
