@@ -1,3 +1,8 @@
-# This javascript isn't installed, we use packages libraries instead embedded ones
-rspamd source: source-is-missing interface/js/lib/bootstrap.min.js
-rspamd source: source-is-missing interface/js/lib/jquery-3.3.1.min.js
+# upstream imports minified versions dirctly from original sources; also these are not packages by Debian
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/d3evolution.min.js
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/d3pie.min.js
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/footable.min.js
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/humanize.min.js
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/jquery.stickytabs.min.js
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/nprogress.min.js
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/visibility.min.js

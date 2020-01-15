@@ -2,6 +2,21 @@
 
 set -eu
 
+copy_js_files()
+{
+  # Rspamd web interface doesn't support symlinks and directory traversal
+  # copy javascript files from original Debian packages
+  RSPAMD_JS_LIB_DIR=/usr/share/rspamd/www/js/lib
+  cp --remove-destination /usr/share/javascript/bootstrap/js/bootstrap.min.js $RSPAMD_JS_LIB_DIR/bootstrap.min.js
+  cp --remove-destination /usr/share/javascript/d3/d3.min.js $RSPAMD_JS_LIB_DIR/d3.min.js
+  cp --remove-destination /usr/share/javascript/jquery/jquery.min.js $RSPAMD_JS_LIB_DIR/jquery.min.js
+  cp --remove-destination /usr/share/javascript/requirejs/require.js $RSPAMD_JS_LIB_DIR/require.min.js
+  # remove path of previous versions, if existent
+  if [ -f $RSPAMD_JS_LIB_DIR/jquery-3.3.1.min.js ]; then
+    rm $RSPAMD_JS_LIB_DIR/jquery-3.3.1.min.js
+  fi
+}
+
 case "$1" in
     configure)
       SERVER_HOME=/var/lib/rspamd
@@ -20,10 +35,11 @@ case "$1" in
 
       chown $SERVER_USER: $SERVER_HOME $SERVER_LOG
 
-      # Rspamd web interface doesn't support symlinks and directory traversal
-      cp --remove-destination /usr/share/javascript/bootstrap/js/bootstrap.min.js /usr/share/rspamd/www/js/lib/bootstrap.min.js
-      cp --remove-destination /usr/share/javascript/jquery/jquery.min.js /usr/share/rspamd/www/js/lib/jquery-3.3.1.min.js
-      cp --remove-destination /usr/share/javascript/requirejs/require.js /usr/share/rspamd/www/js/lib/require.min.js
+      copy_js_files
+    ;;
+
+    triggered)
+      copy_js_files
     ;;
 
     abort-*)

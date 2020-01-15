@@ -30,6 +30,7 @@ Architecture: any
 Depends: adduser,
          ca-certificates,
          libjs-bootstrap,
+         libjs-d3,
          libjs-jquery,
          libjs-requirejs,
          lsb-base,
