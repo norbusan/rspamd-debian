@@ -2,7 +2,7 @@
 
 set -eu
 
-copy_js_files()
+copy_js_font_files()
 {
   # Rspamd web interface doesn't support symlinks and directory traversal
   # copy javascript files from original Debian packages
@@ -15,6 +15,11 @@ copy_js_files()
   if [ -f $RSPAMD_JS_LIB_DIR/jquery-3.3.1.min.js ]; then
     rm $RSPAMD_JS_LIB_DIR/jquery-3.3.1.min.js
   fi
+  # copy font files from original Debian package
+  RSPAMD_FONT_DIR=/usr/share/rspamd/www/fonts
+  cp --remove-destination /usr/share/fonts-glyphicons/glyphicons-halflings-regular.ttf $RSPAMD_FONT_DIR/glyphicons-halflings-regular.ttf
+  cp --remove-destination /usr/share/fonts-glyphicons/glyphicons-halflings-regular.woff $RSPAMD_FONT_DIR/glyphicons-halflings-regular.woff
+  cp --remove-destination /usr/share/fonts-glyphicons/glyphicons-halflings-regular.woff2 $RSPAMD_FONT_DIR/glyphicons-halflings-regular.woff2
 }
 
 case "$1" in
@@ -35,11 +40,11 @@ case "$1" in
 
       chown $SERVER_USER: $SERVER_HOME $SERVER_LOG
 
-      copy_js_files
+      copy_js_font_files
     ;;
 
     triggered)
-      copy_js_files
+      copy_js_font_files
     ;;
 
     abort-*)

@@ -29,6 +29,7 @@ Package: rspamd
 Architecture: any
 Depends: adduser,
          ca-certificates,
+         fonts-glyphicons-halflings,
          libjs-bootstrap,
          libjs-d3,
          libjs-jquery,

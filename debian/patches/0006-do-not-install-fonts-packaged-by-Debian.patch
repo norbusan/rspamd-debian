@@ -1,0 +1,23 @@
+From: =?utf-8?q?Christian_G=C3=B6ttsche?= <cgzones@googlemail.com>
+Date: Wed, 15 Jan 2020 16:40:41 +0100
+Subject: do not install fonts packaged by Debian
+
+---
+ CMakeLists.txt | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9902ded..004a885 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -708,7 +708,9 @@ INSTALL(PROGRAMS "utils/rspamd_stats.pl" RENAME rspamd_stats DESTINATION bin)
+ 
+ # Install webui
+ IF(INSTALL_WEBUI MATCHES "ON")
+-	INSTALL(DIRECTORY "interface/" DESTINATION ${WWWDIR} PATTERN ".git" EXCLUDE)
++	INSTALL(DIRECTORY "interface/" DESTINATION ${WWWDIR}
++	       	PATTERN ".git" EXCLUDE
++		PATTERN "glyphicons-halflings-regular.*" EXCLUDE)
+ ENDIF(INSTALL_WEBUI MATCHES "ON")
+ 
+ 
