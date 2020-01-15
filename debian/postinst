@@ -8,7 +8,6 @@ copy_js_font_files()
   # copy javascript files from original Debian packages
   RSPAMD_JS_LIB_DIR=/usr/share/rspamd/www/js/lib
   cp --remove-destination /usr/share/javascript/bootstrap/js/bootstrap.min.js $RSPAMD_JS_LIB_DIR/bootstrap.min.js
-  cp --remove-destination /usr/share/javascript/d3/d3.min.js $RSPAMD_JS_LIB_DIR/d3.min.js
   cp --remove-destination /usr/share/javascript/jquery/jquery.min.js $RSPAMD_JS_LIB_DIR/jquery.min.js
   cp --remove-destination /usr/share/javascript/requirejs/require.js $RSPAMD_JS_LIB_DIR/require.min.js
   # remove path of previous versions, if existent
