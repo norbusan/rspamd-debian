@@ -23,7 +23,8 @@ endif
 	dh $@
 
 override_dh_auto_configure:
-	dh_auto_configure -- -DCONFDIR=/etc/rspamd \
+	dh_auto_configure -- \
+		-DCONFDIR=/etc/rspamd \
 		-DMANDIR=/usr/share/man \
 		-DRUNDIR=/run/rspamd \
 		-DDBDIR=/var/lib/rspamd \
@@ -34,23 +35,18 @@ override_dh_auto_configure:
 		-DINCLUDEDIR=/usr/include \
 		-DSYSTEMDDIR=/lib/systemd/system \
 		-DNO_SHARED=ON \
-		-DCMAKE_BUILD_TYPE=ReleaseWithDebInfo \
 		-DDEBIAN_BUILD=1 \
-		-DINSTALL_EXAMPLES=ON \
-		-DFORCE_GMIME24=ON \
 		-DENABLE_JEMALLOC=ON \
 		-DENABLE_OPTIMIZATION=OFF \
 		-DENABLE_FULL_DEBUG=OFF \
-		-DENABLE_GD=OFF \
 		-DENABLE_PCRE2=ON \
 		-DENABLE_LUAJIT=$(ENABLED_FOR_ARCH) \
-		-DENABLE_TORCH=$(ENABLED_FOR_ARCH) \
 		-DENABLE_LIBUNWIND=ON \
 		-DENABLE_HYPERSCAN=$(HYPERSCAN) \
 		-DWANT_SYSTEMD_UNITS=ON
 
 override_dh_makeshlibs:
-	dh_makeshlibs -Xrspamd-actrie
+	dh_makeshlibs -Xlibrspamd-actrie -Xlibrspamd-ev -Xlibrspamd-kann -Xlibrspamd-replxx -Xlibrspamd-server
 
 override_dh_auto_clean:
 	dh_auto_clean
@@ -60,3 +56,6 @@ override_dh_fixperms:
 	dh_fixperms
 	chmod 750 $(CURDIR)/debian/rspamd/var/lib/rspamd
 	chmod 750 $(CURDIR)/debian/rspamd/var/log/rspamd
+
+override_dh_missing:
+	dh_missing --fail-missing
