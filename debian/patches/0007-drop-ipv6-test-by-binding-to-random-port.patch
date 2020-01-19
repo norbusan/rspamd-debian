@@ -2,6 +2,7 @@ From: =?utf-8?q?Christian_G=C3=B6ttsche?= <cgzones@googlemail.com>
 Date: Fri, 17 Jan 2020 16:59:00 +0100
 Subject: drop ipv6 test by binding to random port
 
+Forwarded: https://github.com/rspamd/rspamd/issues/3221
 ---
  src/libutil/addr.c | 25 ++-----------------------
  1 file changed, 2 insertions(+), 23 deletions(-)
