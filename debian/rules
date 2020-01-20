@@ -15,7 +15,7 @@ else
   ENABLED_FOR_ARCH = ON
 endif
 
-ifeq ($(DEB_HOST_ARCH),amd64)
+ifneq ($(filter amd64 i386, $(DEB_HOST_ARCH)),)
   HYPERSCAN=ON
 else
   HYPERSCAN=OFF

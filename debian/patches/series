@@ -5,3 +5,4 @@
 0005-drop-unused-examples-directory.patch
 0006-do-not-install-fonts-packaged-by-Debian.patch
 0007-drop-ipv6-test-by-binding-to-random-port.patch
+0008-Allow-hyperscan-on-i386-platform.patch
