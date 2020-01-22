@@ -1,18 +1,18 @@
 #!/usr/bin/make -f
 
-export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all reproducible=+fixfilepath
 DPKG_EXPORT_BUILDFLAGS = 1
 include /usr/share/dpkg/buildflags.mk
 export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
 # please blhc
 export ASMFLAGS = $(CPPFLAGS)
 
-# https://github.com/rspamd/rspamd/issues/2202#issuecomment-401545304
 include /usr/share/dpkg/architecture.mk
-ifneq ($(filter aarch64 mips64 ppc64le parisc64 ia64 ppc64, $(DEB_HOST_GNU_CPU)),)
-  ENABLED_FOR_ARCH = OFF
+
+ifneq ($(filter amd64 arm64 armel armhf i386 mips mips64el mipsel ppc64 ppc64el, $(DEB_HOST_ARCH)),)
+  LUAJIT = ON
 else
-  ENABLED_FOR_ARCH = ON
+  LUAJIT = OFF
 endif
 
 ifneq ($(filter amd64 i386, $(DEB_HOST_ARCH)),)
@@ -41,7 +41,7 @@ override_dh_auto_configure:
 		-DENABLE_OPTIMIZATION=OFF \
 		-DENABLE_FULL_DEBUG=OFF \
 		-DENABLE_PCRE2=ON \
-		-DENABLE_LUAJIT=$(ENABLED_FOR_ARCH) \
+		-DENABLE_LUAJIT=$(LUAJIT) \
 		-DENABLE_LIBUNWIND=ON \
 		-DENABLE_HYPERSCAN=$(HYPERSCAN) \
 		-DWANT_SYSTEMD_UNITS=ON
