@@ -2,7 +2,6 @@
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/d3evolution.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/d3pie.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/footable.min.js
-rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/humanize.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/jquery.stickytabs.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/nprogress.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/visibility.min.js
