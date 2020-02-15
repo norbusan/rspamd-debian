@@ -19,7 +19,7 @@ Build-Depends: cmake,
                libunwind-dev,
                ragel,
                zlib1g-dev
-Standards-Version: 4.4.1
+Standards-Version: 4.5.0
 Rules-Requires-Root: no
 Homepage: https://rspamd.com
 Vcs-Git: https://salsa.debian.org/debian/rspamd.git
