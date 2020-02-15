@@ -1,9 +1,4 @@
 001_fix-perl-sheebang.patch
-0002-Append-CXX-to-the-list-of-needed-languages.patch
 0003-add-versions-to-shared-libraries.patch
 0004-drop-js-scripts-packaged-by-Debian.patch
-0005-drop-unused-examples-directory.patch
 0006-do-not-install-fonts-packaged-by-Debian.patch
-0007-drop-ipv6-test-by-binding-to-random-port.patch
-0008-Allow-hyperscan-on-i386-platform.patch
-0009-enable-lto-ipo.patch

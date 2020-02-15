@@ -5,27 +5,27 @@ Subject: add versions to shared libraries
 ---
  contrib/aho-corasick/CMakeLists.txt | 2 ++
  contrib/kann/CMakeLists.txt         | 3 ++-
- contrib/libev/CMakeLists.txt        | 3 ++-
+ contrib/libev/CMakeLists.txt        | 1 +
  contrib/replxx/CMakeLists.txt       | 3 ++-
  src/CMakeLists.txt                  | 4 +++-
- 5 files changed, 11 insertions(+), 4 deletions(-)
+ 5 files changed, 10 insertions(+), 3 deletions(-)
 
 diff --git a/contrib/aho-corasick/CMakeLists.txt b/contrib/aho-corasick/CMakeLists.txt
-index 93c51a1..e5dbae8 100644
+index 2c431b5..9fa5033 100644
 --- a/contrib/aho-corasick/CMakeLists.txt
 +++ b/contrib/aho-corasick/CMakeLists.txt
-@@ -17,3 +17,5 @@ ELSE()
+@@ -11,3 +11,5 @@ ELSE()
  	ADD_LIBRARY(rspamd-actrie STATIC ${AHOCORASICSRC})
  	target_link_libraries(rspamd-actrie glib-2.0)
  ENDIF()
 +
 +SET_TARGET_PROPERTIES(rspamd-actrie PROPERTIES VERSION "${RSPAMD_VERSION}")
 diff --git a/contrib/kann/CMakeLists.txt b/contrib/kann/CMakeLists.txt
-index 2bf32c9..17bd22a 100644
+index b3a1d54..ab56b0c 100644
 --- a/contrib/kann/CMakeLists.txt
 +++ b/contrib/kann/CMakeLists.txt
-@@ -7,10 +7,11 @@ IF(ENABLE_FULL_DEBUG MATCHES "OFF")
- ENDIF()
+@@ -1,10 +1,11 @@
+ SET(LIBKANNSRC	kautodiff.c kann.c)
  
  ADD_LIBRARY(rspamd-kann SHARED ${LIBKANNSRC})
 +SET_TARGET_PROPERTIES(rspamd-kann PROPERTIES VERSION "${RSPAMD_VERSION}")
@@ -39,24 +39,17 @@ index 2bf32c9..17bd22a 100644
 \ No newline at end of file
 +INSTALL(TARGETS rspamd-kann LIBRARY DESTINATION ${RSPAMD_LIBDIR})
 diff --git a/contrib/libev/CMakeLists.txt b/contrib/libev/CMakeLists.txt
-index e98ff12..631203f 100644
+index 591166a..cae9ac3 100644
 --- a/contrib/libev/CMakeLists.txt
 +++ b/contrib/libev/CMakeLists.txt
-@@ -56,6 +56,7 @@ ENDIF()
+@@ -50,6 +50,7 @@ CHECK_LIBRARY_EXISTS(m ceil "" HAVE_LIBM)
  CONFIGURE_FILE(config.h.in libev-config.h)
  
  ADD_LIBRARY(rspamd-ev SHARED ${LIBEVSRC})
 +SET_TARGET_PROPERTIES(rspamd-ev PROPERTIES VERSION "${RSPAMD_VERSION}")
- ADD_DEFINITIONS("-DEV_CONFIG_H=\"${CMAKE_CURRENT_BINARY_DIR}/libev-config.h\""
+ include_directories("${CMAKE_CURRENT_BINARY_DIR}")
+ ADD_DEFINITIONS("-DEV_CONFIG_H=\"libev-config.h\""
  		-DEV_MULTIPLICITY=1
- 		-DEV_USE_FLOOR=1
-@@ -70,4 +71,4 @@ IF(ENABLE_FULL_DEBUG MATCHES "ON")
- 	ADD_DEFINITIONS(-DEV_VERIFY=3)
- ENDIF()
- 
--INSTALL(TARGETS rspamd-ev LIBRARY DESTINATION ${RSPAMD_LIBDIR})
-\ No newline at end of file
-+INSTALL(TARGETS rspamd-ev LIBRARY DESTINATION ${RSPAMD_LIBDIR})
 diff --git a/contrib/replxx/CMakeLists.txt b/contrib/replxx/CMakeLists.txt
 index b391639..14b7205 100644
 --- a/contrib/replxx/CMakeLists.txt
@@ -77,10 +70,10 @@ index b391639..14b7205 100644
 \ No newline at end of file
 +install( TARGETS ${TARGETS} LIBRARY DESTINATION ${RSPAMD_LIBDIR})
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 4805788..ef2439e 100644
+index 9a34d2a..1655d42 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -178,6 +178,8 @@ ELSE()
+@@ -177,6 +177,8 @@ ELSE()
  			"${RAGEL_ragel_smtp_ip_OUTPUTS}")
  ENDIF()
  
@@ -89,7 +82,7 @@ index 4805788..ef2439e 100644
  TARGET_LINK_LIBRARIES(rspamd-server rspamd-http-parser)
  TARGET_LINK_LIBRARIES(rspamd-server rspamd-fpconv)
  TARGET_LINK_LIBRARIES(rspamd-server rspamd-cdb)
-@@ -228,4 +230,4 @@ ENDIF(NOT DEBIAN_BUILD)
+@@ -227,4 +229,4 @@ ENDIF(NOT DEBIAN_BUILD)
  TARGET_LINK_LIBRARIES(rspamd rspamd-server)
  
  INSTALL(TARGETS rspamd RUNTIME DESTINATION bin)
