@@ -23,18 +23,23 @@
 #include "map.h"
 #include "ref.h"
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 typedef void (*rspamd_map_tmp_dtor) (gpointer p);
+
 extern guint rspamd_map_log_id;
 #define msg_err_map(...) rspamd_default_log_function (G_LOG_LEVEL_CRITICAL, \
-		"map", map->tag, \
+        "map", map->tag, \
         G_STRFUNC, \
         __VA_ARGS__)
 #define msg_warn_map(...)   rspamd_default_log_function (G_LOG_LEVEL_WARNING, \
-		"map", map->tag, \
+        "map", map->tag, \
         G_STRFUNC, \
         __VA_ARGS__)
 #define msg_info_map(...)   rspamd_default_log_function (G_LOG_LEVEL_INFO, \
-		"map", map->tag, \
+        "map", map->tag, \
         G_STRFUNC, \
         __VA_ARGS__)
 #define msg_debug_map(...)  rspamd_conditional_debug_fast (NULL, NULL, \
@@ -54,14 +59,16 @@ enum fetch_proto {
  */
 struct file_map_data {
 	gchar *filename;
-	struct stat st;
+	gboolean need_modify;
+	ev_stat st_ev;
 };
 
 
 struct http_map_data;
 
 struct rspamd_http_map_cached_cbdata {
-	struct event timeout;
+	ev_timer timeout;
+	struct ev_loop *event_loop;
 	struct rspamd_storage_shmem *shm;
 	struct rspamd_map *map;
 	struct http_map_data *data;
@@ -88,7 +95,6 @@ struct http_map_data {
 	gchar *path;
 	gchar *host;
 	gchar *rest;
-	gchar *last_signature;
 	rspamd_fstring_t *etag;
 	time_t last_modified;
 	time_t last_checked;
@@ -114,12 +120,15 @@ struct rspamd_map_backend {
 	gboolean is_signed;
 	gboolean is_compressed;
 	gboolean is_fallback;
+	struct ev_loop *event_loop;
 	guint32 id;
 	struct rspamd_cryptobox_pubkey *trusted_pubkey;
 	union rspamd_map_backend_data data;
 	gchar *uri;
 	ref_entry_t ref;
 };
+
+struct map_periodic_cbdata;
 
 struct rspamd_map {
 	struct rspamd_dns_resolver *r;
@@ -130,12 +139,12 @@ struct rspamd_map {
 	map_fin_cb_t fin_callback;
 	map_dtor_t dtor;
 	void **user_data;
-	struct event_base *ev_base;
+	struct ev_loop *event_loop;
 	struct rspamd_worker *wrk;
 	gchar *description;
 	gchar *name;
 	guint32 id;
-	gboolean scheduled_check;
+	struct map_periodic_cbdata *scheduled_check;
 	rspamd_map_tmp_dtor tmp_dtor;
 	gpointer tmp_dtor_data;
 	rspamd_map_traverse_function traverse_function;
@@ -143,28 +152,29 @@ struct rspamd_map {
 	gsize nelts;
 	guint64 digest;
 	/* Should we check HTTP or just load cached data */
-	struct timeval tv;
+	ev_tstamp timeout;
 	gdouble poll_timeout;
 	time_t next_check;
 	gboolean active_http;
+	gboolean non_trivial; /* E.g. has http backends in active mode */
+	gboolean file_only; /* No HTTP backends found */
+	gboolean static_only; /* No need to check */
 	/* Shared lock for temporary disabling of map reading (e.g. when this map is written by UI) */
 	gint *locked;
 	gchar tag[MEMPOOL_UID_LEN];
 };
 
 enum rspamd_map_http_stage {
-	map_resolve_host2 = 0, /* 2 requests sent */
-	map_resolve_host1, /* 1 requests sent */
-	map_load_file,
-	map_load_pubkey,
-	map_load_signature,
-	map_finished
+	http_map_resolve_host2 = 0, /* 2 requests sent */
+	http_map_resolve_host1, /* 1 requests sent */
+	http_map_http_conn, /* http connection */
+	http_map_terminated /* terminated when doing resolving */
 };
 
 struct map_periodic_cbdata {
 	struct rspamd_map *map;
 	struct map_cb_data cbdata;
-	struct event ev;
+	ev_timer ev;
 	gboolean need_modify;
 	gboolean errored;
 	gboolean locked;
@@ -173,36 +183,37 @@ struct map_periodic_cbdata {
 };
 
 static const gchar rspamd_http_file_magic[] =
-		{'r', 'm', 'c', 'd', '1', '0', '0', '0'};
+		{'r', 'm', 'c', 'd', '2', '0', '0', '0'};
 
 struct rspamd_http_file_data {
 	guchar magic[sizeof (rspamd_http_file_magic)];
 	goffset data_off;
 	gulong mtime;
 	gulong next_check;
+	gulong etag_len;
 };
 
 struct http_callback_data {
-	struct event_base *ev_base;
+	struct ev_loop *event_loop;
 	struct rspamd_http_connection *conn;
+	GPtrArray *addrs;
 	rspamd_inet_addr_t *addr;
 	struct rspamd_map *map;
 	struct rspamd_map_backend *bk;
 	struct http_map_data *data;
 	struct map_periodic_cbdata *periodic;
 	struct rspamd_cryptobox_pubkey *pk;
-	gboolean check;
 	struct rspamd_storage_shmem *shmem_data;
-	struct rspamd_storage_shmem *shmem_sig;
-	struct rspamd_storage_shmem *shmem_pubkey;
 	gsize data_len;
-	gsize sig_len;
-	gsize pubkey_len;
-
+	gboolean check;
 	enum rspamd_map_http_stage stage;
-	struct timeval tv;
+	ev_tstamp timeout;
 
 	ref_entry_t ref;
 };
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif /* SRC_LIBUTIL_MAP_PRIVATE_H_ */

@@ -129,14 +129,22 @@ lua_upstream_fail (lua_State *L)
 	LUA_TRACE_POINT;
 	struct upstream *up = lua_check_upstream (L);
 	gboolean fail_addr = FALSE;
+	const gchar *reason = "unknown";
 
 	if (up) {
 
 		if (lua_isboolean (L, 2)) {
 			fail_addr = lua_toboolean (L, 2);
+
+			if (lua_isstring (L, 3)) {
+				reason = lua_tostring (L, 3);
+			}
+		}
+		else if (lua_isstring (L, 2)) {
+			reason = lua_tostring (L, 2);
 		}
 
-		rspamd_upstream_fail (up, fail_addr);
+		rspamd_upstream_fail (up, fail_addr, reason);
 	}
 
 	return 0;
@@ -479,9 +487,7 @@ lua_upstream_watch_func (struct upstream *up,
 	lua_pushinteger (L, cur_errors);
 
 	if (lua_pcall (L, 3, 0, err_idx) != 0) {
-		GString *tb = lua_touserdata (L, -1);
-		msg_err ("cannot call watch function for upstream: %s", tb->str);
-		g_string_free (tb, TRUE);
+		msg_err ("cannot call watch function for upstream: %s", lua_tostring (L, -1));
 		lua_settop (L, 0);
 
 		return;
@@ -571,30 +577,10 @@ lua_load_upstream_list (lua_State * L)
 void
 luaopen_upstream (lua_State * L)
 {
-	luaL_newmetatable (L, "rspamd{upstream_list}");
-	lua_pushstring (L, "__index");
-	lua_pushvalue (L, -2);
-	lua_settable (L, -3);
-
-	lua_pushstring (L, "class");
-	lua_pushstring (L, "rspamd{upstream_list}");
-	lua_rawset (L, -3);
-
-	luaL_register (L, NULL,			   upstream_list_m);
+	rspamd_lua_new_class (L, "rspamd{upstream_list}", upstream_list_m);
+	lua_pop (L, 1);
 	rspamd_lua_add_preload (L, "rspamd_upstream_list", lua_load_upstream_list);
 
-	lua_pop (L, 1);                      /* remove metatable from stack */
-
-	luaL_newmetatable (L, "rspamd{upstream}");
-	lua_pushstring (L, "__index");
-	lua_pushvalue (L, -2);
-	lua_settable (L, -3);
-
-	lua_pushstring (L, "class");
-	lua_pushstring (L, "rspamd{upstream}");
-	lua_rawset (L, -3);
-
-	luaL_register (L, NULL,		  upstream_m);
-
-	lua_pop (L, 1);                      /* remove metatable from stack */
+	rspamd_lua_new_class (L, "rspamd{upstream}", upstream_m);
+	lua_pop (L, 1);
 }

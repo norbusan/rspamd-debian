@@ -19,14 +19,20 @@
 #include "config.h"
 #include "http_connection.h"
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 struct rspamd_http_connection_router;
 struct rspamd_http_connection_entry;
 
 typedef int (*rspamd_http_router_handler_t) (struct rspamd_http_connection_entry
 											 *conn_ent,
 											 struct rspamd_http_message *msg);
+
 typedef void (*rspamd_http_router_error_handler_t) (struct rspamd_http_connection_entry *conn_ent,
 													GError *err);
+
 typedef void (*rspamd_http_router_finish_handler_t) (struct rspamd_http_connection_entry *conn_ent);
 
 
@@ -44,9 +50,8 @@ struct rspamd_http_connection_router {
 	GHashTable *paths;
 	GHashTable *response_headers;
 	GPtrArray *regexps;
-	struct timeval tv;
-	struct timeval *ptv;
-	struct event_base *ev_base;
+	ev_tstamp timeout;
+	struct ev_loop *event_loop;
 	struct rspamd_http_context *ctx;
 	gchar *default_fs_path;
 	rspamd_http_router_handler_t unknown_method_handler;
@@ -63,10 +68,10 @@ struct rspamd_http_connection_router {
  * the specified directory
  * @return
  */
-struct rspamd_http_connection_router * rspamd_http_router_new (
+struct rspamd_http_connection_router *rspamd_http_router_new (
 		rspamd_http_router_error_handler_t eh,
 		rspamd_http_router_finish_handler_t fh,
-		struct timeval *timeout,
+		ev_tstamp timeout,
 		const char *default_fs_path,
 		struct rspamd_http_context *ctx);
 
@@ -110,6 +115,7 @@ void rspamd_http_router_insert_headers (struct rspamd_http_connection_router *ro
 										struct rspamd_http_message *msg);
 
 struct rspamd_regexp_s;
+
 /**
  * Adds new pattern to router, regexp object is refcounted by this function
  * @param router
@@ -118,6 +124,7 @@ struct rspamd_regexp_s;
  */
 void rspamd_http_router_add_regexp (struct rspamd_http_connection_router *router,
 									struct rspamd_regexp_s *re, rspamd_http_router_handler_t handler);
+
 /**
  * Handle new accepted socket
  * @param router router object
@@ -134,5 +141,9 @@ void rspamd_http_router_handle_socket (
  * @param router
  */
 void rspamd_http_router_free (struct rspamd_http_connection_router *router);
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif

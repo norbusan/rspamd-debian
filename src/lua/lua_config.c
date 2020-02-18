@@ -431,9 +431,10 @@ LUA_FUNCTION_DEF (config, add_condition);
 LUA_FUNCTION_DEF (config, enable_symbol);
 
 /***
- * @method rspamd_config:disable_symbol(symbol)
+ * @method rspamd_config:disable_symbol(symbol, [disable_parent=true])
  * Disables execution for the specified symbol
  * @param {string} symbol symbol's name
+ * @param {boolean} disable_parent if true then disable parent execution in case of a virtual symbol
  */
 LUA_FUNCTION_DEF (config, disable_symbol);
 
@@ -443,6 +444,34 @@ LUA_FUNCTION_DEF (config, disable_symbol);
  * @param {string} symbol symbol's name
  */
 LUA_FUNCTION_DEF (config, get_symbol_parent);
+
+/***
+ * @method rspamd_config:get_group_symbols(group)
+ * Returns list of symbols for a specific group
+ * @param {string} group group's name
+ * @available 2.0+
+ * @return {list|string} list of all symbols in a specific group
+ */
+LUA_FUNCTION_DEF (config, get_group_symbols);
+
+/***
+ * @method rspamd_config:get_groups([need_private])
+ * Returns list of all groups defined
+ * @param {boolean} need_private optional flag to include private groups
+ * @available 2.3+
+ * @return {list|table} list of all groups
+ */
+LUA_FUNCTION_DEF (config, get_groups);
+
+/***
+ * @method rspamd_config:register_settings_id(name, symbols_enabled, symbols_disabled)
+ * Register new static settings id in config
+ * @param {string} name id name (not numeric!)
+ * @param {map|string->string} symbols_enabled map from symbol's name to boolean (currently)
+ * @param {map|string->string} symbols_disabled map from symbol's name to boolean (currently)
+ * @available 2.0+
+ */
+LUA_FUNCTION_DEF (config, register_settings_id);
 
 /***
  * @method rspamd_config:__newindex(name, callback)
@@ -534,6 +563,7 @@ LUA_FUNCTION_DEF (config, register_worker_script);
 /***
  * @method rspamd_config:add_on_load(function(cfg, ev_base, worker) ... end)
  * Registers the following script to be executed when configuration is completely loaded
+ * and the worker is already started (forked)
  * @param {function} script function to be executed
  * @example
 rspamd_config:add_on_load(function(cfg, ev_base, worker)
@@ -558,11 +588,27 @@ rspamd_config:add_on_load(function(cfg, ev_base)
 	rspamd_config:add_periodic(ev_base, 1.0, function(cfg, ev_base)
 		local logger = require "rspamd_logger"
 		logger.infox(cfg, "periodic function")
-		return true -- if return false, then the periodic event is removed
+		return true -- if return numeric, a new interval is set. if return false, then the periodic event is removed
 	end)
 end)
  */
 LUA_FUNCTION_DEF (config, add_periodic);
+
+/***
+ * @method rspamd_config:add_post_init(function(cfg) ... end)
+ * Registers the following script to be executed when configuration is completely loaded
+ * @available 2.0+
+ * @param {function} script function to be executed
+ */
+LUA_FUNCTION_DEF (config, add_post_init);
+
+/***
+ * @method rspamd_config:add_config_unload(function(cfg) ... end)
+ * Registers the following script to be executed when configuration is unloaded
+ * @available 2.0+
+ * @param {function} script function to be executed
+ */
+LUA_FUNCTION_DEF (config, add_config_unload);
 
 /***
  * @method rspamd_config:get_symbols_count()
@@ -586,11 +632,18 @@ LUA_FUNCTION_DEF (config, get_symbols_cksum);
 LUA_FUNCTION_DEF (config, get_symbols_counters);
 
 /***
- * @method rspamd_config:get_symbols_scores()
- * Returns table of all scores defined in config
+ * @method rspamd_config:get_symbols()
+ * Returns table of all scores defined in config. From version 2.0 returns table:
+ * - name
+ * - score
+ * - flags (e.g. `ignore` or `oneparam`)
+ * - nshots (== maxhits)
+ * - group - main group
+ * - groups - array of all groups
+ * @available 2.0+
  * @return {table|tables} all symbols indexed by name
  */
-LUA_FUNCTION_DEF (config, get_symbols_scores);
+LUA_FUNCTION_DEF (config, get_symbols);
 
 /***
  * @method rspamd_config:get_symbol_callback(name)
@@ -767,6 +820,13 @@ LUA_FUNCTION_DEF (config, init_subsystem);
  */
 LUA_FUNCTION_DEF (config, get_tld_path);
 
+/***
+ * @method rspamd_config:get_dns_max_requests()
+ * Returns limit of DNS requests per task
+ * @return {number} number of dns requests allowed
+ */
+LUA_FUNCTION_DEF (config, get_dns_max_requests);
+
 static const struct luaL_reg configlib_m[] = {
 	LUA_INTERFACE_DEF (config, get_module_opt),
 	LUA_INTERFACE_DEF (config, get_mempool),
@@ -787,6 +847,7 @@ static const struct luaL_reg configlib_m[] = {
 	LUA_INTERFACE_DEF (config, register_callback_symbol),
 	LUA_INTERFACE_DEF (config, register_callback_symbol_priority),
 	LUA_INTERFACE_DEF (config, register_dependency),
+	LUA_INTERFACE_DEF (config, register_settings_id),
 	LUA_INTERFACE_DEF (config, get_symbol_flags),
 	LUA_INTERFACE_DEF (config, add_symbol_flags),
 	LUA_INTERFACE_DEF (config, set_metric_symbol),
@@ -813,14 +874,19 @@ static const struct luaL_reg configlib_m[] = {
 	LUA_INTERFACE_DEF (config, register_re_selector),
 	LUA_INTERFACE_DEF (config, add_on_load),
 	LUA_INTERFACE_DEF (config, add_periodic),
+	LUA_INTERFACE_DEF (config, add_post_init),
+	LUA_INTERFACE_DEF (config, add_config_unload),
 	LUA_INTERFACE_DEF (config, get_symbols_count),
 	LUA_INTERFACE_DEF (config, get_symbols_cksum),
 	LUA_INTERFACE_DEF (config, get_symbols_counters),
-	LUA_INTERFACE_DEF (config, get_symbols_scores),
+	{"get_symbols_scores", lua_config_get_symbols},
+	LUA_INTERFACE_DEF (config, get_symbols),
+	LUA_INTERFACE_DEF (config, get_groups),
 	LUA_INTERFACE_DEF (config, get_symbol_callback),
 	LUA_INTERFACE_DEF (config, set_symbol_callback),
 	LUA_INTERFACE_DEF (config, get_symbol_stat),
 	LUA_INTERFACE_DEF (config, get_symbol_parent),
+	LUA_INTERFACE_DEF (config, get_group_symbols),
 	LUA_INTERFACE_DEF (config, register_finish_script),
 	LUA_INTERFACE_DEF (config, register_monitored),
 	LUA_INTERFACE_DEF (config, add_doc),
@@ -834,6 +900,7 @@ static const struct luaL_reg configlib_m[] = {
 	LUA_INTERFACE_DEF (config, init_modules),
 	LUA_INTERFACE_DEF (config, init_subsystem),
 	LUA_INTERFACE_DEF (config, get_tld_path),
+	LUA_INTERFACE_DEF (config, get_dns_max_requests),
 	{"__tostring", rspamd_lua_class_tostring},
 	{"__newindex", lua_config_newindex},
 	{NULL, NULL}
@@ -1130,7 +1197,6 @@ lua_metric_symbol_callback (struct rspamd_task *task,
 	struct rspamd_task **ptask;
 	gint level = lua_gettop (cd->L), nresults, err_idx, ret;
 	lua_State *L = cd->L;
-	GString *tb;
 	struct rspamd_symbol_result *s;
 
 	cd->item = item;
@@ -1152,13 +1218,9 @@ lua_metric_symbol_callback (struct rspamd_task *task,
 	*ptask = task;
 
 	if ((ret = lua_pcall (L, 1, LUA_MULTRET, err_idx)) != 0) {
-		tb = lua_touserdata (L, -1);
-		msg_err_task ("call to (%s) failed (%d): %v", cd->symbol, ret, tb);
-
-		if (tb) {
-			g_string_free (tb, TRUE);
-			lua_pop (L, 1);
-		}
+		msg_err_task ("call to (%s) failed (%d): %s", cd->symbol, ret,
+				lua_tostring (L, -1));
+		lua_settop (L, err_idx); /* Not -1 here, as err_func is popped below */
 	}
 	else {
 		nresults = lua_gettop (L) - level;
@@ -1205,24 +1267,45 @@ lua_metric_symbol_callback (struct rspamd_task *task,
 
 					for (i = level + first_opt; i <= last_pos; i++) {
 						if (lua_type (L, i) == LUA_TSTRING) {
-							const char *opt = lua_tostring (L, i);
+							gsize optlen;
+							const char *opt = lua_tolstring (L, i, &optlen);
 
-							rspamd_task_add_result_option (task, s, opt);
+							rspamd_task_add_result_option (task, s, opt, optlen);
+						}
+						else if (lua_type (L, i) == LUA_TUSERDATA) {
+							struct rspamd_lua_text *t = lua_check_text (L, i);
+
+							if (t) {
+								rspamd_task_add_result_option (task, s, t->start,
+										t->len);
+							}
 						}
 						else if (lua_type (L, i) == LUA_TTABLE) {
-							lua_pushvalue (L, i);
+							gsize objlen = rspamd_lua_table_size (L, i);
 
-							for (lua_pushnil (L); lua_next (L, -2); lua_pop (L, 1)) {
-								const char *opt = lua_tostring (L, -1);
+							for (guint j = 1; j <= objlen; j ++) {
+								lua_rawgeti (L, i, j);
 
-								rspamd_task_add_result_option (task, s, opt);
+								if (lua_type (L, -1) == LUA_TSTRING) {
+									gsize optlen;
+									const char *opt = lua_tolstring (L, -1, &optlen);
+
+									rspamd_task_add_result_option (task, s, opt, optlen);
+								}
+								else if (lua_type (L, -1) == LUA_TUSERDATA) {
+									struct rspamd_lua_text *t = lua_check_text (L, -1);
+
+									if (t) {
+										rspamd_task_add_result_option (task, s, t->start,
+												t->len);
+									}
+								}
+
+								lua_pop (L, 1);
 							}
-
-							lua_pop (L, 1);
 						}
 					}
 				}
-
 			}
 
 			lua_pop (L, nresults);
@@ -1341,20 +1424,42 @@ lua_metric_symbol_callback_return (struct thread_entry *thread_entry, int ret)
 
 				for (i = cd->stack_level + first_opt; i <= last_pos; i++) {
 					if (lua_type (L, i) == LUA_TSTRING) {
-						const char *opt = lua_tostring (L, i);
+						gsize optlen;
+						const char *opt = lua_tolstring (L, i, &optlen);
 
-						rspamd_task_add_result_option (task, s, opt);
+						rspamd_task_add_result_option (task, s, opt, optlen);
+					}
+					else if (lua_type (L, i) == LUA_TUSERDATA) {
+						struct rspamd_lua_text *t = lua_check_text (L, i);
+
+						if (t) {
+							rspamd_task_add_result_option (task, s, t->start,
+									t->len);
+						}
 					}
 					else if (lua_type (L, i) == LUA_TTABLE) {
-						lua_pushvalue (L, i);
+						gsize objlen = rspamd_lua_table_size (L, i);
 
-						for (lua_pushnil (L); lua_next (L, -2); lua_pop (L, 1)) {
-							const char *opt = lua_tostring (L, -1);
+						for (guint j = 1; j <= objlen; j ++) {
+							lua_rawgeti (L, i, j);
 
-							rspamd_task_add_result_option (task, s, opt);
+							if (lua_type (L, -1) == LUA_TSTRING) {
+								gsize optlen;
+								const char *opt = lua_tolstring (L, -1, &optlen);
+
+								rspamd_task_add_result_option (task, s, opt, optlen);
+							}
+							else if (lua_type (L, -1) == LUA_TUSERDATA) {
+								struct rspamd_lua_text *t = lua_check_text (L, -1);
+
+								if (t) {
+									rspamd_task_add_result_option (task, s, t->start,
+											t->len);
+								}
+							}
+
+							lua_pop (L, 1);
 						}
-
-						lua_pop (L, 1);
 					}
 				}
 			}
@@ -1370,107 +1475,25 @@ lua_metric_symbol_callback_return (struct thread_entry *thread_entry, int ret)
 	rspamd_symcache_item_async_dec_check (task, cd->item, "lua coro symbol");
 }
 
-static gint
-rspamd_lua_squeeze_rule (lua_State *L,
-						 struct rspamd_config *cfg,
-						 const gchar *name,
-						 gint cbref,
-						 enum rspamd_symbol_type type,
-						 gint parent)
+static guint32*
+rspamd_process_id_list (const gchar *entries, guint32 *plen)
 {
-	gint ret = -1, err_idx;
+	gchar **sym_elts;
+	guint32 *ids, nids;
 
-	lua_pushcfunction (L, &rspamd_lua_traceback);
-	err_idx = lua_gettop (L);
+	sym_elts = g_strsplit_set (entries, ",;", -1);
+	nids = g_strv_length (sym_elts);
 
-	if (type & SYMBOL_TYPE_VIRTUAL) {
-		if (rspamd_lua_require_function (L, "lua_squeeze_rules", "squeeze_virtual")) {
-			lua_pushnumber (L, parent);
-			if (name) {
-				lua_pushstring (L, name);
-			}
-			else {
-				lua_pushnil (L);
-			}
+	ids = g_malloc (nids * sizeof (guint32));
 
-			/* Now call for squeeze function */
-			if (lua_pcall (L, 2, 1, err_idx) != 0) {
-				GString *tb = lua_touserdata (L, -1);
-				msg_err_config ("call to squeeze_virtual failed: %v", tb);
-
-				if (tb) {
-					g_string_free (tb, TRUE);
-				}
-			}
-
-			ret = lua_tonumber (L, -1);
-		}
-		else {
-			msg_err_config ("lua_squeeze is absent or bad (missing squeeze_virtual),"
-							" your Rspamd installation"
-							" is likely corrupted!");
-		}
+	for (guint i = 0; i < nids; i ++) {
+		ids[i] = rspamd_config_name_to_id (sym_elts[i], strlen (sym_elts[i]));
 	}
-	else if (type & (SYMBOL_TYPE_CALLBACK|SYMBOL_TYPE_NORMAL)) {
-		if (rspamd_lua_require_function (L, "lua_squeeze_rules", "squeeze_rule")) {
-			if (name) {
-				lua_pushstring (L, name);
-			}
-			else {
-				lua_pushnil (L);
-			}
 
-			/* Push function reference */
-			lua_rawgeti (L, LUA_REGISTRYINDEX, cbref);
+	*plen = nids;
+	g_strfreev (sym_elts);
 
-			/* Flags */
-			lua_createtable (L, 0, 0);
-
-			if (type & SYMBOL_TYPE_MIME_ONLY) {
-				lua_pushstring (L, "mime");
-				lua_pushboolean (L, true);
-				lua_settable (L, -3);
-			}
-			if (type & SYMBOL_TYPE_FINE) {
-				lua_pushstring (L, "fine");
-				lua_pushboolean (L, true);
-				lua_settable (L, -3);
-			}
-			if (type & SYMBOL_TYPE_NOSTAT) {
-				lua_pushstring (L, "nostat");
-				lua_pushboolean (L, true);
-				lua_settable (L, -3);
-			}
-			if (type & SYMBOL_TYPE_EXPLICIT_DISABLE) {
-				lua_pushstring (L, "explicit_disable");
-				lua_pushboolean (L, true);
-				lua_settable (L, -3);
-			}
-
-			/* Now call for squeeze function */
-			if (lua_pcall (L, 3, 1, err_idx) != 0) {
-				GString *tb = lua_touserdata (L, -1);
-				msg_err_config ("call to squeeze_rule failed: %v", tb);
-
-				if (tb) {
-					g_string_free (tb, TRUE);
-				}
-			}
-
-			ret = lua_tonumber (L, -1);
-		}
-		else {
-			msg_err_config ("lua_squeeze is absent or bad (missing squeeze_rule),"
-							" your Rspamd installation"
-							" is likely corrupted!");
-		}
-	}
-	/* No squeeze for everything else */
-
-	/* Cleanup lua stack */
-	lua_settop (L, err_idx - 1);
-
-	return ret;
+	return ids;
 }
 
 static gint
@@ -1482,11 +1505,13 @@ rspamd_register_symbol_fromlua (lua_State *L,
 		gint priority,
 		enum rspamd_symbol_type type,
 		gint parent,
-		gboolean optional,
-		gboolean no_squeeze)
+		const gchar *allowed_ids,
+		const gchar *forbidden_ids,
+		gboolean optional)
 {
 	struct lua_callback_data *cd;
 	gint ret = -1;
+	guint32 *ids, nids;
 
 	if (priority == 0 && weight < 0) {
 		priority = 1;
@@ -1505,56 +1530,49 @@ rspamd_register_symbol_fromlua (lua_State *L,
 		}
 	}
 
+	if (allowed_ids && !(type & SYMBOL_TYPE_EXPLICIT_DISABLE)) {
+		/* Mark symbol as explicit allow */
+		msg_info_config ("mark symbol %s as explicit enable as its execution is"
+				   "allowed merely on specific settings ids", name);
+		type |= SYMBOL_TYPE_EXPLICIT_ENABLE;
+	}
+
 	if (ref != -1) {
+		cd = rspamd_mempool_alloc0 (cfg->cfg_pool,
+				sizeof (struct lua_callback_data));
+		cd->magic = rspamd_lua_callback_magic;
+		cd->cb_is_ref = TRUE;
+		cd->callback.ref = ref;
+		cd->L = L;
+
+		if (name) {
+			cd->symbol = rspamd_mempool_strdup (cfg->cfg_pool, name);
+		}
+
 		if (type & SYMBOL_TYPE_USE_CORO) {
-			/* Coroutines are incompatible with squeezing */
-			no_squeeze = TRUE;
+			ret = rspamd_symcache_add_symbol (cfg->cache,
+					name,
+					priority,
+					lua_metric_symbol_callback_coro,
+					cd,
+					type,
+					parent);
 		}
-		/*
-		 * We call for routine called lua_squeeze_rules.squeeze_rule if it exists
-		 */
-		if (no_squeeze || (ret = rspamd_lua_squeeze_rule (L, cfg, name, ref,
-				type, parent)) == -1) {
-			cd = rspamd_mempool_alloc0 (cfg->cfg_pool,
-					sizeof (struct lua_callback_data));
-			cd->magic = rspamd_lua_callback_magic;
-			cd->cb_is_ref = TRUE;
-			cd->callback.ref = ref;
-			cd->L = L;
-
-			if (name) {
-				cd->symbol = rspamd_mempool_strdup (cfg->cfg_pool, name);
-			}
-
-			if (type & SYMBOL_TYPE_USE_CORO) {
-				ret = rspamd_symcache_add_symbol (cfg->cache,
-						name,
-						priority,
-						lua_metric_symbol_callback_coro,
-						cd,
-						type,
-						parent);
-			}
-			else {
-				ret = rspamd_symcache_add_symbol (cfg->cache,
-						name,
-						priority,
-						lua_metric_symbol_callback,
-						cd,
-						type,
-						parent);
-			}
-			rspamd_mempool_add_destructor (cfg->cfg_pool,
-					(rspamd_mempool_destruct_t)lua_destroy_cfg_symbol,
-					cd);
+		else {
+			ret = rspamd_symcache_add_symbol (cfg->cache,
+					name,
+					priority,
+					lua_metric_symbol_callback,
+					cd,
+					type,
+					parent);
 		}
+		rspamd_mempool_add_destructor (cfg->cfg_pool,
+				(rspamd_mempool_destruct_t)lua_destroy_cfg_symbol,
+				cd);
 	}
 	else {
-		if (!no_squeeze) {
-			rspamd_lua_squeeze_rule (L, cfg, name, ref,
-					type, parent);
-		}
-		/* Not a squeezed symbol */
+		/* No callback */
 		ret = rspamd_symcache_add_symbol (cfg->cache,
 				name,
 				priority,
@@ -1562,6 +1580,50 @@ rspamd_register_symbol_fromlua (lua_State *L,
 				NULL,
 				type,
 				parent);
+	}
+
+	if (allowed_ids) {
+		ids = rspamd_process_id_list (allowed_ids, &nids);
+
+		if (nids > 0) {
+			GString *dbg = g_string_new ("");
+
+			for (guint i = 0; i < nids; i ++) {
+				rspamd_printf_gstring (dbg, "%ud,", ids[i]);
+			}
+
+			dbg->len --;
+
+			msg_debug_config ("allowed ids for %s are: %v", name, dbg);
+			g_string_free (dbg, TRUE);
+
+			rspamd_symcache_set_allowed_settings_ids (cfg->cache, name,
+					ids, nids);
+
+			g_free (ids);
+		}
+	}
+
+	if (forbidden_ids) {
+		ids = rspamd_process_id_list (forbidden_ids, &nids);
+
+		if (nids > 0) {
+			GString *dbg = g_string_new ("");
+
+			for (guint i = 0; i < nids; i ++) {
+				rspamd_printf_gstring (dbg, "%ud,", ids[i]);
+			}
+
+			dbg->len --;
+
+			msg_debug_config ("forbidden ids for %s are: %v", name, dbg);
+			g_string_free (dbg, TRUE);
+
+			rspamd_symcache_set_forbidden_settings_ids (cfg->cache, name,
+					ids, nids);
+
+			g_free (ids);
+		}
 	}
 
 	return ret;
@@ -1600,8 +1662,8 @@ lua_config_register_post_filter (lua_State *L)
 				order,
 				SYMBOL_TYPE_POSTFILTER|SYMBOL_TYPE_CALLBACK,
 				-1,
-				FALSE,
-				TRUE);
+				NULL, NULL,
+				FALSE);
 
 		lua_pushboolean (L, ret);
 	}
@@ -1645,8 +1707,8 @@ lua_config_register_pre_filter (lua_State *L)
 				order,
 				SYMBOL_TYPE_PREFILTER|SYMBOL_TYPE_CALLBACK,
 				-1,
-				FALSE,
-				TRUE);
+				NULL, NULL,
+				FALSE);
 
 		lua_pushboolean (L, ret);
 	}
@@ -1683,10 +1745,10 @@ lua_config_get_key (lua_State *L)
 	return 1;
 }
 
-static gint
+static guint
 lua_parse_symbol_flags (const gchar *str)
 {
-	int ret = 0;
+	guint ret = 0;
 
 	if (str) {
 		if (strstr (str, "fine") != NULL) {
@@ -1707,11 +1769,11 @@ lua_parse_symbol_flags (const gchar *str)
 		if (strstr (str, "idempotent") != NULL) {
 			ret |= SYMBOL_TYPE_IDEMPOTENT;
 		}
-		if (strstr (str, "squeezed") != NULL) {
-			ret |= SYMBOL_TYPE_SQUEEZED;
-		}
 		if (strstr (str, "trivial") != NULL) {
 			ret |= SYMBOL_TYPE_TRIVIAL;
+		}
+		if (strstr (str, "ghost") != NULL) {
+			ret |= SYMBOL_TYPE_GHOST;
 		}
 		if (strstr (str, "mime") != NULL) {
 			ret |= SYMBOL_TYPE_MIME_ONLY;
@@ -1722,6 +1784,9 @@ lua_parse_symbol_flags (const gchar *str)
 		if (strstr (str, "explicit_disable") != NULL) {
 			ret |= SYMBOL_TYPE_EXPLICIT_DISABLE;
 		}
+		if (strstr (str, "explicit_enable") != NULL) {
+			ret |= SYMBOL_TYPE_EXPLICIT_ENABLE;
+		}
 		if (strstr (str, "coro") != NULL) {
 			ret |= SYMBOL_TYPE_USE_CORO;
 		}
@@ -1730,10 +1795,10 @@ lua_parse_symbol_flags (const gchar *str)
 	return ret;
 }
 
-static gint
+static guint
 lua_parse_symbol_type (const gchar *str)
 {
-	gint ret = SYMBOL_TYPE_NORMAL;
+	guint ret = SYMBOL_TYPE_NORMAL;
 	gchar **vec;
 	guint i, l;
 
@@ -1780,61 +1845,73 @@ lua_parse_symbol_type (const gchar *str)
 	return ret;
 }
 
+enum lua_push_symbol_flags_opts {
+	LUA_SYMOPT_FLAG_CREATE_ARRAY = 1u << 0u,
+	LUA_SYMOPT_FLAG_CREATE_MAP = 1u << 1u,
+	LUA_SYMOPT_FLAG_USE_MAP = 1u << 2u,
+	LUA_SYMOPT_FLAG_USE_ARRAY = 1u << 3u,
+};
+
+#define LUA_SYMOPT_IS_ARRAY(f) ((f) & (LUA_SYMOPT_FLAG_CREATE_ARRAY|LUA_SYMOPT_FLAG_USE_ARRAY))
+#define LUA_SYMOPT_IS_CREATE(f) ((f) & (LUA_SYMOPT_FLAG_CREATE_ARRAY|LUA_SYMOPT_FLAG_CREATE_MAP))
+#define LUA_OPTION_PUSH(nm) do { \
+	if (LUA_SYMOPT_IS_ARRAY(fl)) { \
+		lua_pushstring (L, #nm); \
+		lua_rawseti (L, -2, i++); \
+	} \
+	else { \
+		lua_pushboolean (L, true); \
+		lua_setfield (L, -2, #nm); \
+	} \
+} while(0)
+
 static void
-lua_push_symbol_flags (lua_State *L, guint flags)
+lua_push_symbol_flags (lua_State *L, guint flags, enum lua_push_symbol_flags_opts fl)
 {
 	guint i = 1;
 
-	lua_newtable (L);
+	if (LUA_SYMOPT_IS_CREATE (fl)) {
+		lua_newtable (L);
+	}
 
 	if (flags & SYMBOL_TYPE_FINE) {
-		lua_pushstring (L, "fine");
-		lua_rawseti (L, -2, i++);
+		LUA_OPTION_PUSH (fine);
 	}
 
 	if (flags & SYMBOL_TYPE_EMPTY) {
-		lua_pushstring (L, "empty");
-		lua_rawseti (L, -2, i++);
-	}
-
-	if (flags & SYMBOL_TYPE_SQUEEZED) {
-		lua_pushstring (L, "squeezed");
-		lua_rawseti (L, -2, i++);
+		LUA_OPTION_PUSH (empty);
 	}
 
 	if (flags & SYMBOL_TYPE_EXPLICIT_DISABLE) {
-		lua_pushstring (L, "explicit_disable");
-		lua_rawseti (L, -2, i++);
+		LUA_OPTION_PUSH (explicit_disable);
+	}
+
+	if (flags & SYMBOL_TYPE_EXPLICIT_ENABLE) {
+		LUA_OPTION_PUSH (explicit_enable);
 	}
 
 	if (flags & SYMBOL_TYPE_IGNORE_PASSTHROUGH) {
-		lua_pushstring (L, "ignore_passthrough");
-		lua_rawseti (L, -2, i++);
+		LUA_OPTION_PUSH (ignore_passthrough);
 	}
 
 	if (flags & SYMBOL_TYPE_NOSTAT) {
-		lua_pushstring (L, "nostat");
-		lua_rawseti (L, -2, i++);
+		LUA_OPTION_PUSH (nostat);
 	}
 
 	if (flags & SYMBOL_TYPE_IDEMPOTENT) {
-		lua_pushstring (L, "idempotent");
-		lua_rawseti (L, -2, i++);
+		LUA_OPTION_PUSH (idempotent);
 	}
 
 	if (flags & SYMBOL_TYPE_MIME_ONLY) {
-		lua_pushstring (L, "mime");
-		lua_rawseti (L, -2, i++);
+		LUA_OPTION_PUSH (mime);
 	}
 
 	if (flags & SYMBOL_TYPE_TRIVIAL) {
-		lua_pushstring (L, "trivial");
-		lua_rawseti (L, -2, i++);
+		LUA_OPTION_PUSH (trivial);
 	}
 
 	if (flags & SYMBOL_TYPE_SKIPPED) {
-		lua_pushstring (L, "skip");
-		lua_rawseti (L, -2, i++);
+		LUA_OPTION_PUSH (skip);
 	}
 }
 
@@ -1850,7 +1927,7 @@ lua_config_get_symbol_flags (lua_State *L)
 				name);
 
 		if (flags != 0) {
-			lua_push_symbol_flags (L, flags);
+			lua_push_symbol_flags (L, flags, LUA_SYMOPT_FLAG_CREATE_ARRAY);
 		}
 		else {
 			lua_pushnil (L);
@@ -1882,7 +1959,7 @@ lua_config_add_symbol_flags (lua_State *L)
 		if (flags != 0) {
 			rspamd_symcache_add_symbol_flags (cfg->cache, name, new_flags);
 			/* Push old flags */
-			lua_push_symbol_flags (L, flags);
+			lua_push_symbol_flags (L, flags, LUA_SYMOPT_FLAG_CREATE_ARRAY);
 		}
 		else {
 			lua_pushnil (L);
@@ -1901,28 +1978,28 @@ lua_config_register_symbol (lua_State * L)
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	const gchar *name = NULL, *flags_str = NULL, *type_str = NULL,
-			*description = NULL, *group = NULL;
+			*description = NULL, *group = NULL, *allowed_ids = NULL,
+			*forbidden_ids = NULL;
 	double weight = 0, score = NAN, parent_float = NAN;
-	gboolean one_shot = FALSE, no_squeeze = FALSE;
+	gboolean one_shot = FALSE;
 	gint ret = -1, cbref = -1, type, flags = 0;
 	gint64 parent = 0, priority = 0, nshots = 0;
 	GError *err = NULL;
 
 	if (cfg) {
 		if (!rspamd_lua_parse_table_arguments (L, 2, &err,
+				RSPAMD_LUA_PARSE_ARGUMENTS_DEFAULT,
 				"name=S;weight=N;callback=F;flags=S;type=S;priority=I;parent=D;"
-				"score=D;description=S;group=S;one_shot=B;nshots=I;no_squeeze=B",
+				"score=D;description=S;group=S;one_shot=B;nshots=I;"
+				"allowed_ids=S;forbidden_ids=S",
 				&name, &weight, &cbref, &flags_str, &type_str,
 				&priority, &parent_float,
-				&score, &description, &group, &one_shot, &nshots, &no_squeeze)) {
+				&score, &description, &group, &one_shot, &nshots,
+				&allowed_ids, &forbidden_ids)) {
 			msg_err_config ("bad arguments: %e", err);
 			g_error_free (err);
 
 			return luaL_error (L, "invalid arguments");
-		}
-
-		if (!no_squeeze) {
-			no_squeeze = cfg->disable_lua_squeeze;
 		}
 
 		if (nshots == 0) {
@@ -1939,9 +2016,6 @@ lua_config_register_symbol (lua_State * L)
 		}
 
 		if (flags_str) {
-			/* Turn off squeezing as well for now */
-			/* TODO: deal with it */
-			no_squeeze = TRUE;
 			type |= lua_parse_symbol_flags (flags_str);
 		}
 
@@ -1960,8 +2034,8 @@ lua_config_register_symbol (lua_State * L)
 				priority,
 				type,
 				parent,
-				FALSE,
-				no_squeeze);
+				allowed_ids, forbidden_ids,
+				FALSE);
 
 		if (!isnan (score) || group) {
 			if (one_shot) {
@@ -1971,12 +2045,12 @@ lua_config_register_symbol (lua_State * L)
 			if (!isnan (score)) {
 				rspamd_config_add_symbol (cfg, name,
 						score, description, group, flags,
-						(guint) priority, nshots);
+						0, nshots);
 			}
 			else {
 				rspamd_config_add_symbol (cfg, name,
 						0.0, description, group, flags,
-						(guint) priority, nshots);
+						0, nshots);
 			}
 
 			lua_pushstring (L, "groups");
@@ -2049,7 +2123,7 @@ lua_config_register_symbols (lua_State *L)
 				0,
 				SYMBOL_TYPE_CALLBACK,
 				-1,
-				FALSE,
+				NULL, NULL,
 				FALSE);
 
 		for (i = top; i <= lua_gettop (L); i++) {
@@ -2141,8 +2215,8 @@ lua_config_register_callback_symbol (lua_State * L)
 				0,
 				SYMBOL_TYPE_CALLBACK,
 				-1,
-				FALSE,
-				lua_type (L, top + 1) == LUA_TSTRING);
+				NULL, NULL,
+				FALSE);
 	}
 
 	lua_pushinteger (L, ret);
@@ -2184,8 +2258,8 @@ lua_config_register_callback_symbol_priority (lua_State * L)
 				priority,
 				SYMBOL_TYPE_CALLBACK,
 				-1,
-				FALSE,
-				lua_type (L, top + 2) == LUA_TSTRING);
+				NULL, NULL,
+				FALSE);
 	}
 
 	lua_pushinteger (L, ret);
@@ -2193,44 +2267,6 @@ lua_config_register_callback_symbol_priority (lua_State * L)
 	return 1;
 }
 
-static gboolean
-rspamd_lua_squeeze_dependency (lua_State *L, struct rspamd_config *cfg,
-		const gchar *child,
-		const gchar *parent)
-{
-	gint err_idx;
-	gboolean ret = FALSE;
-
-	g_assert (parent != NULL);
-	g_assert (child != NULL);
-
-	lua_pushcfunction (L, &rspamd_lua_traceback);
-	err_idx = lua_gettop (L);
-
-	if (rspamd_lua_require_function (L, "lua_squeeze_rules", "squeeze_dependency")) {
-		lua_pushstring (L, child);
-		lua_pushstring (L, parent);
-
-		if (lua_pcall (L, 2, 1, err_idx) != 0) {
-			GString *tb = lua_touserdata (L, -1);
-			msg_err_config ("call to squeeze_dependency script failed: %v", tb);
-
-			if (tb) {
-				g_string_free (tb, TRUE);
-			}
-		}
-		else {
-			ret = lua_toboolean (L, -1);
-		}
-	}
-	else {
-		msg_err_config ("cannot get lua_squeeze_rules.squeeze_dependency function");
-	}
-
-	lua_settop (L, err_idx - 1);
-
-	return ret;
-}
 
 static gint
 lua_config_register_dependency (lua_State * L)
@@ -2239,50 +2275,32 @@ lua_config_register_dependency (lua_State * L)
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	const gchar *parent = NULL, *child = NULL;
 	gint child_id;
-	gboolean skip_squeeze;
 
 	if (cfg == NULL) {
 		lua_error (L);
 		return 0;
 	}
 
-	skip_squeeze = cfg->disable_lua_squeeze;
-
 	if (lua_type (L, 2) == LUA_TNUMBER) {
 		child_id = luaL_checknumber (L, 2);
 		parent = luaL_checkstring (L, 3);
-
-		if (!skip_squeeze && lua_isboolean (L, 4)) {
-			skip_squeeze = lua_toboolean (L, 4);
-		}
 
 		msg_warn_config ("calling for obsolete method to register deps for symbol %d->%s",
 				child_id, parent);
 
 		if (child_id > 0 && parent != NULL) {
 
-			if (skip_squeeze || !rspamd_lua_squeeze_dependency (L, cfg,
-					rspamd_symcache_symbol_by_id (cfg->cache, child_id),
-					parent)) {
-				rspamd_symcache_add_dependency (cfg->cache, child_id, parent);
-			}
+			rspamd_symcache_add_dependency (cfg->cache, child_id, parent,
+					-1);
 		}
 	}
 	else {
 		child = luaL_checkstring (L,2);
 		parent = luaL_checkstring (L, 3);
 
-		if (!skip_squeeze && lua_isboolean (L, 4)) {
-			skip_squeeze = lua_toboolean (L, 4);
-		}
-
 		if (child != NULL && parent != NULL) {
-
-			if (skip_squeeze || !rspamd_lua_squeeze_dependency (L, cfg, child, parent)) {
-				rspamd_symcache_add_delayed_dependency (cfg->cache, child,
-						parent);
-			}
-
+			rspamd_symcache_add_delayed_dependency (cfg->cache, child,
+					parent);
 		}
 	}
 
@@ -2307,6 +2325,7 @@ lua_config_set_metric_symbol (lua_State * L)
 
 		if (lua_type (L, 2) == LUA_TTABLE) {
 			if (!rspamd_lua_parse_table_arguments (L, 2, &err,
+					RSPAMD_LUA_PARSE_ARGUMENTS_DEFAULT,
 					"*name=S;score=N;description=S;"
 					"group=S;one_shot=B;one_param=B;priority=N;flags=S;"
 					"nshots=I",
@@ -2353,7 +2372,7 @@ lua_config_set_metric_symbol (lua_State * L)
 				nshots = 1;
 			}
 			if (strstr (flags_str, "ignore") != NULL) {
-				flags |= RSPAMD_SYMBOL_FLAG_IGNORE;
+				flags |= RSPAMD_SYMBOL_FLAG_IGNORE_METRIC;
 			}
 			if (strstr (flags_str, "one_param") != NULL) {
 				flags |= RSPAMD_SYMBOL_FLAG_ONEPARAM;
@@ -2456,6 +2475,7 @@ lua_config_set_metric_action (lua_State * L)
 
 		if (lua_type (L, 2) == LUA_TTABLE) {
 			if (!rspamd_lua_parse_table_arguments (L, 2, &err,
+					RSPAMD_LUA_PARSE_ARGUMENTS_DEFAULT,
 					"*action=S;score=N;"
 					"priority=N",
 					&name, &threshold,
@@ -2621,14 +2641,13 @@ lua_config_newindex (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
-	const gchar *name;
+	const gchar *name, *allowed_ids = NULL, *forbidden_ids = NULL;
 	gint id, nshots, flags = 0;
-	gboolean optional = FALSE, no_squeeze = FALSE;
+	gboolean optional = FALSE;
 
 	name = luaL_checkstring (L, 2);
 
 	if (cfg != NULL && name != NULL && lua_gettop (L) == 3) {
-		no_squeeze = cfg->disable_lua_squeeze;
 
 		if (lua_type (L, 3) == LUA_TFUNCTION) {
 			/* Normal symbol from just a function */
@@ -2641,15 +2660,14 @@ lua_config_newindex (lua_State *L)
 					0,
 					SYMBOL_TYPE_NORMAL,
 					-1,
-					FALSE,
-					no_squeeze);
+					NULL, NULL,
+					FALSE);
 		}
 		else if (lua_type (L, 3) == LUA_TTABLE) {
 			gint type = SYMBOL_TYPE_NORMAL, priority = 0, idx;
 			gdouble weight = 1.0, score = NAN;
 			const char *type_str, *group = NULL, *description = NULL;
 
-			no_squeeze = cfg->disable_lua_squeeze;
 			/*
 			 * Table can have the following attributes:
 			 * "callback" - should be a callback function
@@ -2718,23 +2736,21 @@ lua_config_newindex (lua_State *L)
 			}
 			lua_pop (L, 1);
 
-			lua_pushstring (L, "condition");
+			lua_pushstring (L, "allowed_ids");
 			lua_gettable (L, -2);
 
-			if (lua_type (L, -1) == LUA_TFUNCTION) {
-				no_squeeze = TRUE;
+			if (lua_type (L, -1) == LUA_TSTRING) {
+				allowed_ids = lua_tostring (L, -1);
 			}
 			lua_pop (L, 1);
 
-			if (!no_squeeze) {
-				lua_pushstring (L, "no_squeeze");
-				lua_gettable (L, -2);
+			lua_pushstring (L, "forbidden_ids");
+			lua_gettable (L, -2);
 
-				if (lua_toboolean (L, -1)) {
-					no_squeeze = TRUE;
-				}
-				lua_pop (L, 1);
+			if (lua_type (L, -1) == LUA_TSTRING) {
+				forbidden_ids = lua_tostring (L, -1);
 			}
+			lua_pop (L, 1);
 
 			id = rspamd_register_symbol_fromlua (L,
 					cfg,
@@ -2744,8 +2760,8 @@ lua_config_newindex (lua_State *L)
 					priority,
 					type,
 					-1,
-					optional,
-					no_squeeze);
+					allowed_ids, forbidden_ids,
+					optional);
 
 			if (id != -1) {
 				/* Check for condition */
@@ -2926,9 +2942,14 @@ lua_config_disable_symbol (lua_State *L)
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	const gchar *sym = luaL_checkstring (L, 2);
+	gboolean disable_parent = TRUE;
 
 	if (cfg && sym) {
-		rspamd_symcache_disable_symbol_perm (cfg->cache, sym);
+		if (lua_isboolean (L, 3)) {
+			disable_parent = lua_toboolean (L, 3);
+		}
+
+		rspamd_symcache_disable_symbol_perm (cfg->cache, sym, disable_parent);
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
@@ -2965,6 +2986,7 @@ lua_config_register_regexp (lua_State *L)
 	 */
 	if (cfg != NULL) {
 		if (!rspamd_lua_parse_table_arguments (L, 2, &err,
+				RSPAMD_LUA_PARSE_ARGUMENTS_DEFAULT,
 				"*re=U{regexp};*type=S;header=S;pcre_only=B",
 				&re, &type_str, &header_str, &pcre_only)) {
 			msg_err_config ("cannot get parameters list: %e", err);
@@ -3031,6 +3053,7 @@ lua_config_replace_regexp (lua_State *L)
 
 	if (cfg != NULL) {
 		if (!rspamd_lua_parse_table_arguments (L, 2, &err,
+				RSPAMD_LUA_PARSE_ARGUMENTS_DEFAULT,
 				"*old_re=U{regexp};*new_re=U{regexp}",
 				&old_re, &new_re)) {
 			msg_err_config ("cannot get parameters list: %e", err);
@@ -3085,42 +3108,99 @@ lua_config_add_on_load (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
-	struct rspamd_config_post_load_script *sc;
+	struct rspamd_config_cfg_lua_script *sc;
 
 	if (cfg == NULL || lua_type (L, 2) != LUA_TFUNCTION) {
 		return luaL_error (L, "invalid arguments");
 	}
 
-	sc = g_malloc0 (sizeof (*sc));
+	sc = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*sc));
 	lua_pushvalue (L, 2);
 	sc->cbref = luaL_ref (L, LUA_REGISTRYINDEX);
-	DL_APPEND (cfg->on_load, sc);
+	DL_APPEND (cfg->on_load_scripts, sc);
 
 	return 0;
 }
+
+static gint
+lua_config_add_post_init (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_config *cfg = lua_check_config (L, 1);
+	struct rspamd_config_cfg_lua_script *sc;
+
+	if (cfg == NULL || lua_type (L, 2) != LUA_TFUNCTION) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	sc = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*sc));
+	lua_pushvalue (L, 2);
+	sc->cbref = luaL_ref (L, LUA_REGISTRYINDEX);
+	DL_APPEND (cfg->post_init_scripts, sc);
+
+	return 0;
+}
+
+static gint
+lua_config_add_config_unload (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_config *cfg = lua_check_config (L, 1);
+	struct rspamd_config_cfg_lua_script *sc;
+
+	if (cfg == NULL || lua_type (L, 2) != LUA_TFUNCTION) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	sc = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*sc));
+	lua_pushvalue (L, 2);
+	sc->cbref = luaL_ref (L, LUA_REGISTRYINDEX);
+	DL_APPEND (cfg->config_unload_scripts, sc);
+
+	return 0;
+}
+
 
 static void lua_periodic_callback_finish (struct thread_entry *thread, int ret);
 static void lua_periodic_callback_error (struct thread_entry *thread, int ret, const char *msg);
 
 struct rspamd_lua_periodic {
-	struct event_base *ev_base;
+	struct ev_loop *event_loop;
 	struct rspamd_config *cfg;
+	gchar *lua_src_pos;
 	lua_State *L;
 	gdouble timeout;
-	struct event ev;
+	ev_timer ev;
 	gint cbref;
 	gboolean need_jitter;
+	ref_entry_t ref;
 };
 
 static void
-lua_periodic_callback (gint unused_fd, short what, gpointer ud)
+lua_periodic_dtor (struct rspamd_lua_periodic *periodic)
 {
-	struct rspamd_lua_periodic *periodic = ud;
+	luaL_unref (periodic->L, LUA_REGISTRYINDEX, periodic->cbref);
+	ev_timer_stop (periodic->event_loop, &periodic->ev);
+}
+
+static void
+lua_periodic_fin (gpointer p)
+{
+	struct rspamd_lua_periodic *periodic = (struct rspamd_lua_periodic *)p;
+
+	REF_RELEASE (periodic);
+}
+
+static void
+lua_periodic_callback (struct ev_loop *loop, ev_timer *w, int revents)
+{
+	struct rspamd_lua_periodic *periodic = (struct rspamd_lua_periodic *)w->data;
 	struct rspamd_config **pcfg, *cfg;
-	struct event_base **pev_base;
+	struct ev_loop **pev_base;
 	struct thread_entry *thread;
 	lua_State *L;
 
+	REF_RETAIN (periodic);
 	thread = lua_thread_pool_get_for_config (periodic->cfg);
 	thread->cd = periodic;
 	thread->finish_callback = lua_periodic_callback_finish;
@@ -3135,10 +3215,10 @@ lua_periodic_callback (gint unused_fd, short what, gpointer ud)
 	*pcfg = cfg;
 	pev_base = lua_newuserdata (L, sizeof (*pev_base));
 	rspamd_lua_setclass (L, "rspamd{ev_base}", -1);
-	*pev_base = periodic->ev_base;
+	*pev_base = periodic->event_loop;
+	lua_pushnumber (L, ev_now (periodic->event_loop));
 
-	event_del (&periodic->ev);
-	lua_thread_call (thread, 2);
+	lua_thread_call (thread, 3);
 }
 
 static void
@@ -3147,14 +3227,11 @@ lua_periodic_callback_finish (struct thread_entry *thread, int ret)
 	lua_State *L;
 	struct rspamd_lua_periodic *periodic = thread->cd;
 	gboolean plan_more = FALSE;
-	struct timeval tv;
 	gdouble timeout = 0.0;
 
 	L = thread->lua_state;
 
-#ifdef HAVE_EVENT_NO_CACHE_TIME_FUNC
-	event_base_update_cache_time (periodic->ev_base);
-#endif
+	ev_now_update (periodic->event_loop);
 
 	if (ret == 0) {
 		if (lua_type (L, -1) == LUA_TBOOLEAN) {
@@ -3168,18 +3245,27 @@ lua_periodic_callback_finish (struct thread_entry *thread, int ret)
 
 		lua_pop (L, 1); /* Return value */
 	}
+
+	if (periodic->cfg->cur_worker) {
+		if (periodic->cfg->cur_worker->state != rspamd_worker_state_running) {
+			/* We are terminating, no more periodics */
+			plan_more = FALSE;
+		}
+	}
+
 	if (plan_more) {
 		if (periodic->need_jitter) {
 			timeout = rspamd_time_jitter (timeout, 0.0);
 		}
 
-		double_to_tv (timeout, &tv);
-		event_add (&periodic->ev, &tv);
+		periodic->ev.repeat = timeout;
+		ev_timer_again (periodic->event_loop, &periodic->ev);
 	}
 	else {
-		luaL_unref (L, LUA_REGISTRYINDEX, periodic->cbref);
-		g_free (periodic);
+		ev_timer_stop (periodic->event_loop, &periodic->ev);
 	}
+
+	REF_RELEASE (periodic);
 }
 
 static void
@@ -3189,9 +3275,10 @@ lua_periodic_callback_error (struct thread_entry *thread, int ret, const char *m
 	struct rspamd_lua_periodic *periodic = thread->cd;
 	cfg = periodic->cfg;
 
-	msg_err_config ("call to finishing script failed: %s", msg);
+	msg_err_config ("call to periodic script (registered at %s) failed: %s",
+			periodic->lua_src_pos, msg);
 
-	lua_periodic_callback_finish(thread, ret);
+	lua_periodic_callback_finish (thread, ret);
 }
 
 
@@ -3200,11 +3287,12 @@ lua_config_add_periodic (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
-	struct event_base *ev_base = lua_check_ev_base (L, 2);
+	struct ev_loop *ev_base = lua_check_ev_base (L, 2);
 	gdouble timeout = lua_tonumber (L, 3);
-	struct timeval tv;
 	struct rspamd_lua_periodic *periodic;
 	gboolean need_jitter = FALSE;
+	lua_Debug d;
+	gchar tmp[256], *p;
 
 	if (cfg == NULL || timeout < 0 || lua_type (L, 4) != LUA_TFUNCTION) {
 		return luaL_error (L, "invalid arguments");
@@ -3214,23 +3302,46 @@ lua_config_add_periodic (lua_State *L)
 		need_jitter = lua_toboolean (L, 5);
 	}
 
-	periodic = g_malloc0 (sizeof (*periodic));
+	if (lua_getstack (L, 1, &d) == 1) {
+		(void) lua_getinfo (L, "Sl", &d);
+		if ((p = strrchr (d.short_src, '/')) == NULL) {
+			p = d.short_src;
+		}
+		else {
+			p++;
+		}
+
+		if (strlen (p) > 20) {
+			rspamd_snprintf (tmp, sizeof (tmp), "%10s...]:%d", p,
+					d.currentline);
+		}
+		else {
+			rspamd_snprintf (tmp, sizeof (tmp), "%s:%d", p,
+					d.currentline);
+		}
+	}
+
+	periodic = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*periodic));
 	periodic->timeout = timeout;
 	periodic->L = L;
 	periodic->cfg = cfg;
-	periodic->ev_base = ev_base;
+	periodic->event_loop = ev_base;
 	periodic->need_jitter = need_jitter;
+	periodic->lua_src_pos = rspamd_mempool_strdup (cfg->cfg_pool, tmp);
 	lua_pushvalue (L, 4);
 	periodic->cbref = luaL_ref (L, LUA_REGISTRYINDEX);
-	event_set (&periodic->ev, -1, EV_TIMEOUT, lua_periodic_callback, periodic);
-	event_base_set (ev_base, &periodic->ev);
 
 	if (need_jitter) {
 		timeout = rspamd_time_jitter (timeout, 0.0);
 	}
 
-	double_to_tv (timeout, &tv);
-	event_add (&periodic->ev, &tv);
+	ev_timer_init (&periodic->ev, lua_periodic_callback, timeout, 0.0);
+	periodic->ev.data = periodic;
+	ev_timer_start (ev_base, &periodic->ev);
+	REF_INIT_RETAIN (periodic, lua_periodic_dtor);
+
+	rspamd_mempool_add_destructor (cfg->cfg_pool, lua_periodic_fin,
+			periodic);
 
 	return 0;
 }
@@ -3293,16 +3404,27 @@ lua_config_get_symbols_counters (lua_State *L)
 
 	return 1;
 }
+
+struct lua_metric_symbols_cbdata {
+	lua_State *L;
+	struct rspamd_config *cfg;
+};
+
 static void
 lua_metric_symbol_inserter (gpointer k, gpointer v, gpointer ud)
 {
-	lua_State *L = (lua_State *) ud;
+	struct lua_metric_symbols_cbdata *cbd = (struct lua_metric_symbols_cbdata *)ud;
+	lua_State *L;
 	const gchar *sym = k;
 	struct rspamd_symbol *s = (struct rspamd_symbol *) v;
+	struct rspamd_symbols_group *gr;
+	gint i;
 
-	lua_pushstring (L, sym);
+	L = cbd->L;
 
-	lua_createtable (L, 0, 3); /* TODO: add more if needed */
+	lua_pushstring (L, sym); /* Symbol name */
+
+	lua_createtable (L, 0, 6);
 	lua_pushstring (L, "score");
 	lua_pushnumber (L, s->score);
 	lua_settable (L, -3);
@@ -3310,20 +3432,113 @@ lua_metric_symbol_inserter (gpointer k, gpointer v, gpointer ud)
 	lua_pushstring (L, s->description);
 	lua_settable (L, -3);
 
+	lua_pushstring (L, "flags");
+	lua_createtable (L, 0, 3);
+
+	if (s->flags & RSPAMD_SYMBOL_FLAG_IGNORE_METRIC) {
+		lua_pushstring (L, "ignore");
+		lua_pushboolean (L, true);
+		lua_settable (L, -3);
+	}
+	if (s->flags & RSPAMD_SYMBOL_FLAG_ONEPARAM) {
+		lua_pushstring (L, "oneparam");
+		lua_pushboolean (L, true);
+		lua_settable (L, -3);
+	}
+	if (s->flags & RSPAMD_SYMBOL_FLAG_UNGROUPPED) {
+		lua_pushstring (L, "ungroupped");
+		lua_pushboolean (L, true);
+		lua_settable (L, -3);
+	}
+	if (s->flags & RSPAMD_SYMBOL_FLAG_DISABLED) {
+		lua_pushstring (L, "disabled");
+		lua_pushboolean (L, true);
+		lua_settable (L, -3);
+	}
+
+	if (s->cache_item) {
+		guint sflags = rspamd_symcache_get_symbol_flags (cbd->cfg->cache, sym);
+
+		lua_push_symbol_flags (L, sflags, LUA_SYMOPT_FLAG_USE_MAP);
+
+		guint nids;
+		const guint *allowed_ids = rspamd_symcache_get_allowed_settings_ids (cbd->cfg->cache,
+				sym, &nids);
+
+		if (allowed_ids && nids > 0) {
+			lua_createtable (L, nids, 0);
+
+			for (i = 0; i < nids; i ++) {
+				lua_pushinteger (L, allowed_ids[i]);
+				lua_rawseti (L, -2, i + 1);
+			}
+
+			lua_setfield (L, -2, "allowed_ids");
+		}
+
+		const guint *forbidden_ids = rspamd_symcache_get_forbidden_settings_ids (
+				cbd->cfg->cache,
+				sym, &nids);
+
+		if (forbidden_ids && nids > 0) {
+			lua_createtable (L, nids, 0);
+
+			for (i = 0; i < nids; i ++) {
+				lua_pushinteger (L, forbidden_ids[i]);
+				lua_rawseti (L, -2, i + 1);
+			}
+
+			lua_setfield (L, -2, "forbidden_ids");
+		}
+	}
+
+	lua_settable (L, -3); /* Flags -> flags_table */
+
+	lua_pushstring (L, "nshots");
+	lua_pushinteger (L, s->nshots);
 	lua_settable (L, -3);
+
+	if (s->gr) {
+		lua_pushstring (L, "group");
+		lua_pushstring (L, s->gr->name);
+		lua_settable (L, -3);
+	}
+
+	if (s->groups && s->groups->len > 0) {
+		lua_pushstring (L, "groups");
+		lua_createtable (L, s->groups->len, 0);
+
+		PTR_ARRAY_FOREACH (s->groups, i, gr) {
+			lua_pushstring (L, gr->name);
+			lua_rawseti (L, -2, i + 1); /* Groups[i + 1] = group_name */
+		}
+
+		lua_settable (L, -3); /* Groups -> groups_table */
+	}
+	else {
+		lua_createtable (L, 0, 0);
+		lua_setfield (L, -2, "groups");
+	}
+
+	lua_settable (L, -3); /* Symname -> table */
 }
 
 static gint
-lua_config_get_symbols_scores (lua_State *L)
+lua_config_get_symbols (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 
 	if (cfg != NULL) {
+		struct lua_metric_symbols_cbdata cbd;
+
+		cbd.L = L;
+		cbd.cfg = cfg;
+
 		lua_createtable (L, 0, g_hash_table_size (cfg->symbols));
 		g_hash_table_foreach (cfg->symbols,
 				lua_metric_symbol_inserter,
-				L);
+				&cbd);
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
@@ -3465,17 +3680,171 @@ lua_config_get_symbol_parent (lua_State *L)
 }
 
 static gint
+lua_config_get_group_symbols (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_config *cfg = lua_check_config (L, 1);
+	const gchar *gr_name = luaL_checkstring (L, 2);
+
+	if (cfg != NULL && gr_name != NULL) {
+		struct rspamd_symbols_group *group;
+
+		group = g_hash_table_lookup (cfg->groups, gr_name);
+
+		if (group == NULL) {
+			lua_pushnil (L);
+		}
+		else {
+			guint i = 1;
+			gpointer k, v;
+			GHashTableIter it;
+
+			lua_createtable (L, g_hash_table_size (group->symbols), 0);
+			g_hash_table_iter_init (&it, group->symbols);
+
+			while (g_hash_table_iter_next (&it, &k, &v)) {
+				lua_pushstring (L, k);
+				lua_rawseti (L, -2, i);
+				i ++;
+			}
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_config_get_groups (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_config *cfg = lua_check_config (L, 1);
+	gboolean need_private;
+	struct rspamd_symbols_group *gr;
+	GHashTableIter it;
+	gpointer k, v;
+
+	if (cfg) {
+		if (lua_isboolean (L, 2)) {
+			need_private = lua_toboolean (L, 2);
+		}
+		else {
+			need_private = !(cfg->public_groups_only);
+		}
+
+		lua_createtable (L, 0, g_hash_table_size (cfg->groups));
+		g_hash_table_iter_init (&it, cfg->groups);
+
+		while (g_hash_table_iter_next (&it, &k, &v)) {
+			gr = (struct rspamd_symbols_group *)v;
+
+			if (need_private || (gr->flags & RSPAMD_SYMBOL_GROUP_PUBLIC)) {
+				lua_createtable (L, 0, 4);
+
+				lua_pushstring (L, gr->description);
+				lua_setfield (L, -2, "description");
+				lua_pushnumber (L, gr->max_score);
+				lua_setfield (L, -2, "max_score");
+				lua_pushboolean (L, (gr->flags & RSPAMD_SYMBOL_GROUP_PUBLIC) != 0);
+				lua_setfield (L, -2, "is_public");
+				/* TODO: maybe push symbols as well */
+
+				/* Parent table indexed by group name */
+				lua_setfield (L, -2, gr->name);
+			}
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
 lua_config_register_finish_script (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
-	struct rspamd_config_post_load_script *sc;
+	struct rspamd_config_cfg_lua_script *sc;
 
 	if (cfg != NULL && lua_type (L, 2) == LUA_TFUNCTION) {
-		sc = g_malloc0 (sizeof (*sc));
+		sc = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*sc));
 		lua_pushvalue (L, 2);
 		sc->cbref = luaL_ref (L, LUA_REGISTRYINDEX);
-		DL_APPEND (cfg->finish_callbacks, sc);
+		DL_APPEND (cfg->on_term_scripts, sc);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 0;
+}
+
+static gint
+lua_config_register_settings_id (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_config *cfg = lua_check_config (L, 1);
+	const gchar *settings_name = luaL_checkstring (L, 2);
+
+	if (cfg != NULL && settings_name) {
+		ucl_object_t *sym_enabled, *sym_disabled;
+		enum rspamd_config_settings_policy policy = RSPAMD_SETTINGS_POLICY_DEFAULT;
+
+		sym_enabled = ucl_object_lua_import (L, 3);
+
+		if (sym_enabled != NULL && ucl_object_type (sym_enabled) != UCL_OBJECT) {
+			ucl_object_unref (sym_enabled);
+
+			return luaL_error (L, "invalid symbols enabled");
+		}
+
+		sym_disabled = ucl_object_lua_import (L, 4);
+
+		if (sym_disabled != NULL && ucl_object_type (sym_disabled) != UCL_OBJECT) {
+			ucl_object_unref (sym_enabled);
+			ucl_object_unref (sym_disabled);
+
+			return luaL_error (L, "invalid symbols enabled");
+		}
+
+		/* Check policy */
+		if (lua_isstring (L, 5)) {
+			const gchar *policy_str = lua_tostring (L, 5);
+
+			if (strcmp (policy_str, "default") == 0) {
+				policy = RSPAMD_SETTINGS_POLICY_DEFAULT;
+			}
+			else if (strcmp (policy_str, "implicit_allow") == 0) {
+				policy = RSPAMD_SETTINGS_POLICY_IMPLICIT_ALLOW;
+			}
+			else if (strcmp (policy_str, "implicit_deny") == 0) {
+				policy = RSPAMD_SETTINGS_POLICY_IMPLICIT_DENY;
+			}
+			else {
+				return luaL_error (L, "invalid settings policy: %s", policy_str);
+			}
+		}
+		else {
+			/* Apply heuristic */
+			if (!sym_enabled) {
+				policy = RSPAMD_SETTINGS_POLICY_IMPLICIT_ALLOW;
+			}
+		}
+
+		rspamd_config_register_settings_id (cfg, settings_name, sym_enabled,
+				sym_disabled, policy);
+
+		if (sym_enabled) {
+			ucl_object_unref (sym_enabled);
+		}
+
+		if (sym_disabled) {
+			ucl_object_unref (sym_disabled);
+		}
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
@@ -3559,6 +3928,7 @@ lua_config_add_doc (lua_State *L)
 	if (cfg && option && doc_string) {
 		if (lua_type (L, 5) == LUA_TTABLE) {
 			if (!rspamd_lua_parse_table_arguments (L, 5, &err,
+					RSPAMD_LUA_PARSE_ARGUMENTS_DEFAULT,
 					"type=S;default=S;required=B",
 					&type_str, &default_value, &required)) {
 				msg_err_config ("cannot get parameters list: %e", err);
@@ -3672,27 +4042,8 @@ lua_config_get_cpu_flags (lua_State *L)
 static gint
 lua_config_has_torch (lua_State *L)
 {
-	LUA_TRACE_POINT;
-	struct rspamd_config *cfg = lua_check_config (L, 1);
-	struct rspamd_cryptobox_library_ctx *crypto_ctx;
-
-	if (cfg != NULL) {
-		crypto_ctx = cfg->libs_ctx->crypto_ctx;
-#if !defined(WITH_TORCH) || !defined(WITH_LUAJIT)
-		lua_pushboolean (L, false);
-		(void)crypto_ctx;
-#else
-		if (crypto_ctx->cpu_config & CPUID_SSE2) {
-			lua_pushboolean (L, true);
-		}
-		else {
-			lua_pushboolean (L, false);
-		}
-#endif
-	}
-	else {
-		return luaL_error (L, "invalid arguments");
-	}
+	msg_warn ("use of the obsoleted `has_torch` function");
+	lua_pushboolean (L, false);
 
 	return 1;
 }
@@ -3729,7 +4080,6 @@ lua_include_trace_cb (struct ucl_parser *parser,
 	struct rspamd_lua_include_trace_cbdata *cbdata =
 			(struct rspamd_lua_include_trace_cbdata *)user_data;
 	gint err_idx;
-	GString *tb;
 	lua_State *L;
 
 	L = cbdata->L;
@@ -3757,11 +4107,7 @@ lua_include_trace_cb (struct ucl_parser *parser,
 	}
 
 	if (lua_pcall (L, 4, 0, err_idx) != 0) {
-		tb = lua_touserdata (L, -1);
-		msg_err ("lua call to local include trace failed: %v", tb);
-		if (tb) {
-			g_string_free (tb, TRUE);
-		}
+		msg_err ("lua call to local include trace failed: %s", lua_tostring (L, -1));
 	}
 
 	lua_settop (L, err_idx - 1);
@@ -3939,13 +4285,18 @@ lua_config_init_subsystem (lua_State *L)
 				rspamd_init_filters (cfg, FALSE);
 			}
 			else if (strcmp (parts[i], "langdet") == 0) {
-				cfg->lang_det = rspamd_language_detector_init (cfg);
+				if (!cfg->lang_det) {
+					cfg->lang_det = rspamd_language_detector_init (cfg);
+					rspamd_mempool_add_destructor (cfg->cfg_pool,
+							(rspamd_mempool_destruct_t) rspamd_language_detector_unref,
+							cfg->lang_det);
+				}
 			}
 			else if (strcmp (parts[i], "stat") == 0) {
 				rspamd_stat_init (cfg, NULL);
 			}
 			else if (strcmp (parts[i], "dns") == 0) {
-				struct event_base *ev_base = lua_check_ev_base (L, 3);
+				struct ev_loop *ev_base = lua_check_ev_base (L, 3);
 
 				if (ev_base) {
 					cfg->dns_resolver = rspamd_dns_resolver_init (rspamd_logger_get_singleton (),
@@ -4011,7 +4362,6 @@ lua_config_register_re_selector (lua_State *L)
 				}
 				else {
 					gint err_idx, ret;
-					GString *tb;
 					struct rspamd_config **pcfg;
 
 					lua_pushcfunction (L, &rspamd_lua_traceback);
@@ -4027,13 +4377,9 @@ lua_config_register_re_selector (lua_State *L)
 					lua_pushstring (L, delimiter);
 
 					if ((ret = lua_pcall (L, 3, 1, err_idx)) != 0) {
-						tb = lua_touserdata (L, -1);
 						msg_err_config ("call to create_selector_closure lua "
-										"script failed (%d): %v", ret, tb);
-
-						if (tb) {
-							g_string_free (tb, TRUE);
-						}
+										"script failed (%d): %s", ret,
+										lua_tostring (L, -1));
 					}
 					else {
 						if (lua_type (L, -1) != LUA_TFUNCTION) {
@@ -4075,6 +4421,22 @@ lua_config_get_tld_path (lua_State *L)
 
 	if (cfg != NULL) {
 		lua_pushstring (L, cfg->tld_file);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_config_get_dns_max_requests (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_config *cfg = lua_check_config (L, 1);
+
+	if (cfg != NULL) {
+		lua_pushinteger (L, cfg->dns_max_requests);
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
@@ -4160,7 +4522,7 @@ luaopen_config (lua_State * L)
 }
 
 void
-lua_call_finish_script (struct rspamd_config_post_load_script *sc,
+lua_call_finish_script (struct rspamd_config_cfg_lua_script *sc,
 		struct rspamd_task *task) {
 
 	struct rspamd_task **ptask;

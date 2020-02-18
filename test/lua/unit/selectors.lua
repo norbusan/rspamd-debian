@@ -3,11 +3,18 @@ context("Selectors test", function()
   local rspamd_task = require "rspamd_task"
   local logger = require "rspamd_logger"
   local lua_selectors = require "lua_selectors"
+  local lua_maps = require "lua_maps"
   local test_helper = require "rspamd_test_helper"
   local cfg = rspamd_config
   local task
 
   test_helper.init_url_parser()
+
+  lua_selectors.maps.test_map = lua_maps.map_add_from_ucl({
+    'key value',
+    'key1 value1',
+    'key3 value1',
+  }, 'hash', 'test selectors maps')
 
   before(function()
     local res
@@ -33,11 +40,13 @@ context("Selectors test", function()
   local cases = {
     ["ip"] = {
                 selector = "ip",
-                expect = {"198.172.22.91"}},
+                expect = {"198.172.22.91"}
+    },
 
     ["header Subject"] = {
                 selector = "header(Subject)",
-                expect = {"Second, lower-cased header subject"}},
+                expect = {"Second, lower-cased header subject"}
+    },
 
     ["header Subject lower"] = {
                 selector = "header(Subject).lower",
@@ -45,47 +54,68 @@ context("Selectors test", function()
 
     ["header full Subject lower"] = {
                 selector = "header(Subject, 'full').lower",
-                expect = {{"second, lower-cased header subject", "test subject"}}},
+                expect = {{"second, lower-cased header subject", "test subject"}}
+    },
 
     ["header full strong Subject"] = {
                 selector = "header(Subject, 'full,strong')",
-                expect = {{"Test subject"}}},
+                expect = {{"Test subject"}}
+    },
 
     ["header full strong lower-cased Subject"] = {
                 selector = "header(subject, 'full,strong')",
-                expect = {{"Second, lower-cased header subject"}}},
+                expect = {{"Second, lower-cased header subject"}}
+    },
 
     ["digest"] = {
                 selector = "digest",
-                expect = {"c459a21bd1f33fb4ba035481f46ef0c7"}},
+                expect = {"f46ccafe448fe4d7b46076938749695e"}
+    },
 
     ["user"] = {
                 selector = "user",
-                expect = {"cool user name"}},
+                expect = {"cool user name"}
+    },
 
     ["from"] = {
                 selector = "from",
-                expect = {"whoknows@nowhere.com"}},
+                expect = {"whoknows@nowhere.com"}
+    },
 
     ["rcpts"] = {
                 selector = "rcpts",
-                expect = {{"nobody@example.com", "no-one@example.com"}}},
+                expect = {{"nobody@example.com", "no-one@example.com"}}
+    },
 
     ["1st rcpts"] = {
                 selector = "rcpts.nth(1)",
-                expect = {"nobody@example.com"}},
+                expect = {"nobody@example.com"}
+    },
 
     ["lower rcpts"] = {
                 selector = "rcpts.lower.first",
-                expect = {"nobody@example.com"}},
+                expect = {"nobody@example.com"}
+    },
 
     ["first rcpts"] = {
                 selector = "rcpts.first",
-                expect = {"nobody@example.com"}},
+                expect = {"nobody@example.com"}
+    },
 
     ["first addr rcpts"] = {
                 selector = "rcpts:addr.first",
-                expect = {"nobody@example.com"}},
+                expect = {"nobody@example.com"}
+    },
+
+    ["rcpts_uniq_domains"] = {
+      selector = "rcpts:domain.uniq",
+      expect = {{"example.com"}}
+    },
+
+    ["rcpts_sorted"] = {
+      selector = "rcpts:addr.sort",
+      expect = {{"nobody@example.com", "no-one@example.com"}}
+    },
 
     ["to"] = {
                 selector = "to",
@@ -111,7 +141,17 @@ context("Selectors test", function()
 
     ["received by hostname"] = {
                 selector = "received:by_hostname",
-                expect = {{"server.chat-met-vreemden.nl"}}},
+                expect = {{"server1.chat-met-vreemden.nl", "server2.chat-met-vreemden.nl"}}},
+
+    ["received by hostname last"] = {
+      selector = "received:by_hostname.last",
+      expect = {"server2.chat-met-vreemden.nl"}
+    },
+
+    ["received by hostname first"] = {
+      selector = "received:by_hostname.first",
+      expect = {"server1.chat-met-vreemden.nl"}
+    },
 
     ["urls"] = {
                 selector = "urls",
@@ -119,7 +159,19 @@ context("Selectors test", function()
 
     ["emails"] = {
                 selector = "emails",
-                expect = {{"mailto://test@example.net"}}},
+                expect = {{"test@example.net"}}},
+
+    ["specific_urls"] = {
+      selector = "specific_urls({limit = 1})",
+      expect = {{"http://example.net"}}},
+
+    ["specific_urls + emails"] = {
+      selector = "specific_urls({need_emails = true, limit = 2})",
+      expect = {{"test@example.net", "http://example.net"}}},
+
+    ["specific_urls + emails limit"] = {
+      selector = "specific_urls({need_emails = true, limit = 1})",
+      expect = {{"test@example.net"}}},
 
     ["pool_var str, default type"] = {
                 selector = [[pool_var("str_var")]],
@@ -205,6 +257,10 @@ context("Selectors test", function()
                 selector = "rcpts.nth(2).lower",
                 expect = {'no-one@example.com'}},
 
+    ["transformation last"] = {
+      selector = "rcpts.last.lower",
+      expect = {'no-one@example.com'}},
+
     ["transformation substring"] = {
                 selector = "header(Subject, strong).substring(6)",
                 expect = {'subject'}},
@@ -215,7 +271,40 @@ context("Selectors test", function()
 
     ["transformation substring -4"] = {
                 selector = "header(Subject, strong).substring(-4)",
-                expect = {'ject'}},
+                expect = {'ject'}
+    },
+    ["map filter"] = {
+      selector = "id('key').filter_map(test_map)",
+      expect = {'key'}
+    },
+    ["map except"] = {
+      selector = "list('key', 'key1', 'key2', 'key3', 'key4').except_map(test_map)",
+      expect = {{'key2', 'key4'}}
+    },
+    ["map apply"] = {
+      selector = "id('key').apply_map(test_map)",
+      expect = {'value'}
+    },
+    ["map filter list"] = {
+      selector = "list('key', 'key1', 'key2').filter_map(test_map)",
+      expect = {{'key', 'key1'}}
+    },
+    ["map apply list"] = {
+      selector = "list('key', 'key1', 'key2', 'key3').apply_map(test_map)",
+      expect = {{'value', 'value1', 'value1'}}
+    },
+    ["map apply list uniq"] = {
+      selector = "list('key', 'key1', 'key2', 'key3').apply_map(test_map).uniq",
+      expect = {{'value1', 'value'}}
+    },
+    ["words"] = {
+      selector = "words('norm')",
+      expect = {{'hello', 'world', 'mail', 'me'}}
+    },
+    ["words_full"] = {
+      selector = "words('full'):2",
+      expect = {{'hello', 'world', '', 'mail', 'me'}}
+    },
   }
 
   for case_name, case in pairs(cases) do
@@ -230,8 +319,12 @@ end)
 
 --[=========[ *******************  message  ******************* ]=========]
 msg = [[
-Received: from ca-18-193-131.service.infuturo.it ([151.18.193.131] helo=User)
-    by server.chat-met-vreemden.nl with esmtpa (Exim 4.76)
+Received: from ca-18-193-131.service1.infuturo.it ([151.18.193.131] helo=User)
+    by server1.chat-met-vreemden.nl with esmtpa (Exim 4.76)
+    (envelope-from <upwest201diana@outlook.com>)
+    id 1ZC1sl-0006b4-TU; Mon, 06 Jul 2015 10:36:08 +0200
+Received: from ca-18-193-131.service2.infuturo.it ([151.18.193.132] helo=User)
+    by server2.chat-met-vreemden.nl with esmtpa (Exim 4.76)
     (envelope-from <upwest201diana@outlook.com>)
     id 1ZC1sl-0006b4-TU; Mon, 06 Jul 2015 10:36:08 +0200
 From: <whoknows@nowhere.com>
@@ -244,7 +337,7 @@ Content-Type: multipart/alternative;
 
 --_000_6be055295eab48a5af7ad4022f33e2d0_
 Content-Type: text/plain; charset="utf-8"
-Content-Transfer-Encoding: base64
+Content-Transfer-Encoding: 7bit
 
 Hello world
 

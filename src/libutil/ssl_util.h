@@ -18,19 +18,27 @@
 
 #include "config.h"
 #include "libutil/addr.h"
+#include "libutil/libev_helper.h"
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
 
 struct rspamd_ssl_connection;
 
-typedef void (*rspamd_ssl_handler_t)(gint fd, short what, gpointer d);
-typedef void (*rspamd_ssl_error_handler_t)(gpointer d, GError *err);
+typedef void (*rspamd_ssl_handler_t) (gint fd, short what, gpointer d);
+
+typedef void (*rspamd_ssl_error_handler_t) (gpointer d, GError *err);
 
 /**
  * Creates a new ssl connection data structure
  * @param ssl_ctx initialized SSL_CTX structure
  * @return opaque connection data
  */
-struct rspamd_ssl_connection * rspamd_ssl_connection_new (gpointer ssl_ctx,
-		struct event_base *ev_base, gboolean verify_peer);
+struct rspamd_ssl_connection *rspamd_ssl_connection_new (gpointer ssl_ctx,
+														 struct ev_loop *ev_base,
+														 gboolean verify_peer,
+														 const gchar *log_tag);
 
 /**
  * Connects SSL session using the specified (connected) FD
@@ -44,9 +52,9 @@ struct rspamd_ssl_connection * rspamd_ssl_connection_new (gpointer ssl_ctx,
  * @return TRUE if a session has been connected
  */
 gboolean rspamd_ssl_connect_fd (struct rspamd_ssl_connection *conn, gint fd,
-		const gchar *hostname, struct event *ev, struct timeval *tv,
-		rspamd_ssl_handler_t handler, rspamd_ssl_error_handler_t err_handler,
-		gpointer handler_data);
+								const gchar *hostname, struct rspamd_io_ev *ev, ev_tstamp timeout,
+								rspamd_ssl_handler_t handler, rspamd_ssl_error_handler_t err_handler,
+								gpointer handler_data);
 
 /**
  * Perform async read from SSL socket
@@ -56,7 +64,7 @@ gboolean rspamd_ssl_connect_fd (struct rspamd_ssl_connection *conn, gint fd,
  * @return
  */
 gssize rspamd_ssl_read (struct rspamd_ssl_connection *conn, gpointer buf,
-		gsize buflen);
+						gsize buflen);
 
 /**
  * Perform async write to ssl buffer
@@ -68,7 +76,7 @@ gssize rspamd_ssl_read (struct rspamd_ssl_connection *conn, gpointer buf,
  * @return
  */
 gssize rspamd_ssl_write (struct rspamd_ssl_connection *conn, gconstpointer buf,
-		gsize buflen);
+						 gsize buflen);
 
 /**
  * Emulate writev by copying iovec to a temporary buffer
@@ -78,12 +86,16 @@ gssize rspamd_ssl_write (struct rspamd_ssl_connection *conn, gconstpointer buf,
  * @return
  */
 gssize rspamd_ssl_writev (struct rspamd_ssl_connection *conn, struct iovec *iov,
-		gsize iovlen);
+						  gsize iovlen);
 
 /**
  * Removes connection data
  * @param conn
  */
 void rspamd_ssl_connection_free (struct rspamd_ssl_connection *conn);
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif /* SRC_LIBUTIL_SSL_UTIL_H_ */

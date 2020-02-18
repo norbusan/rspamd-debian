@@ -48,12 +48,8 @@ rspamd_rfc2231_decode (rspamd_mempool_t *pool,
 		ctok.begin = value_start;
 		ctok.len = quote_pos - value_start;
 
-		charset = rspamd_mime_detect_charset (&ctok, pool);
-
-		if (charset == NULL) {
-			msg_warn_pool ("cannot convert parameter from charset %T", &ctok);
-
-			return FALSE;
+		if (ctok.len > 0) {
+			charset = rspamd_mime_detect_charset (&ctok, pool);
 		}
 
 		/* Now, we can check for either next quote sign or, eh, ignore that */
@@ -70,6 +66,17 @@ rspamd_rfc2231_decode (rspamd_mempool_t *pool,
 		gsize r = rspamd_url_decode (value_start, value_start,
 				value_end - value_start);
 		GError *err = NULL;
+
+		if (charset == NULL) {
+			/* Try heuristic */
+			charset = rspamd_mime_charset_find_by_content (value_start, r);
+		}
+
+		if (charset == NULL) {
+			msg_warn_pool ("cannot convert parameter from charset %T", &ctok);
+
+			return FALSE;
+		}
 
 		param->value.begin = rspamd_mime_text_to_utf8 (pool,
 				value_start, r,
@@ -597,8 +604,26 @@ rspamd_content_type_parser (gchar *in, gsize len, rspamd_mempool_t *pool)
 	}
 
 	if (val.type.len > 0) {
+		gchar *tmp;
+
 		res = rspamd_mempool_alloc (pool, sizeof (val));
 		memcpy (res, &val, sizeof (val));
+
+		/*
+		 * Lowercase type and subtype as they are specified as case insensitive
+		 * in rfc2045 section 5.1
+		 */
+		tmp = rspamd_mempool_alloc (pool, val.type.len);
+		memcpy (tmp, val.type.begin, val.type.len);
+		rspamd_str_lc (tmp, val.type.len);
+		res->type.begin = tmp;
+
+		if (val.subtype.len > 0) {
+			tmp = rspamd_mempool_alloc (pool, val.subtype.len);
+			memcpy (tmp, val.subtype.begin, val.subtype.len);
+			rspamd_str_lc (tmp, val.subtype.len);
+			res->subtype.begin = tmp;
+		}
 	}
 
 	return res;
@@ -776,7 +801,7 @@ rspamd_content_disposition_parse (const gchar *in,
 	}
 	else {
 		msg_warn_pool ("cannot parse content disposition: %*s",
-				(gint)len, val.lc_data);
+				(gint)len, in);
 	}
 
 	return res;

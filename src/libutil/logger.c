@@ -154,6 +154,9 @@ direct_write_log_line (rspamd_logger_t *rspamd_log,
 	const gchar *line;
 	glong r;
 	gint fd;
+	gboolean locked = FALSE;
+
+	iov = (struct iovec *) data;
 
 	if (rspamd_log->type == RSPAMD_LOG_CONSOLE) {
 
@@ -165,7 +168,7 @@ direct_write_log_line (rspamd_logger_t *rspamd_log,
 			}
 		}
 		else {
-			fd = STDERR_FILENO;
+			fd = rspamd_log->fd;
 		}
 	}
 	else {
@@ -173,20 +176,36 @@ direct_write_log_line (rspamd_logger_t *rspamd_log,
 	}
 
 	if (!rspamd_log->no_lock) {
-#ifndef DISABLE_PTHREAD_MUTEX
-		if (rspamd_log->mtx) {
-			rspamd_mempool_lock_mutex (rspamd_log->mtx);
+		gsize tlen;
+
+		if (is_iov) {
+			tlen = 0;
+
+			for (guint i = 0; i < count; i ++) {
+				tlen += iov[i].iov_len;
+			}
 		}
 		else {
-			rspamd_file_lock (fd, FALSE);
+			tlen = count;
 		}
+
+		if (tlen > PIPE_BUF || rspamd_log->flags & RSPAMD_LOG_FLAG_TTY) {
+			locked = TRUE;
+
+#ifndef DISABLE_PTHREAD_MUTEX
+			if (rspamd_log->mtx) {
+				rspamd_mempool_lock_mutex (rspamd_log->mtx);
+			}
+			else {
+				rspamd_file_lock (fd, FALSE);
+			}
 #else
-		rspamd_file_lock (fd, FALSE);
+			rspamd_file_lock (fd, FALSE);
 #endif
+		}
 	}
 
 	if (is_iov) {
-		iov = (struct iovec *) data;
 		r = writev (fd, iov, count);
 	}
 	else {
@@ -194,7 +213,7 @@ direct_write_log_line (rspamd_logger_t *rspamd_log,
 		r = write (fd, line, count);
 	}
 
-	if (!rspamd_log->no_lock) {
+	if (locked) {
 #ifndef DISABLE_PTHREAD_MUTEX
 		if (rspamd_log->mtx) {
 			rspamd_mempool_unlock_mutex (rspamd_log->mtx);
@@ -251,39 +270,98 @@ rspamd_escape_log_string (gchar *str)
 	}
 }
 
+gint
+rspamd_try_open_log_fd (rspamd_logger_t *rspamd_log, uid_t uid, gid_t gid)
+{
+	gint fd;
+
+	fd = open (rspamd_log->log_file,
+			O_CREAT | O_WRONLY | O_APPEND,
+			S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
+	if (fd == -1) {
+		fprintf (stderr,
+				"open_log: cannot open desired log file: %s, %s\n",
+				rspamd_log->log_file, strerror (errno));
+		return -1;
+	}
+
+	if (uid != -1 || gid != -1) {
+		if (fchown (fd, uid, gid) == -1) {
+			fprintf (stderr,
+					"open_log: cannot chown desired log file: %s, %s\n",
+					rspamd_log->log_file, strerror (errno));
+			close (fd);
+
+			return -1;
+		}
+	}
+
+	return fd;
+}
+
 /* Logging utility functions */
 gint
 rspamd_log_open_priv (rspamd_logger_t *rspamd_log, uid_t uid, gid_t gid)
 {
+	gint nfd;
+
 	if (!rspamd_log->opened) {
+
 		switch (rspamd_log->log_type) {
 		case RSPAMD_LOG_CONSOLE:
-			/* Do nothing with console */
-			rspamd_log->fd = -1;
+			/* Dup stderr fd to simplify processing */
+			nfd = dup (STDERR_FILENO);
+
+			if (nfd == -1) {
+				return -1;
+			}
+			if (rspamd_log->fd != -1) {
+				/*
+				 * Postponed closing (e.g. when we switch from
+				 * LOG_FILE to LOG_CONSOLE)
+				 */
+				close (rspamd_log->fd);
+			}
+
+			rspamd_log->fd = nfd;
+
+			if (isatty (STDERR_FILENO)) {
+				rspamd_log->flags |= RSPAMD_LOG_FLAG_TTY;
+			}
 			break;
 		case RSPAMD_LOG_SYSLOG:
 #ifdef HAVE_SYSLOG_H
 			openlog ("rspamd", LOG_NDELAY | LOG_PID,
 					rspamd_log->log_facility);
+			rspamd_log->no_lock = TRUE;
+			if (rspamd_log->fd != -1) {
+				/*
+				 * Postponed closing (e.g. when we switch from
+				 * LOG_FILE to LOG_SYSLOG)
+				 */
+				close (rspamd_log->fd);
+			}
+#else
+			return -1;
 #endif
 			break;
 		case RSPAMD_LOG_FILE:
-			rspamd_log->fd = open (rspamd_log->log_file,
-					O_CREAT | O_WRONLY | O_APPEND,
-					S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
-			if (rspamd_log->fd == -1) {
-				fprintf (stderr,
-						"open_log: cannot open desired log file: %s, %s\n",
-						rspamd_log->log_file, strerror (errno));
+			nfd = rspamd_try_open_log_fd (rspamd_log, uid, gid);
+
+			if (nfd == -1) {
 				return -1;
 			}
-			if (fchown (rspamd_log->fd, uid, gid) == -1) {
-				fprintf (stderr,
-						"open_log: cannot chown desired log file: %s, %s\n",
-						rspamd_log->log_file, strerror (errno));
+
+			if (rspamd_log->fd != -1) {
+				/*
+				 * Postponed closing (e.g. when we switch from
+				 * LOG_CONSOLE to LOG_FILE)
+				 */
 				close (rspamd_log->fd);
-				return -1;
 			}
+
+			rspamd_log->fd = nfd;
+			rspamd_log->no_lock = TRUE;
 			break;
 		default:
 			return -1;
@@ -296,23 +374,12 @@ rspamd_log_open_priv (rspamd_logger_t *rspamd_log, uid_t uid, gid_t gid)
 	return 0;
 }
 
-void
-rspamd_log_close_priv (rspamd_logger_t *rspamd_log, gboolean termination, uid_t uid, gid_t gid)
+static void
+rspamd_log_reset_repeated (rspamd_logger_t *rspamd_log)
 {
 	gchar tmpbuf[256];
-	rspamd_log_flush (rspamd_log);
-
 	if (rspamd_log->opened) {
-		switch (rspamd_log->type) {
-		case RSPAMD_LOG_CONSOLE:
-			/* Do nothing special */
-			break;
-		case RSPAMD_LOG_SYSLOG:
-#ifdef HAVE_SYSLOG_H
-			closelog ();
-#endif
-			break;
-		case RSPAMD_LOG_FILE:
+		if (rspamd_log->type == RSPAMD_LOG_FILE) {
 			if (rspamd_log->repeats > REPEATS_MIN) {
 				rspamd_snprintf (tmpbuf,
 						sizeof (tmpbuf),
@@ -343,13 +410,48 @@ rspamd_log_close_priv (rspamd_logger_t *rspamd_log, gboolean termination, uid_t 
 						tmpbuf,
 						rspamd_log);
 			}
+		}
+	}
+}
 
+void
+rspamd_log_close_priv (rspamd_logger_t *rspamd_log, gboolean termination, uid_t uid, gid_t gid)
+{
+
+	rspamd_log_flush (rspamd_log);
+	rspamd_log_reset_repeated (rspamd_log);
+
+	if (rspamd_log->opened) {
+		switch (rspamd_log->type) {
+		case RSPAMD_LOG_SYSLOG:
+#ifdef HAVE_SYSLOG_H
+			closelog ();
+#endif
+			break;
+		case RSPAMD_LOG_FILE:
 			if (rspamd_log->fd != -1) {
+#if _POSIX_SYNCHRONIZED_IO > 0
+				if (fdatasync (rspamd_log->fd) == -1) {
+					msg_err ("error syncing log file: %s", strerror (errno));
+				}
+#else
 				if (fsync (rspamd_log->fd) == -1) {
 					msg_err ("error syncing log file: %s", strerror (errno));
 				}
+#endif
 				close (rspamd_log->fd);
+				rspamd_log->fd = -1;
 			}
+			break;
+		case RSPAMD_LOG_CONSOLE:
+			/*
+			 * Console logging is special: it is usually a last resort when
+			 * we have errors or something like that.
+			 *
+			 * Hence, we need to postpone it's closing to the moment
+			 * when we open (in a reliable matter!) a new logging
+			 * facility.
+			 */
 			break;
 		}
 
@@ -357,20 +459,39 @@ rspamd_log_close_priv (rspamd_logger_t *rspamd_log, gboolean termination, uid_t 
 		rspamd_log->opened = FALSE;
 	}
 
-	if (termination && rspamd_log->log_file) {
+	if (termination) {
 		g_free (rspamd_log->log_file);
 		rspamd_log->log_file = NULL;
+		g_free (rspamd_log);
 	}
 }
 
 gint
 rspamd_log_reopen_priv (rspamd_logger_t *rspamd_log, uid_t uid, gid_t gid)
 {
-	rspamd_log_close_priv (rspamd_log, FALSE, uid, gid);
+	if (rspamd_log->type == RSPAMD_LOG_FILE) {
+		rspamd_log_flush (rspamd_log);
+		rspamd_log_reset_repeated (rspamd_log);
 
-	if (rspamd_log_open_priv (rspamd_log, uid, gid) == 0) {
-		msg_info ("log file reopened");
-		return 0;
+		gint newfd = rspamd_try_open_log_fd (rspamd_log, uid, gid);
+
+		if (newfd != -1) {
+			rspamd_log_close_priv (rspamd_log, FALSE, uid, gid);
+			rspamd_log->fd = newfd;
+
+			rspamd_log->opened = TRUE;
+			rspamd_log->enabled = TRUE;
+		}
+
+		/* Do nothing, use old settings */
+	}
+	else {
+		/* Straightforward */
+		rspamd_log_close_priv (rspamd_log, FALSE, uid, gid);
+
+		if (rspamd_log_open_priv (rspamd_log, uid, gid) == 0) {
+			return 0;
+		}
 	}
 
 	return -1;
@@ -416,6 +537,7 @@ rspamd_set_logger (struct rspamd_config *cfg,
 
 	if (plogger == NULL || *plogger == NULL) {
 		logger = g_malloc0 (sizeof (rspamd_logger_t));
+		logger->fd = -1;
 
 		if (cfg->log_error_elts > 0 && pool) {
 			logger->errlog = rspamd_mempool_alloc0_shared (pool,
@@ -447,7 +569,6 @@ rspamd_set_logger (struct rspamd_config *cfg,
 	switch (cfg->log_type) {
 		case RSPAMD_LOG_CONSOLE:
 			logger->log_func = file_log_function;
-			logger->fd = -1;
 			break;
 		case RSPAMD_LOG_SYSLOG:
 			logger->log_func = syslog_log_function;
@@ -500,7 +621,9 @@ rspamd_set_logger (struct rspamd_config *cfg,
 		rspamd_config_radix_from_ucl (cfg,
 				cfg->debug_ip_map,
 				"IP addresses for which debug logs are enabled",
-				&logger->debug_ip, NULL);
+				&logger->debug_ip,
+				NULL,
+				NULL);
 	}
 	else if (logger->debug_ip) {
 		rspamd_map_helper_destroy_radix (logger->debug_ip);
@@ -1287,6 +1410,42 @@ rspamd_conditional_debug_fast (rspamd_logger_t *rspamd_log,
 	}
 }
 
+void
+rspamd_conditional_debug_fast_num_id (rspamd_logger_t *rspamd_log,
+							   rspamd_inet_addr_t *addr,
+							   guint mod_id, const gchar *module, guint64 id,
+							   const gchar *function, const gchar *fmt, ...)
+{
+	static gchar logbuf[LOGBUF_LEN], idbuf[64];
+	va_list vp;
+	gchar *end;
+
+	if (rspamd_log == NULL) {
+		rspamd_log = default_logger;
+	}
+
+	if (rspamd_logger_need_log (rspamd_log, G_LOG_LEVEL_DEBUG, mod_id) ||
+		rspamd_log->is_debug) {
+		if (rspamd_log->debug_ip && addr != NULL) {
+			if (rspamd_match_radix_map_addr (rspamd_log->debug_ip, addr)
+				== NULL) {
+				return;
+			}
+		}
+
+		rspamd_snprintf (idbuf, sizeof (idbuf), "%XuL", id);
+		va_start (vp, fmt);
+		end = rspamd_vsnprintf (logbuf, sizeof (logbuf), fmt, vp);
+		*end = '\0';
+		va_end (vp);
+		rspamd_log->log_func (module, idbuf,
+				function,
+				G_LOG_LEVEL_DEBUG | RSPAMD_LOG_FORCED,
+				logbuf,
+				rspamd_log);
+	}
+}
+
 /**
  * Wrapper for glib logger
  */
@@ -1342,22 +1501,6 @@ rspamd_log_counters (rspamd_logger_t *logger)
 	}
 
 	return NULL;
-}
-
-void
-rspamd_log_nolock (rspamd_logger_t *logger)
-{
-	if (logger) {
-		logger->no_lock = TRUE;
-	}
-}
-
-void
-rspamd_log_lock (rspamd_logger_t *logger)
-{
-	if (logger) {
-		logger->no_lock = FALSE;
-	}
 }
 
 static gint
@@ -1445,6 +1588,15 @@ rspamd_logger_allocate_mod_bit (void)
 	}
 }
 
+RSPAMD_DESTRUCTOR (rspamd_debug_modules_dtor)
+{
+	if (log_modules) {
+		g_hash_table_unref (log_modules->modules);
+		g_free (log_modules->bitset);
+		g_free (log_modules);
+	}
+}
+
 guint
 rspamd_logger_add_debug_module (const gchar *mname)
 {
@@ -1455,9 +1607,13 @@ rspamd_logger_add_debug_module (const gchar *mname)
 	}
 
 	if (log_modules == NULL) {
+		/*
+		 * This is usually called from constructors, so we call init check
+		 * each time to avoid dependency issues between ctors calls
+		 */
 		log_modules = g_malloc0 (sizeof (*log_modules));
-		log_modules->modules = g_hash_table_new (rspamd_strcase_hash,
-				rspamd_strcase_equal);
+		log_modules->modules = g_hash_table_new_full (rspamd_strcase_hash,
+				rspamd_strcase_equal, g_free, g_free);
 		log_modules->bitset_allocated = 16;
 		log_modules->bitset_len = 0;
 		log_modules->bitset = g_malloc0 (log_modules->bitset_allocated);

@@ -1,6 +1,7 @@
 #ifndef RSPAMD_CONFIG_H_IN
 #define RSPAMD_CONFIG_H_IN
 
+
 #cmakedefine BUILD_STATIC        1
 #cmakedefine CURL_FOUND          1
 #cmakedefine DEBUG_MODE          1
@@ -50,6 +51,7 @@
 #cmakedefine HAVE_MACHINE_ENDIAN_H  1
 #cmakedefine HAVE_MATH_H         1
 #cmakedefine HAVE_MAXPATHLEN     1
+#cmakedefine HAVE_FMEMOPEN       1
 #cmakedefine HAVE_MEMSET_S       1
 #cmakedefine HAVE_MKSTEMP        1
 #cmakedefine HAVE_MMAP_ANON      1
@@ -61,13 +63,18 @@
 #cmakedefine HAVE_NETINET_TCP_H  1
 #cmakedefine HAVE_NFTW           1
 #cmakedefine HAVE_OASYNC         1
-#cmakedefine HAVE_ONOFOLLOW      1
 #cmakedefine HAVE_OCLOEXEC       1
-#cmakedefine HAVE_OPENSSL        1
+#cmakedefine HAVE_ONOFOLLOW      1
+#cmakedefine HAVE_OPENMEMSTREAM  1
 #cmakedefine HAVE_O_DIRECT       1
 #cmakedefine HAVE_PATH_MAX       1
+
+/* OSX has broken JIT support in PCRE, disable it */
+#ifndef __APPLE__
 #cmakedefine HAVE_PCRE_JIT       1
 #cmakedefine HAVE_PCRE_JIT_FAST  1
+#endif
+
 #cmakedefine HAVE_PIDFILE        1
 #cmakedefine HAVE_PIDFILE_FILENO 1
 #cmakedefine HAVE_POLL_H         1
@@ -133,8 +140,6 @@
 #cmakedefine LIBEVENT_EVHTTP     1
 #cmakedefine PARAM_H_HAS_BITSET  1
 #cmakedefine WITH_DB             1
-#cmakedefine WITH_FANN           1
-#cmakedefine USABLE_GD           1
 #cmakedefine WITH_GPERF_TOOLS    1
 #cmakedefine WITH_HIREDIS        1
 #cmakedefine WITH_HYPERSCAN      1
@@ -150,12 +155,9 @@
 #cmakedefine WITH_TORCH          1
 #cmakedefine WITH_LIBUNWIND      1
 #cmakedefine WITH_LUA_TRACE      1
+#cmakedefine WITH_LUA_REPL       1
 
 #cmakedefine DISABLE_PTHREAD_MUTEX 1
-
-#ifdef HAVE_LIBEVENT2
-#define HAVE_EVUTIL_RNG_INIT 1
-#endif
 
 /* Detect endianness */
 
@@ -215,7 +217,6 @@
 #define RSPAMD_RUNDIR "${RUNDIR}"
 #define RSPAMD_LOGDIR "${LOGDIR}"
 #define RSPAMD_DBDIR "${DBDIR}"
-#define RSPAMD_EXAMPLESDIR "${EXAMPLESDIR}"
 #define RSPAMD_PLUGINSDIR "${PLUGINSDIR}"
 #define RSPAMD_LUALIBDIR "${LUALIBDIR}"
 #define RSPAMD_RULESDIR "${RULESDIR}"
@@ -225,31 +226,27 @@
 
 #define RSPAMD_VERSION_MAJOR "${RSPAMD_VERSION_MAJOR}"
 #define RSPAMD_VERSION_MINOR "${RSPAMD_VERSION_MINOR}"
-#define RSPAMD_VERSION_PATCH "${RSPAMD_VERSION_PATCH}"
 
 #define RSPAMD_VERSION_MAJOR_NUM ${RSPAMD_VERSION_MAJOR_NUM}
 #define RSPAMD_VERSION_MINOR_NUM ${RSPAMD_VERSION_MINOR_NUM}
-#define RSPAMD_VERSION_PATCH_NUM ${RSPAMD_VERSION_PATCH_NUM}
 
-#define RSPAMD_VERSION_BRANCH "${RSPAMD_VERSION_MAJOR}.${RSPAMD_VERSION_MINOR}"
+#define RSPAMD_VERSION_BRANCH "${RSPAMD_VERSION_MAJOR}"
 
 #if defined(GIT_VERSION) && GIT_VERSION == 1
 # define RVERSION         "${RSPAMD_VERSION}"
 # define RSPAMD_VERSION_FULL         "${RSPAMD_VERSION}_${RSPAMD_ID}"
 # define RID              "${RSPAMD_ID}"
-# define RSPAMD_VERSION_NUM 0x${RSPAMD_VERSION_MAJOR_NUM}${RSPAMD_VERSION_MINOR_NUM}${RSPAMD_VERSION_PATCH_NUM}${RSPAMD_ID}ULL
+# define RSPAMD_VERSION_NUM 0x${RSPAMD_VERSION_MAJOR_NUM}${RSPAMD_VERSION_MINOR_NUM}00${RSPAMD_ID}ULL
 #else
 # define RSPAMD_VERSION_FULL         "${RSPAMD_VERSION}"
 # define RVERSION          "${RSPAMD_VERSION}"
-# define RSPAMD_VERSION_NUM 0x${RSPAMD_VERSION_MAJOR_NUM}${RSPAMD_VERSION_MINOR_NUM}${RSPAMD_VERSION_PATCH_NUM}0000000ULL
+# define RSPAMD_VERSION_NUM 0x${RSPAMD_VERSION_MAJOR_NUM}${RSPAMD_VERSION_MINOR_NUM}000000000ULL
 # define RID "release"
 #endif
 
 #define RSPAMD_MASTER_SITE_URL "${RSPAMD_MASTER_SITE_URL}"
 
 #define MODULES_NUM        ${RSPAMD_MODULES_NUM}
-
-#define BUILDROOT "${CMAKE_BINARY_DIR}"
 
 /* sys/types */
 #ifdef HAVE_SYS_TYPES_H
@@ -369,6 +366,28 @@ typedef off_t goffset;
 #endif
 #endif
 
+/* Address sanitizer */
+#ifdef __clang__
+#  if __has_feature(address_sanitizer)
+/* emulate gcc's __SANITIZE_ADDRESS__ flag */
+#    define __SANITIZE_ADDRESS__
+#    define RSPAMD_NO_SANITIZE \
+      __attribute__((no_sanitize("address", "hwaddress")))
+#  else
+#    define RSPAMD_NO_SANITIZE
+#  endif
+#elif defined(__GNUC__)
+/* GCC based */
+#  if __has_attribute(__no_sanitize_address__)
+#    define RSPAMD_NO_SANITIZE __attribute__((no_sanitize_address))
+#  else
+#    define RSPAMD_NO_SANITIZE
+#  endif
+#else
+#  define RSPAMD_NO_SANITIZE
+#endif
+
+
 #ifndef BITSPERBYTE
 # define BITSPERBYTE (NBBY * sizeof (char))
 #endif
@@ -376,8 +395,16 @@ typedef off_t goffset;
 # define NBYTES(nbits)   (((nbits) + BITSPERBYTE - 1) / BITSPERBYTE)
 #endif
 
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
 extern uint64_t ottery_rand_uint64(void);
 #define UCL_RANDOM_FUNCTION ottery_rand_uint64()
+#ifdef  __cplusplus
+}
+#endif
+
 
 /* Disable slab allocator if jemalloc is already in the system */
 #if defined(WITH_JEMALLOC) || defined(__FreeBSD__) || \
@@ -389,27 +416,18 @@ extern uint64_t ottery_rand_uint64(void);
 #endif
 #endif
 
-#ifdef __cplusplus
-    #define RSPAMD_CONSTRUCTOR(f) \
-        static void f(void); \
-        struct f##_t_ { f##_t_(void) { f(); } }; static f##_t_ f##_; \
-        static void f(void)
-#elif defined(_MSC_VER)
-    #pragma section(".CRT$XCU",read)
-    #define INITIALIZER2_(f,p) \
-        static void f(void); \
-        __declspec(allocate(".CRT$XCU")) void (*f##_)(void) = f; \
-        __pragma(comment(linker,"/include:" p #f "_")) \
-        static void f(void)
-    #ifdef _WIN64
-        #define RSPAMD_CONSTRUCTOR(f) INITIALIZER2_(f,"")
-    #else
-        #define RSPAMD_CONSTRUCTOR(f) INITIALIZER2_(f,"_")
-    #endif
+#if  __GNUC__ > 2 || (__GNUC__ == 2 && __GNUC_MINOR__ >= 7)
+  #define RSPAMD_CONSTRUCTOR(f) \
+          static void f(void) __attribute__((constructor)); \
+          static void f(void)
+  #define RSPAMD_DESTRUCTOR(f) \
+          static void f(void) __attribute__((destructor)); \
+          static void f(void)
 #else
-    #define RSPAMD_CONSTRUCTOR(f) \
-        static void f(void) __attribute__((constructor)); \
-        static void f(void)
+  /* In fact, everything else is not supported ¯\_(ツ)_/¯ */
+  #error incompatible compiler found, need gcc > 2.7 or clang
 #endif
+
+#define HAVE_OPENSSL             1
 
 #endif

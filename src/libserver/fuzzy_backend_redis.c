@@ -71,9 +71,9 @@ enum rspamd_fuzzy_redis_command {
 struct rspamd_fuzzy_redis_session {
 	struct rspamd_fuzzy_backend_redis *backend;
 	redisAsyncContext *ctx;
-	struct event timeout;
+	ev_timer timeout;
 	const struct rspamd_fuzzy_cmd *cmd;
-	struct event_base *ev_base;
+	struct ev_loop *event_loop;
 	float prob;
 	gboolean shingles_checked;
 
@@ -140,13 +140,11 @@ rspamd_fuzzy_redis_session_dtor (struct rspamd_fuzzy_redis_session *session,
 		ac = session->ctx;
 		session->ctx = NULL;
 		rspamd_redis_pool_release_connection (session->backend->pool,
-				ac, is_fatal);
+				ac,
+				is_fatal ? RSPAMD_REDIS_RELEASE_FATAL : RSPAMD_REDIS_RELEASE_DEFAULT);
 	}
 
-	if (rspamd_event_pending (&session->timeout, EV_TIMEOUT)) {
-		event_del (&session->timeout);
-	}
-
+	ev_timer_stop (session->event_loop, &session->timeout);
 	rspamd_fuzzy_redis_session_free_args (session);
 
 	REF_RELEASE (session->backend);
@@ -276,9 +274,10 @@ rspamd_fuzzy_backend_init_redis (struct rspamd_fuzzy_backend *bk,
 }
 
 static void
-rspamd_fuzzy_redis_timeout (gint fd, short what, gpointer priv)
+rspamd_fuzzy_redis_timeout (EV_P_ ev_timer *w, int revents)
 {
-	struct rspamd_fuzzy_redis_session *session = priv;
+	struct rspamd_fuzzy_redis_session *session =
+			(struct rspamd_fuzzy_redis_session *)w->data;
 	redisAsyncContext *ac;
 	static char errstr[128];
 
@@ -292,7 +291,7 @@ rspamd_fuzzy_redis_timeout (gint fd, short what, gpointer priv)
 
 		/* This will cause session closing */
 		rspamd_redis_pool_release_connection (session->backend->pool,
-				ac, TRUE);
+				ac, RSPAMD_REDIS_RELEASE_FATAL);
 	}
 }
 
@@ -320,12 +319,11 @@ rspamd_fuzzy_redis_shingles_callback (redisAsyncContext *c, gpointer r,
 	struct rspamd_fuzzy_redis_session *session = priv;
 	redisReply *reply = r, *cur;
 	struct rspamd_fuzzy_reply rep;
-	struct timeval tv;
 	GString *key;
 	struct _rspamd_fuzzy_shingles_helper *shingles, *prev = NULL, *sel = NULL;
 	guint i, found = 0, max_found = 0, cur_found = 0;
 
-	event_del (&session->timeout);
+	ev_timer_stop (session->event_loop, &session->timeout);
 	memset (&rep, 0, sizeof (rep));
 
 	if (c->err == 0) {
@@ -421,12 +419,11 @@ rspamd_fuzzy_redis_shingles_callback (redisAsyncContext *c, gpointer r,
 					}
 					else {
 						/* Add timeout */
-						event_set (&session->timeout, -1, EV_TIMEOUT,
+						session->timeout.data = session;
+						ev_timer_init (&session->timeout,
 								rspamd_fuzzy_redis_timeout,
-								session);
-						event_base_set (session->ev_base, &session->timeout);
-						double_to_tv (session->backend->timeout, &tv);
-						event_add (&session->timeout, &tv);
+								session->backend->timeout, 0.0);
+						ev_timer_start (session->event_loop, &session->timeout);
 					}
 
 					return;
@@ -447,7 +444,7 @@ rspamd_fuzzy_redis_shingles_callback (redisAsyncContext *c, gpointer r,
 			msg_err_redis_session ("error getting shingles: %s", c->errstr);
 		}
 
-		rspamd_upstream_fail (session->up, FALSE);
+		rspamd_upstream_fail (session->up, FALSE,  strerror (errno));
 	}
 
 	rspamd_fuzzy_redis_session_dtor (session, FALSE);
@@ -456,7 +453,6 @@ rspamd_fuzzy_redis_shingles_callback (redisAsyncContext *c, gpointer r,
 static void
 rspamd_fuzzy_backend_check_shingles (struct rspamd_fuzzy_redis_session *session)
 {
-	struct timeval tv;
 	struct rspamd_fuzzy_reply rep;
 	const struct rspamd_fuzzy_shingle_cmd *shcmd;
 	GString *key;
@@ -501,11 +497,11 @@ rspamd_fuzzy_backend_check_shingles (struct rspamd_fuzzy_redis_session *session)
 	}
 	else {
 		/* Add timeout */
-		event_set (&session->timeout, -1, EV_TIMEOUT, rspamd_fuzzy_redis_timeout,
-				session);
-		event_base_set (session->ev_base, &session->timeout);
-		double_to_tv (session->backend->timeout, &tv);
-		event_add (&session->timeout, &tv);
+		session->timeout.data = session;
+		ev_timer_init (&session->timeout,
+				rspamd_fuzzy_redis_timeout,
+				session->backend->timeout, 0.0);
+		ev_timer_start (session->event_loop, &session->timeout);
 	}
 }
 
@@ -519,7 +515,7 @@ rspamd_fuzzy_redis_check_callback (redisAsyncContext *c, gpointer r,
 	gulong value;
 	guint found_elts = 0;
 
-	event_del (&session->timeout);
+	ev_timer_stop (session->event_loop, &session->timeout);
 	memset (&rep, 0, sizeof (rep));
 
 	if (c->err == 0) {
@@ -586,7 +582,7 @@ rspamd_fuzzy_redis_check_callback (redisAsyncContext *c, gpointer r,
 			msg_err_redis_session ("error getting hashes: %s", c->errstr);
 		}
 
-		rspamd_upstream_fail (session->up, FALSE);
+		rspamd_upstream_fail (session->up, FALSE,  strerror (errno));
 	}
 
 	rspamd_fuzzy_redis_session_dtor (session, FALSE);
@@ -602,7 +598,6 @@ rspamd_fuzzy_backend_check_redis (struct rspamd_fuzzy_backend *bk,
 	struct rspamd_fuzzy_redis_session *session;
 	struct upstream *up;
 	struct upstream_list *ups;
-	struct timeval tv;
 	rspamd_inet_addr_t *addr;
 	struct rspamd_fuzzy_reply rep;
 	GString *key;
@@ -620,7 +615,7 @@ rspamd_fuzzy_backend_check_redis (struct rspamd_fuzzy_backend *bk,
 	session->prob = 1.0;
 	memcpy (rep.digest, session->cmd->digest, sizeof (rep.digest));
 	memcpy (session->found_digest, session->cmd->digest, sizeof (rep.digest));
-	session->ev_base = rspamd_fuzzy_backend_event_base (bk);
+	session->event_loop = rspamd_fuzzy_backend_event_base (bk);
 
 	/* First of all check digest */
 	session->nargs = 5;
@@ -656,7 +651,7 @@ rspamd_fuzzy_backend_check_redis (struct rspamd_fuzzy_backend *bk,
 			rspamd_inet_address_get_port (addr));
 
 	if (session->ctx == NULL) {
-		rspamd_upstream_fail (up, TRUE);
+		rspamd_upstream_fail (up, TRUE, strerror (errno));
 		rspamd_fuzzy_redis_session_dtor (session, TRUE);
 
 		if (cb) {
@@ -677,11 +672,11 @@ rspamd_fuzzy_backend_check_redis (struct rspamd_fuzzy_backend *bk,
 		}
 		else {
 			/* Add timeout */
-			event_set (&session->timeout, -1, EV_TIMEOUT, rspamd_fuzzy_redis_timeout,
-					session);
-			event_base_set (session->ev_base, &session->timeout);
-			double_to_tv (backend->timeout, &tv);
-			event_add (&session->timeout, &tv);
+			session->timeout.data = session;
+			ev_timer_init (&session->timeout,
+					rspamd_fuzzy_redis_timeout,
+					session->backend->timeout, 0.0);
+			ev_timer_start (session->event_loop, &session->timeout);
 		}
 	}
 }
@@ -694,7 +689,7 @@ rspamd_fuzzy_redis_count_callback (redisAsyncContext *c, gpointer r,
 	redisReply *reply = r;
 	gulong nelts;
 
-	event_del (&session->timeout);
+	ev_timer_stop (session->event_loop, &session->timeout);
 
 	if (c->err == 0) {
 		rspamd_upstream_ok (session->up);
@@ -726,7 +721,7 @@ rspamd_fuzzy_redis_count_callback (redisAsyncContext *c, gpointer r,
 			msg_err_redis_session ("error getting count: %s", c->errstr);
 		}
 
-		rspamd_upstream_fail (session->up, FALSE);
+		rspamd_upstream_fail (session->up, FALSE,  strerror (errno));
 	}
 
 	rspamd_fuzzy_redis_session_dtor (session, FALSE);
@@ -741,7 +736,6 @@ rspamd_fuzzy_backend_count_redis (struct rspamd_fuzzy_backend *bk,
 	struct rspamd_fuzzy_redis_session *session;
 	struct upstream *up;
 	struct upstream_list *ups;
-	struct timeval tv;
 	rspamd_inet_addr_t *addr;
 	GString *key;
 
@@ -754,7 +748,7 @@ rspamd_fuzzy_backend_count_redis (struct rspamd_fuzzy_backend *bk,
 	session->callback.cb_count = cb;
 	session->cbdata = ud;
 	session->command = RSPAMD_FUZZY_REDIS_COMMAND_COUNT;
-	session->ev_base = rspamd_fuzzy_backend_event_base (bk);
+	session->event_loop = rspamd_fuzzy_backend_event_base (bk);
 
 	session->nargs = 2;
 	session->argv = g_malloc (sizeof (gchar *) * 2);
@@ -782,7 +776,7 @@ rspamd_fuzzy_backend_count_redis (struct rspamd_fuzzy_backend *bk,
 			rspamd_inet_address_get_port (addr));
 
 	if (session->ctx == NULL) {
-		rspamd_upstream_fail (up, TRUE);
+		rspamd_upstream_fail (up, TRUE,  strerror (errno));
 		rspamd_fuzzy_redis_session_dtor (session, TRUE);
 
 		if (cb) {
@@ -801,11 +795,11 @@ rspamd_fuzzy_backend_count_redis (struct rspamd_fuzzy_backend *bk,
 		}
 		else {
 			/* Add timeout */
-			event_set (&session->timeout, -1, EV_TIMEOUT, rspamd_fuzzy_redis_timeout,
-					session);
-			event_base_set (session->ev_base, &session->timeout);
-			double_to_tv (backend->timeout, &tv);
-			event_add (&session->timeout, &tv);
+			session->timeout.data = session;
+			ev_timer_init (&session->timeout,
+					rspamd_fuzzy_redis_timeout,
+					session->backend->timeout, 0.0);
+			ev_timer_start (session->event_loop, &session->timeout);
 		}
 	}
 }
@@ -818,7 +812,7 @@ rspamd_fuzzy_redis_version_callback (redisAsyncContext *c, gpointer r,
 	redisReply *reply = r;
 	gulong nelts;
 
-	event_del (&session->timeout);
+	ev_timer_stop (session->event_loop, &session->timeout);
 
 	if (c->err == 0) {
 		rspamd_upstream_ok (session->up);
@@ -850,7 +844,7 @@ rspamd_fuzzy_redis_version_callback (redisAsyncContext *c, gpointer r,
 			msg_err_redis_session ("error getting version: %s", c->errstr);
 		}
 
-		rspamd_upstream_fail (session->up, FALSE);
+		rspamd_upstream_fail (session->up, FALSE,  strerror (errno));
 	}
 
 	rspamd_fuzzy_redis_session_dtor (session, FALSE);
@@ -866,7 +860,6 @@ rspamd_fuzzy_backend_version_redis (struct rspamd_fuzzy_backend *bk,
 	struct rspamd_fuzzy_redis_session *session;
 	struct upstream *up;
 	struct upstream_list *ups;
-	struct timeval tv;
 	rspamd_inet_addr_t *addr;
 	GString *key;
 
@@ -879,7 +872,7 @@ rspamd_fuzzy_backend_version_redis (struct rspamd_fuzzy_backend *bk,
 	session->callback.cb_version = cb;
 	session->cbdata = ud;
 	session->command = RSPAMD_FUZZY_REDIS_COMMAND_VERSION;
-	session->ev_base = rspamd_fuzzy_backend_event_base (bk);
+	session->event_loop = rspamd_fuzzy_backend_event_base (bk);
 
 	session->nargs = 2;
 	session->argv = g_malloc (sizeof (gchar *) * 2);
@@ -907,7 +900,7 @@ rspamd_fuzzy_backend_version_redis (struct rspamd_fuzzy_backend *bk,
 			rspamd_inet_address_get_port (addr));
 
 	if (session->ctx == NULL) {
-		rspamd_upstream_fail (up, FALSE);
+		rspamd_upstream_fail (up, FALSE,  strerror (errno));
 		rspamd_fuzzy_redis_session_dtor (session, TRUE);
 
 		if (cb) {
@@ -926,11 +919,11 @@ rspamd_fuzzy_backend_version_redis (struct rspamd_fuzzy_backend *bk,
 		}
 		else {
 			/* Add timeout */
-			event_set (&session->timeout, -1, EV_TIMEOUT, rspamd_fuzzy_redis_timeout,
-					session);
-			event_base_set (session->ev_base, &session->timeout);
-			double_to_tv (backend->timeout, &tv);
-			event_add (&session->timeout, &tv);
+			session->timeout.data = session;
+			ev_timer_init (&session->timeout,
+					rspamd_fuzzy_redis_timeout,
+					session->backend->timeout, 0.0);
+			ev_timer_start (session->event_loop, &session->timeout);
 		}
 	}
 }
@@ -1309,7 +1302,8 @@ rspamd_fuzzy_redis_update_callback (redisAsyncContext *c, gpointer r,
 {
 	struct rspamd_fuzzy_redis_session *session = priv;
 	redisReply *reply = r;
-	event_del (&session->timeout);
+
+	ev_timer_stop (session->event_loop, &session->timeout);
 
 	if (c->err == 0) {
 		rspamd_upstream_ok (session->up);
@@ -1340,7 +1334,7 @@ rspamd_fuzzy_redis_update_callback (redisAsyncContext *c, gpointer r,
 			msg_err_redis_session ("error sending update to redis: %s", c->errstr);
 		}
 
-		rspamd_upstream_fail (session->up, FALSE);
+		rspamd_upstream_fail (session->up, FALSE,  strerror (errno));
 	}
 
 	rspamd_fuzzy_redis_session_dtor (session, FALSE);
@@ -1356,12 +1350,11 @@ rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
 	struct rspamd_fuzzy_redis_session *session;
 	struct upstream *up;
 	struct upstream_list *ups;
-	struct timeval tv;
 	rspamd_inet_addr_t *addr;
 	guint i;
 	GString *key;
 	struct fuzzy_peer_cmd *io_cmd;
-	struct rspamd_fuzzy_cmd *cmd;
+	struct rspamd_fuzzy_cmd *cmd = NULL;
 	guint nargs, ncommands, cur_shift;
 
 	g_assert (backend != NULL);
@@ -1445,7 +1438,7 @@ rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
 	session->command = RSPAMD_FUZZY_REDIS_COMMAND_UPDATES;
 	session->cmd = cmd;
 	session->prob = 1.0;
-	session->ev_base = rspamd_fuzzy_backend_event_base (bk);
+	session->event_loop = rspamd_fuzzy_backend_event_base (bk);
 
 	/* First of all check digest */
 	session->nargs = nargs;
@@ -1467,7 +1460,7 @@ rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
 			rspamd_inet_address_get_port (addr));
 
 	if (session->ctx == NULL) {
-		rspamd_upstream_fail (up, TRUE);
+		rspamd_upstream_fail (up, TRUE,  strerror (errno));
 		rspamd_fuzzy_redis_session_dtor (session, TRUE);
 
 		if (cb) {
@@ -1550,11 +1543,11 @@ rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
 		}
 		else {
 			/* Add timeout */
-			event_set (&session->timeout, -1, EV_TIMEOUT, rspamd_fuzzy_redis_timeout,
-					session);
-			event_base_set (session->ev_base, &session->timeout);
-			double_to_tv (backend->timeout, &tv);
-			event_add (&session->timeout, &tv);
+			session->timeout.data = session;
+			ev_timer_init (&session->timeout,
+					rspamd_fuzzy_redis_timeout,
+					session->backend->timeout, 0.0);
+			ev_timer_start (session->event_loop, &session->timeout);
 		}
 	}
 }

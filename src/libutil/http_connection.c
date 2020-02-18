@@ -25,6 +25,7 @@
 #include "ottery.h"
 #include "keypair_private.h"
 #include "cryptobox.h"
+#include "libutil/libev_helper.h"
 #include "libutil/ssl_util.h"
 #include "libserver/url.h"
 
@@ -67,9 +68,8 @@ struct rspamd_http_connection_private {
 	struct rspamd_http_header *header;
 	struct http_parser parser;
 	struct http_parser_settings parser_cb;
-	struct event ev;
-	struct timeval tv;
-	struct timeval *ptv;
+	struct rspamd_io_ev ev;
+	ev_tstamp timeout;
 	struct rspamd_http_message *msg;
 	struct iovec *out;
 	guint outlen;
@@ -243,6 +243,8 @@ rspamd_http_finish_header (struct rspamd_http_connection *conn,
 		struct rspamd_http_connection_private *priv)
 {
 	struct rspamd_http_header *hdr;
+	khiter_t k;
+	gint r;
 
 	priv->header->combined = rspamd_fstring_append (priv->header->combined,
 			"\r\n", 2);
@@ -252,12 +254,15 @@ rspamd_http_finish_header (struct rspamd_http_connection *conn,
 			priv->header->name.len + 2;
 	priv->header->name.begin = priv->header->combined->str;
 
-	HASH_FIND (hh, priv->msg->headers, priv->header->name.begin,
-			priv->header->name.len, hdr);
+	k = kh_put (rspamd_http_headers_hash, priv->msg->headers, &priv->header->name,
+			&r);
 
-	if (hdr == NULL) {
-		HASH_ADD_KEYPTR (hh, priv->msg->headers, priv->header->name.begin,
-				priv->header->name.len, priv->header);
+	if (r != 0) {
+		kh_value (priv->msg->headers, k) = priv->header;
+		hdr = NULL;
+	}
+	else {
+		hdr = kh_value (priv->msg->headers, k);
 	}
 
 	DL_APPEND (hdr, priv->header);
@@ -348,9 +353,7 @@ rspamd_http_on_headers_complete (http_parser * parser)
 
 	if (msg->method == HTTP_HEAD) {
 		/* We don't care about the rest */
-		if (rspamd_event_pending (&priv->ev, EV_READ)) {
-			event_del (&priv->ev);
-		}
+		rspamd_ev_watcher_stop (priv->ctx->event_loop, &priv->ev);
 
 		msg->code = parser->status_code;
 		rspamd_http_connection_ref (conn);
@@ -358,7 +361,7 @@ rspamd_http_on_headers_complete (http_parser * parser)
 
 		if (conn->opts & RSPAMD_HTTP_CLIENT_KEEP_ALIVE) {
 			rspamd_http_context_push_keepalive (conn->priv->ctx, conn,
-					msg, conn->priv->ctx->ev_base);
+					msg, conn->priv->ctx->event_loop);
 			rspamd_http_connection_reset (conn);
 		}
 		else {
@@ -376,7 +379,8 @@ rspamd_http_on_headers_complete (http_parser * parser)
 	 *
 	 * Hence, we skip body setup here
 	 */
-	if (parser->content_length != ULLONG_MAX && parser->content_length != 0) {
+	if (parser->content_length != ULLONG_MAX && parser->content_length != 0 &&
+			msg->method != HTTP_HEAD) {
 		if (conn->max_size > 0 &&
 				parser->content_length > conn->max_size) {
 			/* Too large message */
@@ -532,17 +536,14 @@ rspamd_http_on_headers_complete_decrypted (http_parser *parser)
 
 	if (msg->method == HTTP_HEAD) {
 		/* We don't care about the rest */
-		if (rspamd_event_pending (&priv->ev, EV_READ)) {
-			event_del (&priv->ev);
-		}
-
+		rspamd_ev_watcher_stop (priv->ctx->event_loop, &priv->ev);
 		msg->code = parser->status_code;
 		rspamd_http_connection_ref (conn);
 		ret = conn->finish_handler (conn, msg);
 
 		if (conn->opts & RSPAMD_HTTP_CLIENT_KEEP_ALIVE) {
 			rspamd_http_context_push_keepalive (conn->priv->ctx, conn,
-					msg, conn->priv->ctx->ev_base);
+					msg, conn->priv->ctx->event_loop);
 			rspamd_http_connection_reset (conn);
 		}
 		else {
@@ -569,7 +570,7 @@ rspamd_http_decrypt_message (struct rspamd_http_connection *conn,
 	const guchar *nm;
 	gsize dec_len;
 	struct rspamd_http_message *msg = priv->msg;
-	struct rspamd_http_header *hdr, *hdrtmp, *hcur, *hcurtmp;
+	struct rspamd_http_header *hdr, *hcur, *hcurtmp;
 	struct http_parser decrypted_parser;
 	struct http_parser_settings decrypted_cb;
 	enum rspamd_cryptobox_mode mode;
@@ -593,16 +594,15 @@ rspamd_http_decrypt_message (struct rspamd_http_connection *conn,
 	}
 
 	/* Cleanup message */
-	HASH_ITER (hh, msg->headers, hdr, hdrtmp) {
-		HASH_DELETE (hh, msg->headers, hdr);
-
+	kh_foreach_value (msg->headers, hdr, {
 		DL_FOREACH_SAFE (hdr, hcur, hcurtmp) {
 			rspamd_fstring_free (hcur->combined);
 			g_free (hcur);
 		}
-	}
+	});
 
-	msg->headers = NULL;
+	kh_destroy (rspamd_http_headers_hash, msg->headers);
+	msg->headers = kh_init (rspamd_http_headers_hash);
 
 	if (msg->url != NULL) {
 		msg->url = rspamd_fstring_assign (msg->url, "", 0);
@@ -692,16 +692,13 @@ rspamd_http_on_message_complete (http_parser * parser)
 	}
 
 	if (ret == 0) {
-		if (rspamd_event_pending (&priv->ev, EV_READ)) {
-			event_del (&priv->ev);
-		}
-
+		rspamd_ev_watcher_stop (priv->ctx->event_loop, &priv->ev);
 		rspamd_http_connection_ref (conn);
 		ret = conn->finish_handler (conn, priv->msg);
 
 		if (conn->opts & RSPAMD_HTTP_CLIENT_KEEP_ALIVE) {
 			rspamd_http_context_push_keepalive (conn->priv->ctx, conn,
-					priv->msg, conn->priv->ctx->ev_base);
+					priv->msg, conn->priv->ctx->event_loop);
 			rspamd_http_connection_reset (conn);
 		}
 		else {
@@ -741,11 +738,11 @@ rspamd_http_simple_client_helper (struct rspamd_http_connection *conn)
 
 	if (conn->opts & RSPAMD_HTTP_CLIENT_SHARED) {
 		rspamd_http_connection_read_message_shared (conn, conn->ud,
-				conn->priv->ptv);
+				conn->priv->timeout);
 	}
 	else {
 		rspamd_http_connection_read_message (conn, conn->ud,
-				conn->priv->ptv);
+				conn->priv->timeout);
 	}
 
 	if (priv->msg) {
@@ -782,7 +779,13 @@ rspamd_http_write_helper (struct rspamd_http_connection *conn)
 	niov = priv->outlen;
 	remain = priv->wr_pos;
 	/* We know that niov is small enough for that */
-	cur_iov = alloca (niov * sizeof (struct iovec));
+	if (priv->ssl) {
+		/* Might be recursive! */
+		cur_iov = g_malloc (niov * sizeof (struct iovec));
+	}
+	else {
+		cur_iov = alloca (niov * sizeof (struct iovec));
+	}
 	memcpy (cur_iov, priv->out, niov * sizeof (struct iovec));
 	for (i = 0; i < priv->outlen && remain > 0; i++) {
 		/* Find out the first iov required */
@@ -809,6 +812,7 @@ rspamd_http_write_helper (struct rspamd_http_connection *conn)
 
 	if (priv->ssl) {
 		r = rspamd_ssl_writev (priv->ssl, msg.msg_iov, msg.msg_iovlen);
+		g_free (cur_iov);
 	}
 	else {
 		r = sendmsg (conn->fd, &msg, flags);
@@ -835,12 +839,19 @@ rspamd_http_write_helper (struct rspamd_http_connection *conn)
 	else {
 		/* Want to write more */
 		priv->flags &= ~RSPAMD_HTTP_CONN_FLAG_RESETED;
-		event_add (&priv->ev, priv->ptv);
+
+		if (priv->ssl && r > 0) {
+			/* We can write more data... */
+			rspamd_http_write_helper (conn);
+			return;
+		}
 	}
 
 	return;
 
 call_finish_handler:
+	rspamd_ev_watcher_stop (priv->ctx->event_loop, &priv->ev);
+
 	if ((conn->opts & RSPAMD_HTTP_CLIENT_SIMPLE) == 0) {
 		rspamd_http_connection_ref (conn);
 		conn->finished = TRUE;
@@ -949,6 +960,14 @@ rspamd_http_event_handler (int fd, short what, gpointer ud)
 				else if (priv->flags & RSPAMD_HTTP_CONN_FLAG_ENCRYPTION_NEEDED) {
 					err = g_error_new (HTTP_ERROR, 400,
 							"Encryption required");
+				}
+				else if (priv->parser.http_errno == HPE_CLOSED_CONNECTION) {
+					msg_err ("got garbage after end of the message, ignore it");
+
+					REF_RELEASE (pbuf);
+					rspamd_http_connection_unref (conn);
+
+					return;
 				}
 				else {
 					err = g_error_new (HTTP_ERROR, 500 + priv->parser.http_errno,
@@ -1180,9 +1199,9 @@ rspamd_http_connection_new_client (struct rspamd_http_context *ctx,
 
 			if (fd == -1) {
 				msg_info ("cannot connect to http proxy %s: %s",
-						rspamd_inet_address_to_string (proxy_addr),
+						rspamd_inet_address_to_string_pretty (proxy_addr),
 						strerror (errno));
-				rspamd_upstream_fail (up, TRUE);
+				rspamd_upstream_fail (up, TRUE, strerror (errno));
 
 				return NULL;
 			}
@@ -1199,8 +1218,8 @@ rspamd_http_connection_new_client (struct rspamd_http_context *ctx,
 	fd = rspamd_inet_address_connect (addr, SOCK_STREAM, TRUE);
 
 	if (fd == -1) {
-		msg_info ("cannot connect to proxy %s: %s",
-				rspamd_inet_address_to_string (addr),
+		msg_info ("cannot connect make http connection to %s: %s",
+				rspamd_inet_address_to_string_pretty (addr),
 				strerror (errno));
 
 		return NULL;
@@ -1266,13 +1285,9 @@ rspamd_http_connection_reset (struct rspamd_http_connection *conn)
 
 	conn->finished = FALSE;
 	/* Clear priv */
+	rspamd_ev_watcher_stop (priv->ctx->event_loop, &priv->ev);
 
 	if (!(priv->flags & RSPAMD_HTTP_CONN_FLAG_RESETED)) {
-
-		if (rspamd_event_pending (&priv->ev, EV_READ|EV_WRITE|EV_TIMEOUT)) {
-			event_del (&priv->ev);
-		}
-
 		rspamd_http_parser_reset (conn);
 	}
 
@@ -1314,7 +1329,7 @@ struct rspamd_http_message *
 rspamd_http_connection_copy_msg (struct rspamd_http_message *msg, GError **err)
 {
 	struct rspamd_http_message *new_msg;
-	struct rspamd_http_header *hdr, *nhdr, *nhdrs, *thdr, *hcur;
+	struct rspamd_http_header *hdr, *nhdr, *nhdrs, *hcur;
 	const gchar *old_body;
 	gsize old_len;
 	struct stat st;
@@ -1409,7 +1424,7 @@ rspamd_http_connection_copy_msg (struct rspamd_http_message *msg, GError **err)
 	new_msg->date = msg->date;
 	new_msg->last_modified = msg->last_modified;
 
-	HASH_ITER (hh, msg->headers, hdr, thdr) {
+	kh_foreach_value (msg->headers, hdr, {
 		nhdrs = NULL;
 
 		DL_FOREACH (hdr, hcur) {
@@ -1418,17 +1433,25 @@ rspamd_http_connection_copy_msg (struct rspamd_http_message *msg, GError **err)
 			nhdr->combined = rspamd_fstring_new_init (hcur->combined->str,
 					hcur->combined->len);
 			nhdr->name.begin = nhdr->combined->str +
-					(hcur->name.begin - hcur->combined->str);
+							   (hcur->name.begin - hcur->combined->str);
 			nhdr->name.len = hcur->name.len;
 			nhdr->value.begin = nhdr->combined->str +
-					(hcur->value.begin - hcur->combined->str);
+								(hcur->value.begin - hcur->combined->str);
 			nhdr->value.len = hcur->value.len;
 			DL_APPEND (nhdrs, nhdr);
 		}
 
-		HASH_ADD_KEYPTR (hh, new_msg->headers, nhdrs->name.begin,
-				nhdrs->name.len, nhdrs);
-	}
+		gint r;
+		khiter_t k = kh_put (rspamd_http_headers_hash, new_msg->headers,
+				&nhdrs->name,&r);
+
+		if (r != 0) {
+			kh_value (new_msg->headers, k) = nhdrs;
+		}
+		else {
+			DL_CONCAT (kh_value (new_msg->headers, k), nhdrs);
+		}
+	});
 
 	return new_msg;
 }
@@ -1468,7 +1491,7 @@ rspamd_http_connection_free (struct rspamd_http_connection *conn)
 
 static void
 rspamd_http_connection_read_message_common (struct rspamd_http_connection *conn,
-		gpointer ud, struct timeval *timeout,
+		gpointer ud, ev_tstamp timeout,
 		gint flags)
 {
 	struct rspamd_http_connection_private *priv = conn->priv;
@@ -1490,42 +1513,30 @@ rspamd_http_connection_read_message_common (struct rspamd_http_connection *conn,
 		priv->flags |= RSPAMD_HTTP_CONN_FLAG_ENCRYPTED;
 	}
 
-	if (timeout == NULL) {
-		priv->ptv = NULL;
-	}
-	else {
-		memmove (&priv->tv, timeout, sizeof (struct timeval));
-		priv->ptv = &priv->tv;
-	}
-
+	priv->timeout = timeout;
 	priv->header = NULL;
 	priv->buf = g_malloc0 (sizeof (*priv->buf));
 	REF_INIT_RETAIN (priv->buf, rspamd_http_privbuf_dtor);
 	priv->buf->data = rspamd_fstring_sized_new (8192);
 	priv->flags |= RSPAMD_HTTP_CONN_FLAG_NEW_HEADER;
 
-	event_set (&priv->ev,
-		conn->fd,
-		EV_READ | EV_PERSIST,
-		rspamd_http_event_handler,
-		conn);
-
-	event_base_set (priv->ctx->ev_base, &priv->ev);
+	rspamd_ev_watcher_init (&priv->ev, conn->fd, EV_READ,
+			rspamd_http_event_handler, conn);
+	rspamd_ev_watcher_start (priv->ctx->event_loop, &priv->ev, priv->timeout);
 
 	priv->flags &= ~RSPAMD_HTTP_CONN_FLAG_RESETED;
-	event_add (&priv->ev, priv->ptv);
 }
 
 void
 rspamd_http_connection_read_message (struct rspamd_http_connection *conn,
-		gpointer ud, struct timeval *timeout)
+		gpointer ud, ev_tstamp timeout)
 {
 	rspamd_http_connection_read_message_common (conn, ud, timeout, 0);
 }
 
 void
 rspamd_http_connection_read_message_shared (struct rspamd_http_connection *conn,
-		gpointer ud, struct timeval *timeout)
+		gpointer ud, ev_tstamp timeout)
 {
 	rspamd_http_connection_read_message_common (conn, ud, timeout,
 			RSPAMD_HTTP_FLAG_SHMEM);
@@ -1551,7 +1562,7 @@ rspamd_http_connection_encrypt_message (
 	const guchar *nm;
 	gint i, cnt;
 	guint outlen;
-	struct rspamd_http_header *hdr, *htmp, *hcur;
+	struct rspamd_http_header *hdr, *hcur;
 	enum rspamd_cryptobox_mode mode;
 
 	mode = rspamd_keypair_alg (priv->local_key);
@@ -1586,12 +1597,12 @@ rspamd_http_connection_encrypt_message (
 	}
 
 
-	HASH_ITER (hh, msg->headers, hdr, htmp) {
+	kh_foreach_value (msg->headers, hdr, {
 		DL_FOREACH (hdr, hcur) {
 			segments[i].data = hcur->combined->str;
 			segments[i++].len = hcur->combined->len;
 		}
-	}
+	});
 
 	/* crlfp should point now at the second crlf */
 	segments[i].data = crlfp;
@@ -1906,17 +1917,17 @@ rspamd_http_message_write_header (const gchar* mime_type, gboolean encrypted,
 	return meth_len;
 }
 
-static void
+static gboolean
 rspamd_http_connection_write_message_common (struct rspamd_http_connection *conn,
 											 struct rspamd_http_message *msg,
 											 const gchar *host,
 											 const gchar *mime_type,
 											 gpointer ud,
-											 struct timeval *timeout,
+											 ev_tstamp timeout,
 											 gboolean allow_shared)
 {
 	struct rspamd_http_connection_private *priv = conn->priv;
-	struct rspamd_http_header *hdr, *htmp, *hcur;
+	struct rspamd_http_header *hdr, *hcur;
 	gchar repbuf[512], *pbody;
 	gint i, hdrcount, meth_len = 0, preludelen = 0;
 	gsize bodylen, enclen = 0;
@@ -1930,14 +1941,7 @@ rspamd_http_connection_write_message_common (struct rspamd_http_connection *conn
 
 	conn->ud = ud;
 	priv->msg = msg;
-
-	if (timeout == NULL) {
-		priv->ptv = NULL;
-	}
-	else if (timeout != &priv->tv) {
-		memcpy (&priv->tv, timeout, sizeof (struct timeval));
-		priv->ptv = &priv->tv;
-	}
+	priv->timeout = timeout;
 
 	priv->header = NULL;
 	priv->buf = g_malloc0 (sizeof (*priv->buf));
@@ -1996,8 +2000,30 @@ rspamd_http_connection_write_message_common (struct rspamd_http_connection *conn
 	}
 
 	if (priv->ctx->config.user_agent && conn->type == RSPAMD_HTTP_CLIENT) {
-		rspamd_http_message_add_header (msg, "User-Agent",
-				priv->ctx->config.user_agent);
+		rspamd_ftok_t srch;
+		khiter_t k;
+		gint r;
+
+		RSPAMD_FTOK_ASSIGN (&srch, "User-Agent");
+
+		k = kh_put (rspamd_http_headers_hash, msg->headers, &srch,&r);
+
+		if (r != 0) {
+			hdr = g_malloc0 (sizeof (struct rspamd_http_header));
+			guint vlen = strlen (priv->ctx->config.user_agent);
+			hdr->combined = rspamd_fstring_sized_new (srch.len + vlen + 4);
+			rspamd_printf_fstring (&hdr->combined, "%T: %*s\r\n", &srch, vlen,
+					priv->ctx->config.user_agent);
+			hdr->name.begin = hdr->combined->str;
+			hdr->name.len = srch.len;
+			hdr->value.begin = hdr->combined->str + srch.len + 2;
+			hdr->value.len = vlen;
+			hdr->prev = hdr; /* for utlists */
+
+			kh_value (msg->headers, k) = hdr;
+			/* as we searched using static buffer */
+			kh_key (msg->headers, k) = &hdr->name;
+		}
 	}
 
 	if (encrypted) {
@@ -2118,7 +2144,7 @@ rspamd_http_connection_write_message_common (struct rspamd_http_connection *conn
 	hdrcount = 0;
 
 	if (msg->method < HTTP_SYMBOLS) {
-		HASH_ITER (hh, msg->headers, hdr, htmp) {
+		kh_foreach_value (msg->headers, hdr, {
 			DL_FOREACH (hdr, hcur) {
 				/* <name: value\r\n> */
 				priv->wr_total += hcur->combined->len;
@@ -2126,7 +2152,7 @@ rspamd_http_connection_write_message_common (struct rspamd_http_connection *conn
 				priv->outlen ++;
 				hdrcount ++;
 			}
-		}
+		});
 	}
 
 	/* Allocate iov */
@@ -2196,12 +2222,12 @@ rspamd_http_connection_write_message_common (struct rspamd_http_connection *conn
 	else {
 		i = 1;
 		if (msg->method < HTTP_SYMBOLS) {
-			HASH_ITER (hh, msg->headers, hdr, htmp) {
+			kh_foreach_value (msg->headers, hdr, {
 				DL_FOREACH (hdr, hcur) {
 					priv->out[i].iov_base = hcur->combined->str;
 					priv->out[i++].iov_len = hcur->combined->len;
 				}
-			}
+			});
 
 			priv->out[i].iov_base = "\r\n";
 			priv->out[i++].iov_len = 2;
@@ -2224,15 +2250,11 @@ rspamd_http_connection_write_message_common (struct rspamd_http_connection *conn
 		msg->flags &=~ RSPAMD_HTTP_FLAG_SSL;
 	}
 
-	if (rspamd_event_pending (&priv->ev, EV_TIMEOUT|EV_WRITE|EV_READ)) {
-		event_del (&priv->ev);
-	}
+	rspamd_ev_watcher_stop (priv->ctx->event_loop, &priv->ev);
 
 	if (msg->flags & RSPAMD_HTTP_FLAG_SSL) {
 		gpointer ssl_ctx = (msg->flags & RSPAMD_HTTP_FLAG_SSL_NOVERIFY) ?
 				priv->ctx->ssl_ctx_noverify : priv->ctx->ssl_ctx;
-
-		event_base_set (priv->ctx->ev_base, &priv->ev);
 
 		if (!ssl_ctx) {
 			err = g_error_new (HTTP_ERROR, errno, "ssl message requested "
@@ -2241,7 +2263,7 @@ rspamd_http_connection_write_message_common (struct rspamd_http_connection *conn
 			conn->error_handler (conn, err);
 			rspamd_http_connection_unref (conn);
 			g_error_free (err);
-			return;
+			return FALSE;
 		}
 		else {
 			if (priv->ssl) {
@@ -2249,12 +2271,13 @@ rspamd_http_connection_write_message_common (struct rspamd_http_connection *conn
 				rspamd_ssl_connection_free (priv->ssl);
 			}
 
-			priv->ssl = rspamd_ssl_connection_new (ssl_ctx, priv->ctx->ev_base,
-					!(msg->flags & RSPAMD_HTTP_FLAG_SSL_NOVERIFY));
+			priv->ssl = rspamd_ssl_connection_new (ssl_ctx, priv->ctx->event_loop,
+					!(msg->flags & RSPAMD_HTTP_FLAG_SSL_NOVERIFY),
+					conn->log_tag);
 			g_assert (priv->ssl != NULL);
 
 			if (!rspamd_ssl_connect_fd (priv->ssl, conn->fd, host, &priv->ev,
-					priv->ptv, rspamd_http_event_handler,
+					priv->timeout, rspamd_http_event_handler,
 					rspamd_http_ssl_err_handler, conn)) {
 
 				err = g_error_new (HTTP_ERROR, errno,
@@ -2265,39 +2288,40 @@ rspamd_http_connection_write_message_common (struct rspamd_http_connection *conn
 				conn->error_handler (conn, err);
 				rspamd_http_connection_unref (conn);
 				g_error_free (err);
-				return;
+				return FALSE;
 			}
 		}
 	}
 	else {
-		event_set (&priv->ev, conn->fd, EV_WRITE, rspamd_http_event_handler, conn);
-		event_base_set (priv->ctx->ev_base, &priv->ev);
-
-		event_add (&priv->ev, priv->ptv);
+		rspamd_ev_watcher_init (&priv->ev, conn->fd, EV_WRITE,
+				rspamd_http_event_handler, conn);
+		rspamd_ev_watcher_start (priv->ctx->event_loop, &priv->ev, priv->timeout);
 	}
+
+	return TRUE;
 }
 
-void
+gboolean
 rspamd_http_connection_write_message (struct rspamd_http_connection *conn,
 									  struct rspamd_http_message *msg,
 									  const gchar *host,
 									  const gchar *mime_type,
 									  gpointer ud,
-									  struct timeval *timeout)
+									  ev_tstamp timeout)
 {
-	rspamd_http_connection_write_message_common (conn, msg, host, mime_type,
+	return rspamd_http_connection_write_message_common (conn, msg, host, mime_type,
 			ud, timeout, FALSE);
 }
 
-void
+gboolean
 rspamd_http_connection_write_message_shared (struct rspamd_http_connection *conn,
 											 struct rspamd_http_message *msg,
 											 const gchar *host,
 											 const gchar *mime_type,
 											 gpointer ud,
-											 struct timeval *timeout)
+											 ev_tstamp timeout)
 {
-	rspamd_http_connection_write_message_common (conn, msg, host, mime_type,
+	return rspamd_http_connection_write_message_common (conn, msg, host, mime_type,
 			ud, timeout, TRUE);
 }
 

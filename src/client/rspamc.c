@@ -79,6 +79,10 @@ static gint retcode = EXIT_SUCCESS;
     g_queue_push_tail ((o), nh); \
 } while (0)
 
+#define ADD_CLIENT_FLAG(str, n) do { \
+   g_string_append ((str), n ","); \
+} while (0)
+
 static gboolean rspamc_password_callback (const gchar *option_name,
 		const gchar *value,
 		gpointer data,
@@ -407,6 +411,7 @@ read_cmd_line (gint *argc, gchar ***argv)
 	/* Parse options */
 	if (!g_option_context_parse (context, argc, argv, &error)) {
 		fprintf (stderr, "option parsing failed: %s\n", error->message);
+		g_option_context_free (context);
 		exit (EXIT_FAILURE);
 	}
 
@@ -414,6 +419,7 @@ read_cmd_line (gint *argc, gchar ***argv)
 		raw = TRUE;
 	}
 	/* Argc and argv are shifted after this function */
+	g_option_context_free (context);
 }
 
 static gboolean
@@ -553,11 +559,13 @@ add_options (GQueue *opts)
 {
 	GString *numbuf;
 	gchar **hdr, **rcpt;
+	GString *flagbuf = g_string_new (NULL);
 
 	if (ip != NULL) {
 		rspamd_inet_addr_t *addr = NULL;
 
-		if (!rspamd_parse_inet_address (&addr, ip, strlen (ip))) {
+		if (!rspamd_parse_inet_address (&addr, ip, strlen (ip),
+				RSPAMD_INET_ADDRESS_PARSE_DEFAULT)) {
 			/* Try to resolve */
 			struct addrinfo hints, *res, *cur;
 			gint r;
@@ -634,7 +642,7 @@ add_options (GQueue *opts)
 	}
 
 	if (pass_all) {
-		ADD_CLIENT_HEADER (opts, "Pass", "all");
+		ADD_CLIENT_FLAG (flagbuf, "pass_all");
 	}
 
 	if (classifier) {
@@ -664,8 +672,10 @@ add_options (GQueue *opts)
 	}
 
 	if (profile) {
-		ADD_CLIENT_HEADER (opts, "Profile", "true");
+		ADD_CLIENT_FLAG (flagbuf, "profile");
 	}
+
+	ADD_CLIENT_FLAG (flagbuf, "body_block");
 
 	if (skip_images) {
 		ADD_CLIENT_HEADER (opts, "Skip-Images", "true");
@@ -693,6 +703,19 @@ add_options (GQueue *opts)
 
 		hdr ++;
 	}
+
+	if (flagbuf->len > 0) {
+		goffset last = flagbuf->len - 1;
+
+		if (flagbuf->str[last] == ',') {
+			flagbuf->str[last] = '\0';
+			flagbuf->len --;
+		}
+
+		ADD_CLIENT_HEADER (opts, "Flags", flagbuf->str);
+	}
+
+	g_string_free (flagbuf, TRUE);
 }
 
 static void
@@ -1254,11 +1277,11 @@ rspamc_stat_output (FILE *out, ucl_object_t *obj)
 static void
 rspamc_output_headers (FILE *out, struct rspamd_http_message *msg)
 {
-	struct rspamd_http_header *h, *htmp;
+	struct rspamd_http_header *h;
 
-	HASH_ITER (hh, msg->headers, h, htmp) {
+	kh_foreach_value (msg->headers, h, {
 		rspamd_fprintf (out, "%T: %T\n", &h->name, &h->value);
-	}
+	});
 
 	rspamd_fprintf (out, "\n");
 }
@@ -1504,6 +1527,7 @@ rspamc_client_cb (struct rspamd_client_connection *conn,
 		struct rspamd_http_message *msg,
 		const gchar *name, ucl_object_t *result, GString *input,
 		gpointer ud, gdouble start_time, gdouble send_time,
+		const gchar *body, gsize bodylen,
 		GError *err)
 {
 	gchar *ucl_out;
@@ -1511,8 +1535,6 @@ rspamc_client_cb (struct rspamd_client_connection *conn,
 	struct rspamc_command *cmd;
 	FILE *out = stdout;
 	gdouble finish = rspamd_get_ticks (FALSE), diff;
-	const gchar *body;
-	gsize body_len;
 
 	cmd = cbdata->cmd;
 
@@ -1530,7 +1552,16 @@ rspamc_client_cb (struct rspamd_client_connection *conn,
 	else {
 
 		if (cmd->cmd == RSPAMC_COMMAND_SYMBOLS && mime_output && input) {
-			rspamc_mime_output (out, result, input, diff, err);
+			if (body) {
+				GString tmp;
+
+				tmp.str = (char *)body;
+				tmp.len = bodylen;
+				rspamc_mime_output (out, result, &tmp, diff, err);
+			}
+			else {
+				rspamc_mime_output (out, result, input, diff, err);
+			}
 		}
 		else {
 			if (cmd->need_input) {
@@ -1579,17 +1610,26 @@ rspamc_client_cb (struct rspamd_client_connection *conn,
 					cmd->command_output_func (out, result);
 				}
 
+				if (body) {
+					rspamd_fprintf (out, "\nNew body:\n%*s\n", (int)bodylen,
+							body);
+				}
+
 				ucl_object_unref (result);
 			}
 			else if (err != NULL) {
 				rspamd_fprintf (out, "%s\n", err->message);
 
 				if (json && msg != NULL) {
-					body = rspamd_http_message_get_body (msg, &body_len);
+					const gchar *raw;
+					gsize rawlen;
 
-					if (body) {
+					raw = rspamd_http_message_get_body (msg, &rawlen);
+
+					if (raw) {
 						/* We can also output the resulting json */
-						rspamd_fprintf (out, "%*s\n", (gint)body_len, body);
+						rspamd_fprintf (out, "%*s\n", (gint)(rawlen - bodylen),
+								raw);
 					}
 				}
 			}
@@ -1609,7 +1649,7 @@ rspamc_client_cb (struct rspamd_client_connection *conn,
 }
 
 static void
-rspamc_process_input (struct event_base *ev_base, struct rspamc_command *cmd,
+rspamc_process_input (struct ev_loop *ev_base, struct rspamc_command *cmd,
 	FILE *in, const gchar *name, GQueue *attrs)
 {
 	struct rspamd_client_connection *conn;
@@ -1736,7 +1776,7 @@ rspamd_dirent_size (DIR * dirp)
 }
 
 static void
-rspamc_process_dir (struct event_base *ev_base, struct rspamc_command *cmd,
+rspamc_process_dir (struct ev_loop *ev_base, struct rspamc_command *cmd,
 	const gchar *name, GQueue *attrs)
 {
 	DIR *d;
@@ -1829,7 +1869,7 @@ rspamc_process_dir (struct event_base *ev_base, struct rspamc_command *cmd,
 				if (cur_req >= max_requests) {
 					cur_req = 0;
 					/* Wait for completion */
-					event_base_loop (ev_base, 0);
+					ev_loop (ev_base, 0);
 				}
 			}
 		}
@@ -1840,7 +1880,7 @@ rspamc_process_dir (struct event_base *ev_base, struct rspamc_command *cmd,
 	}
 
 	closedir (d);
-	event_base_loop (ev_base, 0);
+	ev_loop (ev_base, 0);
 }
 
 
@@ -1863,7 +1903,7 @@ main (gint argc, gchar **argv, gchar **env)
 	GPid cld;
 	struct rspamc_command *cmd;
 	FILE *in = NULL;
-	struct event_base *ev_base;
+	struct ev_loop *event_loop;
 	struct stat st;
 	struct sigaction sigpipe_act;
 	gchar **exclude_pattern;
@@ -1884,6 +1924,7 @@ main (gint argc, gchar **argv, gchar **env)
 	npatterns = 0;
 
 	while (exclude_pattern && *exclude_pattern) {
+		exclude_pattern ++;
 		npatterns ++;
 	}
 
@@ -1902,7 +1943,7 @@ main (gint argc, gchar **argv, gchar **env)
 	}
 
 	rspamd_init_libs ();
-	ev_base = event_base_new ();
+	event_loop = ev_loop_new (EVFLAG_SIGNALFD|EVBACKEND_ALL);
 
 	struct rspamd_http_context_cfg http_config;
 
@@ -1911,7 +1952,7 @@ main (gint argc, gchar **argv, gchar **env)
 	http_config.kp_cache_size_server = 0;
 	http_config.user_agent = user_agent;
 	http_ctx = rspamd_http_context_create_config (&http_config,
-			ev_base, NULL);
+			event_loop, NULL);
 
 	/* Ignore sigpipe */
 	sigemptyset (&sigpipe_act.sa_mask);
@@ -1972,10 +2013,10 @@ main (gint argc, gchar **argv, gchar **env)
 	if (start_argc == argc) {
 		/* Do command without input or with stdin */
 		if (empty_input) {
-			rspamc_process_input (ev_base, cmd, NULL, "empty", kwattrs);
+			rspamc_process_input (event_loop, cmd, NULL, "empty", kwattrs);
 		}
 		else {
-			rspamc_process_input (ev_base, cmd, in, "stdin", kwattrs);
+			rspamc_process_input (event_loop, cmd, in, "stdin", kwattrs);
 		}
 	}
 	else {
@@ -1990,7 +2031,7 @@ main (gint argc, gchar **argv, gchar **env)
 				}
 				if (S_ISDIR (st.st_mode)) {
 					/* Directories are processed with a separate limit */
-					rspamc_process_dir (ev_base, cmd, argv[i], kwattrs);
+					rspamc_process_dir (event_loop, cmd, argv[i], kwattrs);
 					cur_req = 0;
 				}
 				else {
@@ -1999,24 +2040,24 @@ main (gint argc, gchar **argv, gchar **env)
 						fprintf (stderr, "cannot open file %s\n", argv[i]);
 						exit (EXIT_FAILURE);
 					}
-					rspamc_process_input (ev_base, cmd, in, argv[i], kwattrs);
+					rspamc_process_input (event_loop, cmd, in, argv[i], kwattrs);
 					cur_req++;
 					fclose (in);
 				}
 				if (cur_req >= max_requests) {
 					cur_req = 0;
 					/* Wait for completion */
-					event_base_loop (ev_base, 0);
+					ev_loop (event_loop, 0);
 				}
 			}
 		}
 
 		if (cmd->cmd == RSPAMC_COMMAND_FUZZY_DELHASH) {
-			rspamc_process_input (ev_base, cmd, NULL, "hashes", kwattrs);
+			rspamc_process_input (event_loop, cmd, NULL, "hashes", kwattrs);
 		}
 	}
 
-	event_base_loop (ev_base, 0);
+	ev_loop (event_loop, 0);
 
 	g_queue_free_full (kwattrs, rspamc_kwattr_free);
 

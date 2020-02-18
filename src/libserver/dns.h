@@ -19,16 +19,24 @@
 
 #include "config.h"
 #include "mem_pool.h"
-#include "events.h"
+#include "async_session.h"
 #include "logger.h"
 #include "rdns.h"
 #include "upstream.h"
+#include "libutil/hash.h"
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
 
 struct rspamd_config;
+struct rspamd_task;
 
 struct rspamd_dns_resolver {
 	struct rdns_resolver *r;
-	struct event_base *ev_base;
+	struct ev_loop *event_loop;
+	rspamd_lru_hash_t *fails_cache;
+	ev_tstamp fails_cache_time;
 	struct upstream_list *ups;
 	struct rspamd_config *cfg;
 	gdouble request_timeout;
@@ -40,10 +48,14 @@ struct rspamd_dns_resolver {
 /**
  * Init DNS resolver, params are obtained from a config file or system file /etc/resolv.conf
  */
-struct rspamd_dns_resolver * rspamd_dns_resolver_init (rspamd_logger_t *logger,
-													   struct event_base *ev_base, struct rspamd_config *cfg);
+struct rspamd_dns_resolver *rspamd_dns_resolver_init (rspamd_logger_t *logger,
+													  struct ev_loop *ev_base,
+													  struct rspamd_config *cfg);
+
+void rspamd_dns_resolver_deinit (struct rspamd_dns_resolver *resolver);
 
 struct rspamd_dns_request_ud;
+
 /**
  * Make a DNS request
  * @param resolver resolver object
@@ -55,13 +67,13 @@ struct rspamd_dns_request_ud;
  * @param ... string or ip address based on a request type
  * @return TRUE if request was sent.
  */
-struct rspamd_dns_request_ud * rspamd_dns_resolver_request (struct rspamd_dns_resolver *resolver,
-															struct rspamd_async_session *session,
-															rspamd_mempool_t *pool,
-															dns_callback_type cb,
-															gpointer ud,
-															enum rdns_request_type type,
-															const char *name);
+struct rspamd_dns_request_ud *rspamd_dns_resolver_request (struct rspamd_dns_resolver *resolver,
+														   struct rspamd_async_session *session,
+														   rspamd_mempool_t *pool,
+														   dns_callback_type cb,
+														   gpointer ud,
+														   enum rdns_request_type type,
+														   const char *name);
 
 gboolean rspamd_dns_resolver_request_task (struct rspamd_task *task,
 										   dns_callback_type cb,
@@ -74,5 +86,9 @@ gboolean rspamd_dns_resolver_request_task_forced (struct rspamd_task *task,
 												  gpointer ud,
 												  enum rdns_request_type type,
 												  const char *name);
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif

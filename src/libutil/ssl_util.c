@@ -18,6 +18,7 @@
 #include "libutil/util.h"
 #include "libutil/logger.h"
 #include "ssl_util.h"
+#include "unix-std.h"
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -30,7 +31,8 @@ enum rspamd_ssl_state {
 	ssl_conn_init,
 	ssl_conn_connected,
 	ssl_next_read,
-	ssl_next_write
+	ssl_next_write,
+	ssl_next_shutdown,
 };
 
 enum rspamd_ssl_shutdown {
@@ -45,13 +47,23 @@ struct rspamd_ssl_connection {
 	gboolean verify_peer;
 	SSL *ssl;
 	gchar *hostname;
-	struct event *ev;
-	struct event_base *ev_base;
-	struct timeval *tv;
+	struct rspamd_io_ev *ev;
+	struct rspamd_io_ev *shut_ev;
+	struct ev_loop *event_loop;
 	rspamd_ssl_handler_t handler;
 	rspamd_ssl_error_handler_t err_handler;
 	gpointer handler_data;
+	gchar log_tag[8];
 };
+
+#define msg_debug_ssl(...)  rspamd_conditional_debug_fast (NULL, NULL, \
+        rspamd_ssl_log_id, "ssl", conn->log_tag, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+
+static void rspamd_ssl_event_handler (gint fd, short what, gpointer ud);
+
+INIT_LOG_MODULE(ssl)
 
 static GQuark
 rspamd_ssl_quark (void)
@@ -389,7 +401,7 @@ rspamd_tls_set_error (gint retcode, const gchar *stage, GError **err)
 
 		err_code = last_err;
 
-		if (reason->str[reason->len - 1] == ',') {
+		if (reason->len > 0 && reason->str[reason->len - 1] == ',') {
 			reason->str[reason->len - 1] = '\0';
 			reason->len --;
 		}
@@ -401,95 +413,222 @@ rspamd_tls_set_error (gint retcode, const gchar *stage, GError **err)
 }
 
 static void
+rspamd_ssl_connection_dtor (struct rspamd_ssl_connection *conn)
+{
+	SSL_free (conn->ssl);
+
+	if (conn->hostname) {
+		g_free (conn->hostname);
+	}
+
+	if (conn->shut_ev) {
+		rspamd_ev_watcher_stop (conn->event_loop, conn->shut_ev);
+		g_free (conn->shut_ev);
+	}
+
+	close (conn->fd);
+	g_free (conn);
+}
+
+static void
+rspamd_ssl_shutdown (struct rspamd_ssl_connection *conn)
+{
+	gint ret = 0, nret, retries;
+	static const gint max_retries = 5;
+
+	/*
+	 * Fucking openssl...
+	 * From the manual, 0 means: "The shutdown is not yet finished.
+	 * Call SSL_shutdown() for a second time,
+	 * if a bidirectional shutdown shall be performed.
+	 * The output of SSL_get_error(3) may be misleading,
+	 * as an erroneous SSL_ERROR_SYSCALL may be flagged
+	 * even though no error occurred."
+	 *
+	 * What is `second`, what if `second` also returns 0?
+	 * What a retarded behaviour!
+	 */
+	for (retries = 0; retries < max_retries; retries ++) {
+		ret = SSL_shutdown (conn->ssl);
+
+		if (ret != 0) {
+			break;
+		}
+	}
+
+	if (ret == 1) {
+		/* All done */
+		msg_debug_ssl ("ssl shutdown: all done");
+		rspamd_ssl_connection_dtor (conn);
+	}
+	else if (ret < 0) {
+		short what;
+
+		nret = SSL_get_error (conn->ssl, ret);
+		conn->state = ssl_next_shutdown;
+
+		if (nret == SSL_ERROR_WANT_READ) {
+			msg_debug_ssl ("ssl shutdown: need read");
+			what = EV_READ;
+		}
+		else if (nret == SSL_ERROR_WANT_WRITE) {
+			msg_debug_ssl ("ssl shutdown: need write");
+			what = EV_WRITE;
+		}
+		else {
+			/* Cannot do anything else, fatal error */
+			GError *err = NULL;
+
+			rspamd_tls_set_error (nret, "final shutdown", &err);
+			msg_debug_ssl ("ssl shutdown: fatal error: %e; retries=%d; ret=%d",
+					err, retries, ret);
+			g_error_free (err);
+			rspamd_ssl_connection_dtor (conn);
+
+			return;
+		}
+
+		/* As we own fd, we can try to perform shutdown one more time */
+		/* BUGON: but we DO NOT own conn->ev, and it's a big issue */
+		static const ev_tstamp shutdown_time = 5.0;
+
+		if (conn->shut_ev == NULL) {
+			rspamd_ev_watcher_stop (conn->event_loop, conn->ev);
+			conn->shut_ev = g_malloc0 (sizeof (*conn->shut_ev));
+			rspamd_ev_watcher_init (conn->shut_ev, conn->fd, what,
+					rspamd_ssl_event_handler, conn);
+			rspamd_ev_watcher_start (conn->event_loop, conn->shut_ev, shutdown_time);
+			/* XXX: can it be done safely ? */
+			conn->ev = conn->shut_ev;
+		}
+		else {
+			rspamd_ev_watcher_reschedule (conn->event_loop, conn->shut_ev, what);
+		}
+
+		conn->state = ssl_next_shutdown;
+	}
+	else if (ret == 0) {
+		/* What can we do here?? */
+		msg_debug_ssl ("ssl shutdown: openssl failed to initiate shutdown after "
+				 "%d attempts!", max_retries);
+		rspamd_ssl_connection_dtor (conn);
+	}
+}
+
+static void
 rspamd_ssl_event_handler (gint fd, short what, gpointer ud)
 {
-	struct rspamd_ssl_connection *c = ud;
+	struct rspamd_ssl_connection *conn = ud;
 	gint ret;
 	GError *err = NULL;
 
-	if (what == EV_TIMEOUT) {
-		c->shut = ssl_shut_unclean;
+	if (what == EV_TIMER) {
+		if (conn->state == ssl_next_shutdown) {
+			/* No way to restore, just terminate */
+			rspamd_ssl_connection_dtor (conn);
+		}
+		else {
+			conn->shut = ssl_shut_unclean;
+			rspamd_ev_watcher_stop (conn->event_loop, conn->ev);
+			g_set_error (&err, rspamd_ssl_quark (), ETIMEDOUT,
+					"ssl connection timed out");
+			conn->err_handler (conn->handler_data, err);
+			g_error_free (err);
+		}
+
+		return;
 	}
 
-	switch (c->state) {
+	msg_debug_ssl ("ssl event; what=%d; c->state=%d", (int)what,
+			(int)conn->state);
+
+	switch (conn->state) {
 	case ssl_conn_init:
 		/* Continue connection */
-		ret = SSL_connect (c->ssl);
+		ret = SSL_connect (conn->ssl);
 
 		if (ret == 1) {
-			event_del (c->ev);
+			rspamd_ev_watcher_stop (conn->event_loop, conn->ev);
 			/* Verify certificate */
-			if ((!c->verify_peer) || rspamd_ssl_peer_verify (c)) {
-				c->state = ssl_conn_connected;
-				c->handler (fd, EV_WRITE, c->handler_data);
+			if ((!conn->verify_peer) || rspamd_ssl_peer_verify (conn)) {
+				msg_debug_ssl ("ssl connect: connected");
+				conn->state = ssl_conn_connected;
+				conn->handler (fd, EV_WRITE, conn->handler_data);
 			}
 			else {
 				return;
 			}
 		}
 		else {
-			ret = SSL_get_error (c->ssl, ret);
+			ret = SSL_get_error (conn->ssl, ret);
 
 			if (ret == SSL_ERROR_WANT_READ) {
+				msg_debug_ssl ("ssl connect: need read");
 				what = EV_READ;
 			}
 			else if (ret == SSL_ERROR_WANT_WRITE) {
+				msg_debug_ssl ("ssl connect: need write");
 				what = EV_WRITE;
 			}
 			else {
+				rspamd_ev_watcher_stop (conn->event_loop, conn->ev);
 				rspamd_tls_set_error (ret, "connect", &err);
-				c->err_handler (c->handler_data, err);
+				conn->err_handler (conn->handler_data, err);
 				g_error_free (err);
 				return;
 			}
 
-			event_del (c->ev);
-			event_set (c->ev, fd, what, rspamd_ssl_event_handler, c);
-			event_base_set (c->ev_base, c->ev);
-			event_add (c->ev, c->tv);
+			rspamd_ev_watcher_reschedule (conn->event_loop, conn->ev, what);
+
 		}
 		break;
 	case ssl_next_read:
-		event_del (c->ev);
-		/* Restore handler */
-		event_set (c->ev, c->fd, EV_READ|EV_PERSIST,
-				c->handler, c->handler_data);
-		event_base_set (c->ev_base, c->ev);
-		event_add (c->ev, c->tv);
-		c->state = ssl_conn_connected;
-		c->handler (fd, EV_READ, c->handler_data);
+		rspamd_ev_watcher_reschedule (conn->event_loop, conn->ev, EV_READ);
+		conn->state = ssl_conn_connected;
+		conn->handler (fd, EV_READ, conn->handler_data);
 		break;
 	case ssl_next_write:
+		rspamd_ev_watcher_reschedule (conn->event_loop, conn->ev, EV_WRITE);
+		conn->state = ssl_conn_connected;
+		conn->handler (fd, EV_WRITE, conn->handler_data);
+		break;
 	case ssl_conn_connected:
-		event_del (c->ev);
-		/* Restore handler */
-		event_set (c->ev, c->fd, EV_WRITE,
-				c->handler, c->handler_data);
-		event_base_set (c->ev_base, c->ev);
-		event_add (c->ev, c->tv);
-		c->state = ssl_conn_connected;
-		c->handler (fd, EV_WRITE, c->handler_data);
+		rspamd_ev_watcher_reschedule (conn->event_loop, conn->ev, what);
+		conn->state = ssl_conn_connected;
+		conn->handler (fd, what, conn->handler_data);
+		break;
+	case ssl_next_shutdown:
+		rspamd_ssl_shutdown (conn);
 		break;
 	default:
+		rspamd_ev_watcher_stop (conn->event_loop, conn->ev);
 		g_set_error (&err, rspamd_ssl_quark (), EINVAL,
-				"ssl bad state error: %d", c->state);
-		c->err_handler (c->handler_data, err);
+				"ssl bad state error: %d", conn->state);
+		conn->err_handler (conn->handler_data, err);
 		g_error_free (err);
 		break;
 	}
 }
 
 struct rspamd_ssl_connection *
-rspamd_ssl_connection_new (gpointer ssl_ctx, struct event_base *ev_base,
-		gboolean verify_peer)
+rspamd_ssl_connection_new (gpointer ssl_ctx, struct ev_loop *ev_base,
+		gboolean verify_peer, const gchar *log_tag)
 {
 	struct rspamd_ssl_connection *c;
 
 	g_assert (ssl_ctx != NULL);
 	c = g_malloc0 (sizeof (*c));
 	c->ssl = SSL_new (ssl_ctx);
-	c->ev_base = ev_base;
+	c->event_loop = ev_base;
 	c->verify_peer = verify_peer;
+
+	if (log_tag) {
+		rspamd_strlcpy (c->log_tag, log_tag, sizeof (log_tag));
+	}
+	else {
+		rspamd_random_hex (c->log_tag, sizeof (log_tag) - 1);
+		c->log_tag[sizeof (log_tag) - 1] = '\0';
+	}
 
 	return c;
 }
@@ -497,12 +636,11 @@ rspamd_ssl_connection_new (gpointer ssl_ctx, struct event_base *ev_base,
 
 gboolean
 rspamd_ssl_connect_fd (struct rspamd_ssl_connection *conn, gint fd,
-		const gchar *hostname, struct event *ev, struct timeval *tv,
+		const gchar *hostname, struct rspamd_io_ev *ev, ev_tstamp timeout,
 		rspamd_ssl_handler_t handler, rspamd_ssl_error_handler_t err_handler,
 		gpointer handler_data)
 {
 	gint ret;
-	short what;
 
 	g_assert (conn != NULL);
 
@@ -510,13 +648,22 @@ rspamd_ssl_connect_fd (struct rspamd_ssl_connection *conn, gint fd,
 		return FALSE;
 	}
 
-	conn->fd = fd;
+	/* We dup fd to allow graceful closing */
+	gint nfd = dup (fd);
+
+	if (nfd == -1) {
+		return FALSE;
+	}
+
+	conn->fd = nfd;
 	conn->ev = ev;
 	conn->handler = handler;
 	conn->err_handler = err_handler;
 	conn->handler_data = handler_data;
 
-	if (SSL_set_fd (conn->ssl, fd) != 1) {
+	if (SSL_set_fd (conn->ssl, conn->fd) != 1) {
+		close (conn->fd);
+
 		return FALSE;
 	}
 
@@ -534,40 +681,36 @@ rspamd_ssl_connect_fd (struct rspamd_ssl_connection *conn, gint fd,
 	if (ret == 1) {
 		conn->state = ssl_conn_connected;
 
-		if (rspamd_event_pending (ev, EV_TIMEOUT|EV_WRITE|EV_READ)) {
-			event_del (ev);
-		}
-
-		event_set (ev, fd, EV_WRITE, rspamd_ssl_event_handler, conn);
-
-		if (conn->ev_base) {
-			event_base_set (conn->ev_base, ev);
-		}
-
-		event_add (ev, tv);
+		msg_debug_ssl ("connected, start write event");
+		rspamd_ev_watcher_stop (conn->event_loop, ev);
+		rspamd_ev_watcher_init (ev, nfd, EV_WRITE, rspamd_ssl_event_handler, conn);
+		rspamd_ev_watcher_start (conn->event_loop, ev, timeout);
 	}
 	else {
 		ret = SSL_get_error (conn->ssl, ret);
 
 		if (ret == SSL_ERROR_WANT_READ) {
-			what = EV_READ;
+			msg_debug_ssl ("not connected, want read");
 		}
 		else if (ret == SSL_ERROR_WANT_WRITE) {
-			what = EV_WRITE;
+			msg_debug_ssl ("not connected, want write");
 		}
 		else {
+			GError *err = NULL;
+
 			conn->shut = ssl_shut_unclean;
+			rspamd_tls_set_error (ret, "initial connect", &err);
+			msg_debug_ssl ("not connected, fatal error %e", err);
+			g_error_free (err);
+
 
 			return FALSE;
 		}
 
-		if (rspamd_event_pending (ev, EV_TIMEOUT|EV_WRITE|EV_READ)) {
-			event_del (ev);
-		}
-
-		event_set (ev, fd, what, rspamd_ssl_event_handler, conn);
-		event_base_set (conn->ev_base, ev);
-		event_add (ev, tv);
+		rspamd_ev_watcher_stop (conn->event_loop, ev);
+		rspamd_ev_watcher_init (ev, nfd, EV_WRITE|EV_READ,
+				rspamd_ssl_event_handler, conn);
+		rspamd_ev_watcher_start (conn->event_loop, ev, timeout);
 	}
 
 	return TRUE;
@@ -595,6 +738,7 @@ rspamd_ssl_read (struct rspamd_ssl_connection *conn, gpointer buf,
 	}
 
 	ret = SSL_read (conn->ssl, buf, buflen);
+	msg_debug_ssl ("ssl read: %d", ret);
 
 	if (ret > 0) {
 		conn->state = ssl_conn_connected;
@@ -623,9 +767,11 @@ rspamd_ssl_read (struct rspamd_ssl_connection *conn, gpointer buf,
 		what = 0;
 
 		if (ret == SSL_ERROR_WANT_READ) {
+			msg_debug_ssl ("ssl read: need read");
 			what |= EV_READ;
 		}
 		else if (ret == SSL_ERROR_WANT_WRITE) {
+			msg_debug_ssl ("ssl read: need write");
 			what |= EV_WRITE;
 		}
 		else {
@@ -638,13 +784,8 @@ rspamd_ssl_read (struct rspamd_ssl_connection *conn, gpointer buf,
 			return -1;
 		}
 
-		event_del (conn->ev);
-		event_set (conn->ev, conn->fd, what, rspamd_ssl_event_handler, conn);
-		event_base_set (conn->ev_base, conn->ev);
-		event_add (conn->ev, conn->tv);
-
+		rspamd_ev_watcher_reschedule (conn->event_loop, conn->ev, what);
 		errno = EAGAIN;
-
 	}
 
 	return -1;
@@ -666,6 +807,7 @@ rspamd_ssl_write (struct rspamd_ssl_connection *conn, gconstpointer buf,
 	}
 
 	ret = SSL_write (conn->ssl, buf, buflen);
+	msg_debug_ssl ("ssl write: ret=%d, buflen=%z", ret, buflen);
 
 	if (ret > 0) {
 		conn->state = ssl_conn_connected;
@@ -695,12 +837,14 @@ rspamd_ssl_write (struct rspamd_ssl_connection *conn, gconstpointer buf,
 	}
 	else {
 		ret = SSL_get_error (conn->ssl, ret);
-		conn->state = ssl_next_read;
+		conn->state = ssl_next_write;
 
 		if (ret == SSL_ERROR_WANT_READ) {
+			msg_debug_ssl ("ssl write: need read");
 			what = EV_READ;
 		}
 		else if (ret == SSL_ERROR_WANT_WRITE) {
+			msg_debug_ssl ("ssl write: need write");
 			what = EV_WRITE;
 		}
 		else {
@@ -713,11 +857,7 @@ rspamd_ssl_write (struct rspamd_ssl_connection *conn, gconstpointer buf,
 			return -1;
 		}
 
-		event_del (conn->ev);
-		event_set (conn->ev, conn->fd, what, rspamd_ssl_event_handler, conn);
-		event_base_set (conn->ev_base, conn->ev);
-		event_add (conn->ev, conn->tv);
-
+		rspamd_ev_watcher_reschedule (conn->event_loop, conn->ev, what);
 		errno = EAGAIN;
 	}
 
@@ -728,10 +868,14 @@ gssize
 rspamd_ssl_writev (struct rspamd_ssl_connection *conn, struct iovec *iov,
 		gsize iovlen)
 {
-	static guchar ssl_buf[16000];
+	/*
+	 * Static is needed to avoid issue:
+	 * https://github.com/openssl/openssl/issues/6865
+	 */
+	static guchar ssl_buf[16384];
 	guchar *p;
 	struct iovec *cur;
-	guint i, remain;
+	gsize i, remain;
 
 	remain = sizeof (ssl_buf);
 	p = ssl_buf;
@@ -765,38 +909,16 @@ void
 rspamd_ssl_connection_free (struct rspamd_ssl_connection *conn)
 {
 	if (conn) {
-		/*
-		 * SSL_RECEIVED_SHUTDOWN tells SSL_shutdown to act as if we had already
-		 * received a close notify from the other end.  SSL_shutdown will then
-		 * send the final close notify in reply.  The other end will receive the
-		 * close notify and send theirs.  By this time, we will have already
-		 * closed the socket and the other end's real close notify will never be
-		 * received.  In effect, both sides will think that they have completed a
-		 * clean shutdown and keep their sessions valid.  This strategy will fail
-		 * if the socket is not ready for writing, in which case this hack will
-		 * lead to an unclean shutdown and lost session on the other end.
-		 */
 		if (conn->shut == ssl_shut_unclean) {
-			SSL_set_shutdown (conn->ssl, SSL_RECEIVED_SHUTDOWN|SSL_SENT_SHUTDOWN);
+			/* Ignore return result and close socket */
+			msg_debug_ssl ("unclean shutdown");
 			SSL_set_quiet_shutdown (conn->ssl, 1);
+			(void)SSL_shutdown (conn->ssl);
+			rspamd_ssl_connection_dtor (conn);
 		}
 		else {
-			SSL_set_shutdown (conn->ssl, SSL_RECEIVED_SHUTDOWN);
+			msg_debug_ssl ("normal shutdown");
+			rspamd_ssl_shutdown (conn);
 		}
-
-		/* Stupid hack to enforce SSL to do shutdown sequence */
-		for (guint i = 0; i < 4; i++) {
-			if (SSL_shutdown (conn->ssl)) {
-				break;
-			}
-		}
-
-		SSL_free (conn->ssl);
-
-		if (conn->hostname) {
-			g_free (conn->hostname);
-		}
-
-		g_free (conn);
 	}
 }

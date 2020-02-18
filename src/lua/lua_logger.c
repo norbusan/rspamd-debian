@@ -326,7 +326,7 @@ lua_logger_out_str (lua_State *L, gint pos,
 			s = 0;
 
 			while (slen > 0 && len > 1) {
-				if (!lua_logger_char_safe (str[r], esc_type)) {
+				if (!lua_logger_char_safe (str[s], esc_type)) {
 					if (len >= 3) {
 						outbuf[r++] = '\\';
 						outbuf[r++] = hexdigests[((str[s] >> 4) & 0xF)];
@@ -463,7 +463,7 @@ lua_logger_out_table (lua_State *L, gint pos, gchar *outbuf, gsize len,
 	gsize remain = len, r;
 	gboolean first = TRUE;
 	gconstpointer self = NULL;
-	gint i, tpos;
+	gint i, tpos, last_seq = -1;
 
 	if (!lua_istable (L, pos) || remain == 0) {
 		return 0;
@@ -498,6 +498,8 @@ lua_logger_out_table (lua_State *L, gint pos, gchar *outbuf, gsize len,
 			break;
 		}
 
+		last_seq = i;
+
 		if (!first) {
 			r = rspamd_snprintf (d, remain + 1, ", ");
 			MOVE_BUF(d, remain, r);
@@ -524,7 +526,17 @@ lua_logger_out_table (lua_State *L, gint pos, gchar *outbuf, gsize len,
 		/* 'key' is at index -2 and 'value' is at index -1 */
 
 		if (lua_type (L, -2) == LUA_TNUMBER) {
-			continue;
+			if (last_seq > 0) {
+				lua_pushvalue (L, -2);
+
+				if (lua_tonumber (L, -1) <= last_seq + 1) {
+					lua_pop (L, 1);
+					/* Already seen */
+					continue;
+				}
+
+				lua_pop (L, 1);
+			}
 		}
 
 		if (!first) {
@@ -532,8 +544,11 @@ lua_logger_out_table (lua_State *L, gint pos, gchar *outbuf, gsize len,
 			MOVE_BUF(d, remain, r);
 		}
 
+		/* Preserve key */
+		lua_pushvalue (L, -2);
 		r = rspamd_snprintf (d, remain + 1, "[%s] = ",
-				lua_tostring (L, -2));
+				lua_tostring (L, -1));
+		lua_pop (L, 1); /* Remove key */
 		MOVE_BUF(d, remain, r);
 		tpos = lua_gettop (L);
 
@@ -575,31 +590,34 @@ lua_logger_out_type (lua_State *L, gint pos,
 	trace->cur_level ++;
 
 	switch (type) {
-		case LUA_TNUMBER:
-			r = lua_logger_out_num (L, pos, outbuf, len, trace);
-			break;
-		case LUA_TBOOLEAN:
-			r = lua_logger_out_boolean (L, pos, outbuf, len, trace);
-			break;
-		case LUA_TTABLE:
-			r = lua_logger_out_table (L, pos, outbuf, len, trace, esc_type);
-			break;
-		case LUA_TUSERDATA:
-			r = lua_logger_out_userdata (L, pos, outbuf, len, trace);
-			break;
-		case LUA_TFUNCTION:
-			r = rspamd_snprintf (outbuf, len + 1, "function");
-			break;
-		case LUA_TNIL:
-			r = rspamd_snprintf (outbuf, len + 1, "nil");
-			break;
-		case LUA_TNONE:
-			r = rspamd_snprintf (outbuf, len + 1, "no value");
-			break;
-		default:
-			/* Try to push everything as string using tostring magic */
-			r = lua_logger_out_str (L, pos, outbuf, len, trace, esc_type);
-			break;
+	case LUA_TNUMBER:
+		r = lua_logger_out_num (L, pos, outbuf, len, trace);
+		break;
+	case LUA_TBOOLEAN:
+		r = lua_logger_out_boolean (L, pos, outbuf, len, trace);
+		break;
+	case LUA_TTABLE:
+		r = lua_logger_out_table (L, pos, outbuf, len, trace, esc_type);
+		break;
+	case LUA_TUSERDATA:
+		r = lua_logger_out_userdata (L, pos, outbuf, len, trace);
+		break;
+	case LUA_TFUNCTION:
+		r = rspamd_snprintf (outbuf, len + 1, "function");
+		break;
+	case LUA_TLIGHTUSERDATA:
+		r = rspamd_snprintf (outbuf, len + 1, "0x%p", lua_topointer (L, pos));
+		break;
+	case LUA_TNIL:
+		r = rspamd_snprintf (outbuf, len + 1, "nil");
+		break;
+	case LUA_TNONE:
+		r = rspamd_snprintf (outbuf, len + 1, "no value");
+		break;
+	default:
+		/* Try to push everything as string using tostring magic */
+		r = lua_logger_out_str (L, pos, outbuf, len, trace, esc_type);
+		break;
 	}
 
 	trace->cur_level --;

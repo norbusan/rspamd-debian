@@ -20,12 +20,12 @@ Example domains whitelist config:
 greylist {
   # Search "example.com" and "mail.example.com" for "mx.out.mail.example.com":
   whitelist_domains_url = [
-    "$LOCAL_CONFDIR/local.d/greylist-whitelist-domains.inc",
-    "${CONFDIR}/maillist.inc",
-    "${CONFDIR}/redirectors.inc",
-    "${CONFDIR}/dmarc_whitelist.inc",
-    "${CONFDIR}/spf_dkim_whitelist.inc",
-    "${CONFDIR}/surbl-whitelist.inc",
+    "$LOCAL_CONFDIR/local.d/maps.d/greylist-whitelist-domains.inc",
+    "${CONFDIR}/maps.d/maillist.inc",
+    "${CONFDIR}/maps.d/redirectors.inc",
+    "${CONFDIR}/maps.d/dmarc_whitelist.inc",
+    "${CONFDIR}/maps.d/spf_dkim_whitelist.inc",
+    "${CONFDIR}/maps.d/surbl-whitelist.inc",
     "https://maps.rspamd.com/freemail/free.txt.zst"
   ];
 }
@@ -63,6 +63,7 @@ local settings = {
 
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util = require "rspamd_util"
+local lua_redis = require "lua_redis"
 local fun = require "fun"
 local hash = require "rspamd_cryptobox_hash"
 local rspamd_lua_utils = require "lua_util"
@@ -258,13 +259,13 @@ local function greylist_check(task)
     end
   end
 
-  local ret = rspamd_redis_make_request(task,
-    redis_params, -- connect params
-    hash_key, -- hash key
-    false, -- is write
-    redis_get_cb, --callback
-    'MGET', -- command
-    {body_key, meta_key} -- arguments
+  local ret = lua_redis.redis_make_request(task,
+      redis_params, -- connect params
+      hash_key, -- hash key
+      false, -- is write
+      redis_get_cb, --callback
+      'MGET', -- command
+      {body_key, meta_key} -- arguments
   )
   if not ret then
     rspamd_logger.errx(task, 'cannot make redis request to check results')
@@ -373,7 +374,7 @@ local function greylist_set(task)
 
     if not settings.check_local and is_rspamc then return end
 
-    ret,conn,upstream = rspamd_redis_make_request(task,
+    ret,conn,upstream = lua_redis.redis_make_request(task,
       redis_params, -- connect params
       hash_key, -- hash key
       true, -- is write
@@ -396,7 +397,7 @@ local function greylist_set(task)
     rspamd_logger.infox(task, 'greylisted until "%s", new record', end_time)
     greylist_message(task, end_time, 'new record')
     -- Create new record
-    ret,conn,upstream = rspamd_redis_make_request(task,
+    ret,conn,upstream = lua_redis.redis_make_request(task,
       redis_params, -- connect params
       hash_key, -- hash key
       true, -- is write
@@ -458,24 +459,30 @@ if opts then
   whitelist_domains_map = lua_map.rspamd_map_add(N, 'whitelist_domains_url',
     'map', 'Greylist whitelist domains map')
 
-  redis_params = rspamd_parse_redis_server(N)
+  redis_params = lua_redis.parse_redis_server(N)
   if not redis_params then
     rspamd_logger.infox(rspamd_config, 'no servers are specified, disabling module')
     rspamd_lua_utils.disable_module(N, "redis")
   else
+    lua_redis.register_prefix(settings.key_prefix .. 'b[a-z0-9]{20}', N,
+        'Greylisting elements (body hashes)"', {
+          type = 'string',
+        })
+    lua_redis.register_prefix(settings.key_prefix .. 'm[a-z0-9]{20}', N,
+        'Greylisting elements (meta hashes)"', {
+          type = 'string',
+        })
     rspamd_config:register_symbol({
       name = 'GREYLIST_SAVE',
       type = 'postfilter',
       callback = greylist_set,
       priority = 6,
-      flags = 'empty',
     })
     rspamd_config:register_symbol({
       name = 'GREYLIST_CHECK',
       type = 'prefilter',
       callback = greylist_check,
       priority = 6,
-      flags = 'empty',
     })
   end
 end

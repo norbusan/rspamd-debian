@@ -4,12 +4,9 @@
 ; Ignore third-party code
 ignore = contrib/**/* doc/doxydown/doxydown.pl
 
-;[PerlCritic]
-;select = **/*.{pl,pl.in,pm,t}
-
-[PerlTidy]
+[PerlCritic]
 select = **/*.{pl,pl.in,pm,t}
-argv = -l=120
+ignore = utils/{cgp_rspamd.pl,redirector.pl.in,classifier_test.pl}
 
 [PodChecker]
 select = **/*.{pl,pl.in,pm,pod}

@@ -28,6 +28,7 @@
 
 #include "cryptobox.h"
 #include "libutil/str_util.h"
+#include "ucl.h"
 
 #include <time.h>
 #include <limits.h>
@@ -65,7 +66,7 @@ extern const guchar lc_map[256];
 static inline uint32_t
 ucl_hash_func (const ucl_object_t *o)
 {
-	return rspamd_cryptobox_fast_hash (o->key, o->keylen, 0xb9a1ef83c4561c95ULL);
+	return (uint32_t)rspamd_cryptobox_fast_hash (o->key, o->keylen, 0xb9a1ef83c4561c95ULL);
 }
 
 static inline int
@@ -123,7 +124,7 @@ ucl_hash_caseless_func (const ucl_object_t *o)
 		break;
 	}
 
-	return rspamd_cryptobox_fast_hash_final (&hst);
+	return (uint32_t)rspamd_cryptobox_fast_hash_final (&hst);
 }
 
 
@@ -453,4 +454,52 @@ ucl_hash_reserve (ucl_hash_t *hashlin, size_t sz)
 	return true;
 	e0:
 	return false;
+}
+
+static int
+ucl_hash_cmp_icase (const void *a, const void *b)
+{
+	const ucl_object_t *oa = *(const ucl_object_t **)a,
+		*ob = *(const ucl_object_t **)b;
+
+	if (oa->keylen == ob->keylen) {
+		return rspamd_lc_cmp (oa->key, ob->key, oa->keylen);
+	}
+
+	return ((int)(oa->keylen)) - ob->keylen;
+}
+
+static int
+ucl_hash_cmp_case_sens (const void *a, const void *b)
+{
+	const ucl_object_t *oa = *(const ucl_object_t **)a,
+			*ob = *(const ucl_object_t **)b;
+
+	if (oa->keylen == ob->keylen) {
+		return memcmp (oa->key, ob->key, oa->keylen);
+	}
+
+	return ((int)(oa->keylen)) - ob->keylen;
+}
+
+void
+ucl_hash_sort (ucl_hash_t *hashlin, enum ucl_object_keys_sort_flags fl)
+{
+
+	if (fl & UCL_SORT_KEYS_ICASE) {
+		qsort (hashlin->ar.a, hashlin->ar.n, sizeof (ucl_object_t *),
+				ucl_hash_cmp_icase);
+	}
+	else {
+		qsort (hashlin->ar.a, hashlin->ar.n, sizeof (ucl_object_t *),
+				ucl_hash_cmp_case_sens);
+	}
+
+	if (fl & UCL_SORT_KEYS_RECURSIVE) {
+		for (size_t i = 0; i < hashlin->ar.n; i ++) {
+			if (ucl_object_type (hashlin->ar.a[i]) == UCL_OBJECT) {
+				ucl_hash_sort (hashlin->ar.a[i]->value.ov, fl);
+			}
+		}
+	}
 }

@@ -279,7 +279,7 @@ rspamd_rcl_options_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 
 	HASH_FIND_STR (section->subsections, "upstream", upstream_section);
 
-	upstream = ucl_object_lookup (obj, "upstream");
+	upstream = ucl_object_lookup_any (obj, "upstream", "upstreams", NULL);
 	if (upstream_section != NULL && upstream != NULL) {
 		if (!rspamd_rcl_section_parse_defaults (cfg,
 				upstream_section, cfg->cfg_pool,
@@ -329,6 +329,7 @@ rspamd_rcl_group_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 	const ucl_object_t *val, *elt;
 	struct rspamd_rcl_section *subsection;
 	struct rspamd_rcl_symbol_data sd;
+	const gchar *description = NULL;
 
 	g_assert (key != NULL);
 
@@ -388,6 +389,44 @@ rspamd_rcl_group_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 		}
 	}
 
+	if ((elt = ucl_object_lookup (obj, "public")) != NULL) {
+		if (ucl_object_type (elt) != UCL_BOOLEAN) {
+			g_set_error (err,
+					CFG_RCL_ERROR,
+					EINVAL,
+					"public attribute is not boolean for symbol: '%s'",
+					key);
+
+			return FALSE;
+		}
+		if (ucl_object_toboolean (elt)) {
+			gr->flags |= RSPAMD_SYMBOL_GROUP_PUBLIC;
+		}
+	}
+
+	if ((elt = ucl_object_lookup (obj, "private")) != NULL) {
+		if (ucl_object_type (elt) != UCL_BOOLEAN) {
+			g_set_error (err,
+					CFG_RCL_ERROR,
+					EINVAL,
+					"private attribute is not boolean for symbol: '%s'",
+					key);
+
+			return FALSE;
+		}
+		if (!ucl_object_toboolean (elt)) {
+			gr->flags |= RSPAMD_SYMBOL_GROUP_PUBLIC;
+		}
+	}
+
+	elt = ucl_object_lookup (obj, "description");
+	if (elt) {
+		description = ucl_object_tostring (elt);
+
+		gr->description = rspamd_mempool_strdup (cfg->cfg_pool,
+				description);
+	}
+
 	sd.gr = gr;
 	sd.cfg = cfg;
 
@@ -415,13 +454,12 @@ rspamd_rcl_symbol_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 	struct rspamd_config *cfg;
 	const ucl_object_t *elt;
 	const gchar *description = NULL;
-	gdouble score = 0.0;
+	gdouble score = NAN;
 	guint priority = 1, flags = 0;
-	gint nshots;
+	gint nshots = 0;
 
 	g_assert (key != NULL);
 	cfg = sd->cfg;
-	nshots = cfg->default_max_shots;
 
 	if ((elt = ucl_object_lookup (obj, "one_shot")) != NULL) {
 		if (ucl_object_type (elt) != UCL_BOOLEAN) {
@@ -481,7 +519,23 @@ rspamd_rcl_symbol_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 		}
 
 		if (ucl_object_toboolean (elt)) {
-			flags |= RSPAMD_SYMBOL_FLAG_IGNORE;
+			flags |= RSPAMD_SYMBOL_FLAG_IGNORE_METRIC;
+		}
+	}
+
+	if ((elt = ucl_object_lookup (obj, "enabled")) != NULL) {
+		if (ucl_object_type (elt) != UCL_BOOLEAN) {
+			g_set_error (err,
+					CFG_RCL_ERROR,
+					EINVAL,
+					"enabled attribute is not boolean for symbol: '%s'",
+					key);
+
+			return FALSE;
+		}
+
+		if (ucl_object_toboolean (elt)) {
+			flags |= RSPAMD_SYMBOL_FLAG_DISABLED;
 		}
 	}
 
@@ -753,7 +807,6 @@ rspamd_rcl_lua_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 			ucl_object_tostring (obj));
 	gchar *cur_dir, *lua_dir, *lua_file, *tmp1, *tmp2;
 	lua_State *L = cfg->lua_state;
-	GString *tb;
 	gint err_idx;
 
 	tmp1 = g_strdup (lua_src);
@@ -788,15 +841,13 @@ rspamd_rcl_lua_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 
 			/* Now do it */
 			if (lua_pcall (L, 0, 0, err_idx) != 0) {
-				tb = lua_touserdata (L, -1);
 				g_set_error (err,
 						CFG_RCL_ERROR,
 						EINVAL,
 						"cannot init lua file %s: %s",
 						lua_src,
-						tb->str);
-				g_string_free (tb, TRUE);
-				lua_pop (L, 2);
+						lua_tostring (L, -1));
+				lua_settop (L, 0);
 
 				if (chdir (cur_dir) == -1) {
 					msg_err_config ("cannot chdir to %s: %s", cur_dir,
@@ -990,6 +1041,8 @@ rspamd_rcl_modules_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 							TRUE,
 							mods_seen,
 							err)) {
+						g_hash_table_unref (mods_seen);
+
 						return FALSE;
 					}
 				}
@@ -1000,6 +1053,8 @@ rspamd_rcl_modules_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 					CFG_RCL_ERROR,
 					EINVAL,
 					"path attribute is missing");
+			g_hash_table_unref (mods_seen);
+
 			return FALSE;
 		}
 
@@ -1013,6 +1068,8 @@ rspamd_rcl_modules_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 							FALSE,
 							mods_seen,
 							err)) {
+						g_hash_table_unref (mods_seen);
+
 						return FALSE;
 					}
 				}
@@ -1029,11 +1086,15 @@ rspamd_rcl_modules_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 							FALSE,
 							mods_seen,
 							err)) {
+						g_hash_table_unref (mods_seen);
+
 						return FALSE;
 					}
 				}
 			}
 		}
+
+		g_hash_table_unref (mods_seen);
 	}
 	else if (ucl_object_tostring_safe (obj, &data)) {
 		if (!rspamd_rcl_add_lua_plugins_path (cfg,
@@ -1241,7 +1302,6 @@ rspamd_rcl_classifier_handler (rspamd_mempool_t *pool,
 				const gchar *lua_script;
 				gsize slen;
 				gint err_idx, ref_idx;
-				GString *tb = NULL;
 
 				lua_script = ucl_object_tolstring (cur, &slen);
 				L = cfg->lua_state;
@@ -1263,13 +1323,11 @@ rspamd_rcl_classifier_handler (rspamd_mempool_t *pool,
 
 				/* Now do it */
 				if (lua_pcall (L, 0, 1, err_idx) != 0) {
-					tb = lua_touserdata (L, -1);
 					g_set_error (err,
 							CFG_RCL_ERROR,
 							EINVAL,
 							"cannot init lua condition script: %s",
-							tb->str);
-					g_string_free (tb, TRUE);
+							lua_tostring (L, -1));
 					lua_settop (L, 0);
 
 					return FALSE;
@@ -1802,7 +1860,7 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				rspamd_rcl_parse_struct_integer,
 				G_STRUCT_OFFSET (struct rspamd_config, dns_max_requests),
 				RSPAMD_CL_FLAG_INT_32,
-				"Legacy option for DNS maximum requests per task count");
+				"Maximum DNS requests per task (default: 64)");
 		rspamd_rcl_add_default_handler (sub,
 				"classify_headers",
 				rspamd_rcl_parse_struct_string_list,
@@ -1894,6 +1952,12 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				0,
 				"Disable monitoring completely");
 		rspamd_rcl_add_default_handler (sub,
+				"fips_mode",
+				rspamd_rcl_parse_struct_boolean,
+				G_STRUCT_OFFSET (struct rspamd_config, fips_mode),
+				0,
+				"Enable FIPS 140-2 mode in OpenSSL");
+		rspamd_rcl_add_default_handler (sub,
 				"dynamic_conf",
 				rspamd_rcl_parse_struct_string,
 				G_STRUCT_OFFSET (struct rspamd_config, dynamic_conf),
@@ -1905,6 +1969,12 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				G_STRUCT_OFFSET (struct rspamd_config, rrd_file),
 				RSPAMD_CL_FLAG_STRING_PATH,
 				"Path to RRD file");
+		rspamd_rcl_add_default_handler (sub,
+				"stats_file",
+				rspamd_rcl_parse_struct_string,
+				G_STRUCT_OFFSET (struct rspamd_config, stats_file),
+				RSPAMD_CL_FLAG_STRING_PATH,
+				"Path to stats file");
 		rspamd_rcl_add_default_handler (sub,
 				"history_file",
 				rspamd_rcl_parse_struct_string,
@@ -1918,6 +1988,18 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				0,
 				"Always check all filters");
 		rspamd_rcl_add_default_handler (sub,
+				"public_groups_only",
+				rspamd_rcl_parse_struct_boolean,
+				G_STRUCT_OFFSET (struct rspamd_config, public_groups_only),
+				0,
+				"Output merely public groups everywhere");
+		rspamd_rcl_add_default_handler (sub,
+				"enable_test_patterns",
+				rspamd_rcl_parse_struct_boolean,
+				G_STRUCT_OFFSET (struct rspamd_config, enable_test_patterns),
+				0,
+				"Enable test GTUBE like patterns (not for production!)");
+		rspamd_rcl_add_default_handler (sub,
 				"enable_experimental",
 				rspamd_rcl_parse_struct_boolean,
 				G_STRUCT_OFFSET (struct rspamd_config, enable_experimental),
@@ -1929,12 +2011,6 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				G_STRUCT_OFFSET (struct rspamd_config, disable_pcre_jit),
 				0,
 				"Disable PCRE JIT");
-		rspamd_rcl_add_default_handler (sub,
-				"disable_lua_squeeze",
-				rspamd_rcl_parse_struct_boolean,
-				G_STRUCT_OFFSET (struct rspamd_config, disable_lua_squeeze),
-				0,
-				"Disable Lua rules squeezing");
 		rspamd_rcl_add_default_handler (sub,
 				"min_word_len",
 				rspamd_rcl_parse_struct_integer,
@@ -2050,12 +2126,6 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				0,
 				"List of ssl ciphers (e.g. HIGH:!aNULL:!kRSA:!PSK:!SRP:!MD5:!RC4)");
 		rspamd_rcl_add_default_handler (sub,
-				"magic_file",
-				rspamd_rcl_parse_struct_string,
-				G_STRUCT_OFFSET (struct rspamd_config, magic_file),
-				0,
-				"Path to a custom libmagic file");
-		rspamd_rcl_add_default_handler (sub,
 				"max_message",
 				rspamd_rcl_parse_struct_integer,
 				G_STRUCT_OFFSET (struct rspamd_config, max_message),
@@ -2145,6 +2215,49 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				G_STRUCT_OFFSET (struct rspamd_config, full_gc_iters),
 				RSPAMD_CL_FLAG_UINT,
 				"Task scanned before memory gc is performed (default: 0 - disabled)");
+		rspamd_rcl_add_default_handler (sub,
+				"heartbeat_interval",
+				rspamd_rcl_parse_struct_time,
+				G_STRUCT_OFFSET (struct rspamd_config, heartbeat_interval),
+				RSPAMD_CL_FLAG_TIME_FLOAT,
+				"Time between workers heartbeats");
+		rspamd_rcl_add_default_handler (sub,
+				"heartbeats_loss_max",
+				rspamd_rcl_parse_struct_integer,
+				G_STRUCT_OFFSET (struct rspamd_config, heartbeats_loss_max),
+				RSPAMD_CL_FLAG_INT_32,
+				"Maximum count of heartbeats to be lost before trying to "
+				"terminate a worker (default: 0 - disabled)");
+		rspamd_rcl_add_default_handler (sub,
+				"max_lua_urls",
+				rspamd_rcl_parse_struct_integer,
+				G_STRUCT_OFFSET (struct rspamd_config, max_lua_urls),
+				RSPAMD_CL_FLAG_INT_32,
+				"Maximum count of URLs to pass to Lua to avoid DoS (default: 1024)");
+		rspamd_rcl_add_default_handler (sub,
+				"max_urls",
+				rspamd_rcl_parse_struct_integer,
+				G_STRUCT_OFFSET (struct rspamd_config, max_urls),
+				RSPAMD_CL_FLAG_INT_32,
+				"Maximum count of URLs to process to avoid DoS (default: 10240)");
+		rspamd_rcl_add_default_handler (sub,
+				"max_blas_threads",
+				rspamd_rcl_parse_struct_integer,
+				G_STRUCT_OFFSET (struct rspamd_config, max_blas_threads),
+				RSPAMD_CL_FLAG_INT_32,
+				"Maximum number of Blas threads for learning neural networks (default: 1)");
+		rspamd_rcl_add_default_handler (sub,
+				"max_opts_len",
+				rspamd_rcl_parse_struct_integer,
+				G_STRUCT_OFFSET (struct rspamd_config, max_opts_len),
+				RSPAMD_CL_FLAG_INT_32,
+				"Maximum size of all options for a single symbol (default: 4096)");
+		rspamd_rcl_add_default_handler (sub,
+				"events_backend",
+				rspamd_rcl_parse_struct_string,
+				G_STRUCT_OFFSET (struct rspamd_config, events_backend),
+				0,
+				"Events backend to use: kqueue, epoll, select, poll or auto (default: auto)");
 
 		/* Neighbours configuration */
 		rspamd_rcl_add_section_doc (&sub->subsections, "neighbours", "name",
@@ -2225,6 +2338,12 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				G_STRUCT_OFFSET (struct rspamd_config, upstream_revive_time),
 				RSPAMD_CL_FLAG_TIME_FLOAT,
 				"Time before attempting to recover upstream after an error");
+		rspamd_rcl_add_default_handler (ssub,
+				"lazy_resolve_time",
+				rspamd_rcl_parse_struct_time,
+				G_STRUCT_OFFSET (struct rspamd_config, upstream_lazy_resolve_time),
+				RSPAMD_CL_FLAG_TIME_FLOAT,
+				"Time to resolve upstreams addresses in lazy mode");
 	}
 
 	if (!(skip_sections && g_hash_table_lookup (skip_sections, "actions"))) {
@@ -3198,13 +3317,15 @@ rspamd_rcl_parse_struct_addr (rspamd_mempool_t *pool,
 	struct rspamd_rcl_struct_parser *pd = ud;
 	rspamd_inet_addr_t **target;
 	const gchar *val;
+	gsize size;
 
 	target = (rspamd_inet_addr_t **)(((gchar *)pd->user_struct) + pd->offset);
 
 	if (ucl_object_type (obj) == UCL_STRING) {
-		val = ucl_object_tostring (obj);
+		val = ucl_object_tolstring (obj, &size);
 
-		if (!rspamd_parse_inet_address (target, val, 0)) {
+		if (!rspamd_parse_inet_address (target, val, size,
+				RSPAMD_INET_ADDRESS_PARSE_DEFAULT)) {
 			g_set_error (err,
 				CFG_RCL_ERROR,
 				EINVAL,
@@ -3484,7 +3605,6 @@ rspamd_rcl_maybe_apply_lua_transform (struct rspamd_config *cfg)
 {
 	lua_State *L = cfg->lua_state;
 	gint err_idx, ret;
-	GString *tb;
 	gchar str[PATH_MAX];
 	static const char *transform_script = "lua_cfg_transform";
 
@@ -3518,13 +3638,8 @@ rspamd_rcl_maybe_apply_lua_transform (struct rspamd_config *cfg)
 	ucl_object_push_lua (L, cfg->rcl_obj, true);
 
 	if ((ret = lua_pcall (L, 1, 2, err_idx)) != 0) {
-		tb = lua_touserdata (L, -1);
-		msg_err ("call to rspamadm lua script failed (%d): %v", ret, tb);
-
-		if (tb) {
-			g_string_free (tb, TRUE);
-		}
-
+		msg_err ("call to rspamadm lua script failed (%d): %s", ret,
+				lua_tostring (L, -1));
 		lua_settop (L, 0);
 
 		return;
@@ -3588,11 +3703,8 @@ rspamd_rcl_jinja_handler (struct ucl_parser *parser,
 	lua_pushboolean (L, false);
 
 	if (lua_pcall (L, 3, 1, err_idx) != 0) {
-		GString *tb;
-
-		tb = lua_touserdata (L, -1);
-		msg_err_config ("cannot call lua jinja_template script: %s", tb->str);
-		g_string_free (tb, TRUE);
+		msg_err_config ("cannot call lua jinja_template script: %s",
+				lua_tostring (L, -1));
 		lua_settop (L, err_idx - 1);
 
 		return false;
@@ -3856,12 +3968,8 @@ rspamd_config_read (struct rspamd_config *cfg,
 				rspamd_lua_setclass (L, "rspamd{config}", -1);
 
 				if (lua_pcall (L, 1, 0, err_idx) != 0) {
-					GString *tb;
-
-					tb = lua_touserdata (L, -1);
 					msg_err_config ("cannot call lua init_debug_logging script: %s",
-							tb->str);
-					g_string_free (tb, TRUE);
+							lua_tostring (L, -1));
 					lua_settop (L, err_idx - 1);
 
 					return FALSE;
@@ -3889,6 +3997,9 @@ rspamd_config_read (struct rspamd_config *cfg,
 	}
 
 	cfg->lang_det = rspamd_language_detector_init (cfg);
+	rspamd_mempool_add_destructor (cfg->cfg_pool,
+			(rspamd_mempool_destruct_t)rspamd_language_detector_unref,
+			cfg->lang_det);
 
 	return TRUE;
 }

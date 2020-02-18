@@ -23,6 +23,10 @@
 #include "libserver/cfg_file.h"
 #include "libserver/rspamd_control.h"
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 static const guint64 rspamd_worker_magic = 0xb48abc69d601dc1dULL;
 
 struct rspamd_lang_detector;
@@ -30,14 +34,13 @@ struct rspamd_lang_detector;
 struct rspamd_worker_ctx {
 	guint64 magic;
 	/* Events base */
-	struct event_base *ev_base;
+	struct ev_loop *event_loop;
 	/* DNS resolver */
 	struct rspamd_dns_resolver *resolver;
 	/* Config */
 	struct rspamd_config *cfg;
 
-	guint32 timeout;
-	struct timeval io_tv;
+	ev_tstamp timeout;
 	/* Detect whether this worker is mime worker    */
 	gboolean is_mime;
 	/* Allow encrypted requests only using network */
@@ -45,7 +48,7 @@ struct rspamd_worker_ctx {
 	/* Limit of tasks */
 	guint32 max_tasks;
 	/* Maximum time for task processing */
-	gdouble task_timeout;
+	ev_tstamp task_timeout;
 	/* Encryption key */
 	struct rspamd_cryptobox_keypair *key;
 	/* Keys cache */
@@ -53,22 +56,17 @@ struct rspamd_worker_ctx {
 	/* Language detector */
 	struct rspamd_lang_detector *lang_det;
 };
+
 /*
  * Init scanning routines
  */
 void rspamd_worker_init_scanner (struct rspamd_worker *worker,
-		struct event_base *ev_base,
-		struct rspamd_dns_resolver *resolver,
-		struct rspamd_lang_detector **plang_det);
+								 struct ev_loop *ev_base,
+								 struct rspamd_dns_resolver *resolver,
+								 struct rspamd_lang_detector **plang_det);
 
-/*
- * Called on forced timeout
- */
-void rspamd_task_timeout (gint fd, short what, gpointer ud);
-
-/*
- * Called on unexpected IO error (e.g. ECONNRESET)
- */
-void rspamd_worker_guard_handler (gint fd, short what, void *data);
+#ifdef  __cplusplus
+}
+#endif
 
 #endif

@@ -67,7 +67,8 @@ rspamd_archive_file_try_utf (struct rspamd_task *task,
 		struct rspamd_charset_converter *conv;
 		UConverter *utf8_converter;
 
-		conv = rspamd_mime_get_converter_cached (charset, &uc_err);
+		conv = rspamd_mime_get_converter_cached (charset, task->task_pool,
+				FALSE, &uc_err);
 		utf8_converter = rspamd_get_utf8_converter ();
 
 		if (conv == NULL) {
@@ -175,13 +176,13 @@ rspamd_archive_process_zip (struct rspamd_task *task,
 
 	if (eocd == NULL) {
 		/* Not a zip file */
-		msg_debug_archive ("zip archive is invalid (no EOCD)");
+		msg_info_task ("zip archive is invalid (no EOCD)");
 
 		return;
 	}
 
 	if (end - eocd < 21) {
-		msg_debug_archive ("zip archive is invalid (short EOCD)");
+		msg_info_task ("zip archive is invalid (short EOCD)");
 
 		return;
 	}
@@ -193,8 +194,8 @@ rspamd_archive_process_zip (struct rspamd_task *task,
 	cd_offset = GUINT32_FROM_LE (cd_offset);
 
 	/* We need to check sanity as well */
-	if (cd_offset + cd_size != (guint)(eocd - start)) {
-		msg_debug_archive ("zip archive is invalid (bad size/offset for CD)");
+	if (cd_offset + cd_size > (guint)(eocd - start)) {
+		msg_info_task ("zip archive is invalid (bad size/offset for CD)");
 
 		return;
 	}
@@ -207,13 +208,13 @@ rspamd_archive_process_zip (struct rspamd_task *task,
 	rspamd_mempool_add_destructor (task->task_pool, rspamd_archive_dtor,
 			arch);
 
-	while (cd < eocd) {
+	while (cd < start + cd_offset + cd_size) {
 		guint16 flags;
 
 		/* Read central directory record */
 		if (eocd - cd < cd_basic_len ||
 				memcmp (cd, cd_magic, sizeof (cd_magic)) != 0) {
-			msg_debug_archive ("zip archive is invalid (bad cd record)");
+			msg_info_task ("zip archive is invalid (bad cd record)");
 
 			return;
 		}
@@ -232,7 +233,7 @@ rspamd_archive_process_zip (struct rspamd_task *task,
 		comment_len = GUINT16_FROM_LE (comment_len);
 
 		if (cd + fname_len + comment_len + extra_len + cd_basic_len > eocd) {
-			msg_debug_archive ("zip archive is invalid (too large cd record)");
+			msg_info_task ("zip archive is invalid (too large cd record)");
 
 			return;
 		}
@@ -277,7 +278,7 @@ rspamd_archive_process_zip (struct rspamd_task *task,
 		cd += fname_len + comment_len + extra_len + cd_basic_len;
 	}
 
-	part->flags |= RSPAMD_MIME_PART_ARCHIVE;
+	part->part_type = RSPAMD_MIME_PART_ARCHIVE;
 	part->specific.arch = arch;
 
 	if (part->cd) {
@@ -509,7 +510,7 @@ rspamd_archive_process_rar_v4 (struct rspamd_task *task, const guchar *start,
 	}
 
 end:
-	part->flags |= RSPAMD_MIME_PART_ARCHIVE;
+	part->part_type = RSPAMD_MIME_PART_ARCHIVE;
 	part->specific.arch = arch;
 	arch->archive_name = &part->cd->filename;
 	arch->size = part->parsed_data.len;
@@ -733,7 +734,7 @@ rspamd_archive_process_rar (struct rspamd_task *task,
 	}
 
 end:
-part->flags |= RSPAMD_MIME_PART_ARCHIVE;
+	part->part_type = RSPAMD_MIME_PART_ARCHIVE;
 	part->specific.arch = arch;
 	if (part->cd != NULL) {
 		arch->archive_name = &part->cd->filename;
@@ -1439,14 +1440,16 @@ rspamd_7zip_ucs2_to_utf8 (struct rspamd_task *task, const guchar *p,
 	UChar32 wc;
 	UBool is_error = 0;
 
-	res = g_string_sized_new ((end - p) + sizeof (wc) * 2 + 1);
+	res = g_string_sized_new ((end - p) * 3 / 2 + sizeof (wc) + 1);
 	up = (guint16 *)p;
 
 	while (src_pos < len) {
 		U16_NEXT (up, src_pos, len, wc);
 
 		if (wc > 0) {
-			U8_APPEND (res->str, dest_pos, res->allocated_len, wc, is_error);
+			U8_APPEND (res->str, dest_pos,
+					res->allocated_len - 1,
+					wc, is_error);
 		}
 
 		if (is_error) {
@@ -1590,7 +1593,8 @@ rspamd_7zip_read_next_section (struct rspamd_task *task,
 		 * In fact, headers are just packed, but we assume it as
 		 * encrypted to distinguish from the normal archives
 		 */
-		arch->flags |= RSPAMD_ARCHIVE_ENCRYPTED;
+		msg_debug_archive ("7zip: encoded header, needs to be uncompressed");
+		arch->flags |= RSPAMD_ARCHIVE_CANNOT_READ;
 		p = NULL; /* Cannot get anything useful */
 		break;
 	case kArchiveProperties:
@@ -1670,7 +1674,7 @@ rspamd_archive_process_7zip (struct rspamd_task *task,
 
 	while ((p = rspamd_7zip_read_next_section (task, p, end, arch)) != NULL);
 
-	part->flags |= RSPAMD_MIME_PART_ARCHIVE;
+	part->part_type = RSPAMD_MIME_PART_ARCHIVE;
 	part->specific.arch = arch;
 	if (part->cd != NULL) {
 		arch->archive_name = &part->cd->filename;
@@ -1763,7 +1767,7 @@ rspamd_archive_process_gzip (struct rspamd_task *task,
 	}
 
 	/* Fallback, we need to extract file name from archive name if possible */
-	if (part->cd->filename.len > 0) {
+	if (part->cd && part->cd->filename.len > 0) {
 		const gchar *dot_pos, *slash_pos;
 
 		dot_pos = rspamd_memrchr (part->cd->filename.begin, '.',
@@ -1820,7 +1824,7 @@ rspamd_archive_process_gzip (struct rspamd_task *task,
 
 set:
 	/* Set archive data */
-	part->flags |= RSPAMD_MIME_PART_ARCHIVE;
+	part->part_type = RSPAMD_MIME_PART_ARCHIVE;
 	part->specific.arch = arch;
 
 	if (part->cd) {
@@ -1891,6 +1895,14 @@ rspamd_archive_cheat_detect (struct rspamd_mime_part *part, const gchar *str,
 			}
 		}
 	}
+	else {
+		if (magic_start != NULL) {
+			if (part->parsed_data.len > magic_len &&
+				memcmp (part->parsed_data.begin, magic_start, magic_len) == 0) {
+				return TRUE;
+			}
+		}
+	}
 
 	return FALSE;
 }
@@ -1905,10 +1917,8 @@ rspamd_archives_process (struct rspamd_task *task)
 	const guchar sz_magic[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
 	const guchar gz_magic[] = {0x1F, 0x8B};
 
-	for (i = 0; i < task->parts->len; i ++) {
-		part = g_ptr_array_index (task->parts, i);
-
-		if (!(part->flags & (RSPAMD_MIME_PART_TEXT|RSPAMD_MIME_PART_IMAGE))) {
+	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, parts), i, part) {
+		if (part->part_type == RSPAMD_MIME_PART_UNDEFINED) {
 			if (part->parsed_data.len > 0) {
 				if (rspamd_archive_cheat_detect (part, "zip",
 						zip_magic, sizeof (zip_magic))) {
@@ -1927,9 +1937,13 @@ rspamd_archives_process (struct rspamd_task *task)
 					rspamd_archive_process_gzip (task, part);
 				}
 
-				if (IS_CT_TEXT (part->ct) &&
-						(part->flags & RSPAMD_MIME_PART_ARCHIVE)) {
-					msg_info_task ("found archive with incorrect content-type: %T/%T",
+				if (part->ct && (part->ct->flags & RSPAMD_CONTENT_TYPE_TEXT) &&
+						part->part_type == RSPAMD_MIME_PART_ARCHIVE &&
+						part->specific.arch) {
+					struct rspamd_archive *arch = part->specific.arch;
+
+					msg_info_task ("found %s archive with incorrect content-type: %T/%T",
+							rspamd_archive_type_str (arch->type),
 							&part->ct->type, &part->ct->subtype);
 					part->ct->flags |= RSPAMD_CONTENT_TYPE_BROKEN;
 				}

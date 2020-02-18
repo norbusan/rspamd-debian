@@ -5,6 +5,10 @@
  * Here are described test functions for rspamd test suite
  */
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 /* URL parser test */
 void rspamd_url_test_func (void);
 
@@ -19,9 +23,6 @@ void rspamd_radix_test_func (void);
 
 /* DNS resolving */
 void rspamd_dns_test_func (void);
-
-/* Async IO */
-void rspamd_async_test_func (void);
 
 /* DKIM test */
 void rspamd_dkim_test_func (void);
@@ -41,6 +42,10 @@ void rspamd_cryptobox_test_func (void);
 
 void rspamd_heap_test_func (void);
 
-void rspamd_lua_lua_pcall_vs_resume_test_func(void);
+void rspamd_lua_lua_pcall_vs_resume_test_func (void);
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif
