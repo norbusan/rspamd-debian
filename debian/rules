@@ -13,6 +13,12 @@ else
   ENABLED_FOR_ARCH = ON
 endif
 
+ifeq "$(DEB_HOST_ARCH)" "amd64"
+  HYPERSCANARG="-DENABLE_HYPERSCAN=ON"
+else
+  HYPERSCANARG=""
+endif
+
 %:
 	dh $@
 
@@ -32,6 +38,7 @@ override_dh_auto_configure:
 		-DDEBIAN_BUILD=1 \
 		-DINSTALL_EXAMPLES=ON \
 		-DFORCE_GMIME24=ON \
+		-DWANT_SYSTEMD_UNITS=ON \
 		-DENABLE_JEMALLOC=ON \
 		-DENABLE_OPTIMIZATION=OFF \
 		-DENABLE_FULL_DEBUG=OFF \
@@ -39,10 +46,7 @@ override_dh_auto_configure:
 		-DENABLE_PCRE2=ON \
 		-DENABLE_LUAJIT=$(ENABLED_FOR_ARCH) \
 		-DENABLE_LIBUNWIND=ON \
-ifeq "$(DEB_HOST_ARCH)" "amd64"
-		-DENABLE_HYPERSCAN=ON \
-endif
-		-DWANT_SYSTEMD_UNITS=ON
+		$(HYPERSCANARG)
 
 override_dh_makeshlibs:
 	dh_makeshlibs -Xrspamd-actrie
