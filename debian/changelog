@@ -1,9 +1,9 @@
-rspamd (2.3-0.1) UNRELEASED; urgency=medium
+rspamd (2.3-0.1) unstable; urgency=medium
 
   * Non-maintainer upload.
   * New upstream versions
 
- -- Norbert Preining <norbert@preining.info>  Tue, 18 Feb 2020 12:39:22 +0900
+ -- Norbert Preining <norbert@preining.info>  Tue, 18 Feb 2020 12:52:14 +0900
 
 rspamd (1.9.4-2) unstable; urgency=medium
 
