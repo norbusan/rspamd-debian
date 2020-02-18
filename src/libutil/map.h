@@ -2,12 +2,16 @@
 #define RSPAMD_MAP_H
 
 #include "config.h"
-#include <event.h>
+#include "contrib/libev/ev.h"
 
 #include "ucl.h"
 #include "mem_pool.h"
 #include "radix.h"
 #include "dns.h"
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
 
 /**
  * Maps API is designed to load lists data from different dynamic sources.
@@ -15,20 +19,24 @@
  * modified.
  */
 struct map_cb_data;
+struct rspamd_worker;
 
 /**
  * Callback types
  */
-typedef gchar * (*map_cb_t)(gchar *chunk, gint len,
-	struct map_cb_data *data, gboolean final);
-typedef void (*map_fin_cb_t)(struct map_cb_data *data, void **target);
-typedef void (*map_dtor_t)(struct map_cb_data *data);
+typedef gchar *(*map_cb_t) (gchar *chunk, gint len,
+							struct map_cb_data *data, gboolean final);
 
-typedef gboolean (*rspamd_map_traverse_cb)(gconstpointer key,
-		gconstpointer value, gsize hits, gpointer ud);
-typedef void (*rspamd_map_traverse_function)(void *data,
-		rspamd_map_traverse_cb cb,
-		gpointer cbdata, gboolean reset_hits);
+typedef void (*map_fin_cb_t) (struct map_cb_data *data, void **target);
+
+typedef void (*map_dtor_t) (struct map_cb_data *data);
+
+typedef gboolean (*rspamd_map_traverse_cb) (gconstpointer key,
+											gconstpointer value, gsize hits, gpointer ud);
+
+typedef void (*rspamd_map_traverse_function) (void *data,
+											  rspamd_map_traverse_cb cb,
+											  gpointer cbdata, gboolean reset_hits);
 
 /**
  * Common map object
@@ -56,33 +64,43 @@ gboolean rspamd_map_is_map (const gchar *map_line);
 /**
  * Add map from line
  */
-struct rspamd_map* rspamd_map_add (struct rspamd_config *cfg,
+struct rspamd_map *rspamd_map_add (struct rspamd_config *cfg,
 								   const gchar *map_line,
 								   const gchar *description,
 								   map_cb_t read_callback,
 								   map_fin_cb_t fin_callback,
 								   map_dtor_t dtor,
-								   void **user_data);
+								   void **user_data,
+								   struct rspamd_worker *worker);
 
 /**
  * Add map from ucl
  */
-struct rspamd_map* rspamd_map_add_from_ucl (struct rspamd_config *cfg,
+struct rspamd_map *rspamd_map_add_from_ucl (struct rspamd_config *cfg,
 											const ucl_object_t *obj,
 											const gchar *description,
 											map_cb_t read_callback,
 											map_fin_cb_t fin_callback,
 											map_dtor_t dtor,
-											void **user_data);
+											void **user_data,
+											struct rspamd_worker *worker);
+
+enum rspamd_map_watch_type {
+	RSPAMD_MAP_WATCH_MIN = 9,
+	RSPAMD_MAP_WATCH_PRIMARY_CONTROLLER,
+	RSPAMD_MAP_WATCH_SCANNER,
+	RSPAMD_MAP_WATCH_WORKER,
+	RSPAMD_MAP_WATCH_MAX
+};
 
 /**
  * Start watching of maps by adding events to libevent event loop
  */
 void rspamd_map_watch (struct rspamd_config *cfg,
-					   struct event_base *ev_base,
+					   struct ev_loop *event_loop,
 					   struct rspamd_dns_resolver *resolver,
 					   struct rspamd_worker *worker,
-					   gboolean active_http);
+					   enum rspamd_map_watch_type how);
 
 /**
  * Preloads maps where all backends are file
@@ -111,6 +129,10 @@ rspamd_map_traverse_function rspamd_map_get_traverse_function (struct rspamd_map
  * @return
  */
 void rspamd_map_traverse (struct rspamd_map *map, rspamd_map_traverse_cb cb,
-		gpointer cbdata, gboolean reset_hits);
+						  gpointer cbdata, gboolean reset_hits);
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif

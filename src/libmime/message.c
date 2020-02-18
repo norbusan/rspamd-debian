@@ -34,8 +34,11 @@
 
 #include <math.h>
 #include <unicode/uchar.h>
+#include "sodium.h"
 #include "libserver/cfg_file_private.h"
 #include "lua/lua_common.h"
+#include "contrib/uthash/utlist.h"
+#include "contrib/t1ha/t1ha.h"
 
 #define GTUBE_SYMBOL "GTUBE"
 
@@ -43,14 +46,15 @@
 #define SET_PART_UTF(part) ((part)->flags |= RSPAMD_MIME_TEXT_PART_FLAG_UTF)
 
 static const gchar gtube_pattern_reject[] = "XJS*C4JDBQADN1.NSBN3*2IDNEN*"
-		"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+				"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
 static const gchar gtube_pattern_add_header[] = "YJS*C4JDBQADN1.NSBN3*2IDNEN*"
-		"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+				"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
 static const gchar gtube_pattern_rewrite_subject[] = "ZJS*C4JDBQADN1.NSBN3*2IDNEN*"
-		"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+				"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+static const gchar gtube_pattern_no_action[] = "AJS*C4JDBQADN1.NSBN3*2IDNEN*"
+				"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
 struct rspamd_multipattern *gtube_matcher = NULL;
 static const guint64 words_hash_seed = 0xdeadbabe;
-
 
 static void
 free_byte_array_callback (void *pointer)
@@ -185,7 +189,9 @@ rspamd_mime_part_create_words (struct rspamd_task *task,
 			&part->utf_stripped_text,
 			tok_type, task->cfg,
 			part->exceptions,
-			NULL, NULL);
+			NULL,
+			NULL,
+			task->task_pool);
 
 
 	if (part->utf_words) {
@@ -222,7 +228,6 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 		struct rspamd_mime_text_part *part)
 {
 	const gchar *p = begin, *c = begin;
-	gchar last_c = '\0';
 	gboolean crlf_added = FALSE;
 	gboolean url_open_bracket = FALSE;
 	UChar32 uc;
@@ -239,7 +244,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 			U8_NEXT (begin, off, pe - begin, uc);
 
 			if (uc != -1) {
-				while (p < pe) {
+				while (p < pe && off < (pe - begin)) {
 					if (IS_ZERO_WIDTH_SPACE (uc)) {
 						/* Invisible space ! */
 						task->flags |= RSPAMD_TASK_FLAG_BAD_UNICODE;
@@ -274,7 +279,6 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 			case normal_char:
 				state = seen_cr;
 				if (p > c) {
-					last_c = *(p - 1);
 					g_byte_array_append (part->utf_stripped_content,
 							(const guint8 *)c, p - c);
 				}
@@ -313,7 +317,6 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 				state = seen_lf;
 
 				if (p > c) {
-					last_c = *(p - 1);
 					g_byte_array_append (part->utf_stripped_content,
 							(const guint8 *)c, p - c);
 				}
@@ -488,6 +491,12 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 }
 
 static void
+rspamd_u_text_dtor (void *p)
+{
+	utext_close ((UText *)p);
+}
+
+static void
 rspamd_normalize_text_part (struct rspamd_task *task,
 		struct rspamd_mime_text_part *part)
 {
@@ -534,7 +543,7 @@ rspamd_normalize_text_part (struct rspamd_task *task,
 		}
 		else {
 			rspamd_mempool_add_destructor (task->task_pool,
-					(rspamd_mempool_destruct_t)utext_close,
+					rspamd_u_text_dtor,
 					&part->utf_stripped_text);
 		}
 	}
@@ -542,6 +551,8 @@ rspamd_normalize_text_part (struct rspamd_task *task,
 	rspamd_mempool_add_destructor (task->task_pool,
 			(rspamd_mempool_destruct_t) free_byte_array_callback,
 			part->utf_stripped_content);
+	rspamd_mempool_notify_alloc (task->task_pool,
+			part->utf_stripped_content->len);
 	rspamd_mempool_add_destructor (task->task_pool,
 			(rspamd_mempool_destruct_t) rspamd_ptr_array_free_hard,
 			part->newlines);
@@ -607,6 +618,16 @@ rspamd_multipattern_gtube_cb (struct rspamd_multipattern *mp,
 		gsize len,
 		void *context)
 {
+	struct rspamd_task *task = (struct rspamd_task *)context;
+
+	if (strnum > 0) {
+		if (task->cfg->enable_test_patterns) {
+			return strnum + 1;
+		}
+
+		return 0;
+	}
+
 	return strnum + 1; /* To distinguish from zero */
 }
 
@@ -630,6 +651,9 @@ rspamd_check_gtube (struct rspamd_task *task, struct rspamd_mime_text_part *part
 		rspamd_multipattern_add_pattern (gtube_matcher,
 				gtube_pattern_rewrite_subject,
 				RSPAMD_MULTIPATTERN_DEFAULT);
+		rspamd_multipattern_add_pattern (gtube_matcher,
+				gtube_pattern_no_action,
+				RSPAMD_MULTIPATTERN_DEFAULT);
 
 		g_assert (rspamd_multipattern_compile (gtube_matcher, NULL));
 	}
@@ -638,26 +662,32 @@ rspamd_check_gtube (struct rspamd_task *task, struct rspamd_mime_text_part *part
 			part->utf_content->len <= max_check_size) {
 		if ((ret = rspamd_multipattern_lookup (gtube_matcher, part->utf_content->data,
 				part->utf_content->len,
-				rspamd_multipattern_gtube_cb, NULL, NULL)) > 0) {
+				rspamd_multipattern_gtube_cb, task, NULL)) > 0) {
 
 			switch (ret) {
 			case 1:
 				act = METRIC_ACTION_REJECT;
 				break;
 			case 2:
+				g_assert (task->cfg->enable_test_patterns);
 				act = METRIC_ACTION_ADD_HEADER;
 				break;
 			case 3:
+				g_assert (task->cfg->enable_test_patterns);
 				act = METRIC_ACTION_REWRITE_SUBJECT;
+				break;
+			case 4:
+				g_assert (task->cfg->enable_test_patterns);
+				act = METRIC_ACTION_NOACTION;
 				break;
 			}
 
-			if (act != METRIC_ACTION_NOACTION) {
+			if (ret != 0) {
 				task->flags |= RSPAMD_TASK_FLAG_SKIP;
 				task->flags |= RSPAMD_TASK_FLAG_GTUBE;
 				msg_info_task (
-						"<%s>: gtube %s pattern has been found in part of length %ud",
-						task->message_id, rspamd_action_to_str (act),
+						"gtube %s pattern has been found in part of length %ud",
+						rspamd_action_to_str (act),
 						part->utf_content->len);
 			}
 		}
@@ -687,74 +717,8 @@ rspamd_message_process_plain_text_part (struct rspamd_task *task,
 	rspamd_mime_text_part_maybe_convert (task, text_part);
 
 	if (text_part->utf_raw_content != NULL) {
-		/* Check for ical */
-		rspamd_ftok_t cal_ct;
-
-		/*
-		 * TODO: If we want to process more than that, we need
-		 * to create some generic framework that accepts a part
-		 * and returns a processed data
-		 */
-		RSPAMD_FTOK_ASSIGN (&cal_ct, "calendar");
-
-		if (rspamd_ftok_casecmp (&cal_ct, &text_part->mime_part->ct->subtype) == 0) {
-			lua_State *L = task->cfg->lua_state;
-			gint err_idx;
-
-			lua_pushcfunction (L, &rspamd_lua_traceback);
-			err_idx = lua_gettop (L);
-
-			/* Obtain function */
-			if (!rspamd_lua_require_function (L, "lua_ical", "ical_txt_values")) {
-				msg_err_task ("cannot require lua_ical.ical_txt_values");
-				lua_settop (L, err_idx - 1);
-
-				return FALSE;
-			}
-
-			lua_pushlstring (L, text_part->utf_raw_content->data,
-					text_part->utf_raw_content->len);
-
-			if (lua_pcall (L, 1, 1, err_idx) != 0) {
-				GString *tb;
-
-				tb = lua_touserdata (L, -1);
-				msg_err_task ("cannot call lua lua_ical.ical_txt_values: %s", tb->str);
-				g_string_free (tb, TRUE);
-				lua_settop (L, err_idx - 1);
-
-				return FALSE;
-			}
-
-			if (lua_type (L, -1) == LUA_TSTRING) {
-				const char *ndata;
-				gsize nsize;
-
-				ndata = lua_tolstring (L, -1, &nsize);
-				text_part->utf_content = g_byte_array_sized_new (nsize);
-				g_byte_array_append (text_part->utf_content, ndata, nsize);
-				rspamd_mempool_add_destructor (task->task_pool,
-						(rspamd_mempool_destruct_t) free_byte_array_callback,
-						text_part->utf_content);
-			}
-			else if (lua_type (L, -1) == LUA_TNIL) {
-				msg_info_task ("cannot convert text/calendar to plain text");
-				text_part->utf_content = text_part->utf_raw_content;
-			}
-			else {
-				msg_err_task ("invalid return type when calling lua_ical.ical_txt_values: %s",
-						lua_typename (L, lua_type (L, -1)));
-				lua_settop (L, err_idx - 1);
-
-				return FALSE;
-			}
-
-			lua_settop (L, err_idx - 1);
-		}
-		else {
-			/* Just have the same content */
-			text_part->utf_content = text_part->utf_raw_content;
-		}
+		/* Just have the same content */
+		text_part->utf_content = text_part->utf_raw_content;
 	}
 	else {
 		/*
@@ -794,8 +758,8 @@ rspamd_message_process_html_text_part (struct rspamd_task *task,
 			text_part->html,
 			text_part->utf_raw_content,
 			&text_part->exceptions,
-			task->urls,
-			task->emails);
+			MESSAGE_FIELD (task, urls),
+			MESSAGE_FIELD (task, emails));
 
 	if (text_part->utf_content->len == 0) {
 		text_part->flags |= RSPAMD_MIME_TEXT_PART_FLAG_EMPTY;
@@ -814,111 +778,34 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 {
 	struct rspamd_mime_text_part *text_part;
 	rspamd_ftok_t html_tok, xhtml_tok;
-	gboolean found_html = FALSE, found_txt = FALSE;
+	gboolean found_html = FALSE, found_txt = FALSE, straight_ct = FALSE;
 	enum rspamd_action_type act;
 
-	if (IS_CT_TEXT (mime_part->ct) && (!mime_part->detected_ct ||
-									   IS_CT_TEXT (mime_part->detected_ct))) {
+	if (((mime_part->ct && (mime_part->ct->flags & RSPAMD_CONTENT_TYPE_TEXT)) &&
+		 (straight_ct = TRUE)) ||
+		(mime_part->detected_type &&
+		 strcmp (mime_part->detected_type, "text") == 0)) {
+		found_txt = TRUE;
+
 		html_tok.begin = "html";
 		html_tok.len = 4;
 		xhtml_tok.begin = "xhtml";
 		xhtml_tok.len = 5;
 
 		if (rspamd_ftok_casecmp (&mime_part->ct->subtype, &html_tok) == 0 ||
-				rspamd_ftok_casecmp (&mime_part->ct->subtype, &xhtml_tok) == 0) {
+			rspamd_ftok_casecmp (&mime_part->ct->subtype, &xhtml_tok) == 0 ||
+			(mime_part->detected_ct &&
+				rspamd_ftok_casecmp (&mime_part->detected_ct->subtype, &html_tok) == 0)) {
 			found_html = TRUE;
-		}
-		else {
-			/*
-			 * We also need to apply heuristic for text parts that are actually
-			 * HTML.
-			 */
-			RSPAMD_FTOK_ASSIGN (&html_tok, "<!DOCTYPE html");
-			RSPAMD_FTOK_ASSIGN (&xhtml_tok, "<html");
-
-			if (mime_part->parsed_data.len >= xhtml_tok.len &&
-					rspamd_lc_cmp (mime_part->parsed_data.begin,
-							xhtml_tok.begin, xhtml_tok.len) == 0) {
-				found_html = TRUE;
-			}
-			else if (mime_part->parsed_data.len >= html_tok.len &&
-					rspamd_lc_cmp (mime_part->parsed_data.begin,
-							html_tok.begin, html_tok.len) == 0) {
-				found_html = TRUE;
-			}
-			else {
-				/* We need to be extra careful with some stupid things here */
-
-				html_tok.begin = "plain";
-				html_tok.len = 5;
-
-				if (rspamd_ftok_casecmp (&mime_part->ct->subtype, &html_tok) == 0) {
-					found_txt = TRUE;
-				}
-				else {
-					if (mime_part->cd && mime_part->cd->filename.len > 4) {
-						const gchar *pos = mime_part->cd->filename.begin +
-										   mime_part->cd->filename.len -
-										   sizeof (".txt") + 1;
-						if (rspamd_lc_cmp (pos, ".txt", sizeof ("txt") - 1) == 0) {
-							found_txt = TRUE;
-						}
-						else {
-							msg_debug_task ("found mime part with incorrect content-type: %T/%T, "
-										   "filename: %T",
-									&mime_part->ct->type,
-									&mime_part->ct->subtype,
-									&mime_part->cd->filename);
-						}
-					}
-					else {
-						/* For something like Content-Type: text */
-						found_txt = TRUE;
-					}
-				}
-			}
-
-			if (found_html) {
-				msg_info_task ("found html part pretending to be text/plain part");
-			}
-		}
-	}
-	else {
-		/* Apply heuristic */
-
-		if (mime_part->cd && mime_part->cd->filename.len > 4) {
-			const gchar *pos = mime_part->cd->filename.begin +
-					mime_part->cd->filename.len - sizeof (".htm") + 1;
-
-			if (rspamd_lc_cmp (pos, ".htm", sizeof (".htm") - 1) == 0) {
-				found_html = TRUE;
-			}
-			else if (rspamd_lc_cmp (pos, ".txt", sizeof ("txt") - 1) == 0) {
-				found_txt = TRUE;
-			}
-			else if ( mime_part->cd->filename.len > 5) {
-				pos = mime_part->cd->filename.begin +
-						mime_part->cd->filename.len - sizeof (".html") + 1;
-				if (rspamd_lc_cmp (pos, ".html", sizeof (".html") - 1) == 0) {
-					found_html = TRUE;
-				}
-			}
-		}
-
-		if (found_txt || found_html) {
-			msg_info_task ("found %s part with incorrect content-type: %T/%T",
-					found_html ? "html" : "text",
-					&mime_part->ct->type, &mime_part->ct->subtype);
-			mime_part->ct->flags |= RSPAMD_CONTENT_TYPE_BROKEN;
 		}
 	}
 
 	/* Skip attachments */
 	if ((found_txt || found_html) &&
 			mime_part->cd && mime_part->cd->type == RSPAMD_CT_ATTACHMENT &&
-			(task->cfg && !task->cfg->check_text_attachements)) {
+			(!straight_ct || (task->cfg && !task->cfg->check_text_attachements))) {
 		debug_task ("skip attachments for checking as text parts");
-		return TRUE;
+		return FALSE;
 	}
 	else if (!(found_txt || found_html)) {
 		/* Not a text part */
@@ -945,8 +832,8 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 		}
 	}
 
-	g_ptr_array_add (task->text_parts, text_part);
-	mime_part->flags |= RSPAMD_MIME_PART_TEXT;
+	g_ptr_array_add (MESSAGE_FIELD (task, text_parts), text_part);
+	mime_part->part_type = RSPAMD_MIME_PART_TEXT;
 	mime_part->specific.txt = text_part;
 
 	act = rspamd_check_gtube (task, text_part);
@@ -1007,7 +894,7 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 {
 	struct rspamd_content_type *ct = NULL;
 	struct rspamd_mime_part *part;
-	const char *mb = NULL;
+	const char *mb = "application/octet-stream";
 	gchar *mid;
 	rspamd_ftok_t srch, *tok;
 	gchar cdbuf[1024];
@@ -1015,6 +902,14 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 	g_assert (start != NULL);
 
 	part = rspamd_mempool_alloc0 (task->task_pool, sizeof (*part));
+
+	part->raw_data.begin = start;
+	part->raw_data.len = len;
+	part->parsed_data.begin = start;
+	part->parsed_data.len = len;
+	part->id = MESSAGE_FIELD (task, parts)->len;
+	part->raw_headers = rspamd_message_headers_new ();
+	part->headers_order = NULL;
 
 	tok = rspamd_task_get_request_header (task, "Content-Type");
 
@@ -1024,11 +919,42 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 				task->task_pool);
 		part->ct = ct;
 	}
+	else if (task->cfg && task->cfg->libs_ctx) {
+		lua_State *L = task->cfg->lua_state;
 
-	if (task->cfg && task->cfg->libs_ctx) {
-		mb = magic_buffer (task->cfg->libs_ctx->libmagic,
-				start,
-				len);
+		if (rspamd_lua_require_function (L,
+				"lua_magic", "detect_mime_part")) {
+
+			struct rspamd_mime_part **pmime;
+			struct rspamd_task **ptask;
+
+			pmime = lua_newuserdata (L, sizeof (struct rspamd_mime_part *));
+			rspamd_lua_setclass (L, "rspamd{mimepart}", -1);
+			*pmime = part;
+			ptask = lua_newuserdata (L, sizeof (struct rspamd_task *));
+			rspamd_lua_setclass (L, "rspamd{task}", -1);
+			*ptask = task;
+
+			if (lua_pcall (L, 2, 2, 0) != 0) {
+				msg_err_task ("cannot detect type: %s", lua_tostring (L, -1));
+			}
+			else {
+				if (lua_istable (L, -1)) {
+					lua_pushstring (L, "ct");
+					lua_gettable (L, -2);
+
+					if (lua_isstring (L, -1)) {
+						mb = rspamd_mempool_strdup (task->task_pool,
+								lua_tostring (L, -1));
+					}
+				}
+			}
+
+			lua_settop (L, 0);
+		}
+		else {
+			msg_err_task ("cannot require lua_magic.detect_mime_part");
+		}
 
 		if (mb) {
 			srch.begin = mb;
@@ -1042,7 +968,7 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 			}
 			else {
 				/* Check sanity */
-				if (IS_CT_TEXT (part->ct)) {
+				if (part->ct && (part->ct->flags & RSPAMD_CONTENT_TYPE_TEXT)) {
 					RSPAMD_FTOK_FROM_STR (&srch, "application");
 
 					if (rspamd_ftok_cmp (&ct->type, &srch) == 0) {
@@ -1060,16 +986,6 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 		}
 	}
 
-	part->raw_data.begin = start;
-	part->raw_data.len = len;
-	part->parsed_data.begin = start;
-	part->parsed_data.len = len;
-	part->id = task->parts->len;
-	part->raw_headers =  g_hash_table_new_full (rspamd_strcase_hash,
-			rspamd_strcase_equal, NULL, rspamd_ptr_array_free_hard);
-	part->headers_order = g_queue_new ();
-
-
 
 	tok = rspamd_task_get_request_header (task, "Filename");
 
@@ -1083,30 +999,99 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 	part->cd = rspamd_content_disposition_parse (cdbuf, strlen (cdbuf),
 			task->task_pool);
 
-	g_ptr_array_add (task->parts, part);
+	g_ptr_array_add (MESSAGE_FIELD (task, parts), part);
 	rspamd_mime_parser_calc_digest (part);
 
 	/* Generate message ID */
 	mid = rspamd_mime_message_id_generate ("localhost.localdomain");
 	rspamd_mempool_add_destructor (task->task_pool,
 			(rspamd_mempool_destruct_t) g_free, mid);
-	task->message_id = mid;
+	MESSAGE_FIELD (task, message_id) = mid;
 	task->queue_id = mid;
+}
+
+static void
+rspamd_message_dtor (struct rspamd_message *msg)
+{
+	guint i;
+	struct rspamd_mime_part *p;
+	struct rspamd_mime_text_part *tp;
+
+
+	PTR_ARRAY_FOREACH (msg->parts, i, p) {
+		if (p->raw_headers) {
+			rspamd_message_headers_unref (p->raw_headers);
+		}
+
+		if (IS_PART_MULTIPART (p)) {
+			if (p->specific.mp->children) {
+				g_ptr_array_free (p->specific.mp->children, TRUE);
+			}
+		}
+
+		if (p->part_type == RSPAMD_MIME_PART_CUSTOM_LUA &&
+				p->specific.lua_specific.cbref != -1) {
+			luaL_unref (msg->task->cfg->lua_state,
+					LUA_REGISTRYINDEX,
+					p->specific.lua_specific.cbref);
+		}
+	}
+
+	PTR_ARRAY_FOREACH (msg->text_parts, i, tp) {
+		if (tp->utf_words) {
+			g_array_free (tp->utf_words, TRUE);
+		}
+		if (tp->normalized_hashes) {
+			g_array_free (tp->normalized_hashes, TRUE);
+		}
+		if (tp->languages) {
+			g_ptr_array_unref (tp->languages);
+		}
+	}
+
+	rspamd_message_headers_unref (msg->raw_headers);
+
+	g_ptr_array_unref (msg->text_parts);
+	g_ptr_array_unref (msg->parts);
+
+	g_hash_table_unref (msg->urls);
+	g_hash_table_unref (msg->emails);
+}
+
+struct rspamd_message*
+rspamd_message_new (struct rspamd_task *task)
+{
+	struct rspamd_message *msg;
+
+	msg = rspamd_mempool_alloc0 (task->task_pool, sizeof (*msg));
+
+	msg->raw_headers = rspamd_message_headers_new ();
+
+	msg->emails = g_hash_table_new (rspamd_email_hash, rspamd_emails_cmp);
+	msg->urls = g_hash_table_new (rspamd_url_hash, rspamd_urls_cmp);
+
+	msg->parts = g_ptr_array_sized_new (4);
+	msg->text_parts = g_ptr_array_sized_new (2);
+	msg->task = task;
+
+	REF_INIT_RETAIN (msg, rspamd_message_dtor);
+
+	return msg;
 }
 
 gboolean
 rspamd_message_parse (struct rspamd_task *task)
 {
-	struct received_header *recv, *trecv;
+	struct rspamd_received_header *recv, *trecv;
 	const gchar *p;
 	gsize len;
 	guint i;
 	GError *err = NULL;
-	rspamd_cryptobox_hash_state_t st;
-	guchar digest_out[rspamd_cryptobox_HASHBYTES];
+	guint64 n[2], seed;
 
 	if (RSPAMD_TASK_IS_EMPTY (task)) {
 		/* Don't do anything with empty task */
+		task->flags |= RSPAMD_TASK_FLAG_SKIP_PROCESS;
 		return TRUE;
 	}
 
@@ -1126,8 +1111,8 @@ rspamd_message_parse (struct rspamd_task *task)
 	 * So we check if a task has non-http format then we check for such a line
 	 * at the beginning to avoid errors
 	 */
-	if (!(task->flags & RSPAMD_TASK_FLAG_JSON) || (task->flags &
-			RSPAMD_TASK_FLAG_LOCAL_CLIENT)) {
+	if (task->cmd != CMD_CHECK_V2 || (task->protocol_flags &
+			RSPAMD_TASK_PROTOCOL_FLAG_LOCAL_CLIENT)) {
 		if (len > sizeof ("From ") - 1) {
 			if (memcmp (p, "From ", sizeof ("From ") - 1) == 0) {
 				/* Skip to CRLF */
@@ -1149,7 +1134,13 @@ rspamd_message_parse (struct rspamd_task *task)
 
 	task->msg.begin = p;
 	task->msg.len = len;
-	rspamd_cryptobox_hash_init (&st, NULL, 0);
+
+	/* Cleanup old message */
+	if (task->message) {
+		rspamd_message_unref (task->message);
+	}
+
+	task->message = rspamd_message_new (task);
 
 	if (task->flags & RSPAMD_TASK_FLAG_MIME) {
 		enum rspamd_mime_parse_error ret;
@@ -1193,20 +1184,20 @@ rspamd_message_parse (struct rspamd_task *task)
 	}
 
 
-	if (task->message_id == NULL) {
-		task->message_id = "undef";
+	if (MESSAGE_FIELD (task, message_id) == NULL) {
+		MESSAGE_FIELD (task, message_id) = "undef";
 	}
 
-	debug_task ("found %ud parts in message", task->parts->len);
+	debug_task ("found %ud parts in message", MESSAGE_FIELD (task, parts)->len);
 	if (task->queue_id == NULL) {
 		task->queue_id = "undef";
 	}
 
-	if (task->received->len > 0) {
+	if (MESSAGE_FIELD (task, received)) {
 		gboolean need_recv_correction = FALSE;
 		rspamd_inet_addr_t *raddr;
 
-		recv = g_ptr_array_index (task->received, 0);
+		recv = MESSAGE_FIELD (task, received);
 		/*
 		 * For the first header we must ensure that
 		 * received is consistent with the IP that we obtain through
@@ -1234,7 +1225,7 @@ rspamd_message_parse (struct rspamd_task *task)
 					" not ours, prepend it with fake one");
 
 			trecv = rspamd_mempool_alloc0 (task->task_pool,
-					sizeof (struct received_header));
+					sizeof (struct rspamd_received_header));
 			trecv->flags |= RSPAMD_RECEIVED_FLAG_ARTIFICIAL;
 
 			if (task->flags & RSPAMD_TASK_FLAG_SSL) {
@@ -1260,34 +1251,19 @@ rspamd_message_parse (struct rspamd_task *task)
 				trecv->from_hostname = trecv->real_hostname;
 			}
 
-#ifdef GLIB_VERSION_2_40
-			g_ptr_array_insert (task->received, 0, trecv);
-#else
-			/*
-			 * Unfortunately, before glib 2.40 we cannot insert element into a
-			 * ptr array
-			 */
-			GPtrArray *nar = g_ptr_array_sized_new (task->received->len + 1);
-
-			g_ptr_array_add (nar, trecv);
-			PTR_ARRAY_FOREACH (task->received, i, recv) {
-				g_ptr_array_add (nar, recv);
-			}
-			rspamd_mempool_add_destructor (task->task_pool,
-						rspamd_ptr_array_free_hard, nar);
-			task->received = nar;
-#endif
+			DL_PREPEND (MESSAGE_FIELD (task, received), trecv);
 		}
 	}
 
 	/* Extract data from received header if we were not given IP */
-	if (task->received->len > 0 && (task->flags & RSPAMD_TASK_FLAG_NO_IP) &&
+	if (MESSAGE_FIELD (task, received) && (task->flags & RSPAMD_TASK_FLAG_NO_IP) &&
 			(task->cfg && !task->cfg->ignore_received)) {
-		recv = g_ptr_array_index (task->received, 0);
+		recv = MESSAGE_FIELD (task, received);
 		if (recv->real_ip) {
 			if (!rspamd_parse_inet_address (&task->from_addr,
 					recv->real_ip,
-					0)) {
+					strlen (recv->real_ip),
+					RSPAMD_INET_ADDRESS_PARSE_NO_UNIX)) {
 				msg_warn_task ("cannot get IP from received header: '%s'",
 						recv->real_ip);
 				task->from_addr = NULL;
@@ -1298,37 +1274,56 @@ rspamd_message_parse (struct rspamd_task *task)
 		}
 	}
 
+	struct rspamd_mime_part *part;
+
+	/* Blake2b applied to string 'rspamd' */
+	static const guchar RSPAMD_ALIGNED(32) hash_key[] = {
+			0xef,0x43,0xae,0x80,0xcc,0x8d,0xc3,0x4c,
+			0x6f,0x1b,0xd6,0x18,0x1b,0xae,0x87,0x74,
+			0x0c,0xca,0xf7,0x8e,0x5f,0x2e,0x54,0x32,
+			0xf6,0x79,0xb9,0x27,0x26,0x96,0x20,0x92,
+			0x70,0x07,0x85,0xeb,0x83,0xf7,0x89,0xe0,
+			0xd7,0x32,0x2a,0xd2,0x1a,0x64,0x41,0xef,
+			0x49,0xff,0xc3,0x8c,0x54,0xf9,0x67,0x74,
+			0x30,0x1e,0x70,0x2e,0xb7,0x12,0x09,0xfe,
+	};
+
+	memcpy (&seed, hash_key, sizeof (seed));
+
+	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, parts), i, part) {
+		n[0] = t1ha2_atonce128 (&n[1],
+				part->digest, sizeof (part->digest),
+				seed);
+
+		seed = n[0] ^ n[1];
+	}
+
+	memcpy (MESSAGE_FIELD (task, digest), n, sizeof (n));
+
 	/* Parse urls inside Subject header */
-	if (task->subject) {
-		p = task->subject;
+	if (MESSAGE_FIELD (task, subject)) {
+		p = MESSAGE_FIELD (task, subject);
 		len = strlen (p);
-		rspamd_cryptobox_hash_update (&st, p, len);
+		n[0] = t1ha2_atonce128 (&n[1],
+				p, len,
+				seed);
+		memcpy (MESSAGE_FIELD (task, digest), n, sizeof (n));
 		rspamd_url_find_multiple (task->task_pool, p, len,
 				RSPAMD_URL_FIND_STRICT, NULL,
 				rspamd_url_task_subject_callback, task);
 	}
 
-	for (i = 0; i < task->parts->len; i ++) {
-		struct rspamd_mime_part *part;
-
-		part = g_ptr_array_index (task->parts, i);
-		rspamd_cryptobox_hash_update (&st, part->digest, sizeof (part->digest));
-	}
-
-	rspamd_cryptobox_hash_final (&st, digest_out);
-	memcpy (task->digest, digest_out, sizeof (task->digest));
-
 	if (task->queue_id) {
 		msg_info_task ("loaded message; id: <%s>; queue-id: <%s>; size: %z; "
 				"checksum: <%*xs>",
-				task->message_id, task->queue_id, task->msg.len,
-				(gint)sizeof (task->digest), task->digest);
+				MESSAGE_FIELD (task, message_id), task->queue_id, task->msg.len,
+				(gint)sizeof (MESSAGE_FIELD (task, digest)), MESSAGE_FIELD (task, digest));
 	}
 	else {
 		msg_info_task ("loaded message; id: <%s>; size: %z; "
 				"checksum: <%*xs>",
-				task->message_id, task->msg.len,
-				(gint)sizeof (task->digest), task->digest);
+				MESSAGE_FIELD (task, message_id), task->msg.len,
+				(gint)sizeof (MESSAGE_FIELD (task, digest)), MESSAGE_FIELD (task, digest));
 	}
 
 	return TRUE;
@@ -1341,41 +1336,136 @@ rspamd_message_process (struct rspamd_task *task)
 	struct rspamd_mime_text_part *p1, *p2;
 	gdouble diff, *pdiff;
 	guint tw, *ptw, dw;
+	struct rspamd_mime_part *part;
+	lua_State *L = NULL;
+	gint magic_func_pos = -1, content_func_pos = -1, old_top = -1, funcs_top = -1;
 
-	for (i = 0; i < task->parts->len; i ++) {
-		struct rspamd_mime_part *part;
+	if (task->cfg) {
+		L = task->cfg->lua_state;
+	}
 
-		part = g_ptr_array_index (task->parts, i);
+	rspamd_archives_process (task);
 
+	if (L) {
+		old_top = lua_gettop (L);
+	}
 
-		if (!rspamd_message_process_text_part_maybe (task, part) &&
-				part->parsed_data.len > 0) {
-			const gchar *mb = magic_buffer (task->cfg->libs_ctx->libmagic,
-					part->parsed_data.begin,
-					part->parsed_data.len);
+	if (L && rspamd_lua_require_function (L,
+			"lua_magic", "detect_mime_part")) {
+		magic_func_pos = lua_gettop (L);
+	}
+	else {
+		msg_err_task ("cannot require lua_magic.detect_mime_part");
+	}
 
-			if (mb) {
-				rspamd_ftok_t srch;
+	if (L && rspamd_lua_require_function (L,
+			"lua_content", "maybe_process_mime_part")) {
+		content_func_pos = lua_gettop (L);
+	}
+	else {
+		msg_err_task ("cannot require lua_content.maybe_process_mime_part");
+	}
 
-				srch.begin = mb;
-				srch.len = strlen (mb);
-				part->detected_ct = rspamd_content_type_parse (srch.begin,
-						srch.len,
-						task->task_pool);
+	if (L) {
+		funcs_top = lua_gettop (L);
+	}
+
+	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, parts), i, part) {
+		if (magic_func_pos != -1 && part->parsed_data.len > 0) {
+			struct rspamd_mime_part **pmime;
+			struct rspamd_task **ptask;
+
+			lua_pushcfunction (L, &rspamd_lua_traceback);
+			gint err_idx = lua_gettop (L);
+			lua_pushvalue (L, magic_func_pos);
+			pmime = lua_newuserdata (L, sizeof (struct rspamd_mime_part *));
+			rspamd_lua_setclass (L, "rspamd{mimepart}", -1);
+			*pmime = part;
+			ptask = lua_newuserdata (L, sizeof (struct rspamd_task *));
+			rspamd_lua_setclass (L, "rspamd{task}", -1);
+			*ptask = task;
+
+			if (lua_pcall (L, 2, 2, err_idx) != 0) {
+				msg_err_task ("cannot detect type: %s", lua_tostring (L, -1));
+			}
+			else {
+				if (lua_istable (L, -1)) {
+					const gchar *mb;
+
+					/* First returned value */
+					part->detected_ext = rspamd_mempool_strdup (task->task_pool,
+							lua_tostring (L, -2));
+
+					lua_pushstring (L, "ct");
+					lua_gettable (L, -2);
+
+					if (lua_isstring (L, -1)) {
+						mb = lua_tostring (L, -1);
+
+						if (mb) {
+							rspamd_ftok_t srch;
+
+							srch.begin = mb;
+							srch.len = strlen (mb);
+							part->detected_ct = rspamd_content_type_parse (srch.begin,
+									srch.len,
+									task->task_pool);
+						}
+					}
+
+					lua_pop (L, 1);
+
+					lua_pushstring (L, "type");
+					lua_gettable (L, -2);
+
+					if (lua_isstring (L, -1)) {
+						part->detected_type = rspamd_mempool_strdup (task->task_pool,
+								lua_tostring (L, -1));
+					}
+				}
 			}
 
+			lua_settop (L, funcs_top);
+		}
+
+		/* Now detect content */
+		if (content_func_pos != -1 && part->parsed_data.len > 0 &&
+			part->part_type == RSPAMD_MIME_PART_UNDEFINED) {
+			struct rspamd_mime_part **pmime;
+			struct rspamd_task **ptask;
+
+			lua_pushcfunction (L, &rspamd_lua_traceback);
+			gint err_idx = lua_gettop (L);
+			lua_pushvalue (L, content_func_pos);
+			pmime = lua_newuserdata (L, sizeof (struct rspamd_mime_part *));
+			rspamd_lua_setclass (L, "rspamd{mimepart}", -1);
+			*pmime = part;
+			ptask = lua_newuserdata (L, sizeof (struct rspamd_task *));
+			rspamd_lua_setclass (L, "rspamd{task}", -1);
+			*ptask = task;
+
+			if (lua_pcall (L, 2, 0, err_idx) != 0) {
+				msg_err_task ("cannot detect content: %s", lua_tostring (L, -1));
+			}
+
+			lua_settop (L, funcs_top);
+		}
+
+		if (part->part_type == RSPAMD_MIME_PART_UNDEFINED) {
+			rspamd_message_process_text_part_maybe (task, part);
 		}
 	}
 
-	rspamd_images_process (task);
-	rspamd_archives_process (task);
+	if (old_top != -1) {
+		lua_settop (L, old_top);
+	}
 
 	/* Calculate average words length and number of short words */
 	struct rspamd_mime_text_part *text_part;
 	gdouble *var;
 	guint total_words = 0;
 
-	PTR_ARRAY_FOREACH (task->text_parts, i, text_part) {
+	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, text_parts), i, text_part) {
 		if (!text_part->language) {
 			rspamd_mime_part_detect_language (task, text_part);
 		}
@@ -1388,9 +1478,9 @@ rspamd_message_process (struct rspamd_task *task)
 	}
 
 	/* Calculate distance for 2-parts messages */
-	if (task->text_parts->len == 2) {
-		p1 = g_ptr_array_index (task->text_parts, 0);
-		p2 = g_ptr_array_index (task->text_parts, 1);
+	if (i == 2) {
+		p1 = g_ptr_array_index (MESSAGE_FIELD (task, text_parts), 0);
+		p2 = g_ptr_array_index (MESSAGE_FIELD (task, text_parts), 1);
 
 		/* First of all check parent object */
 		if (p1->mime_part->parent_part) {
@@ -1427,10 +1517,18 @@ rspamd_message_process (struct rspamd_task *task)
 					if (sel->language && sel->language[0]) {
 						/* Propagate language */
 						if (sel == p1) {
+							if (p2->languages) {
+								g_ptr_array_unref (p2->languages);
+							}
+
 							p2->language = sel->language;
 							p2->languages = g_ptr_array_ref (sel->languages);
 						}
 						else {
+							if (p1->languages) {
+								g_ptr_array_unref (p1->languages);
+							}
+
 							p1->language = sel->language;
 							p1->languages = g_ptr_array_ref (sel->languages);
 						}
@@ -1490,101 +1588,36 @@ rspamd_message_process (struct rspamd_task *task)
 		}
 	}
 
+	rspamd_images_process (task);
+	rspamd_images_link (task);
+
 	rspamd_tokenize_meta_words (task);
 }
 
 
-GPtrArray *
-rspamd_message_get_header_from_hash (GHashTable *htb,
-		rspamd_mempool_t *pool,
-		const gchar *field,
-		gboolean strong)
+struct rspamd_message *
+rspamd_message_ref (struct rspamd_message *msg)
 {
-	GPtrArray *ret, *ar;
-	struct rspamd_mime_header *cur;
-	guint i;
+	REF_RETAIN (msg);
 
-	ar = g_hash_table_lookup (htb, field);
-
-	if (ar == NULL) {
-		return NULL;
-	}
-
-	if (strong && pool != NULL) {
-		/* Need to filter what we have */
-		ret = g_ptr_array_sized_new (ar->len);
-
-		PTR_ARRAY_FOREACH (ar, i, cur) {
-			if (strcmp (cur->name, field) != 0) {
-				continue;
-			}
-
-			g_ptr_array_add (ret, cur);
-		}
-
-		rspamd_mempool_add_destructor (pool,
-				(rspamd_mempool_destruct_t)rspamd_ptr_array_free_hard, ret);
-	}
-	else {
-		ret = ar;
-	}
-
-	return ret;
+	return msg;
 }
 
-GPtrArray *
-rspamd_message_get_header_array (struct rspamd_task *task,
-		const gchar *field,
-		gboolean strong)
+void rspamd_message_unref (struct rspamd_message *msg)
 {
-	return rspamd_message_get_header_from_hash (task->raw_headers,
-			task->task_pool, field, strong);
+	if (msg) {
+		REF_RELEASE (msg);
+	}
 }
 
-GPtrArray *
-rspamd_message_get_mime_header_array (struct rspamd_task *task,
-		const gchar *field,
-		gboolean strong)
+void rspamd_message_update_digest (struct rspamd_message *msg,
+								   const void *input, gsize len)
 {
-	GPtrArray *ret, *ar;
-	struct rspamd_mime_header *cur;
-	guint nelems = 0, i, j;
-	struct rspamd_mime_part *mp;
+	guint64 n[2];
+	/* Sanity */
+	G_STATIC_ASSERT (sizeof (n) == sizeof (msg->digest));
 
-	for (i = 0; i < task->parts->len; i ++) {
-		mp = g_ptr_array_index (task->parts, i);
-		ar = g_hash_table_lookup (mp->raw_headers, field);
-
-		if (ar == NULL) {
-			continue;
-		}
-
-		nelems += ar->len;
-	}
-
-	if (nelems == 0) {
-		return NULL;
-	}
-
-	ret = g_ptr_array_sized_new (nelems);
-
-	for (i = 0; i < task->parts->len; i ++) {
-		mp = g_ptr_array_index (task->parts, i);
-		ar = g_hash_table_lookup (mp->raw_headers, field);
-
-		PTR_ARRAY_FOREACH (ar, j, cur) {
-			if (strong) {
-				if (strcmp (cur->name, field) != 0) {
-					continue;
-				}
-			}
-
-			g_ptr_array_add (ret, cur);
-		}
-	}
-
-	rspamd_mempool_add_destructor (task->task_pool,
-		(rspamd_mempool_destruct_t)rspamd_ptr_array_free_hard, ret);
-
-	return ret;
+	memcpy (n, msg->digest, sizeof (msg->digest));
+	n[0] = t1ha2_atonce128 (&n[1], input, len, n[0]);
+	memcpy (msg->digest, n, sizeof (msg->digest));
 }

@@ -101,7 +101,6 @@ rspamd_config.R_EMPTY_IMAGE = {
       if p:is_html() then -- if the current part is html part
         local hc = p:get_html() -- we get HTML context
         local len = p:get_length() -- and part's length
-
         if hc and len < 50 then -- if we have a part that has less than 50 bytes of text
           local images = hc:get_images() -- then we check for HTML images
 
@@ -195,18 +194,18 @@ local vis_check_id = rspamd_config:register_symbol{
       if p:is_html() and p:get_html() then -- if the current part is html part
         local hc = p:get_html() -- we get HTML context
 
-        hc:foreach_tag({'font', 'span', 'div', 'p', 'td'}, function(tag)
+        hc:foreach_tag({'font', 'span', 'div', 'p', 'td'}, function(tag, clen, is_leaf)
           local bl = tag:get_extra()
           if bl then
-            if not bl['visible'] then
+            if not bl['visible'] and is_leaf then
               invisible_blocks = invisible_blocks + 1
             end
 
-            if bl['font_size'] and bl['font_size'] == 0 then
+            if bl['font_size'] and bl['font_size'] == 0 and is_leaf then
               zero_size_blocks = zero_size_blocks + 1
             end
 
-            if bl['bgcolor'] and bl['color'] and bl['visible'] then
+            if bl['bgcolor'] and bl['color'] and bl['visible'] and is_leaf then
 
               local color = bl['color']
               local bgcolor = bl['bgcolor']
@@ -226,10 +225,9 @@ local vis_check_id = rspamd_config:register_symbol{
 
               if diff < 0.1 then
                 ret = true
-                local content_len = #(tag:get_content() or {})
                 invisible_blocks = invisible_blocks + 1 -- This block is invisible
-                transp_len = transp_len + content_len * (0.1 - diff) * 10.0
-                normal_len = normal_len - content_len
+                transp_len = transp_len + clen * (0.1 - diff) * 10.0
+                normal_len = normal_len - clen
                 local tr = transp_len / (normal_len + transp_len)
                 if tr > transp_rate then
                   transp_rate = tr

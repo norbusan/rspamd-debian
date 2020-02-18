@@ -21,7 +21,6 @@
 
 extern struct rspamadm_command pw_command;
 extern struct rspamadm_command configtest_command;
-extern struct rspamadm_command fuzzy_merge_command;
 extern struct rspamadm_command configdump_command;
 extern struct rspamadm_command control_command;
 extern struct rspamadm_command confighelp_command;
@@ -35,7 +34,6 @@ const struct rspamadm_command *commands[] = {
 	&help_command,
 	&pw_command,
 	&configtest_command,
-	&fuzzy_merge_command,
 	&configdump_command,
 	&control_command,
 	&confighelp_command,
@@ -268,14 +266,15 @@ rspamadm_fill_lua_commands (lua_State *L, GPtrArray *dest)
 			lua_pushvalue (L, -1);
 			/* Reference table itself */
 			lua_cmd->command_data = GINT_TO_POINTER (luaL_ref (L, LUA_REGISTRYINDEX));
-			lua_cmd->flags |= RSPAMADM_FLAG_LUA;
+			lua_cmd->flags |= RSPAMADM_FLAG_LUA|RSPAMADM_FLAG_DYNAMIC;
 			lua_cmd->run = rspamadm_lua_command_run;
 			lua_cmd->help = rspamadm_lua_command_help;
-
 
 			g_ptr_array_add (dest, lua_cmd);
 		}
 
 		lua_settop (L, 0);
 	}
+
+	g_ptr_array_free (lua_paths, TRUE);
 }

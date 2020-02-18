@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <string.h>
+#include <src/lua/lua_common.h>
 
 
 #include "lua.h"
@@ -358,6 +359,7 @@ static TTree *gettree (lua_State *L, int idx, int *len) {
 static TTree *newtree (lua_State *L, int len) {
   size_t size = (len - 1) * sizeof(TTree) + sizeof(Pattern);
   Pattern *p = (Pattern *)lua_newuserdata(L, size);
+  memset(p, 0, size);
   luaL_getmetatable(L, PATTERN_T);
   lua_pushvalue(L, -1);
   lua_setuservalue(L, -3);
@@ -1147,23 +1149,50 @@ static size_t initposition (lua_State *L, size_t len) {
 ** Main match function
 */
 static int lp_match (lua_State *L) {
+#ifdef LPEG_LUD_WORKAROUND
+  Capture *capture = lpeg_allocate_mem_low(sizeof(Capture) * INITCAPSIZE);
+#else
   Capture capture[INITCAPSIZE];
+#endif
   const char *r;
   size_t l;
+  const char *s;
+
   Pattern *p = (getpatt(L, 1, NULL), getpattern(L, 1));
   Instruction *code = (p->code != NULL) ? p->code : prepcompile(L, p, 1);
-  const char *s = luaL_checklstring(L, SUBJIDX, &l);
+
+  if (lua_type (L, SUBJIDX) == LUA_TSTRING) {
+	  s = luaL_checklstring (L, SUBJIDX, &l);
+  }
+  else if (lua_type (L, SUBJIDX) == LUA_TUSERDATA) {
+  	struct rspamd_lua_text *t = lua_check_text (L, SUBJIDX);
+  	if (!t) {
+		return luaL_error (L, "invalid argument (not a text)");
+  	}
+  	s = t->start;
+  	l = t->len;
+  }
+  else {
+  	return luaL_error (L, "invalid argument");
+  }
   size_t i = initposition(L, l);
-  int ptop = lua_gettop(L);
+  int ptop = lua_gettop(L), rs;
   lua_pushnil(L);  /* initialize subscache */
   lua_pushlightuserdata(L, capture);  /* initialize caplistidx */
   lua_getuservalue(L, 1);  /* initialize penvidx */
   r = match(L, s, s + i, s + l, code, capture, ptop);
   if (r == NULL) {
     lua_pushnil(L);
+#ifdef LPEG_LUD_WORKAROUND
+    lpeg_free_mem_low (capture);
+#endif
     return 1;
   }
-  return getcaptures(L, s, r, ptop);
+  rs = getcaptures(L, s, r, ptop);
+#ifdef LPEG_LUD_WORKAROUND
+  lpeg_free_mem_low (capture);
+#endif
+  return rs;
 }
 
 

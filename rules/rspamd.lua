@@ -36,6 +36,8 @@ dofile(local_rules .. '/misc.lua')
 dofile(local_rules .. '/http_headers.lua')
 dofile(local_rules .. '/forwarding.lua')
 dofile(local_rules .. '/mid.lua')
+dofile(local_rules .. '/bitcoin.lua')
+dofile(local_rules .. '/content.lua')
 
 if rspamd_util.file_exists(local_conf .. '/rspamd.local.lua') then
   dofile(local_conf .. '/rspamd.local.lua')
@@ -46,8 +48,8 @@ else
   end
 end
 
-if rspamd_util.file_exists(local_rules .. '/rspamd.classifiers.lua') then
-  dofile(local_rules .. '/rspamd.classifiers.lua')
+if rspamd_util.file_exists(local_conf .. '/local.d/rspamd.lua') then
+  dofile(local_conf .. '/local.d/rspamd.lua')
 end
 
 local rmaps =  rspamd_config:get_all_opt("lua_maps")
@@ -63,6 +65,3 @@ if rmaps and type(rmaps) == 'table' then
     end
   end
 end
-
-local rspamd_nn = require "lua_nn"
-rspamd_nn.load_rspamd_nn() -- Load defined models if any

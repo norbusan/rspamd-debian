@@ -24,8 +24,10 @@
 #include "ref.h"
 #include "upstream.h"
 #include "khash.h"
-#define HASH_CASELESS
-#include "uthash_strcase.h"
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
 
 /**
  * HTTP header structure
@@ -34,9 +36,12 @@ struct rspamd_http_header {
 	rspamd_fstring_t *combined;
 	rspamd_ftok_t name;
 	rspamd_ftok_t value;
-	UT_hash_handle hh;
 	struct rspamd_http_header *prev, *next;
 };
+
+KHASH_INIT (rspamd_http_headers_hash, rspamd_ftok_t *,
+		struct rspamd_http_header *, 1,
+		rspamd_ftok_icase_hash, rspamd_ftok_icase_equal);
 
 /**
  * HTTP message structure, used for requests and replies
@@ -45,7 +50,7 @@ struct rspamd_http_message {
 	rspamd_fstring_t *url;
 	GString *host;
 	rspamd_fstring_t *status;
-	struct rspamd_http_header *headers;
+	khash_t (rspamd_http_headers_hash) *headers;
 
 	struct _rspamd_body_buf_s {
 		/* Data start */
@@ -84,9 +89,10 @@ struct rspamd_keepalive_hash_key {
 	GQueue conns;
 };
 
-gint32 rspamd_keep_alive_key_hash (struct rspamd_keepalive_hash_key* k);
-bool rspamd_keep_alive_key_equal (struct rspamd_keepalive_hash_key* k1,
-								  struct rspamd_keepalive_hash_key* k2);
+gint32 rspamd_keep_alive_key_hash (struct rspamd_keepalive_hash_key *k);
+
+bool rspamd_keep_alive_key_equal (struct rspamd_keepalive_hash_key *k1,
+								  struct rspamd_keepalive_hash_key *k2);
 
 KHASH_INIT (rspamd_keep_alive_hash, struct rspamd_keepalive_hash_key *,
 		char, 0, rspamd_keep_alive_key_hash, rspamd_keep_alive_key_equal);
@@ -100,16 +106,22 @@ struct rspamd_http_context {
 	struct upstream_list *http_proxies;
 	gpointer ssl_ctx;
 	gpointer ssl_ctx_noverify;
-	struct event_base *ev_base;
-	struct event client_rotate_ev;
+	struct ev_loop *event_loop;
+	ev_timer client_rotate_ev;
 	khash_t (rspamd_keep_alive_hash) *keep_alive_hash;
 };
 
 #define HTTP_ERROR http_error_quark ()
+
 GQuark http_error_quark (void);
 
 void rspamd_http_message_storage_cleanup (struct rspamd_http_message *msg);
+
 gboolean rspamd_http_message_grow_body (struct rspamd_http_message *msg,
 										gsize len);
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif /* SRC_LIBUTIL_HTTP_PRIVATE_H_ */

@@ -20,6 +20,7 @@
 #include "radix.h"
 #include "rspamd.h"
 #include "cryptobox.h"
+#include "contrib/fastutf8/fastutf8.h"
 
 #ifdef WITH_HYPERSCAN
 #include "hs.h"
@@ -68,7 +69,7 @@ struct rspamd_regexp_map_helper {
 #ifdef WITH_HYPERSCAN
 	hs_database_t *hs_db;
 	hs_scratch_t *hs_scratch;
-	const gchar **patterns;
+	gchar **patterns;
 	gint *flags;
 	gint *ids;
 #endif
@@ -630,11 +631,11 @@ rspamd_map_helper_new_hash (struct rspamd_map *map)
 
 	if (map) {
 		pool = rspamd_mempool_new (rspamd_mempool_suggest_size (),
-				map->tag);
+				map->tag, 0);
 	}
 	else {
 		pool = rspamd_mempool_new (rspamd_mempool_suggest_size (),
-				NULL);
+				NULL, 0);
 	}
 
 	htb = rspamd_mempool_alloc0 (pool, sizeof (*htb));
@@ -687,11 +688,11 @@ rspamd_map_helper_new_radix (struct rspamd_map *map)
 
 	if (map) {
 		pool = rspamd_mempool_new (rspamd_mempool_suggest_size (),
-				map->tag);
+				map->tag, 0);
 	}
 	else {
 		pool = rspamd_mempool_new (rspamd_mempool_suggest_size (),
-				NULL);
+				NULL, 0);
 	}
 
 	r = rspamd_mempool_alloc0 (pool, sizeof (*r));
@@ -745,7 +746,7 @@ rspamd_map_helper_new_regexp (struct rspamd_map *map,
 	rspamd_mempool_t *pool;
 
 	pool = rspamd_mempool_new (rspamd_mempool_suggest_size (),
-			map->tag);
+			map->tag, 0);
 
 	re_map = rspamd_mempool_alloc0 (pool, sizeof (*re_map));
 	re_map->pool = pool;
@@ -770,15 +771,6 @@ rspamd_map_helper_destroy_regexp (struct rspamd_regexp_map_helper *re_map)
 		return;
 	}
 
-	for (i = 0; i < re_map->regexps->len; i ++) {
-		re = g_ptr_array_index (re_map->regexps, i);
-		rspamd_regexp_unref (re);
-	}
-
-	g_ptr_array_free (re_map->regexps, TRUE);
-	g_ptr_array_free (re_map->values, TRUE);
-	kh_destroy (rspamd_map_hash, re_map->htb);
-
 #ifdef WITH_HYPERSCAN
 	if (re_map->hs_scratch) {
 		hs_free_scratch (re_map->hs_scratch);
@@ -787,6 +779,10 @@ rspamd_map_helper_destroy_regexp (struct rspamd_regexp_map_helper *re_map)
 		hs_free_database (re_map->hs_db);
 	}
 	if (re_map->patterns) {
+		for (i = 0; i < re_map->regexps->len; i ++) {
+			g_free (re_map->patterns[i]);
+		}
+
 		g_free (re_map->patterns);
 	}
 	if (re_map->flags) {
@@ -796,6 +792,15 @@ rspamd_map_helper_destroy_regexp (struct rspamd_regexp_map_helper *re_map)
 		g_free (re_map->ids);
 	}
 #endif
+
+	for (i = 0; i < re_map->regexps->len; i ++) {
+		re = g_ptr_array_index (re_map->regexps, i);
+		rspamd_regexp_unref (re);
+	}
+
+	g_ptr_array_free (re_map->regexps, TRUE);
+	g_ptr_array_free (re_map->values, TRUE);
+	kh_destroy (rspamd_map_hash, re_map->htb);
 
 	rspamd_mempool_t *pool = re_map->pool;
 	memset (re_map, 0, sizeof (*re_map));
@@ -941,15 +946,32 @@ rspamd_re_map_finalize (struct rspamd_regexp_map_helper *re_map)
 		return;
 	}
 
-	re_map->patterns = g_new (const gchar *, re_map->regexps->len);
+	re_map->patterns = g_new (gchar *, re_map->regexps->len);
 	re_map->flags = g_new (gint, re_map->regexps->len);
 	re_map->ids = g_new (gint, re_map->regexps->len);
 
 	for (i = 0; i < re_map->regexps->len; i ++) {
+		const gchar *pat;
+		gchar *escaped;
+		gint pat_flags;
+
 		re = g_ptr_array_index (re_map->regexps, i);
-		re_map->patterns[i] = rspamd_regexp_get_pattern (re);
-		re_map->flags[i] = HS_FLAG_SINGLEMATCH;
 		pcre_flags = rspamd_regexp_get_pcre_flags (re);
+		pat = rspamd_regexp_get_pattern (re);
+		pat_flags = rspamd_regexp_get_flags (re);
+
+		if (pat_flags & RSPAMD_REGEXP_FLAG_UTF) {
+			escaped = rspamd_str_regexp_escape (pat, strlen (pat), NULL,
+					RSPAMD_REGEXP_ESCAPE_RE|RSPAMD_REGEXP_ESCAPE_UTF);
+			re_map->flags[i] |= HS_FLAG_UTF8;
+		}
+		else {
+			escaped = rspamd_str_regexp_escape (pat, strlen (pat), NULL,
+					RSPAMD_REGEXP_ESCAPE_RE);
+		}
+
+		re_map->patterns[i] = escaped;
+		re_map->flags[i] = HS_FLAG_SINGLEMATCH;
 
 #ifndef WITH_PCRE2
 		if (pcre_flags & PCRE_FLAG(UTF8)) {
@@ -977,7 +999,7 @@ rspamd_re_map_finalize (struct rspamd_regexp_map_helper *re_map)
 	}
 
 	if (re_map->regexps->len > 0 && re_map->patterns) {
-		if (hs_compile_multi (re_map->patterns,
+		if (hs_compile_multi ((const gchar **)re_map->patterns,
 				re_map->flags,
 				re_map->ids,
 				re_map->regexps->len,
@@ -1168,7 +1190,7 @@ rspamd_match_regexp_map_single (struct rspamd_regexp_map_helper *map,
 	}
 
 	if (map->map_flags & RSPAMD_REGEXP_MAP_FLAG_UTF) {
-		if (g_utf8_validate (in, len, NULL)) {
+		if (rspamd_fast_utf8_validate (in, len) == 0) {
 			validated = TRUE;
 		}
 	}
@@ -1252,14 +1274,14 @@ rspamd_match_regexp_map_all (struct rspamd_regexp_map_helper *map,
 	gboolean validated = FALSE;
 	struct rspamd_map_helper_value *val;
 
-	g_assert (in != NULL);
-
 	if (map == NULL || map->regexps == NULL || len == 0) {
 		return NULL;
 	}
 
+	g_assert (in != NULL);
+
 	if (map->map_flags & RSPAMD_REGEXP_MAP_FLAG_UTF) {
-		if (g_utf8_validate (in, len, NULL)) {
+		if (rspamd_fast_utf8_validate (in, len) == 0) {
 			validated = TRUE;
 		}
 	}

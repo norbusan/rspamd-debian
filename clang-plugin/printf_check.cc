@@ -84,7 +84,7 @@ namespace rspamd {
 	using arg_parser_t = bool (*) (const Expr *, struct PrintfArgChecker *);
 
 	static void
-	print_error (const std::string &err, const Expr *e, const ASTContext *ast,
+	print_error (const char *err, const Expr *e, const ASTContext *ast,
 			CompilerInstance *ci)
 	{
 		auto loc = e->getExprLoc ();
@@ -95,12 +95,23 @@ namespace rspamd {
 	}
 
 	static void
-	print_warning (const std::string &err, const Expr *e, const ASTContext *ast,
+	print_warning (const char *err, const Expr *e, const ASTContext *ast,
 			CompilerInstance *ci)
 	{
 		auto loc = e->getExprLoc ();
 		auto &diag = ci->getDiagnostics ();
 		auto id = diag.getCustomDiagID (DiagnosticsEngine::Warning,
+				"format query warning: %0");
+		diag.Report (loc, id) << err;
+	}
+
+	static void
+	print_remark (const char *err, const Expr *e, const ASTContext *ast,
+				   CompilerInstance *ci)
+	{
+		auto loc = e->getExprLoc ();
+		auto &diag = ci->getDiagnostics ();
+		auto id = diag.getCustomDiagID (DiagnosticsEngine::Remark,
 				"format query warning: %0");
 		diag.Report (loc, id) << err;
 	}
@@ -196,10 +207,12 @@ namespace rspamd {
 			case 'e':
 				return llvm::make_unique<PrintfArgChecker> (gerr_arg_handler,
 						this->pcontext, this->ci);
-			default:
-				print_warning (std::string("unknown parser flag: ") + type,
+			default: {
+				auto err_msg = std::string ("unknown parser flag: ") + type;
+				print_warning (err_msg.c_str(),
 						e, this->pcontext, this->ci);
 				break;
+				}
 			}
 
 			return nullptr;
@@ -371,13 +384,15 @@ namespace rspamd {
 		bool VisitCallExpr (CallExpr *E)
 		{
 			if (E->getCalleeDecl () == nullptr) {
-				llvm::errs () << "Bad callee\n";
-				return false;
+				print_remark ("cannot get callee decl",
+						E, this->pcontext, this->ci);
+				return true;
 			}
 			auto callee = dyn_cast<NamedDecl> (E->getCalleeDecl ());
 			if (callee == NULL) {
-				llvm::errs () << "Bad callee\n";
-				return false;
+				print_remark ("cannot get named callee decl",
+						E, this->pcontext, this->ci);
+				return true;
 			}
 
 			auto fname = callee->getNameAsString ();
@@ -390,7 +405,7 @@ namespace rspamd {
 				auto query = args[pos];
 
 				if (!query->isEvaluatable (*pcontext)) {
-					print_warning (std::string ("cannot evaluate query"),
+					print_remark ("cannot evaluate query",
 							E, this->pcontext, this->ci);
 					/* It is not assumed to be an error */
 					return true;
@@ -399,7 +414,7 @@ namespace rspamd {
 				clang::Expr::EvalResult r;
 
 				if (!query->EvaluateAsRValue (r, *pcontext)) {
-					print_warning (std::string ("cannot evaluate rvalue of query"),
+					print_warning ("cannot evaluate rvalue of query",
 							E, this->pcontext, this->ci);
 					return false;
 				}
@@ -407,7 +422,7 @@ namespace rspamd {
 				auto qval = dyn_cast<StringLiteral> (
 						r.Val.getLValueBase ().get<const Expr *> ());
 				if (!qval) {
-					print_warning (std::string ("bad or absent query string"),
+					print_warning ("bad or absent query string",
 							E, this->pcontext, this->ci);
 					return false;
 				}
@@ -425,7 +440,7 @@ namespace rspamd {
 										<< ", got " <<
 								(E->getNumArgs () - (pos + 1))
 										<< " args";
-						print_error (err_buf.str (), E, this->pcontext, this->ci);
+						print_error (err_buf.str().c_str(), E, this->pcontext, this->ci);
 
 						return false;
 					}
@@ -469,9 +484,9 @@ namespace rspamd {
 		auto type = arg->getType ().split ().Ty;
 
 		if (!type->isPointerType ()) {
-			print_error (
-					std::string ("bad string argument for %s: ") +
-					arg->getType ().getAsString (),
+			auto err_msg = std::string ("bad string argument for %s: ") +
+						   arg->getType ().getAsString ();
+			print_error (err_msg.c_str(),
 					arg, ctx->past, ctx->pci);
 			return false;
 		}
@@ -488,9 +503,9 @@ namespace rspamd {
 				if (desugared_type) {
 					desugared_type->dump ();
 				}
-				print_error (
-						std::string ("bad string argument for %s: ") +
-								arg->getType ().getAsString (),
+				auto err_msg = std::string ("bad string argument for %s: ") +
+							   arg->getType ().getAsString ();
+				print_error (err_msg.c_str(),
 						arg, ctx->past, ctx->pci);
 				return false;
 			}
@@ -508,9 +523,9 @@ namespace rspamd {
 		auto desugared_type = type->getUnqualifiedDesugaredType ();
 
 		if (!desugared_type->isBuiltinType ()) {
-			print_error (
-					std::string ("not a builtin type for ") + fmt + " arg: " +
-							arg->getType ().getAsString (),
+			auto err_msg = std::string ("not a builtin type for ") + fmt + " arg: " +
+						   arg->getType ().getAsString ();
+			print_error (err_msg.c_str(),
 					arg, ctx->past, ctx->pci);
 			return false;
 		}
@@ -527,10 +542,12 @@ namespace rspamd {
 		}
 
 		if (!found) {
-			print_error (
-					std::string ("bad argument for ") + fmt + " arg: " +
-					arg->getType ().getAsString () + ", resolved as: " +
-					builtin_type->getNameAsCString (ctx->past->getPrintingPolicy ()),
+			auto err_msg = std::string ("bad argument for ") +
+						   fmt + " arg: " +
+						   arg->getType ().getAsString () +
+						   ", resolved as: " +
+						   builtin_type->getNameAsCString (ctx->past->getPrintingPolicy ());
+			print_error (err_msg.c_str(),
 					arg, ctx->past, ctx->pci);
 			return false;
 		}
@@ -573,11 +590,22 @@ namespace rspamd {
 	size_arg_handler (const Expr *arg, struct PrintfArgChecker *ctx)
 	{
 		if (sizeof (size_t) == sizeof (long)) {
-			return check_builtin_type (arg,
-					ctx,
-					{BuiltinType::Kind::ULong,
-					 BuiltinType::Kind::Long},
-					"%z");
+			if (sizeof (long long) == sizeof (long)) {
+				return check_builtin_type (arg,
+						ctx,
+						{BuiltinType::Kind::ULong,
+						 BuiltinType::Kind::Long,
+						 BuiltinType::Kind::LongLong,
+						 BuiltinType::Kind::ULongLong},
+						"%z");
+			}
+			else {
+				return check_builtin_type (arg,
+						ctx,
+						{BuiltinType::Kind::ULong,
+						 BuiltinType::Kind::Long},
+						"%z");
+			}
 		}
 		else if (sizeof (size_t) == sizeof (int)) {
 			return check_builtin_type (arg,
@@ -661,9 +689,9 @@ namespace rspamd {
 		auto type = arg->getType ().split ().Ty;
 
 		if (!type->isPointerType ()) {
-			print_error (
-					std::string ("bad pointer argument for %p: ") +
-							arg->getType ().getAsString (),
+			auto err_msg = std::string ("bad pointer argument for %p: ") +
+						   arg->getType ().getAsString ();
+			print_error (err_msg.c_str(),
 					arg, ctx->past, ctx->pci);
 			return false;
 		}
@@ -722,9 +750,9 @@ namespace rspamd {
 		auto type = arg->getType ().split ().Ty;
 
 		if (!type->isPointerType ()) {
-			print_error (
-					std::string ("bad string argument for %s: ") +
-							arg->getType ().getAsString (),
+			auto err_msg = std::string ("non pointer argument for %s: ") +
+						   arg->getType ().getAsString ();
+			print_error (err_msg.c_str(),
 					arg, ctx->past, ctx->pci);
 			return false;
 		}
@@ -733,9 +761,9 @@ namespace rspamd {
 		auto desugared_type = ptr_type->getUnqualifiedDesugaredType ();
 
 		if (!desugared_type->isRecordType ()) {
-			print_error (
-					std::string ("not a record type for ") + fmt + " arg: " +
-							arg->getType ().getAsString (),
+			auto err_msg = std::string ("not a record type for ") + fmt + " arg: " +
+						   arg->getType ().getAsString ();
+			print_error (err_msg.c_str(),
 					arg, ctx->past, ctx->pci);
 			return false;
 		}
@@ -745,9 +773,10 @@ namespace rspamd {
 		auto struct_def = struct_decl->getNameAsString ();
 
 		if (struct_def != sname) {
-			print_error (std::string ("bad argument '") + struct_def + "' for "
-					+ fmt + " arg: " +
-					arg->getType ().getAsString (),
+			auto err_msg = std::string ("bad argument '") + struct_def + "' for "
+						   + fmt + " arg: " +
+						   arg->getType ().getAsString ();
+			print_error (err_msg.c_str(),
 					arg, ctx->past, ctx->pci);
 			return false;
 		}

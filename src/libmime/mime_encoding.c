@@ -18,9 +18,11 @@
 #include "libutil/mem_pool.h"
 #include "libutil/regexp.h"
 #include "libutil/hash.h"
+#include "libserver/cfg_file.h"
 #include "libserver/task.h"
 #include "mime_encoding.h"
 #include "message.h"
+#include "contrib/fastutf8/fastutf8.h"
 #include <unicode/ucnv.h>
 #include <unicode/ucsdet.h>
 #if U_ICU_VERSION_MAJOR_NUM >= 44
@@ -34,7 +36,7 @@
 #define RSPAMD_CHARSET_FLAG_ASCII (1 << 1)
 
 #define RSPAMD_CHARSET_CACHE_SIZE 32
-#define RSPAMD_CHARSET_MAX_CONTENT 128
+#define RSPAMD_CHARSET_MAX_CONTENT 512
 
 #define SET_PART_RAW(part) ((part)->flags &= ~RSPAMD_MIME_TEXT_PART_FLAG_UTF)
 #define SET_PART_UTF(part) ((part)->flags |= RSPAMD_MIME_TEXT_PART_FLAG_UTF)
@@ -133,7 +135,10 @@ rspamd_converter_to_uchars (struct rspamd_charset_converter *cnv,
 
 
 struct rspamd_charset_converter *
-rspamd_mime_get_converter_cached (const gchar *enc, UErrorCode *err)
+rspamd_mime_get_converter_cached (const gchar *enc,
+								  rspamd_mempool_t *pool,
+								  gboolean is_canon,
+								  UErrorCode *err)
 {
 	const gchar *canon_name;
 	static rspamd_lru_hash_t *cache;
@@ -145,7 +150,19 @@ rspamd_mime_get_converter_cached (const gchar *enc, UErrorCode *err)
 				rspamd_str_equal);
 	}
 
-	canon_name = ucnv_getStandardName (enc, "IANA", err);
+	if (enc == NULL) {
+		return NULL;
+	}
+
+	if (!is_canon) {
+		rspamd_ftok_t cset_tok;
+
+		RSPAMD_FTOK_FROM_STR (&cset_tok, enc);
+		canon_name = rspamd_mime_detect_charset (&cset_tok, pool);
+	}
+	else {
+		canon_name = enc;
+	}
 
 	if (canon_name == NULL) {
 		return NULL;
@@ -237,6 +254,7 @@ rspamd_mime_detect_charset (const rspamd_ftok_t *in, rspamd_mempool_t *pool)
 {
 	gchar *ret = NULL, *h, *t;
 	struct rspamd_charset_substitution *s;
+	const gchar *cset;
 	UErrorCode uc_err = U_ZERO_ERROR;
 
 	if (sub_hash == NULL) {
@@ -266,10 +284,28 @@ rspamd_mime_detect_charset (const rspamd_ftok_t *in, rspamd_mempool_t *pool)
 	s = g_hash_table_lookup (sub_hash, ret);
 
 	if (s) {
-		return ucnv_getStandardName (s->canon, "IANA", &uc_err);
+		ret = (char *)s->canon;
 	}
 
-	return ucnv_getStandardName (ret, "IANA", &uc_err);
+	/* Just fucking stupid */
+	cset = ucnv_getCanonicalName (ret, "MIME", &uc_err);
+
+	if (cset == NULL) {
+		uc_err = U_ZERO_ERROR;
+		cset = ucnv_getCanonicalName (ret, "IANA", &uc_err);
+	}
+
+	if (cset == NULL) {
+		uc_err = U_ZERO_ERROR;
+		cset = ucnv_getCanonicalName (ret, "WINDOWS", &uc_err);
+	}
+
+	if (cset == NULL) {
+		uc_err = U_ZERO_ERROR;
+		cset = ucnv_getCanonicalName (ret, "JAVA", &uc_err);
+	}
+
+	return cset;
 }
 
 gchar *
@@ -285,7 +321,7 @@ rspamd_mime_text_to_utf8 (rspamd_mempool_t *pool,
 	UConverter *utf8_converter;
 	struct rspamd_charset_converter *conv;
 
-	conv = rspamd_mime_get_converter_cached (in_enc, &uc_err);
+	conv = rspamd_mime_get_converter_cached (in_enc, pool, TRUE, &uc_err);
 	utf8_converter = rspamd_get_utf8_converter ();
 
 	if (conv == NULL) {
@@ -349,7 +385,8 @@ rspamd_mime_text_part_utf8_convert (struct rspamd_task *task,
 	UConverter *utf8_converter;
 	struct rspamd_charset_converter *conv;
 
-	conv = rspamd_mime_get_converter_cached (charset, &uc_err);
+	conv = rspamd_mime_get_converter_cached (charset, task->task_pool,
+			TRUE, &uc_err);
 	utf8_converter = rspamd_get_utf8_converter ();
 
 	if (conv == NULL) {
@@ -408,6 +445,7 @@ rspamd_mime_text_part_utf8_convert (struct rspamd_task *task,
 gboolean
 rspamd_mime_to_utf8_byte_array (GByteArray *in,
 		GByteArray *out,
+		rspamd_mempool_t *pool,
 		const gchar *enc)
 {
 	gint32 r, clen, dlen;
@@ -416,6 +454,24 @@ rspamd_mime_to_utf8_byte_array (GByteArray *in,
 	UConverter *utf8_converter;
 	struct rspamd_charset_converter *conv;
 	rspamd_ftok_t charset_tok;
+
+	if (in == NULL || in->len == 0) {
+		return FALSE;
+	}
+
+	if (enc == NULL) {
+		/* Assume utf ? */
+		if (rspamd_fast_utf8_validate (in->data, in->len) == 0) {
+			g_byte_array_set_size (out, in->len);
+			memcpy (out->data, in->data, out->len);
+
+			return TRUE;
+		}
+		else {
+			/* Bad stuff, keep out */
+			return FALSE;
+		}
+	}
 
 	RSPAMD_FTOK_FROM_STR (&charset_tok, enc);
 
@@ -428,7 +484,7 @@ rspamd_mime_to_utf8_byte_array (GByteArray *in,
 	}
 
 	utf8_converter = rspamd_get_utf8_converter ();
-	conv = rspamd_mime_get_converter_cached (enc, &uc_err);
+	conv = rspamd_mime_get_converter_cached (enc, pool, TRUE, &uc_err);
 
 	if (conv == NULL) {
 		return FALSE;
@@ -467,36 +523,38 @@ rspamd_mime_to_utf8_byte_array (GByteArray *in,
 void
 rspamd_mime_charset_utf_enforce (gchar *in, gsize len)
 {
-	const gchar *end, *p;
-	gsize remain = len;
+	gchar *p, *end;
+	goffset err_offset;
+	UChar32 uc = 0;
 
 	/* Now we validate input and replace bad characters with '?' symbol */
 	p = in;
+	end = in + len;
 
-	while (remain > 0 && !g_utf8_validate (p, remain, &end)) {
-		gchar *valid;
+	while (p < end && len > 0 && (err_offset = rspamd_fast_utf8_validate (p, len)) > 0) {
+		err_offset --; /* As it returns it 1 indexed */
+		gint32 cur_offset = err_offset;
 
-		if (end >= in + len) {
-			if (p < in + len) {
-				memset ((gchar *)p, '?', (in + len) - p);
+		while (cur_offset < len) {
+			gint32 tmp = cur_offset;
+
+			U8_NEXT (p, cur_offset, len, uc);
+
+			if (uc > 0) {
+				/* Fill string between err_offset and tmp with `?` character */
+				memset (p + err_offset, '?', tmp - err_offset);
+				break;
 			}
+		}
+
+		if (uc < 0) {
+			/* Fill till the end */
+			memset (p + err_offset, '?', len - err_offset);
 			break;
 		}
 
-		valid = g_utf8_find_next_char (end, in + len);
-
-		if (!valid) {
-			valid = in + len;
-		}
-
-		if (valid > end) {
-			memset ((gchar *)end, '?', valid - end);
-			p = valid;
-			remain = (in + len) - p;
-		}
-		else {
-			break;
-		}
+		p += cur_offset;
+		len = end - p;
 	}
 }
 
@@ -515,16 +573,9 @@ rspamd_mime_charset_find_by_content (const gchar *in, gsize inlen)
 		g_assert (csd != NULL);
 	}
 
-	/* If text is ascii, then we can treat it as utf8 data */
-	for (i = 0; i < inlen; i++) {
-		if ((((guchar)in[i]) & 0x80) != 0) {
-			goto detect;
-		}
+	if (rspamd_fast_utf8_validate (in, inlen) == 0) {
+		return UTF8_CHARSET;
 	}
-
-	return UTF8_CHARSET;
-
-detect:
 
 	ucsdet_setText (csd, in, inlen, &uc_err);
 	csm = ucsdet_detectAll (csd, &matches, &uc_err);
@@ -567,27 +618,29 @@ rspamd_mime_charset_utf_check (rspamd_ftok_t *charset,
 		 * corner cases
 		 */
 		if (content_check) {
-			real_charset = rspamd_mime_charset_find_by_content (in,
-					MIN (RSPAMD_CHARSET_MAX_CONTENT, len));
+			if (rspamd_fast_utf8_validate (in, len) != 0) {
+				real_charset = rspamd_mime_charset_find_by_content (in,
+						MIN (RSPAMD_CHARSET_MAX_CONTENT, len));
 
-			if (real_charset) {
+				if (real_charset) {
 
-				if (rspamd_regexp_match (utf_compatible_re,
-						real_charset, strlen (real_charset), TRUE)) {
-					RSPAMD_FTOK_ASSIGN (charset, UTF8_CHARSET);
+					if (rspamd_regexp_match (utf_compatible_re,
+							real_charset, strlen (real_charset), TRUE)) {
+						RSPAMD_FTOK_ASSIGN (charset, UTF8_CHARSET);
 
-					return TRUE;
+						return TRUE;
+					}
+					else {
+						charset->begin = real_charset;
+						charset->len = strlen (real_charset);
+
+						return FALSE;
+					}
 				}
-				else {
-					charset->begin = real_charset;
-					charset->len = strlen (real_charset);
 
-					return FALSE;
-				}
+				rspamd_mime_charset_utf_enforce (in, len);
 			}
 		}
-
-		rspamd_mime_charset_utf_enforce (in, len);
 
 		return TRUE;
 	}
@@ -601,35 +654,39 @@ rspamd_mime_text_part_maybe_convert (struct rspamd_task *task,
 {
 	GError *err = NULL;
 	const gchar *charset = NULL;
-	gboolean checked = FALSE, need_charset_heuristic = TRUE;
+	gboolean checked = FALSE, need_charset_heuristic = TRUE, valid_utf8 = FALSE;
 	GByteArray *part_content;
 	rspamd_ftok_t charset_tok;
 	struct rspamd_mime_part *part = text_part->mime_part;
 
 	if (rspamd_str_has_8bit (text_part->raw.begin, text_part->raw.len)) {
-		text_part->flags |= RSPAMD_MIME_TEXT_PART_FLAG_8BIT;
+		text_part->flags |= RSPAMD_MIME_TEXT_PART_FLAG_8BIT_RAW;
 	}
 
 	/* Allocate copy storage */
 	part_content = g_byte_array_sized_new (text_part->parsed.len);
 	memcpy (part_content->data, text_part->parsed.begin, text_part->parsed.len);
 	part_content->len = text_part->parsed.len;
+	rspamd_mempool_notify_alloc (task->task_pool,
+			part_content->len);
 	rspamd_mempool_add_destructor (task->task_pool,
 			(rspamd_mempool_destruct_t)g_byte_array_unref, part_content);
 
 	if (rspamd_str_has_8bit (text_part->parsed.begin, text_part->parsed.len)) {
+		if (rspamd_fast_utf8_validate (text_part->parsed.begin, text_part->parsed.len) == 0) {
+			/* Valid UTF, likely all good */
+			need_charset_heuristic = FALSE;
+			valid_utf8 = TRUE;
+			checked = TRUE;
+		}
+
 		text_part->flags |= RSPAMD_MIME_TEXT_PART_FLAG_8BIT_ENCODED;
 	}
-
-	if (!(text_part->flags & RSPAMD_MIME_TEXT_PART_FLAG_8BIT_ENCODED)) {
+	else {
+		/* All 7bit characters, assume it valid utf */
 		need_charset_heuristic = FALSE;
-	}
-
-	if (task->cfg && task->cfg->raw_mode) {
-		SET_PART_RAW (text_part);
-		text_part->utf_raw_content = part_content;
-
-		return;
+		valid_utf8 = TRUE;
+		checked = TRUE; /* Already valid utf, no need in further checks */
 	}
 
 	if (part->ct->charset.len == 0) {
@@ -644,7 +701,7 @@ rspamd_mime_text_part_maybe_convert (struct rspamd_task *task,
 			checked = TRUE;
 			text_part->real_charset = charset;
 		}
-		else {
+		else if (valid_utf8) {
 			SET_PART_UTF (text_part);
 			text_part->utf_raw_content = part_content;
 			text_part->real_charset = UTF8_CHARSET;
@@ -657,16 +714,35 @@ rspamd_mime_text_part_maybe_convert (struct rspamd_task *task,
 				task->task_pool);
 
 		if (charset == NULL) {
-			charset = rspamd_mime_charset_find_by_content (part_content->data,
-					MIN (RSPAMD_CHARSET_MAX_CONTENT, part_content->len));
-			msg_info_task ("detected charset: %s", charset);
-			checked = TRUE;
+			/* We don't know the real charset but can try heuristic */
+			if (need_charset_heuristic) {
+				charset = rspamd_mime_charset_find_by_content (part_content->data,
+						MIN (RSPAMD_CHARSET_MAX_CONTENT, part_content->len));
+				msg_info_task ("detected charset: %s", charset);
+				checked = TRUE;
+				text_part->real_charset = charset;
+			}
+			else if (valid_utf8) {
+				/* We already know that the input is valid utf, so skip heuristic */
+				text_part->real_charset = UTF8_CHARSET;
+			}
+		}
+		else {
 			text_part->real_charset = charset;
+
+			if (strcmp (charset, UTF8_CHARSET) != 0) {
+				/*
+				 * We have detected some charset, but we don't know which one,
+				 * so we need to reset valid utf8 flag and enforce it later
+				 */
+				valid_utf8 = FALSE;
+			}
 		}
 	}
 
-	if (charset == NULL) {
-		msg_info_task ("<%s>: has invalid charset", task->message_id);
+	if (text_part->real_charset == NULL) {
+		msg_info_task ("<%s>: has invalid charset; original: %T",
+				MESSAGE_FIELD_CHECK (task, message_id), &part->ct->charset);
 		SET_PART_RAW (text_part);
 		text_part->utf_raw_content = part_content;
 
@@ -675,32 +751,37 @@ rspamd_mime_text_part_maybe_convert (struct rspamd_task *task,
 
 	RSPAMD_FTOK_FROM_STR (&charset_tok, charset);
 
-	if (rspamd_mime_charset_utf_check (&charset_tok, part_content->data,
-			part_content->len, !checked)) {
-		SET_PART_UTF (text_part);
-		text_part->utf_raw_content = part_content;
-		text_part->real_charset = UTF8_CHARSET;
-
-		return;
-	}
-	else {
-		charset = charset_tok.begin;
-
-		if (!rspamd_mime_text_part_utf8_convert (task, text_part,
-				part_content, charset, &err)) {
-			msg_warn_task ("<%s>: cannot convert from %s to utf8: %s",
-					task->message_id,
-					charset,
-					err ? err->message : "unknown problem");
-			SET_PART_RAW (text_part);
-			g_error_free (err);
-
+	if (!valid_utf8) {
+		if (rspamd_mime_charset_utf_check (&charset_tok, part_content->data,
+				part_content->len, !checked)) {
+			SET_PART_UTF (text_part);
 			text_part->utf_raw_content = part_content;
+			text_part->real_charset = UTF8_CHARSET;
+
 			return;
 		}
+		else {
+			charset = charset_tok.begin;
 
-		text_part->real_charset = charset;
+			if (!rspamd_mime_text_part_utf8_convert (task, text_part,
+					part_content, charset, &err)) {
+				msg_warn_task ("<%s>: cannot convert from %s to utf8: %s",
+						MESSAGE_FIELD (task, message_id),
+						charset,
+						err ? err->message : "unknown problem");
+				SET_PART_RAW (text_part);
+				g_error_free (err);
+
+				text_part->utf_raw_content = part_content;
+				return;
+			}
+
+			SET_PART_UTF (text_part);
+			text_part->real_charset = charset;
+		}
 	}
-
-	SET_PART_UTF (text_part);
+	else {
+		SET_PART_UTF (text_part);
+		text_part->utf_raw_content = part_content;
+	}
 }

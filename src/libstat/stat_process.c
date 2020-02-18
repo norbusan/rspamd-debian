@@ -46,7 +46,6 @@ rspamd_stat_tokenize_parts_metadata (struct rspamd_stat_ctx *st_ctx,
 
 	if (st_ctx->lua_stat_tokens_ref != -1) {
 		gint err_idx, ret;
-		GString *tb;
 		struct rspamd_task **ptask;
 
 		lua_pushcfunction (L, &rspamd_lua_traceback);
@@ -58,13 +57,8 @@ rspamd_stat_tokenize_parts_metadata (struct rspamd_stat_ctx *st_ctx,
 		rspamd_lua_setclass (L, "rspamd{task}", -1);
 
 		if ((ret = lua_pcall (L, 1, 1, err_idx)) != 0) {
-			tb = lua_touserdata (L, -1);
 			msg_err_task ("call to stat_tokens lua "
-							"script failed (%d): %v", ret, tb);
-
-			if (tb) {
-				g_string_free (tb, TRUE);
-			}
+							"script failed (%d): %s", ret, lua_tostring (L, -1));
 		}
 		else {
 			if (lua_type (L, -1) != LUA_TTABLE) {
@@ -137,9 +131,7 @@ rspamd_stat_process_tokenize (struct rspamd_stat_ctx *st_ctx,
 
 	g_assert (st_ctx != NULL);
 
-	for (i = 0; i < task->text_parts->len; i++) {
-		part = g_ptr_array_index (task->text_parts, i);
-
+	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, text_parts), i, part) {
 		if (!IS_PART_EMPTY (part) && part->utf_words != NULL) {
 			reserved_len += part->utf_words->len;
 		}
@@ -150,11 +142,10 @@ rspamd_stat_process_tokenize (struct rspamd_stat_ctx *st_ctx,
 	task->tokens = g_ptr_array_sized_new (reserved_len);
 	rspamd_mempool_add_destructor (task->task_pool,
 			rspamd_ptr_array_free_hard, task->tokens);
+	rspamd_mempool_notify_alloc (task->task_pool, reserved_len * sizeof (gpointer));
 	pdiff = rspamd_mempool_get_variable (task->task_pool, "parts_distance");
 
-	for (i = 0; i < task->text_parts->len; i ++) {
-		part = g_ptr_array_index (task->text_parts, i);
-
+	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, text_parts), i, part) {
 		if (!IS_PART_EMPTY (part) && part->utf_words != NULL) {
 			st_ctx->tokenizer->tokenize_func (st_ctx, task,
 					part->utf_words, IS_PART_UTF (part),
@@ -271,37 +262,6 @@ rspamd_stat_backends_process (struct rspamd_stat_ctx *st_ctx,
 	}
 }
 
-static gboolean
-rspamd_stat_backends_post_process (struct rspamd_stat_ctx *st_ctx,
-		struct rspamd_task *task)
-{
-	guint i;
-	struct rspamd_statfile *st;
-	struct rspamd_classifier *cl;
-	gpointer bk_run;
-
-	g_assert (task->stat_runtimes != NULL);
-
-	for (i = 0; i < st_ctx->statfiles->len; i++) {
-		st = g_ptr_array_index (st_ctx->statfiles, i);
-		cl = st->classifier;
-
-		if (cl->cfg->flags & RSPAMD_FLAG_CLASSIFIER_NO_BACKEND) {
-			continue;
-		}
-
-		bk_run = g_ptr_array_index (task->stat_runtimes, i);
-
-		if (bk_run != NULL) {
-			if (!st->backend->finalize_process (task, bk_run, st_ctx)) {
-				return FALSE;
-			}
-		}
-	}
-
-	return TRUE;
-}
-
 static void
 rspamd_stat_classifiers_process (struct rspamd_stat_ctx *st_ctx,
 		struct rspamd_task *task)
@@ -336,6 +296,8 @@ rspamd_stat_classifiers_process (struct rspamd_stat_ctx *st_ctx,
 		cl->ham_learns = 0;
 	}
 
+	g_assert (task->stat_runtimes != NULL);
+
 	for (i = 0; i < st_ctx->statfiles->len; i++) {
 		st = g_ptr_array_index (st_ctx->statfiles, i);
 		cl = st->classifier;
@@ -366,10 +328,28 @@ rspamd_stat_classifiers_process (struct rspamd_stat_ctx *st_ctx,
 
 		g_assert (cl != NULL);
 
-		/* Ensure that all symbols enabled */
 		skip = FALSE;
 
-		if (!(cl->cfg->flags & RSPAMD_FLAG_CLASSIFIER_NO_BACKEND)) {
+		/* Do not process classifiers on backend failures */
+		for (j = 0; j < cl->statfiles_ids->len; j++) {
+			if (cl->cfg->flags & RSPAMD_FLAG_CLASSIFIER_NO_BACKEND) {
+				continue;
+			}
+
+			id = g_array_index (cl->statfiles_ids, gint, j);
+			bk_run =  g_ptr_array_index (task->stat_runtimes, id);
+			st = g_ptr_array_index (st_ctx->statfiles, id);
+
+			if (bk_run != NULL) {
+				if (!st->backend->finalize_process (task, bk_run, st_ctx)) {
+					skip = TRUE;
+					break;
+				}
+			}
+		}
+
+		/* Ensure that all symbols enabled */
+		if (!skip && !(cl->cfg->flags & RSPAMD_FLAG_CLASSIFIER_NO_BACKEND)) {
 			for (j = 0; j < cl->statfiles_ids->len; j++) {
 				id = g_array_index (cl->statfiles_ids, gint, j);
 				bk_run =  g_ptr_array_index (task->stat_runtimes, id);
@@ -387,9 +367,8 @@ rspamd_stat_classifiers_process (struct rspamd_stat_ctx *st_ctx,
 		if (!skip) {
 			if (cl->cfg->min_tokens > 0 && task->tokens->len < cl->cfg->min_tokens) {
 				msg_debug_bayes (
-						"<%s> contains less tokens than required for %s classifier: "
+						"contains less tokens than required for %s classifier: "
 						"%ud < %ud",
-						task->message_id,
 						cl->cfg->name,
 						task->tokens->len,
 						cl->cfg->min_tokens);
@@ -397,9 +376,8 @@ rspamd_stat_classifiers_process (struct rspamd_stat_ctx *st_ctx,
 			}
 			else if (cl->cfg->max_tokens > 0 && task->tokens->len > cl->cfg->max_tokens) {
 				msg_debug_bayes (
-						"<%s> contains more tokens than allowed for %s classifier: "
+						"contains more tokens than allowed for %s classifier: "
 						"%ud > %ud",
-						task->message_id,
 						cl->cfg->name,
 						task->tokens->len,
 						cl->cfg->max_tokens);
@@ -436,10 +414,7 @@ rspamd_stat_classify (struct rspamd_task *task, lua_State *L, guint stage,
 	}
 	else if (stage == RSPAMD_TASK_STAGE_CLASSIFIERS_POST) {
 		/* Process classifiers */
-		if (rspamd_stat_backends_post_process (st_ctx, task)) {
-			rspamd_stat_classifiers_process (st_ctx, task);
-		}
-		/* Do not process classifiers on backend failures */
+		rspamd_stat_classifiers_process (st_ctx, task);
 	}
 
 	task->processed_stages |= stage;
@@ -479,7 +454,7 @@ rspamd_stat_cache_check (struct rspamd_stat_ctx *st_ctx,
 		if (learn_res == RSPAMD_LEARN_INGORE) {
 			/* Do not learn twice */
 			g_set_error (err, rspamd_stat_quark (), 404, "<%s> has been already "
-					"learned as %s, ignore it", task->message_id,
+					"learned as %s, ignore it", MESSAGE_FIELD (task, message_id),
 					spam ? "spam" : "ham");
 			task->flags |= RSPAMD_TASK_FLAG_ALREADY_LEARNED;
 
@@ -527,7 +502,7 @@ rspamd_stat_classifiers_learn (struct rspamd_stat_ctx *st_ctx,
 			*err == NULL) {
 		/* Do not learn twice */
 		g_set_error (err, rspamd_stat_quark (), 208, "<%s> has been already "
-				"learned as %s, ignore it", task->message_id,
+				"learned as %s, ignore it", MESSAGE_FIELD (task, message_id),
 				spam ? "spam" : "ham");
 
 		return FALSE;
@@ -550,10 +525,10 @@ rspamd_stat_classifiers_learn (struct rspamd_stat_ctx *st_ctx,
 			msg_info_task (
 				"<%s> contains less tokens than required for %s classifier: "
 						"%ud < %ud",
-				task->message_id,
-				cl->cfg->name,
-				task->tokens->len,
-				cl->cfg->min_tokens);
+					MESSAGE_FIELD (task, message_id),
+					cl->cfg->name,
+					task->tokens->len,
+					cl->cfg->min_tokens);
 			too_small = TRUE;
 			continue;
 		}
@@ -561,10 +536,10 @@ rspamd_stat_classifiers_learn (struct rspamd_stat_ctx *st_ctx,
 			msg_info_task (
 				"<%s> contains more tokens than allowed for %s classifier: "
 						"%ud > %ud",
-				task->message_id,
-				cl->cfg->name,
-				task->tokens->len,
-				cl->cfg->max_tokens);
+					MESSAGE_FIELD (task, message_id),
+					cl->cfg->name,
+					task->tokens->len,
+					cl->cfg->max_tokens);
 			too_large = TRUE;
 			continue;
 		}
@@ -638,26 +613,26 @@ rspamd_stat_classifiers_learn (struct rspamd_stat_ctx *st_ctx,
 			g_set_error (err, rspamd_stat_quark (), 204,
 					"<%s> contains more tokens than allowed for %s classifier: "
 					"%d > %d",
-					task->message_id,
-					cl->cfg->name,
+					MESSAGE_FIELD (task, message_id),
+					sel->cfg->name,
 					task->tokens->len,
-					cl->cfg->max_tokens);
+					sel->cfg->max_tokens);
 		}
 		else if (too_small) {
 			g_set_error (err, rspamd_stat_quark (), 204,
 					"<%s> contains less tokens than required for %s classifier: "
 					"%d < %d",
-					task->message_id,
-					cl->cfg->name,
+					MESSAGE_FIELD (task, message_id),
+					sel->cfg->name,
 					task->tokens->len,
-					cl->cfg->min_tokens);
+					sel->cfg->min_tokens);
 		}
 		else if (conditionally_skipped) {
 			g_set_error (err, rspamd_stat_quark (), 204,
 					"<%s> is skipped for %s classifier: "
 					"%s",
-					task->message_id,
-					cl->cfg->name,
+					MESSAGE_FIELD (task, message_id),
+					sel->cfg->name,
 					cond_str ? cond_str : "unknown reason");
 		}
 	}
@@ -704,6 +679,8 @@ rspamd_stat_backends_learn (struct rspamd_stat_ctx *st_ctx,
 
 			if (bk_run == NULL) {
 				/* XXX: must be error */
+				msg_warn_task ("no runtime for backend %s; classifier %s; symbol %s",
+						st->backend->name, cl->cfg->name, st->stcf->symbol);
 				continue;
 			}
 
@@ -715,10 +692,9 @@ rspamd_stat_backends_learn (struct rspamd_stat_ctx *st_ctx,
 			}
 
 			if (!st->backend->learn_tokens (task, task->tokens, id, bk_run)) {
-				if (err && *err == NULL) {
-					g_set_error (err, rspamd_stat_quark (), 500, "Cannot push "
-							"learned results to the backend");
-				}
+				g_set_error (err, rspamd_stat_quark (), 500,
+						"Cannot push "
+						"learned results to the backend");
 
 				res = FALSE;
 				goto end;
@@ -850,11 +826,23 @@ rspamd_stat_learn (struct rspamd_task *task,
 		/* Process classifiers */
 		if (!rspamd_stat_classifiers_learn (st_ctx, task, classifier,
 				spam, err)) {
+			if (err && *err == NULL) {
+				g_set_error (err, rspamd_stat_quark (), 500,
+						"Unknown statistics error, found when learning classifiers;"
+						" classifier: %s",
+						task->classifier);
+			}
 			return RSPAMD_STAT_PROCESS_ERROR;
 		}
 
 		/* Process backends */
 		if (!rspamd_stat_backends_learn (st_ctx, task, classifier, spam, err)) {
+			if (err && *err == NULL) {
+				g_set_error (err, rspamd_stat_quark (), 500,
+						"Unknown statistics error, found when storing data on backend;"
+						" classifier: %s",
+						task->classifier);
+			}
 			return RSPAMD_STAT_PROCESS_ERROR;
 		}
 	}
@@ -871,7 +859,7 @@ rspamd_stat_learn (struct rspamd_task *task,
 
 static gboolean
 rspamd_stat_has_classifier_symbols (struct rspamd_task *task,
-		struct rspamd_metric_result *mres,
+		struct rspamd_scan_result *mres,
 		struct rspamd_classifier *cl)
 {
 	guint i;
@@ -910,10 +898,9 @@ rspamd_stat_check_autolearn (struct rspamd_task *task)
 	struct rspamd_stat_ctx *st_ctx;
 	struct rspamd_classifier *cl;
 	const ucl_object_t *obj, *elt1, *elt2;
-	struct rspamd_metric_result *mres = NULL;
+	struct rspamd_scan_result *mres = NULL;
 	struct rspamd_task **ptask;
 	lua_State *L;
-	GString *tb;
 	guint i;
 	gint err_idx;
 	gboolean ret = FALSE;
@@ -924,6 +911,8 @@ rspamd_stat_check_autolearn (struct rspamd_task *task)
 	st_ctx = rspamd_stat_get_ctx ();
 	g_assert (st_ctx != NULL);
 
+	L = task->cfg->lua_state;
+
 	for (i = 0; i < st_ctx->classifiers->len; i ++) {
 		cl = g_ptr_array_index (st_ctx->classifiers, i);
 		ret = FALSE;
@@ -932,6 +921,7 @@ rspamd_stat_check_autolearn (struct rspamd_task *task)
 			obj = ucl_object_lookup (cl->cfg->opts, "autolearn");
 
 			if (ucl_object_type (obj) == UCL_BOOLEAN) {
+				/* Legacy true/false */
 				if (ucl_object_toboolean (obj)) {
 					/*
 					 * Default learning algorithm:
@@ -955,6 +945,7 @@ rspamd_stat_check_autolearn (struct rspamd_task *task)
 				}
 			}
 			else if (ucl_object_type (obj) == UCL_ARRAY && obj->len == 2) {
+				/* Legacy thresholds */
 				/*
 				 * We have an array of 2 elements, treat it as a
 				 * ham_score, spam_score
@@ -993,8 +984,8 @@ rspamd_stat_check_autolearn (struct rspamd_task *task)
 				}
 			}
 			else if (ucl_object_type (obj) == UCL_STRING) {
+				/* Legacy sript */
 				lua_script = ucl_object_tostring (obj);
-				L = task->cfg->lua_state;
 
 				if (luaL_dostring (L, lua_script) != 0) {
 					msg_err_task ("cannot execute lua script for autolearn "
@@ -1011,14 +1002,13 @@ rspamd_stat_check_autolearn (struct rspamd_task *task)
 						rspamd_lua_setclass (L, "rspamd{task}", -1);
 
 						if (lua_pcall (L, 1, 1, err_idx) != 0) {
-							tb = lua_touserdata (L, -1);
 							msg_err_task ("call to autolearn script failed: "
-									"%v", tb);
-							g_string_free (tb, TRUE);
+									"%s", lua_tostring (L, -1));
 						}
 						else {
 							lua_ret = lua_tostring (L, -1);
 
+							/* We can have immediate results */
 							if (lua_ret) {
 								if (strcmp (lua_ret, "ham") == 0) {
 									task->flags |= RSPAMD_TASK_FLAG_LEARN_HAM;
@@ -1042,6 +1032,53 @@ rspamd_stat_check_autolearn (struct rspamd_task *task)
 					}
 				}
 			}
+			else if (ucl_object_type (obj) == UCL_OBJECT) {
+				/* Try to find autolearn callback */
+				if (cl->autolearn_cbref == 0) {
+					/* We don't have preprocessed cb id, so try to get it */
+					if (!rspamd_lua_require_function (L, "lua_bayes_learn",
+							"autolearn")) {
+						msg_err_task ("cannot get autolearn library from "
+									  "`lua_bayes_learn`");
+					}
+					else {
+						cl->autolearn_cbref = luaL_ref (L, LUA_REGISTRYINDEX);
+					}
+				}
+
+				if (cl->autolearn_cbref != -1) {
+					lua_pushcfunction (L, &rspamd_lua_traceback);
+					err_idx = lua_gettop (L);
+					lua_rawgeti (L, LUA_REGISTRYINDEX, cl->autolearn_cbref);
+
+					ptask = lua_newuserdata (L, sizeof (struct rspamd_task *));
+					*ptask = task;
+					rspamd_lua_setclass (L, "rspamd{task}", -1);
+					/* Push the whole object as well */
+					ucl_object_push_lua (L, obj, true);
+
+					if (lua_pcall (L, 2, 1, err_idx) != 0) {
+						msg_err_task ("call to autolearn script failed: "
+									  "%s", lua_tostring (L, -1));
+					}
+					else {
+						lua_ret = lua_tostring (L, -1);
+
+						if (lua_ret) {
+							if (strcmp (lua_ret, "ham") == 0) {
+								task->flags |= RSPAMD_TASK_FLAG_LEARN_HAM;
+								ret = TRUE;
+							}
+							else if (strcmp (lua_ret, "spam") == 0) {
+								task->flags |= RSPAMD_TASK_FLAG_LEARN_SPAM;
+								ret = TRUE;
+							}
+						}
+					}
+
+					lua_settop (L, err_idx - 1);
+				}
+			}
 
 			if (ret) {
 				/* Do not autolearn if we have this symbol already */
@@ -1055,14 +1092,14 @@ rspamd_stat_check_autolearn (struct rspamd_task *task)
 						msg_info_task ("<%s>: autolearn ham for classifier "
 								"'%s' as message's "
 								"score is negative: %.2f",
-								task->message_id, cl->cfg->name,
+								MESSAGE_FIELD (task, message_id), cl->cfg->name,
 								mres->score);
 					}
 					else {
 						msg_info_task ("<%s>: autolearn spam for classifier "
 								"'%s' as message's "
 								"action is reject, score: %.2f",
-								task->message_id, cl->cfg->name,
+								MESSAGE_FIELD (task, message_id), cl->cfg->name,
 								mres->score);
 					}
 

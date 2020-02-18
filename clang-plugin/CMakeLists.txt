@@ -1,62 +1,45 @@
+
 IF (ENABLE_CLANG_PLUGIN MATCHES "ON")
     # Clang plugin for static analysis
+    PROJECT(RspamdClangPlugin)
     if (NOT "${CMAKE_C_COMPILER_ID}" STREQUAL "Clang")
         MESSAGE(FATAL_ERROR "Cannot build clang plugin when compiler is not clang")
     endif ()
+    FIND_PACKAGE(LLVM REQUIRED CONFIG)
 
-    LIST(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}")
-    ENABLE_LANGUAGE(CXX)
-    FIND_PACKAGE(LLVM REQUIRED)
-    MESSAGE(STATUS "Trying to find libclang for llvm version ${LLVM_PACKAGE_VERSION}")
-    SET(libclang_llvm_header_search_paths
-            # LLVM Debian/Ubuntu nightly packages: http://llvm.org/apt/
-            "/usr/lib/llvm-${LLVM_PACKAGE_VERSION}/include/"
-            # LLVM MacPorts
-            "/opt/local/libexec/llvm-${LLVM_PACKAGE_VERSION}/include"
-            # LLVM Homebrew
-            "/usr/local/Cellar/llvm/${LLVM_PACKAGE_VERSION}/include"
-            # LLVM Homebrew/versions
-            "/usr/local/lib/llvm-${LLVM_PACKAGE_VERSION}/include"
-            # FreeBSD ports versions
-            "/usr/local/llvm${LLVM_PACKAGE_VERSION}/include"
-            "${LLVM_INCLUDE_DIRS}"
-            )
+    MESSAGE(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+    MESSAGE(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+    INCLUDE_DIRECTORIES(${LLVM_INCLUDE_DIRS})
+    ADD_DEFINITIONS(${LLVM_DEFINITIONS})
 
-    SET(libclang_llvm_lib_search_paths
-            # LLVM Debian/Ubuntu nightly packages: http://llvm.org/apt/
-            "/usr/lib/llvm-${LLVM_PACKAGE_VERSION}/lib/"
-            # LLVM MacPorts
-            "/opt/local/libexec/llvm-${LLVM_PACKAGE_VERSION}/lib"
-            # LLVM Homebrew
-            "/usr/local/Cellar/llvm/${LLVM_PACKAGE_VERSION}/lib"
-            # LLVM Homebrew/versions
-            "/usr/local/lib/llvm-${LLVM_PACKAGE_VERSION}/lib"
-            # FreeBSD ports versions
-            "/usr/local/llvm${LLVM_PACKAGE_VERSION}/lib"
-            "${LLVM_LIBRARY_DIRS}"
-            )
+    find_package(Clang REQUIRED)
 
-    find_path(LIBCLANG_INCLUDE_DIR clang-c/Index.h
-            PATHS ${libclang_llvm_header_search_paths}
-            PATH_SUFFIXES LLVM/include #Windows package from http://llvm.org/releases/
-            DOC "The path to the directory that contains clang-c/Index.h")
-    find_library(LIBCLANG_LIBRARY NAMES libclang.imp libclang clang
-            PATHS ${libclang_llvm_lib_search_paths}
-            PATH_SUFFIXES LLVM/lib #Windows package from http://llvm.org/releases/
-            DOC "The file that corresponds to the libclang library.")
+    set(clang_libs
+            clangAST
+            clangBasic
+            clangFrontend)
 
-    get_filename_component(LIBCLANG_LIBRARY_DIR ${LIBCLANG_LIBRARY} PATH)
-
-    set(LIBCLANG_LIBRARIES ${LIBCLANG_LIBRARY})
-    set(LIBCLANG_INCLUDE_DIRS ${LIBCLANG_INCLUDE_DIR})
+    message(STATUS "Found LibClang in: ${CLANG_INSTALL_PREFIX}")
+    include_directories(${CLANG_INCLUDE_DIRS})
 
     SET(CLANGPLUGINSRC plugin.cc printf_check.cc)
 
     ADD_LIBRARY(rspamd-clang SHARED ${CLANGPLUGINSRC})
     SET_TARGET_PROPERTIES(rspamd-clang PROPERTIES
-            COMPILE_FLAGS "${LLVM_CPP_FLAGS} -O2 -Wall -Wextra -Wno-unused-parameter -Werror"
-            INCLUDE_DIRECTORIES ${LIBCLANG_INCLUDE_DIR}
+            COMPILE_FLAGS "-O2 -Wall -Wextra -Wno-unused-parameter -Werror"
             LINKER_LANGUAGE CXX)
-    TARGET_LINK_LIBRARIES(rspamd-clang ${LIBCLANG_LIBRARIES})
-    LINK_DIRECTORIES(${LLVM_LIBRARY_DIRS})
+    IF(NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+	    set_property(TARGET rspamd-clang APPEND_STRING PROPERTY LINK_FLAGS " -Wl,--no-undefined -Wl,--as-needed")
+    ENDIF()
+
+    find_library(found_LLVM LLVM HINTS ${LLVM_LIBRARY_DIRS})
+    if(found_LLVM)
+        target_link_libraries(rspamd-clang PRIVATE LLVM)
+    else()
+        # XXX not tested yet
+        llvm_map_components_to_libnames(llvm_libs support core)
+        target_link_libraries(rspamd-clang PRIVATE ${llvm_libs})
+    endif()
+
+    target_link_libraries(rspamd-clang PRIVATE ${clang_libs})
 ENDIF()

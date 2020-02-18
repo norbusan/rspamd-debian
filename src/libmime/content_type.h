@@ -20,6 +20,10 @@
 #include "libutil/fstring.h"
 #include "libutil/mem_pool.h"
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 enum rspamd_content_type_flags {
 	RSPAMD_CONTENT_TYPE_VALID = 0,
 	RSPAMD_CONTENT_TYPE_BROKEN = 1 << 0,
@@ -29,10 +33,6 @@ enum rspamd_content_type_flags {
 	RSPAMD_CONTENT_TYPE_DSN = 1 << 4,
 	RSPAMD_CONTENT_TYPE_MISSING = 1 << 5,
 };
-
-#define IS_CT_MULTIPART(ct) ((ct) && ((ct)->flags & RSPAMD_CONTENT_TYPE_MULTIPART))
-#define IS_CT_TEXT(ct) ((ct) && ((ct)->flags & RSPAMD_CONTENT_TYPE_TEXT))
-#define IS_CT_MESSAGE(ct) ((ct) &&((ct)->flags & RSPAMD_CONTENT_TYPE_MESSAGE))
 
 enum rspamd_content_param_flags {
 	RSPAMD_CONTENT_PARAM_NORMAL = 0,
@@ -84,8 +84,8 @@ struct rspamd_content_disposition {
 void
 rspamd_content_type_add_param (rspamd_mempool_t *pool,
 							   struct rspamd_content_type *ct,
-							   gchar *name_start,  gchar *name_end,
-							   gchar *value_start,  gchar *value_end);
+							   gchar *name_start, gchar *name_end,
+							   gchar *value_start, gchar *value_end);
 
 /**
  * Parse content type from the header (performs copy + lowercase)
@@ -94,8 +94,8 @@ rspamd_content_type_add_param (rspamd_mempool_t *pool,
  * @param pool
  * @return
  */
-struct rspamd_content_type * rspamd_content_type_parse (const gchar *in,
-		gsize len, rspamd_mempool_t *pool);
+struct rspamd_content_type *rspamd_content_type_parse (const gchar *in,
+													   gsize len, rspamd_mempool_t *pool);
 
 /**
  * Adds new param for content disposition header
@@ -108,9 +108,9 @@ struct rspamd_content_type * rspamd_content_type_parse (const gchar *in,
  */
 void
 rspamd_content_disposition_add_param (rspamd_mempool_t *pool,
-		struct rspamd_content_disposition *cd,
-		const gchar *name_start, const gchar *name_end,
-		const gchar *value_start, const gchar *value_end);
+									  struct rspamd_content_disposition *cd,
+									  const gchar *name_start, const gchar *name_end,
+									  const gchar *value_start, const gchar *value_end);
 
 /**
  * Parse content-disposition header
@@ -119,7 +119,12 @@ rspamd_content_disposition_add_param (rspamd_mempool_t *pool,
  * @param pool
  * @return
  */
-struct rspamd_content_disposition * rspamd_content_disposition_parse (const gchar *in,
-		gsize len, rspamd_mempool_t *pool);
+struct rspamd_content_disposition *rspamd_content_disposition_parse (const gchar *in,
+																	 gsize len,
+																	 rspamd_mempool_t *pool);
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif /* SRC_LIBMIME_CONTENT_TYPE_H_ */

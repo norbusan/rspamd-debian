@@ -98,7 +98,7 @@ struct lua_redis_userdata {
 	struct rspamd_task *task;
 	struct rspamd_symcache_item *item;
 	struct rspamd_async_session *s;
-	struct event_base *ev_base;
+	struct ev_loop *event_loop;
 	struct rspamd_config *cfg;
 	struct rspamd_redis_pool *pool;
 	gchar *server;
@@ -114,6 +114,7 @@ struct lua_redis_userdata {
 #define LUA_REDIS_ASYNC (1 << 0)
 #define LUA_REDIS_TEXTDATA (1 << 1)
 #define LUA_REDIS_TERMINATED (1 << 2)
+#define LUA_REDIS_NO_POOL (1 << 3)
 #define IS_ASYNC(ctx) ((ctx)->flags & LUA_REDIS_ASYNC)
 
 struct lua_redis_request_specific_userdata {
@@ -124,7 +125,7 @@ struct lua_redis_request_specific_userdata {
 	struct lua_redis_userdata *c;
 	struct lua_redis_ctx *ctx;
 	struct lua_redis_request_specific_userdata *next;
-	struct event timeout;
+	ev_timer timeout_ev;
 	guint flags;
 };
 
@@ -184,9 +185,7 @@ lua_redis_dtor (struct lua_redis_ctx *ctx)
 	if (ud->ctx) {
 
 		LL_FOREACH_SAFE (ud->specific, cur, tmp) {
-			if (rspamd_event_pending (&cur->timeout, EV_TIMEOUT)) {
-				event_del (&cur->timeout);
-			}
+			ev_timer_stop (ud->event_loop, &cur->timeout_ev);
 
 			if (!(cur->flags & LUA_REDIS_SPECIFIC_REPLIED)) {
 				is_successful = FALSE;
@@ -200,7 +199,17 @@ lua_redis_dtor (struct lua_redis_ctx *ctx)
 		ud->terminated = 1;
 		ac = ud->ctx;
 		ud->ctx = NULL;
-		rspamd_redis_pool_release_connection (ud->pool, ac, !is_successful);
+
+		if (!is_successful) {
+			rspamd_redis_pool_release_connection (ud->pool, ac,
+					RSPAMD_REDIS_RELEASE_FATAL);
+		}
+		else {
+			rspamd_redis_pool_release_connection (ud->pool, ac,
+					(ctx->flags & LUA_REDIS_NO_POOL) ?
+					RSPAMD_REDIS_RELEASE_ENFORCE : RSPAMD_REDIS_RELEASE_DEFAULT);
+		}
+
 	}
 
 	LL_FOREACH_SAFE (ud->specific, cur, tmp) {
@@ -245,9 +254,7 @@ lua_redis_fin (void *arg)
 
 	ctx = sp_ud->ctx;
 
-	if (rspamd_event_pending (&sp_ud->timeout, EV_TIMEOUT)) {
-		event_del (&sp_ud->timeout);
-	}
+	ev_timer_stop (sp_ud->ctx->async.event_loop, &sp_ud->timeout_ev);
 
 	msg_debug ("finished redis query %p from session %p", sp_ud, ctx);
 	sp_ud->flags |= LUA_REDIS_SPECIFIC_FINISHED;
@@ -268,12 +275,16 @@ lua_redis_push_error (const gchar *err,
 {
 	struct lua_redis_userdata *ud = sp_ud->c;
 	struct lua_callback_state cbs;
+	lua_State *L;
 
 	if (!(sp_ud->flags & (LUA_REDIS_SPECIFIC_REPLIED|LUA_REDIS_SPECIFIC_FINISHED))) {
 		if (sp_ud->cbref != -1) {
 
 			lua_thread_pool_prepare_callback (ud->cfg->lua_thread_pool, &cbs);
+			L = cbs.L;
 
+			lua_pushcfunction (L, &rspamd_lua_traceback);
+			int err_idx = lua_gettop (L);
 			/* Push error */
 			lua_rawgeti (cbs.L, LUA_REGISTRYINDEX, sp_ud->cbref);
 
@@ -286,11 +297,11 @@ lua_redis_push_error (const gchar *err,
 				rspamd_symcache_set_cur_item (ud->task, ud->item);
 			}
 
-			if (lua_pcall (cbs.L, 2, 0, 0) != 0) {
+			if (lua_pcall (cbs.L, 2, 0, err_idx) != 0) {
 				msg_info ("call to callback failed: %s", lua_tostring (cbs.L, -1));
-				lua_pop (cbs.L, 1);
 			}
 
+			lua_settop (L, err_idx - 1);
 			lua_thread_pool_restore_callback (&cbs);
 		}
 
@@ -360,11 +371,15 @@ lua_redis_push_data (const redisReply *r, struct lua_redis_ctx *ctx,
 {
 	struct lua_redis_userdata *ud = sp_ud->c;
 	struct lua_callback_state cbs;
+	lua_State *L;
 
 	if (!(sp_ud->flags & (LUA_REDIS_SPECIFIC_REPLIED|LUA_REDIS_SPECIFIC_FINISHED))) {
 		if (sp_ud->cbref != -1) {
 			lua_thread_pool_prepare_callback (ud->cfg->lua_thread_pool, &cbs);
+			L = cbs.L;
 
+			lua_pushcfunction (L, &rspamd_lua_traceback);
+			int err_idx = lua_gettop (L);
 			/* Push error */
 			lua_rawgeti (cbs.L, LUA_REGISTRYINDEX, sp_ud->cbref);
 			/* Error is nil */
@@ -376,11 +391,11 @@ lua_redis_push_data (const redisReply *r, struct lua_redis_ctx *ctx,
 				rspamd_symcache_set_cur_item (ud->task, ud->item);
 			}
 
-			if (lua_pcall (cbs.L, 2, 0, 0) != 0) {
+			if (lua_pcall (cbs.L, 2, 0, err_idx) != 0) {
 				msg_info ("call to callback failed: %s", lua_tostring (cbs.L, -1));
-				lua_pop (cbs.L, 1);
 			}
 
+			lua_settop (L, err_idx - 1);
 			lua_thread_pool_restore_callback (&cbs);
 		}
 
@@ -460,7 +475,9 @@ lua_redis_callback (redisAsyncContext *c, gpointer r, gpointer priv)
 		ud->ctx = NULL;
 
 		if (ac) {
-			rspamd_redis_pool_release_connection (ud->pool, ac, FALSE);
+			rspamd_redis_pool_release_connection (ud->pool, ac,
+					(ctx->flags & LUA_REDIS_NO_POOL) ?
+					RSPAMD_REDIS_RELEASE_ENFORCE : RSPAMD_REDIS_RELEASE_DEFAULT);
 		}
 	}
 
@@ -556,10 +573,7 @@ lua_redis_callback_sync (redisAsyncContext *ac, gpointer r, gpointer priv)
 		return;
 	}
 
-	if (rspamd_event_pending (&sp_ud->timeout, EV_TIMEOUT)) {
-		event_del (&sp_ud->timeout);
-	}
-
+	ev_timer_stop (ud->event_loop, &sp_ud->timeout_ev);
 	msg_debug ("got reply from redis: %p for query %p", ac, sp_ud);
 
 	struct lua_redis_result *result = g_malloc0 (sizeof *result);
@@ -603,7 +617,8 @@ lua_redis_callback_sync (redisAsyncContext *ac, gpointer r, gpointer priv)
 		 * This will call all callbacks pending so the entire context
 		 * will be destructed
 		 */
-		rspamd_redis_pool_release_connection (sp_ud->c->pool, ac, TRUE);
+		rspamd_redis_pool_release_connection (sp_ud->c->pool, ac,
+				RSPAMD_REDIS_RELEASE_FATAL);
 	}
 
 	result->result_ref = luaL_ref (L, LUA_REGISTRYINDEX);
@@ -630,9 +645,10 @@ lua_redis_callback_sync (redisAsyncContext *ac, gpointer r, gpointer priv)
 }
 
 static void
-lua_redis_timeout_sync (int fd, short what, gpointer priv)
+lua_redis_timeout_sync (EV_P_ ev_timer *w, int revents)
 {
-	struct lua_redis_request_specific_userdata *sp_ud = priv;
+	struct lua_redis_request_specific_userdata *sp_ud =
+			(struct lua_redis_request_specific_userdata *)w->data;
 	struct lua_redis_ctx *ctx = sp_ud->ctx;
 	redisAsyncContext *ac;
 
@@ -652,14 +668,16 @@ lua_redis_timeout_sync (int fd, short what, gpointer priv)
 		 * This will call all callbacks pending so the entire context
 		 * will be destructed
 		 */
-		rspamd_redis_pool_release_connection (sp_ud->c->pool, ac, TRUE);
+		rspamd_redis_pool_release_connection (sp_ud->c->pool, ac,
+				RSPAMD_REDIS_RELEASE_FATAL);
 	}
 }
 
 static void
-lua_redis_timeout (int fd, short what, gpointer u)
+lua_redis_timeout (EV_P_ ev_timer *w, int revents)
 {
-	struct lua_redis_request_specific_userdata *sp_ud = u;
+	struct lua_redis_request_specific_userdata *sp_ud =
+			(struct lua_redis_request_specific_userdata *)w->data;
 	struct lua_redis_ctx *ctx;
 	redisAsyncContext *ac;
 
@@ -684,7 +702,8 @@ lua_redis_timeout (int fd, short what, gpointer u)
 		 * This will call all callbacks pending so the entire context
 		 * will be destructed
 		 */
-		rspamd_redis_pool_release_connection (sp_ud->c->pool, ac, TRUE);
+		rspamd_redis_pool_release_connection (sp_ud->c->pool, ac,
+				RSPAMD_REDIS_RELEASE_FATAL);
 	}
 
 	REDIS_RELEASE (ctx);
@@ -790,9 +809,9 @@ lua_redis_parse_args (lua_State *L, gint idx, const gchar *cmd,
 static struct lua_redis_ctx *
 rspamd_lua_redis_prepare_connection (lua_State *L, gint *pcbref, gboolean is_async)
 {
-	struct lua_redis_ctx *ctx;
+	struct lua_redis_ctx *ctx = NULL;
 	rspamd_inet_addr_t *ip = NULL;
-	struct lua_redis_userdata *ud;
+	struct lua_redis_userdata *ud = NULL;
 	struct rspamd_lua_ip *addr = NULL;
 	struct rspamd_task *task = NULL;
 	const gchar *host;
@@ -800,7 +819,7 @@ rspamd_lua_redis_prepare_connection (lua_State *L, gint *pcbref, gboolean is_asy
 	gint cbref = -1;
 	struct rspamd_config *cfg = NULL;
 	struct rspamd_async_session *session = NULL;
-	struct event_base *ev_base = NULL;
+	struct ev_loop *ev_base = NULL;
 	gboolean ret = FALSE;
 	guint flags = 0;
 
@@ -850,7 +869,7 @@ rspamd_lua_redis_prepare_connection (lua_State *L, gint *pcbref, gboolean is_asy
 		else {
 			cfg = task->cfg;
 			session = task->s;
-			ev_base = task->ev_base;
+			ev_base = task->event_loop;
 			ret = TRUE;
 		}
 
@@ -877,7 +896,8 @@ rspamd_lua_redis_prepare_connection (lua_State *L, gint *pcbref, gboolean is_asy
 		else if (lua_type (L, -1) == LUA_TSTRING) {
 			host = lua_tostring (L, -1);
 
-			if (rspamd_parse_inet_address (&ip, host, strlen (host))) {
+			if (rspamd_parse_inet_address (&ip,
+					host, strlen (host), RSPAMD_INET_ADDRESS_PARSE_DEFAULT)) {
 				addr = g_alloca (sizeof (*addr));
 				addr->addr = ip;
 
@@ -909,6 +929,13 @@ rspamd_lua_redis_prepare_connection (lua_State *L, gint *pcbref, gboolean is_asy
 		}
 		lua_pop (L, 1);
 
+		lua_pushstring (L, "no_pool");
+		lua_gettable (L, -2);
+		if (!!lua_toboolean (L, -1)) {
+			flags |= LUA_REDIS_NO_POOL;
+		}
+		lua_pop (L, 1);
+
 		lua_pop (L, 1); /* table */
 
 		if (session && rspamd_session_blocked (session)) {
@@ -933,7 +960,7 @@ rspamd_lua_redis_prepare_connection (lua_State *L, gint *pcbref, gboolean is_asy
 			ud->s = session;
 			ud->cfg = cfg;
 			ud->pool = cfg->redis_pool;
-			ud->ev_base = ev_base;
+			ud->event_loop = ev_base;
 			ud->task = task;
 
 			if (task) {
@@ -967,11 +994,13 @@ rspamd_lua_redis_prepare_connection (lua_State *L, gint *pcbref, gboolean is_asy
 			if (ud->ctx) {
 				msg_err_task_check ("cannot connect to redis: %s",
 						ud->ctx->errstr);
-				rspamd_redis_pool_release_connection (ud->pool, ud->ctx, TRUE);
+				rspamd_redis_pool_release_connection (ud->pool, ud->ctx,
+						RSPAMD_REDIS_RELEASE_FATAL);
 				ud->ctx = NULL;
 			}
 			else {
-				msg_err_task_check ("cannot connect to redis: unknown error");
+				msg_err_task_check ("cannot connect to redis (OS error): %s",
+						strerror (errno));
 			}
 
 			REDIS_RELEASE (ctx);
@@ -1009,7 +1038,6 @@ lua_redis_make_request (lua_State *L)
 	struct lua_redis_userdata *ud;
 	struct lua_redis_ctx *ctx, **pctx;
 	const gchar *cmd = NULL;
-	struct timeval tv;
 	gdouble timeout = REDIS_DEFAULT_TIMEOUT;
 	gint cbref = -1;
 	gboolean ret = FALSE;
@@ -1064,15 +1092,15 @@ lua_redis_make_request (lua_State *L)
 
 			REDIS_RETAIN (ctx); /* Cleared by fin event */
 			ctx->cmds_pending ++;
-			double_to_tv (timeout, &tv);
-			event_set (&sp_ud->timeout, -1, EV_TIMEOUT, lua_redis_timeout, sp_ud);
-			event_base_set (ud->ev_base, &sp_ud->timeout);
-			event_add (&sp_ud->timeout, &tv);
+			sp_ud->timeout_ev.data = sp_ud;
+			ev_timer_init (&sp_ud->timeout_ev, lua_redis_timeout, timeout, 0.0);
+			ev_timer_start (ud->event_loop, &sp_ud->timeout_ev);
 			ret = TRUE;
 		}
 		else {
 			msg_info ("call to redis failed: %s", ud->ctx->errstr);
-			rspamd_redis_pool_release_connection (ud->pool, ud->ctx, TRUE);
+			rspamd_redis_pool_release_connection (ud->pool, ud->ctx,
+					RSPAMD_REDIS_RELEASE_FATAL);
 			ud->ctx = NULL;
 			REDIS_RELEASE (ctx);
 			ret = FALSE;
@@ -1139,7 +1167,8 @@ lua_redis_make_request_sync (lua_State *L)
 		}
 		else if (lua_type (L, -1) == LUA_TSTRING) {
 			host = lua_tostring (L, -1);
-			if (rspamd_parse_inet_address (&ip, host, strlen (host))) {
+			if (rspamd_parse_inet_address (&ip,
+					host, strlen (host), RSPAMD_INET_ADDRESS_PARSE_DEFAULT)) {
 				addr = g_alloca (sizeof (*addr));
 				addr->addr = ip;
 
@@ -1347,7 +1376,6 @@ lua_redis_add_cmd (lua_State *L)
 	const gchar *cmd = NULL;
 	gint args_pos = 2;
 	gint cbref = -1, ret;
-	struct timeval tv;
 
 	if (ctx) {
 		if (ctx->flags & LUA_REDIS_TERMINATED) {
@@ -1426,19 +1454,18 @@ lua_redis_add_cmd (lua_State *L)
 				}
 			}
 
-			double_to_tv (sp_ud->c->timeout, &tv);
+			sp_ud->timeout_ev.data = sp_ud;
 
 			if (IS_ASYNC (ctx)) {
-				event_set (&sp_ud->timeout, -1, EV_TIMEOUT,
-						lua_redis_timeout, sp_ud);
+				ev_timer_init (&sp_ud->timeout_ev, lua_redis_timeout,
+						sp_ud->c->timeout, 0.0);
 			}
 			else {
-				event_set (&sp_ud->timeout, -1, EV_TIMEOUT,
-						lua_redis_timeout_sync, sp_ud);
+				ev_timer_init (&sp_ud->timeout_ev, lua_redis_timeout_sync,
+						sp_ud->c->timeout, 0.0);
 			}
 
-			event_base_set (ud->ev_base, &sp_ud->timeout);
-			event_add (&sp_ud->timeout, &tv);
+			ev_timer_start (ud->event_loop, &sp_ud->timeout_ev);
 			REDIS_RETAIN (ctx);
 			ctx->cmds_pending ++;
 		}
@@ -1579,17 +1606,7 @@ lua_load_redis (lua_State * L)
 void
 luaopen_redis (lua_State * L)
 {
-	luaL_newmetatable (L, "rspamd{redis}");
-	lua_pushstring (L, "__index");
-	lua_pushvalue (L, -2);
-	lua_settable (L, -3);
-
-	lua_pushstring (L, "class");
-	lua_pushstring (L, "rspamd{redis}");
-	lua_rawset (L, -3);
-
-	luaL_register (L, NULL, redislib_m);
+	rspamd_lua_new_class (L, "rspamd{redis}", redislib_m);
 	lua_pop (L, 1);
-
 	rspamd_lua_add_preload (L, "rspamd_redis", lua_load_redis);
 }

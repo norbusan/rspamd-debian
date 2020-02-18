@@ -17,6 +17,10 @@
 #ifndef RSPAMD_PROTOCOL_INTERNAL_H
 #define RSPAMD_PROTOCOL_INTERNAL_H
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 /*
  * Just check if the passed message is spam or not and reply as
  * described below
@@ -64,11 +68,11 @@
 #define RCPT_HEADER "Rcpt"
 #define SUBJECT_HEADER "Subject"
 #define SETTINGS_ID_HEADER "Settings-ID"
+#define SETTINGS_HEADER "Settings"
 #define QUEUE_ID_HEADER "Queue-ID"
 #define USER_HEADER "User"
 #define URLS_HEADER "URL-Format"
 #define PASS_HEADER "Pass"
-#define JSON_HEADER "Json"
 #define HOSTNAME_HEADER "Hostname"
 #define DELIVER_TO_HEADER "Deliver-To"
 #define NO_LOG_HEADER "Log"
@@ -81,8 +85,15 @@
 #define MTA_NAME_HEADER "MTA-Name"
 #define MILTER_HEADER "Milter"
 #define FILENAME_HEADER "Filename"
+#define FLAGS_HEADER "Flags"
 #define CERT_ISSUER_HEADER "TLS-Cert-Issuer"
 #define MAILER_HEADER "Mailer"
 #define RAW_DATA_HEADER "Raw"
+#define COMPRESSION_HEADER "Compression"
+#define MESSAGE_OFFSET_HEADER "Message-Offset"
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif //RSPAMD_PROTOCOL_INTERNAL_H

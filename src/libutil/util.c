@@ -86,6 +86,7 @@
 #include "cryptobox.h"
 #include "zlib.h"
 #include "contrib/uthash/utlist.h"
+#include "contrib/fastutf8/fastutf8.h"
 
 /* Check log messages intensity once per minute */
 #define CHECK_TIME 60
@@ -785,75 +786,13 @@ rspamd_pass_signal (GHashTable * workers, gint signo)
 
 #ifndef HAVE_SETPROCTITLE
 
-#if !defined(DARWIN) && !defined(SOLARIS) && !defined(__APPLE__)
-static gchar *title_buffer = 0;
+#ifdef LINUX
+static gchar *title_buffer = NULL;
 static size_t title_buffer_size = 0;
 static gchar *title_progname, *title_progname_full;
 #endif
 
-gint
-setproctitle (const gchar *fmt, ...)
-{
-#if defined(DARWIN) || defined(SOLARIS) || defined(__APPLE__)
-	GString *dest;
-	va_list ap;
-
-	dest = g_string_new ("");
-	va_start (ap, fmt);
-	rspamd_vprintf_gstring (dest, fmt, ap);
-	va_end (ap);
-
-	g_set_prgname (dest->str);
-	g_string_free (dest, TRUE);
-
-	return 0;
-#else
-	if (!title_buffer || !title_buffer_size) {
-		errno = ENOMEM;
-		return -1;
-	}
-
-	memset (title_buffer, '\0', title_buffer_size);
-
-	ssize_t written;
-
-	if (fmt) {
-		ssize_t written2;
-		va_list ap;
-
-		written = snprintf (title_buffer,
-				title_buffer_size,
-				"%s: ",
-				title_progname);
-		if (written < 0 || (size_t) written >= title_buffer_size)
-			return -1;
-
-		va_start (ap, fmt);
-		written2 = vsnprintf (title_buffer + written,
-				title_buffer_size - written,
-				fmt,
-				ap);
-		va_end (ap);
-		if (written2 < 0 || (size_t) written2 >= title_buffer_size - written)
-			return -1;
-	}
-	else {
-		written = snprintf (title_buffer,
-				title_buffer_size,
-				"%s",
-				title_progname);
-		if (written < 0 || (size_t) written >= title_buffer_size)
-			return -1;
-	}
-
-	written = strlen (title_buffer);
-	memset (title_buffer + written, '\0', title_buffer_size - written);
-
-	return 0;
-#endif
-}
-
-#if !(defined(DARWIN) || defined(SOLARIS) || defined(__APPLE__))
+#ifdef LINUX
 static void
 rspamd_title_dtor (gpointer d)
 {
@@ -868,19 +807,200 @@ rspamd_title_dtor (gpointer d)
 }
 #endif
 
-/*
-   It has to be _init function, because __attribute__((constructor))
-   functions gets called without arguments.
+#ifdef __APPLE__
+
+/* Code is based on darwin-proctitle.c used almost everywhere */
+
+/* Copyright Joyent, Inc. and other Node contributors. All rights reserved.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
+
+#include <dlfcn.h>
+#include <TargetConditionals.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <ApplicationServices/ApplicationServices.h>
+
+/* Darwin is just brain damaged */
+static int (*dynamic_pthread_setname_np)(const char* name);
+static CFStringRef (*pCFStringCreateWithCString)(CFAllocatorRef,
+												 const char*,
+												 CFStringEncoding);
+static CFBundleRef (*pCFBundleGetBundleWithIdentifier)(CFStringRef);
+static void *(*pCFBundleGetDataPointerForName)(CFBundleRef, CFStringRef);
+static void *(*pCFBundleGetFunctionPointerForName)(CFBundleRef, CFStringRef);
+static CFTypeRef (*pLSGetCurrentApplicationASN)(void);
+static OSStatus (*pLSSetApplicationInformationItem)(int,
+													CFTypeRef,
+													CFStringRef,
+													CFStringRef,
+													CFDictionaryRef*);
+static CFBundleRef launch_services_bundle;
+static CFStringRef* display_name_key;
+static CFDictionaryRef (*pCFBundleGetInfoDictionary)(CFBundleRef);
+static CFBundleRef (*pCFBundleGetMainBundle)(void);
+static CFBundleRef hi_services_bundle;
+static OSStatus (*pSetApplicationIsDaemon)(int);
+static CFDictionaryRef (*pLSApplicationCheckIn)(int, CFDictionaryRef);
+static void (*pLSSetApplicationLaunchServicesServerConnectionStatus)(uint64_t,
+																	 void*);
+#define APPLE_S(s) pCFStringCreateWithCString(NULL, (s), kCFStringEncodingUTF8)
+/* Dlfunc handles */
+struct rspamd_osx_handles {
+	gpointer application_services_handle;
+	gpointer core_foundation_handle;
+};
+
+static
+void rspamd_darwin_title_dtor (void *ud)
+{
+	struct rspamd_osx_handles *hdls = (struct rspamd_osx_handles *)ud;
+
+	if (hdls->core_foundation_handle != NULL) {
+		dlclose (hdls->core_foundation_handle);
+	}
+
+	if (hdls->application_services_handle != NULL) {
+		dlclose (hdls->application_services_handle);
+	}
+}
+
+static void
+rspamd_darwin_init_title (struct rspamd_main *rspamd_main)
+{
+	struct rspamd_osx_handles *hdls;
+	/* Assumed that pthreads are already linked */
+	*(void **)(&dynamic_pthread_setname_np) =
+			dlsym (RTLD_DEFAULT, "pthread_setname_np");
+
+	hdls = rspamd_mempool_alloc0 (rspamd_main->server_pool, sizeof (*hdls));
+
+	hdls->application_services_handle = dlopen("/System/Library/Frameworks/"
+										 "ApplicationServices.framework/"
+										 "Versions/A/ApplicationServices",
+			RTLD_LAZY | RTLD_LOCAL);
+	hdls->core_foundation_handle = dlopen("/System/Library/Frameworks/"
+									"CoreFoundation.framework/"
+									"Versions/A/CoreFoundation",
+			RTLD_LAZY | RTLD_LOCAL);
+
+	if (hdls->application_services_handle == NULL ||
+		hdls->core_foundation_handle == NULL) {
+		goto out;
+	}
+
+	/* Fill procedures via dlsym */
+	*(void **)(&pCFStringCreateWithCString) =
+			dlsym (hdls->core_foundation_handle, "CFStringCreateWithCString");
+	*(void **)(&pCFBundleGetBundleWithIdentifier) =
+			dlsym (hdls->core_foundation_handle, "CFBundleGetBundleWithIdentifier");
+	*(void **)(&pCFBundleGetDataPointerForName) =
+			dlsym (hdls->core_foundation_handle, "CFBundleGetDataPointerForName");
+	*(void **)(&pCFBundleGetFunctionPointerForName) =
+			dlsym (hdls->core_foundation_handle, "CFBundleGetFunctionPointerForName");
+
+	if (pCFStringCreateWithCString == NULL ||
+		pCFBundleGetBundleWithIdentifier == NULL ||
+		pCFBundleGetDataPointerForName == NULL ||
+		pCFBundleGetFunctionPointerForName == NULL) {
+		goto out;
+	}
+
+	launch_services_bundle =
+			pCFBundleGetBundleWithIdentifier(APPLE_S("com.apple.LaunchServices"));
+
+	if (launch_services_bundle == NULL) {
+		goto out;
+	}
+
+	*(void **)(&pLSGetCurrentApplicationASN) =
+			pCFBundleGetFunctionPointerForName(launch_services_bundle,
+					APPLE_S("_LSGetCurrentApplicationASN"));
+
+	if (pLSGetCurrentApplicationASN == NULL) {
+		goto out;
+	}
+
+	*(void **)(&pLSSetApplicationInformationItem) =
+			pCFBundleGetFunctionPointerForName(launch_services_bundle,
+					APPLE_S("_LSSetApplicationInformationItem"));
+
+	if (pLSSetApplicationInformationItem == NULL) {
+		goto out;
+	}
+
+	display_name_key = pCFBundleGetDataPointerForName(launch_services_bundle,
+			APPLE_S("_kLSDisplayNameKey"));
+
+	if (display_name_key == NULL || *display_name_key == NULL) {
+		goto out;
+	}
+
+	*(void **)(&pCFBundleGetInfoDictionary) = dlsym (hdls->core_foundation_handle,
+			"CFBundleGetInfoDictionary");
+	*(void **)(&pCFBundleGetMainBundle) = dlsym (hdls->core_foundation_handle,
+			"CFBundleGetMainBundle");
+
+	if (pCFBundleGetInfoDictionary == NULL || pCFBundleGetMainBundle == NULL) {
+		goto out;
+	}
+
+	/* Black 10.9 magic, to remove (Not responding) mark in Activity Monitor */
+	hi_services_bundle =
+			pCFBundleGetBundleWithIdentifier(APPLE_S("com.apple.HIServices"));
+
+	if (hi_services_bundle == NULL) {
+		goto out;
+	}
+
+	*(void **)(&pSetApplicationIsDaemon) = pCFBundleGetFunctionPointerForName(
+			hi_services_bundle,
+			APPLE_S("SetApplicationIsDaemon"));
+	*(void **)(&pLSApplicationCheckIn) = pCFBundleGetFunctionPointerForName(
+			launch_services_bundle,
+			APPLE_S("_LSApplicationCheckIn"));
+	*(void **)(&pLSSetApplicationLaunchServicesServerConnectionStatus) =
+			pCFBundleGetFunctionPointerForName(
+					launch_services_bundle,
+					APPLE_S("_LSSetApplicationLaunchServicesServerConnectionStatus"));
+
+	if (pSetApplicationIsDaemon == NULL ||
+		pLSApplicationCheckIn == NULL ||
+		pLSSetApplicationLaunchServicesServerConnectionStatus == NULL) {
+		goto out;
+	}
+
+	rspamd_mempool_add_destructor (rspamd_main->server_pool,
+			rspamd_darwin_title_dtor, hdls);
+
+	return;
+
+out:
+	rspamd_darwin_title_dtor (hdls);
+}
+
+#endif
 
 gint
 init_title (struct rspamd_main *rspamd_main,
 		gint argc, gchar *argv[], gchar *envp[])
 {
-#if defined(DARWIN) || defined(SOLARIS) || defined(__APPLE__)
-	/* XXX: try to handle these OSes too */
-	return 0;
-#else
+#ifdef LINUX
 	gchar *begin_of_buffer = 0, *end_of_buffer = 0;
 	gint i;
 
@@ -936,10 +1056,96 @@ init_title (struct rspamd_main *rspamd_main,
 
 	rspamd_mempool_add_destructor (rspamd_main->server_pool,
 			rspamd_title_dtor, new_environ);
+#elif defined(__APPLE__)
+	rspamd_darwin_init_title (rspamd_main);
+#endif
 
 	return 0;
-#endif
 }
+
+gint
+setproctitle (const gchar *fmt, ...)
+{
+#if defined(LINUX)
+	if (!title_buffer || !title_buffer_size) {
+		errno = ENOMEM;
+		return -1;
+	}
+
+	memset (title_buffer, '\0', title_buffer_size);
+
+	ssize_t written;
+
+	if (fmt) {
+		va_list ap;
+
+		written = rspamd_snprintf (title_buffer,
+				title_buffer_size,
+				"%s: ",
+				title_progname);
+		if (written < 0 || (size_t) written >= title_buffer_size)
+			return -1;
+
+		va_start (ap, fmt);
+		rspamd_vsnprintf (title_buffer + written,
+				title_buffer_size - written,
+				fmt,
+				ap);
+		va_end (ap);
+	}
+	else {
+		written = rspamd_snprintf (title_buffer,
+				title_buffer_size,
+				"%s",
+				title_progname);
+		if (written < 0 || (size_t) written >= title_buffer_size)
+			return -1;
+	}
+
+	written = strlen (title_buffer);
+	memset (title_buffer + written, '\0', title_buffer_size - written);
+#elif defined(__APPLE__)
+	static gchar titlebuf[128];
+
+	va_list ap;
+	int r;
+	va_start (ap, fmt);
+	r = rspamd_snprintf (titlebuf, sizeof (titlebuf), "rspamd: ");
+	rspamd_vsnprintf (titlebuf + r, sizeof (titlebuf) - r, fmt, ap);
+	va_end (ap);
+
+	if (pSetApplicationIsDaemon != NULL && pSetApplicationIsDaemon (1) != noErr) {
+		CFTypeRef asn;
+		pLSSetApplicationLaunchServicesServerConnectionStatus (0, NULL);
+		pLSApplicationCheckIn (/* Magic value */ -2,
+				pCFBundleGetInfoDictionary (pCFBundleGetMainBundle()));
+		asn = pLSGetCurrentApplicationASN ();
+		pLSSetApplicationInformationItem (/* Magic value */ -2, asn,
+				*display_name_key, APPLE_S (titlebuf), NULL);
+	}
+
+	if (dynamic_pthread_setname_np != NULL) {
+		char namebuf[64];  /* MAXTHREADNAMESIZE */
+		rspamd_strlcpy (namebuf, titlebuf, sizeof(namebuf));
+		dynamic_pthread_setname_np (namebuf);
+	}
+#else
+	/* Last resort (usually broken, but eh...) */
+	GString *dest;
+	va_list ap;
+
+	dest = g_string_new ("");
+	va_start (ap, fmt);
+	rspamd_vprintf_gstring (dest, fmt, ap);
+	va_end (ap);
+
+	g_set_prgname (dest->str);
+	g_string_free (dest, TRUE);
+
+#endif
+	return 0;
+}
+
 #endif
 
 #ifndef HAVE_PIDFILE
@@ -1612,42 +1818,6 @@ rspamd_thread_func (gpointer ud)
 	return ud;
 }
 
-/**
- * Create new named thread
- * @param name name pattern
- * @param func function to start
- * @param data data to pass to function
- * @param err error pointer
- * @return new thread object that can be joined
- */
-GThread *
-rspamd_create_thread (const gchar *name,
-	GThreadFunc func,
-	gpointer data,
-	GError **err)
-{
-	GThread *new;
-	struct rspamd_thread_data *td;
-	static gint32 id;
-	guint r;
-
-	r = strlen (name);
-	td = g_malloc (sizeof (struct rspamd_thread_data));
-	td->id = ++id;
-	td->name = g_malloc (r + sizeof ("4294967296"));
-	td->func = func;
-	td->data = data;
-
-	rspamd_snprintf (td->name, r + sizeof ("4294967296"), "%s-%d", name, id);
-#if ((GLIB_MAJOR_VERSION == 2) && (GLIB_MINOR_VERSION > 32))
-	new = g_thread_try_new (td->name, rspamd_thread_func, td, err);
-#else
-	new = g_thread_create (rspamd_thread_func, td, TRUE, err);
-#endif
-
-	return new;
-}
-
 struct hash_copy_callback_data {
 	gpointer (*key_copy_func)(gconstpointer data, gpointer ud);
 	gpointer (*value_copy_func)(gconstpointer data, gpointer ud);
@@ -1953,13 +2123,6 @@ rspamd_get_calendar_ticks (void)
 	return res;
 }
 
-/* Required for tweetnacl */
-void
-randombytes (guchar *buf, guint64 len)
-{
-	ottery_rand_bytes (buf, (size_t)len);
-}
-
 void
 rspamd_random_hex (guchar *buf, guint64 len)
 {
@@ -2172,6 +2335,18 @@ rspamd_init_libs (void)
 #endif
 	}
 
+	/* Configure utf8 library */
+	guint utf8_flags = 0;
+
+	if ((ctx->crypto_ctx->cpu_config & CPUID_SSE41)) {
+		utf8_flags |= RSPAMD_FAST_UTF8_FLAG_SSE41;
+	}
+	if ((ctx->crypto_ctx->cpu_config & CPUID_AVX2)) {
+		utf8_flags |= RSPAMD_FAST_UTF8_FLAG_AVX2;
+	}
+
+	rspamd_fast_utf8_library_init (utf8_flags);
+
 	g_assert (ottery_init (ottery_cfg) == 0);
 
 #ifdef HAVE_LOCALE_H
@@ -2199,35 +2374,6 @@ rspamd_init_libs (void)
 	rlim.rlim_max = rlim.rlim_cur;
 	setrlimit (RLIMIT_STACK, &rlim);
 
-	gint magic_flags = 0;
-
-	/* Unless trusty and other crap is supported... */
-#if 0
-#ifdef MAGIC_NO_CHECK_BUILTIN
-	magic_flags = MAGIC_NO_CHECK_BUILTIN;
-#endif
-#endif
-	magic_flags |= MAGIC_MIME|MAGIC_NO_CHECK_COMPRESS|
-				   MAGIC_NO_CHECK_ELF|MAGIC_NO_CHECK_TAR;
-#ifdef MAGIC_NO_CHECK_CDF
-	magic_flags |= MAGIC_NO_CHECK_CDF;
-#endif
-#ifdef MAGIC_NO_CHECK_ENCODING
-	magic_flags |= MAGIC_NO_CHECK_ENCODING;
-#endif
-#ifdef MAGIC_NO_CHECK_TAR
-	magic_flags |= MAGIC_NO_CHECK_TAR;
-#endif
-#ifdef MAGIC_NO_CHECK_TEXT
-	magic_flags |= MAGIC_NO_CHECK_TEXT;
-#endif
-#ifdef MAGIC_NO_CHECK_TOKENS
-	magic_flags |= MAGIC_NO_CHECK_TOKENS;
-#endif
-#ifdef MAGIC_NO_CHECK_JSON
-	magic_flags |= MAGIC_NO_CHECK_JSON;
-#endif
-	ctx->libmagic = magic_open (magic_flags);
 	ctx->local_addrs = rspamd_inet_library_init ();
 	REF_INIT_RETAIN (ctx, rspamd_deinit_libs);
 
@@ -2268,12 +2414,31 @@ rspamd_free_zstd_dictionary (struct zstd_dictionary *dict)
 	}
 }
 
-void
+#ifdef HAVE_CBLAS
+#ifdef HAVE_CBLAS_H
+#include "cblas.h"
+#else
+extern void openblas_set_num_threads(int num_threads);
+#endif
+/*
+ * Openblas creates threads that are not supported by
+ * jemalloc allocator (aside of being bloody stupid). So this hack
+ * is intended to set number of threads to one by default.
+ * FIXME: is it legit to do so in ctor?
+ */
+RSPAMD_CONSTRUCTOR (openblas_stupidity_fix_ctor)
+{
+	openblas_set_num_threads (1);
+}
+#endif
+
+gboolean
 rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 		struct rspamd_config *cfg)
 {
 	static const char secure_ciphers[] = "HIGH:!aNULL:!kRSA:!PSK:!SRP:!MD5:!RC4";
 	size_t r;
+	gboolean ret = TRUE;
 
 	g_assert (cfg != NULL);
 
@@ -2281,35 +2446,9 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 		if (cfg->local_addrs) {
 			rspamd_config_radix_from_ucl (cfg, cfg->local_addrs,
 					"Local addresses",
-					ctx->local_addrs, NULL);
-		}
-
-		if (cfg->ssl_ca_path) {
-			if (SSL_CTX_load_verify_locations (ctx->ssl_ctx, cfg->ssl_ca_path,
-					NULL) != 1) {
-				msg_err_config ("cannot load CA certs from %s: %s",
-						cfg->ssl_ca_path,
-						ERR_error_string (ERR_get_error (), NULL));
-			}
-		} else {
-			msg_debug_config ("ssl_ca_path is not set, using default CA path");
-			SSL_CTX_set_default_verify_paths (ctx->ssl_ctx);
-		}
-
-		if (cfg->ssl_ciphers) {
-			if (SSL_CTX_set_cipher_list (ctx->ssl_ctx, cfg->ssl_ciphers) != 1) {
-				msg_err_config (
-						"cannot set ciphers set to %s: %s; fallback to %s",
-						cfg->ssl_ciphers,
-						ERR_error_string (ERR_get_error (), NULL),
-						secure_ciphers);
-				/* Default settings */
-				SSL_CTX_set_cipher_list (ctx->ssl_ctx, secure_ciphers);
-			}
-		}
-
-		if (ctx->libmagic) {
-			magic_load (ctx->libmagic, cfg->magic_file);
+					ctx->local_addrs,
+					NULL,
+					NULL);
 		}
 
 		rspamd_free_zstd_dictionary (ctx->in_dict);
@@ -2344,6 +2483,55 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 			}
 		}
 
+		if (cfg->fips_mode) {
+			int mode = FIPS_mode ();
+			unsigned long err = (unsigned long)-1;
+
+			/* Toggle FIPS mode */
+			if (mode == 0) {
+				if (FIPS_mode_set (1) != 1) {
+					err = ERR_get_error ();
+				}
+			}
+			else {
+				msg_info_config ("OpenSSL FIPS mode is already enabled");
+			}
+
+			if (err != (unsigned long)-1) {
+				msg_err_config ("FIPS_mode_set failed: %s",
+						ERR_error_string (err, NULL));
+				ret = FALSE;
+			}
+			else {
+				msg_info_config ("OpenSSL FIPS mode is enabled");
+			}
+		}
+
+		if (cfg->ssl_ca_path) {
+			if (SSL_CTX_load_verify_locations (ctx->ssl_ctx, cfg->ssl_ca_path,
+					NULL) != 1) {
+				msg_err_config ("cannot load CA certs from %s: %s",
+						cfg->ssl_ca_path,
+						ERR_error_string (ERR_get_error (), NULL));
+			}
+		}
+		else {
+			msg_debug_config ("ssl_ca_path is not set, using default CA path");
+			SSL_CTX_set_default_verify_paths (ctx->ssl_ctx);
+		}
+
+		if (cfg->ssl_ciphers) {
+			if (SSL_CTX_set_cipher_list (ctx->ssl_ctx, cfg->ssl_ciphers) != 1) {
+				msg_err_config (
+						"cannot set ciphers set to %s: %s; fallback to %s",
+						cfg->ssl_ciphers,
+						ERR_error_string (ERR_get_error (), NULL),
+						secure_ciphers);
+				/* Default settings */
+				SSL_CTX_set_cipher_list (ctx->ssl_ctx, secure_ciphers);
+			}
+		}
+
 		/* Init decompression */
 		ctx->in_zstream = ZSTD_createDStream ();
 		r = ZSTD_initDStream (ctx->in_zstream);
@@ -2365,7 +2553,12 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 			ZSTD_freeCStream (ctx->out_zstream);
 			ctx->out_zstream = NULL;
 		}
+#ifdef HAVE_CBLAS
+		openblas_set_num_threads (cfg->max_blas_threads);
+#endif
 	}
+
+	return ret;
 }
 
 gboolean
@@ -2421,10 +2614,6 @@ void
 rspamd_deinit_libs (struct rspamd_external_libs_ctx *ctx)
 {
 	if (ctx != NULL) {
-		if (ctx->libmagic) {
-			magic_close (ctx->libmagic);
-		}
-
 		g_free (ctx->ottery_cfg);
 
 #ifdef HAVE_OPENSSL
@@ -2444,6 +2633,8 @@ rspamd_deinit_libs (struct rspamd_external_libs_ctx *ctx)
 		if (ctx->in_zstream) {
 			ZSTD_freeDStream (ctx->in_zstream);
 		}
+
+		rspamd_cryptobox_deinit (ctx->crypto_ctx);
 
 		g_free (ctx);
 	}
@@ -2490,40 +2681,63 @@ rspamd_random_double (void)
 }
 
 
-static guint64 xorshifto_seed[2];
+static guint64 xorshifto_seed[4];
 
 static inline guint64
 xoroshiro_rotl (const guint64 x, int k) {
 	return (x << k) | (x >> (64 - k));
 }
 
-
 gdouble
 rspamd_random_double_fast (void)
 {
-	const guint64 s0 = xorshifto_seed[0];
-	guint64 s1 = xorshifto_seed[1];
-	const guint64 result = s0 + s1;
+	return rspamd_random_double_fast_seed (xorshifto_seed);
+}
 
-	s1 ^= s0;
-	xorshifto_seed[0] = xoroshiro_rotl(s0, 55) ^ s1 ^ (s1 << 14);
-	xorshifto_seed[1] = xoroshiro_rotl (s1, 36);
+/* xoshiro256+ */
+inline gdouble
+rspamd_random_double_fast_seed (guint64 seed[4])
+{
+	const uint64_t result = seed[0] + seed[3];
+
+	const uint64_t t = seed[1] << 17;
+
+	seed[2] ^= seed[0];
+	seed[3] ^= seed[1];
+	seed[1] ^= seed[2];
+	seed[0] ^= seed[3];
+
+	seed[2] ^= t;
+
+	seed[3] = xoroshiro_rotl (seed[3], 45);
 
 	return rspamd_double_from_int64 (result);
+}
+
+/* xoroshiro256** */
+static inline guint64
+rspamd_random_uint64_fast_seed (guint64 seed[4])
+{
+	const uint64_t result = xoroshiro_rotl (seed[1] * 5, 7) * 9;
+
+	const uint64_t t = seed[1] << 17;
+
+	seed[2] ^= seed[0];
+	seed[3] ^= seed[1];
+	seed[1] ^= seed[2];
+	seed[0] ^= seed[3];
+
+	seed[2] ^= t;
+
+	seed[3] = xoroshiro_rotl (seed[3], 45);
+
+	return result;
 }
 
 guint64
 rspamd_random_uint64_fast (void)
 {
-	const guint64 s0 = xorshifto_seed[0];
-	guint64 s1 = xorshifto_seed[1];
-	const guint64 result = s0 + s1;
-
-	s1 ^= s0;
-	xorshifto_seed[0] = xoroshiro_rotl(s0, 55) ^ s1 ^ (s1 << 14);
-	xorshifto_seed[1] = xoroshiro_rotl (s1, 36);
-
-	return result;
+	return rspamd_random_uint64_fast_seed (xorshifto_seed);
 }
 
 void
@@ -2543,15 +2757,17 @@ rspamd_time_jitter (gdouble in, gdouble jitter)
 }
 
 gboolean
-rspamd_constant_memcmp (const guchar *a, const guchar *b, gsize len)
+rspamd_constant_memcmp (const void *a, const void *b, gsize len)
 {
 	gsize lena, lenb, i;
 	guint16 d, r = 0, m;
 	guint16 v;
+	const guint8 *aa = (const guint8 *)a,
+			*bb =  (const guint8 *)b;
 
 	if (len == 0) {
-		lena = strlen (a);
-		lenb = strlen (b);
+		lena = strlen ((const char*)a);
+		lenb = strlen ((const char*)b);
 
 		if (lena != lenb) {
 			return FALSE;
@@ -2563,29 +2779,11 @@ rspamd_constant_memcmp (const guchar *a, const guchar *b, gsize len)
 	for (i = 0; i < len; i++) {
 		v = ((guint16)(guint8)r) + 255;
 		m = v / 256 - 1;
-		d = (guint16)((int)a[i] - (int)b[i]);
+		d = (guint16)((int)aa[i] - (int)bb[i]);
 		r |= (d & m);
 	}
 
 	return (((gint32)(guint16)((guint32)r + 0x8000) - 0x8000) == 0);
-}
-
-#if !defined(LIBEVENT_VERSION_NUMBER) || LIBEVENT_VERSION_NUMBER < 0x02000000UL
-struct event_base *
-event_get_base (struct event *ev)
-{
-	return ev->ev_base;
-}
-#endif
-
-int
-rspamd_event_pending (struct event *ev, short what)
-{
-	if (ev->ev_base == NULL) {
-		return 0;
-	}
-
-	return event_pending (ev, what, NULL);
 }
 
 int

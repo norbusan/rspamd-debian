@@ -6,7 +6,13 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<meta name="description" content="">
 	<meta name="author" content="">
-	<link rel="shortcut icon" href="favicon.ico">
+
+	<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png?v=3">
+	<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png?v=3">
+	<link rel="mask-icon" href="/safari-pinned-tab.svg?v=3" color="#5bbad5">
+	<link rel="shortcut icon" href="/favicon.ico?v=3">
+	<meta name="msapplication-TileColor" content="#2b5797">
+
 	<link href="./css/bootstrap.min.css" rel="stylesheet">
 	<link rel="stylesheet" type="text/css" href="./css/footable.bootstrap.min.css"/>
 	<link rel="stylesheet" type="text/css" href="./css/d3evolution.css">
@@ -18,8 +24,8 @@
 
 <nav class="navbar navbar-default" id="navBar">
 	<div class="container-fluid">
-		<div class="navbar-header">
-			<a class="navbar-brand" href="."><img src="./img/rspamd_logo_navbar.png" style="width: 67px; margin-top: -16px;"/></a>
+		<div class="navbar-header navbar-brand">
+			<img src="./img/rspamd_logo_navbar.png" alt="Rspamd">
 		</div>
 		<form class="navbar-form navbar-left">
 			<select id="selSrv" class="form-control"></select>
@@ -126,10 +132,10 @@
 							<form id="graph_controls" action="#">
 								Dataset:
 								<select id="selData" class="form-control">
-									<option value="hourly" selected>Hourly</option>
-									<option value="daily">Daily</option>
-									<option value="weekly">Weekly</option>
-									<option value="monthly">Monthly</option>
+									<option value="day" selected>By day</option>
+									<option value="week">By week</option>
+									<option value="month">By month</option>
+									<option value="year">By year</option>
 								</select>
 								Y-scale:
 								<select id="selYScale" class="form-control">
@@ -219,20 +225,6 @@
 								</div>
 							</form>
 						</div>
-						<div id="scanResult" style="display: none;">
-							<h4>Scan results:</h4>
-							<div class="well nomargin nopadding">
-								<table class="table table-log table-hover" id="scanOutput">
-									<thead>
-										<tr>
-											<th class="col4" title="Action">Action</th>
-											<th class="col5" title="Score / Req.&nbsp;score">Score / Req.&nbsp;score</th>
-											<th class="col6" title="Symbols">Symbols</th>
-										</tr>
-									</thead>
-								</table>
-							</div>
-						</div>
 					</div>
 				</div>
 				<div class="widget-box learn" style="display: none;">
@@ -244,7 +236,7 @@
 						<div class="row">
 							<div class="col-md-6">
 								<div class="well well-sm">
-									<form class="form-inline" role="form">
+									<form class="form-inline">
 										<h5>Learn Bayessian classifier:</h5>
 										<div class="form-group">
 											<div class="btn-group">
@@ -257,7 +249,7 @@
 							</div>
 							<div class="col-md-6">
 								<div class="well well-sm">
-									<form class="form-inline" role="form">
+									<form class="form-inline">
 										<h5>Learn Fuzzy storage:</h5>
 										<div class="form-group">
 											<label for="fuzzyFlagText">Flag:</label>
@@ -274,6 +266,31 @@
 						</div>
 					</div>
 				</div>
+
+				<div class="widget-box">
+					<div class="widget-title">
+						<div id="scanResult" class="form-inline widget-title-form input-group-sm pull-right buttons">
+								<label for="selSymOrder_scan">Symbols order:</label>
+								<select id="selSymOrder_scan" class="form-control">
+									<option value="magnitude" selected>Score magnitude</option>
+									<option value="score">Score value</option>
+									<option value="name">Name</option>
+								</select>
+							<label for="scan_page_size">Rows per page:</label>
+							<input id="scan_page_size" class="form-control" value="25" min="1" type="number">
+							<button class="btn btn-default btn-sm" id="cleanScanHistory">
+								<i class="glyphicon glyphicon-trash"></i> Clean history
+							</button>
+						</div>
+						<span class="icon"><i class="glyphicon glyphicon-eye-open"></i></span>
+						<h5>Scan results history</h5>
+					</div>
+					<div class="widget-content nopadding">
+						<div id="scanLog">
+							<table class="table" id="historyTable_scan"></table>
+						</div>
+					</div>
+				</div>
 			</div>
 
 			<div class="tab-pane" id="history">
@@ -281,8 +298,8 @@
 				<div class="widget-box">
 					<div class="widget-title">
 						<div class="form-inline widget-title-form input-group-sm pull-right buttons">
-								<label for="selSymOrder">Symbols order:</label>
-								<select id="selSymOrder" class="form-control">
+								<label for="selSymOrder_history">Symbols order:</label>
+								<select id="selSymOrder_history" class="form-control">
 									<option value="magnitude" selected>Score magnitude</option>
 									<option value="score">Score value</option>
 									<option value="name">Name</option>
@@ -301,7 +318,7 @@
 					</div>
 					<div class="widget-content nopadding">
 						<div id="historyLog">
-							<table class="table" id="historyTable"></table>
+							<table class="table" id="historyTable_history"></table>
 						</div>
 					</div>
 				</div>
@@ -328,18 +345,14 @@
 </div>
 
 <!-- Common modal -->
-<div id="modalDialog" class="modal fade" tabindex="-1" role="dialog" aria-labelledby="modalLabel">
+<div id="modalDialog" class="modal fade" tabindex="-1" role="dialog">
 	<div class="modal-dialog">
 		<div class="modal-content">
 			<div class="modal-header">
 				<button type="button" class="close" data-dismiss="modal" aria-hidden="true">×</button>
 				<h3 id="modalTitle"></h3>
 			</div>
-			<div class="modal-body" id="modalBody">
-				<div class="progress progress-striped active">
-					<div class="bar" style="width: 100%;"></div>
-				</div>
-			</div>
+			<div class="modal-body" id="modalBody"></div>
 			<div class="modal-footer">
 				<button class="btn btn-default" data-dismiss="modal" aria-hidden="true" id="modalClose">Close</button>
 				<button class="btn btn-primary" id="modalSave">Save changes</button>

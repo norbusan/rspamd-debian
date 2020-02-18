@@ -1,4 +1,3 @@
-import demjson
 import grp
 import os
 import os.path
@@ -10,6 +9,8 @@ import signal
 import socket
 import sys
 import tempfile
+import json
+import stat
 from robot.libraries.BuiltIn import BuiltIn
 from robot.api import logger
 
@@ -25,7 +26,8 @@ except:
     import httplib
 
 def Check_JSON(j):
-    d = demjson.decode(j, strict=True)
+    d = json.loads(j, strict=True)
+    logger.debug('got json %s' % d)
     assert len(d) > 0
     assert 'error' not in d
     return d
@@ -37,8 +39,10 @@ def save_run_results(directory, filenames):
     current_directory = os.getcwd()
     suite_name = BuiltIn().get_variable_value("${SUITE_NAME}")
     test_name = BuiltIn().get_variable_value("${TEST NAME}")
+    onlyfiles = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+    logger.debug('%s content before cleanup: %s' % (directory, onlyfiles))
     if test_name is None:
-        # this is suite-level tear down 
+        # this is suite-level tear down
         destination_directory = "%s/robot-save/%s" % (current_directory, suite_name)
     else:
         destination_directory = "%s/robot-save/%s/%s" % (current_directory, suite_name, test_name)
@@ -46,7 +50,9 @@ def save_run_results(directory, filenames):
         os.makedirs(destination_directory)
     for file in filenames.split(' '):
         source_file = "%s/%s" % (directory, file)
+        logger.debug('check if we can save %s' % source_file)
         if os.path.isfile(source_file):
+            logger.debug('found %s, save it' % file)
             shutil.copy(source_file, "%s/%s" % (destination_directory, file))
             shutil.copy(source_file, "%s/robot-save/%s.last" % (current_directory, file))
 
@@ -102,7 +108,20 @@ def HTTP(method, host, port, path, data=None, headers={}):
     return [s, t]
 
 def make_temporary_directory():
-    return tempfile.mkdtemp()
+    """Creates and returns a unique temporary directory
+
+    Example:
+    | ${TMPDIR} = | Make Temporary Directory |
+    """
+    dirname = tempfile.mkdtemp()
+    os.chmod(dirname, stat.S_IRUSR |
+             stat.S_IXUSR |
+             stat.S_IWUSR |
+             stat.S_IRGRP |
+             stat.S_IXGRP |
+             stat.S_IROTH |
+             stat.S_IXOTH)
+    return dirname
 
 def make_temporary_file():
     return tempfile.mktemp()
@@ -169,6 +188,24 @@ def TCP_Connect(addr, port):
     s.connect((addr, port))
     s.close()
 
+def ping_rspamd(addr, port):
+    return str(urlopen("http://%s:%s/ping" % (addr, port)).read())
+
+def redis_check(addr, port):
+    """Attempts to open a TCP connection to specified address:port
+
+    Example:
+    | Wait Until Keyword Succeeds | 5s | 10ms | TCP Connect | localhost | 8080 |
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0) # seconds
+    s.connect((addr, port))
+    if s.sendall(b"ECHO TEST\n"):
+        result = s.recv(128)
+        return result == b'TEST\n'
+    else:
+        return False
+
 def update_dictionary(a, b):
     a.update(b)
     return a
@@ -185,19 +222,18 @@ def shutdown_process(process):
         process.wait(TERM_TIMEOUT)
         return
     except psutil.TimeoutExpired:
-        logger.info( "PID {} is not termianated in {} seconds, sending SIGKILL..." %
-            (process.pid, TERM_TIMEOUT))
+        logger.info( "PID {} is not terminated in {} seconds, sending SIGKILL...".format(process.pid, TERM_TIMEOUT))
         try:
             # send SIGKILL
             process.kill()
         except psutil.NoSuchProcess:
-            # process exited just befor we tried to kill
+            # process exited just before we tried to kill
             return
 
     try:
         process.wait(KILL_WAIT)
     except psutil.TimeoutExpired:
-        raise RuntimeError("Failed to shutdown process %d (%s)" % (process.pid, process.name()))
+        raise RuntimeError("Failed to shutdown process {} ({})".format(process.pid, process.name()))
 
 
 def shutdown_process_with_children(pid):
@@ -229,7 +265,7 @@ def get_file_if_exists(file_path):
             return myfile.read()
     return None
 
-# copy-paste from 
+# copy-paste from
 # https://hg.python.org/cpython/file/6860263c05b3/Lib/shutil.py#l1068
 # As soon as we move to Python 3, this should be removed in favor of shutil.which()
 def python3_which(cmd, mode=os.F_OK | os.X_OK, path=None):

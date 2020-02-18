@@ -30,7 +30,7 @@ local rspamd_cryptobox_hash = require "rspamd_cryptobox_hash"
 local rspamd_expression = require "rspamd_expression"
 local rspamd_logger = require "rspamd_logger"
 
-local function gen_cb(expr, act, pool, message, subject, raction, honor, limit)
+local function gen_cb(expr, act, pool, message, subject, raction, honor, limit, least)
 
   local function parse_atom(str)
     local atom = table.concat(fun.totable(fun.take_while(function(c)
@@ -78,10 +78,14 @@ local function gen_cb(expr, act, pool, message, subject, raction, honor, limit)
       if subject then
         task:set_metric_subject(subject)
       end
+
+      local flags = ""
+      if least then flags = "least" end
+
       if type(message) == 'string' then
-        task:set_pre_result(act, message, N)
+        task:set_pre_result(act, message, N, nil, nil, flags)
       else
-        task:set_pre_result(act, nil, N)
+        task:set_pre_result(act, nil, N, nil, nil, flags)
       end
       return true, act
     end
@@ -138,10 +142,11 @@ local function configure_module()
         local subject = sett.subject
         local message = sett.message
         local lim = sett.limit or 0
+        local least = sett.least or false
         local raction = lua_util.list_to_hash(sett.require_action)
         local honor = lua_util.list_to_hash(sett.honor_action)
         local cb, atoms = gen_cb(expr, action, rspamd_config:get_mempool(),
-          message, subject, raction, honor, lim)
+          message, subject, raction, honor, lim, least)
         if cb and atoms then
           local t = {}
           if (raction or honor) then
@@ -159,9 +164,9 @@ local function configure_module()
               rspamd_config:register_dependency(t.name, a)
             end
             rspamd_logger.infox(rspamd_config, 'Registered symbol %1 <%2> with dependencies [%3]',
-                name, expr, table.concat(atoms, ','))
+                t.name, expr, table.concat(atoms, ','))
           else
-            rspamd_logger.infox(rspamd_config, 'Registered symbol %1 <%2> as postfilter', name, expr)
+            rspamd_logger.infox(rspamd_config, 'Registered symbol %1 <%2> as postfilter', t.name, expr)
           end
         end
       end
