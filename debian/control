@@ -29,6 +29,7 @@ Vcs-Browser: https://salsa.debian.org/debian/rspamd
 
 Package: rspamd
 Architecture: any
+Pre-Depends: ${misc:Pre-Depends}
 Depends: adduser,
          ca-certificates,
          libjs-bootstrap,

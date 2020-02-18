@@ -1,3 +1,3 @@
 # This javascript isn't installed, we use packages libraries instead embedded ones
 rspamd source: source-is-missing interface/js/lib/bootstrap.min.js
-rspamd source: source-is-missing interface/js/lib/jquery-3.3.1.min.js
+rspamd source: source-is-missing interface/js/lib/jquery-3.4.1.min.js
