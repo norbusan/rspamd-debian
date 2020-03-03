@@ -1962,7 +1962,7 @@ lua_mimepart_get_id (lua_State * L)
 		return luaL_error (L, "invalid arguments");
 	}
 
-	lua_pushinteger (L, part->id);
+	lua_pushinteger (L, part->part_number);
 
 	return 1;
 }
@@ -2011,7 +2011,7 @@ lua_mimepart_headers_foreach (lua_State *L)
 		if (part->headers_order) {
 			hdr = part->headers_order;
 
-			LL_FOREACH (hdr, cur) {
+			LL_FOREACH2 (hdr, cur, ord_next) {
 				if (re && re->re) {
 					if (!rspamd_regexp_match (re->re, cur->name,
 							strlen (cur->name),FALSE)) {

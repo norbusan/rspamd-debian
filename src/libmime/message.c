@@ -849,12 +849,6 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 			rspamd_add_passthrough_result (task, action,
 					RSPAMD_PASSTHROUGH_CRITICAL,
 					score, "Gtube pattern", "GTUBE", 0);
-
-			if (ucl_object_lookup (task->messages, "smtp_message") == NULL) {
-				ucl_object_replace_key (task->messages,
-						ucl_object_fromstring ("Gtube pattern"),
-						"smtp_message", 0, false);
-			}
 		}
 
 		rspamd_task_insert_result (task, GTUBE_SYMBOL, 0, NULL);
@@ -907,7 +901,7 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 	part->raw_data.len = len;
 	part->parsed_data.begin = start;
 	part->parsed_data.len = len;
-	part->id = MESSAGE_FIELD (task, parts)->len;
+	part->part_number = MESSAGE_FIELD (task, parts)->len;
 	part->raw_headers = rspamd_message_headers_new ();
 	part->headers_order = NULL;
 

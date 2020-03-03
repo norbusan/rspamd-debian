@@ -89,18 +89,6 @@ rspamadm_configdump_help (gboolean full_help, const struct rspamadm_command *cmd
 static void
 config_logger (rspamd_mempool_t *pool, gpointer ud)
 {
-	struct rspamd_main *rm = ud;
-
-	rm->cfg->log_type = RSPAMD_LOG_CONSOLE;
-	rm->cfg->log_level = G_LOG_LEVEL_CRITICAL;
-
-	rspamd_set_logger (rm->cfg, g_quark_try_string ("main"), &rm->logger,
-			rm->server_pool);
-	if (rspamd_log_open_priv (rm->logger, rm->workers_uid, rm->workers_gid) ==
-			-1) {
-		fprintf (stderr, "Fatal error, cannot open logfile, exiting\n");
-		exit (EXIT_FAILURE);
-	}
 }
 
 static void
@@ -297,13 +285,8 @@ rspamadm_configdump (gint argc, gchar **argv, const struct rspamadm_command *cmd
 		/* Do post-load actions */
 		rspamd_lua_post_load_config (cfg);
 
-		if (!rspamd_init_filters (rspamd_main->cfg, FALSE)) {
-			ret = FALSE;
-		}
-
-		if (ret) {
-			ret = rspamd_config_post_load (cfg, RSPAMD_CONFIG_INIT_SYMCACHE);
-		}
+		(void)rspamd_init_filters (rspamd_main->cfg, false, false);
+		rspamd_config_post_load (cfg, RSPAMD_CONFIG_INIT_SYMCACHE);
 	}
 
 	if (ret) {

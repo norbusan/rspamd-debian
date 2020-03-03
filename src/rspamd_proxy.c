@@ -15,10 +15,10 @@
  */
 #include "config.h"
 #include "libutil/util.h"
-#include "libutil/map.h"
+#include "libserver/maps/map.h"
 #include "libutil/upstream.h"
-#include "libutil/http_connection.h"
-#include "libutil/http_private.h"
+#include "libserver/http/http_connection.h"
+#include "libserver/http/http_private.h"
 #include "libserver/protocol.h"
 #include "libserver/protocol_internal.h"
 #include "libserver/cfg_file.h"
@@ -1415,8 +1415,7 @@ proxy_open_mirror_connections (struct rspamd_proxy_session *session)
 		}
 
 		if (m->local ||
-				rspamd_inet_address_is_local (
-						rspamd_upstream_addr_cur (bk_conn->up), FALSE)) {
+				rspamd_inet_address_is_local (rspamd_upstream_addr_cur (bk_conn->up))) {
 
 			if (session->fname) {
 				rspamd_http_message_add_header (msg, "File", session->fname);
@@ -1951,7 +1950,7 @@ retry:
 		if (backend->local ||
 				rspamd_inet_address_is_local (
 						rspamd_upstream_addr_cur (
-								session->master_conn->up), FALSE)) {
+								session->master_conn->up))) {
 
 			if (session->fname) {
 				rspamd_http_message_add_header (msg, "File", session->fname);
@@ -2369,7 +2368,7 @@ start_rspamd_proxy (struct rspamd_worker *worker)
 	}
 
 	REF_RELEASE (ctx->cfg);
-	rspamd_log_close (worker->srv->logger, TRUE);
+	rspamd_log_close (worker->srv->logger);
 
 	exit (EXIT_SUCCESS);
 }

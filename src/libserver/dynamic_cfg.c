@@ -15,7 +15,7 @@
  */
 #include "config.h"
 #include "rspamd.h"
-#include "map.h"
+#include "libserver/maps/map.h"
 #include "scan_result.h"
 #include "dynamic_cfg.h"
 #include "unix-std.h"
@@ -283,7 +283,7 @@ init_dynamic_config (struct rspamd_config *cfg)
 			json_config_read_cb,
 			json_config_fin_cb,
 			json_config_dtor_cb,
-			(void **)pjb, NULL)) {
+			(void **)pjb, NULL, RSPAMD_MAP_DEFAULT)) {
 		msg_err ("cannot add map for configuration %s", cfg->dynamic_conf);
 	}
 }

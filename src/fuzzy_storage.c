@@ -21,10 +21,10 @@
 #include "libserver/fuzzy_wire.h"
 #include "util.h"
 #include "rspamd.h"
-#include "map.h"
-#include "map_helpers.h"
+#include "libserver/maps/map.h"
+#include "libserver/maps/map_helpers.h"
 #include "fuzzy_wire.h"
-#include "fuzzy_backend.h"
+#include "libserver/fuzzy_backend/fuzzy_backend.h"
 #include "ottery.h"
 #include "ref.h"
 #include "xxhash.h"
@@ -33,9 +33,8 @@
 #include "libcryptobox/cryptobox.h"
 #include "libcryptobox/keypairs_cache.h"
 #include "libcryptobox/keypair.h"
-#include "libserver/rspamd_control.h"
 #include "libutil/hash.h"
-#include "libutil/map_private.h"
+#include "libserver/maps/map_private.h"
 #include "contrib/uthash/utlist.h"
 #include "unix-std.h"
 
@@ -445,9 +444,6 @@ rspamd_fuzzy_stat_callback (EV_P_ ev_timer *w, int revents)
 static void
 fuzzy_update_version_callback (guint64 ver, void *ud)
 {
-	msg_info ("updated fuzzy storage from %s: version: %d",
-			(const char *)ud, (gint)ver);
-	g_free (ud);
 }
 
 static void
@@ -468,14 +464,17 @@ rspamd_fuzzy_updates_cb (gboolean success,
 	if (success) {
 		rspamd_fuzzy_backend_count (ctx->backend, fuzzy_count_callback, ctx);
 
-		msg_info ("successfully updated fuzzy storage: %d updates in queue; "
+		msg_info ("successfully updated fuzzy storage %s: %d updates in queue; "
 				  "%d pending currently; "
-				  "%d added, %d deleted, %d extended, %d duplicates",
+				  "%d added; %d deleted; %d extended; %d duplicates",
+				ctx->worker->cf->bind_conf ?
+					 ctx->worker->cf->bind_conf->bind_line :
+					 "unknown",
 				cbdata->updates_pending->len,
 				ctx->updates_pending->len,
 				nadded, ndeleted, nextended, nignored);
 		rspamd_fuzzy_backend_version (ctx->backend, source,
-				fuzzy_update_version_callback, g_strdup (source));
+				fuzzy_update_version_callback, NULL);
 		ctx->updates_failed = 0;
 
 		if (cbdata->final || ctx->worker->state != rspamd_worker_state_running) {
@@ -485,8 +484,11 @@ rspamd_fuzzy_updates_cb (gboolean success,
 	}
 	else {
 		if (++ctx->updates_failed > ctx->updates_maxfail) {
-			msg_err ("cannot commit update transaction to fuzzy backend, discard "
+			msg_err ("cannot commit update transaction to fuzzy backend %s, discard "
 					 "%ud updates after %d retries",
+					ctx->worker->cf->bind_conf ?
+						ctx->worker->cf->bind_conf->bind_line :
+						"unknown",
 					cbdata->updates_pending->len,
 					ctx->updates_maxfail);
 			ctx->updates_failed = 0;
@@ -497,9 +499,12 @@ rspamd_fuzzy_updates_cb (gboolean success,
 			}
 		}
 		else {
-			msg_err ("cannot commit update transaction to fuzzy backend, "
+			msg_err ("cannot commit update transaction to fuzzy backend %s; "
 					 "%ud updates are still left; %ud currently pending;"
 					 " %d updates left",
+					ctx->worker->cf->bind_conf ?
+						ctx->worker->cf->bind_conf->bind_line :
+						"unknown",
 					cbdata->updates_pending->len,
 					ctx->updates_pending->len,
 					ctx->updates_maxfail - ctx->updates_failed);
@@ -512,7 +517,6 @@ rspamd_fuzzy_updates_cb (gboolean success,
 				/* Try one more time */
 				rspamd_fuzzy_process_updates_queue (cbdata->ctx, cbdata->source,
 						cbdata->final);
-
 			}
 		}
 	}
@@ -937,7 +941,8 @@ rspamd_fuzzy_process_command (struct fuzzy_session *session)
 					hexbuf, sizeof (hexbuf) - 1);
 				hexbuf[sizeof (hexbuf) - 1] = '\0';
 
-				if (rspamd_match_hash_map (session->ctx->skip_hashes, hexbuf)) {
+				if (rspamd_match_hash_map (session->ctx->skip_hashes,
+						hexbuf, sizeof (hexbuf) - 1)) {
 					result.v1.value = 401;
 					result.v1.prob = 0.0f;
 
@@ -2011,7 +2016,7 @@ start_fuzzy (struct rspamd_worker *worker)
 				rspamd_kv_list_fin,
 				rspamd_kv_list_dtor,
 				(void **)&ctx->skip_hashes,
-				worker)) == NULL) {
+				worker, RSPAMD_MAP_DEFAULT)) == NULL) {
 			msg_warn_config ("cannot load hashes list from %s",
 					ucl_object_tostring (ctx->skip_map));
 		}
@@ -2100,7 +2105,7 @@ start_fuzzy (struct rspamd_worker *worker)
 	}
 
 	REF_RELEASE (ctx->cfg);
-	rspamd_log_close (worker->srv->logger, TRUE);
+	rspamd_log_close (worker->srv->logger);
 
 	exit (EXIT_SUCCESS);
 }

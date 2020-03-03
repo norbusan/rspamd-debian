@@ -129,7 +129,6 @@ struct url_matcher {
 			url_match_t *match);
 
 	gint flags;
-	gsize patlen;
 };
 
 static gboolean url_file_start (struct url_callback_data *cb,
@@ -175,44 +174,44 @@ static gboolean url_tel_end (struct url_callback_data *cb,
 struct url_matcher static_matchers[] = {
 		/* Common prefixes */
 		{"file://",   "",          url_file_start,  url_file_end,
-				0, 0},
+				0},
 		{"file:\\\\",   "",        url_file_start,  url_file_end,
-				0, 0},
+				0},
 		{"ftp://",    "",          url_web_start,   url_web_end,
-				0, 0},
+				0},
 		{"ftp:\\\\",    "",        url_web_start,   url_web_end,
-				0, 0},
+				0},
 		{"sftp://",   "",          url_web_start,   url_web_end,
-				0, 0},
+				0},
 		{"http:",   "",            url_web_start,   url_web_end,
-				0, 0},
+				0},
 		{"https:",   "",           url_web_start,   url_web_end,
-				0, 0},
+				0},
 		{"news://",   "",          url_web_start,   url_web_end,
-				0, 0},
+				0},
 		{"nntp://",   "",          url_web_start,   url_web_end,
-				0, 0},
+				0},
 		{"telnet://", "",          url_web_start,   url_web_end,
-				0, 0},
+				0},
 		{"tel:", "",               url_tel_start,   url_tel_end,
-				0, 0},
+				0},
 		{"webcal://", "",          url_web_start,   url_web_end,
-				0, 0},
+				0},
 		{"mailto:",   "",          url_email_start, url_email_end,
-				0, 0},
+				0},
 		{"callto:", "",            url_tel_start,   url_tel_end,
-				0, 0},
+				0},
 		{"h323:",     "",          url_web_start,   url_web_end,
-				0, 0},
+				0},
 		{"sip:",      "",          url_web_start,   url_web_end,
-				0, 0},
+				0},
 		{"www.",      "http://",   url_web_start,   url_web_end,
-				URL_FLAG_NOHTML, 0},
+				URL_FLAG_NOHTML},
 		{"ftp.",      "ftp://",    url_web_start,   url_web_end,
-				URL_FLAG_NOHTML, 0},
+				URL_FLAG_NOHTML},
 		/* Likely emails */
 		{"@",         "mailto://", url_email_start, url_email_end,
-				URL_FLAG_NOHTML, 0}
+				URL_FLAG_NOHTML}
 };
 
 struct url_callback_data {
@@ -442,7 +441,6 @@ rspamd_url_parse_tld_file (const gchar *fname,
 
 		flags = URL_FLAG_NOHTML | URL_FLAG_TLD_MATCH;
 
-#ifndef WITH_HYPERSCAN
 		if (linebuf[0] == '*') {
 			flags |= URL_FLAG_STAR_MATCH;
 			p = strchr (linebuf, '.');
@@ -456,16 +454,13 @@ rspamd_url_parse_tld_file (const gchar *fname,
 		else {
 			p = linebuf;
 		}
-#else
-		p = linebuf;
-#endif
 
 		m.flags = flags;
 		rspamd_multipattern_add_pattern (url_scanner->search_trie, p,
 				RSPAMD_MULTIPATTERN_TLD|RSPAMD_MULTIPATTERN_ICASE|RSPAMD_MULTIPATTERN_UTF8);
 		m.pattern = rspamd_multipattern_get_pattern (url_scanner->search_trie,
 				rspamd_multipattern_get_npatterns (url_scanner->search_trie) - 1);
-		m.patlen = strlen (m.pattern);
+
 		g_array_append_val (url_scanner->matchers, m);
 	}
 
@@ -492,8 +487,6 @@ rspamd_url_add_static_matchers (struct url_match_scanner *sc)
 					static_matchers[i].pattern,
 					RSPAMD_MULTIPATTERN_ICASE|RSPAMD_MULTIPATTERN_UTF8);
 		}
-
-		static_matchers[i].patlen = strlen (static_matchers[i].pattern);
 	}
 
 	g_array_append_vals (sc->matchers, static_matchers, n);
@@ -1515,14 +1508,15 @@ rspamd_tld_trie_callback (struct rspamd_multipattern *mp,
 	struct url_matcher *matcher;
 	const gchar *start, *pos, *p;
 	struct rspamd_url *url = context;
-	gint ndots = 1;
+	gint ndots;
 
 	matcher = &g_array_index (url_scanner->matchers, struct url_matcher,
 			strnum);
+	ndots = 1;
 
 	if (matcher->flags & URL_FLAG_STAR_MATCH) {
 		/* Skip one more tld component */
-		ndots = 2;
+		ndots ++;
 	}
 
 	pos = text + match_start;
@@ -1552,6 +1546,9 @@ rspamd_tld_trie_callback (struct rspamd_multipattern *mp,
 		if (*p == '.') {
 			ndots--;
 			pos = p + 1;
+		}
+		else {
+			pos = p;
 		}
 
 		p--;
@@ -2278,6 +2275,9 @@ rspamd_tld_trie_find_callback (struct rspamd_multipattern *mp,
 			ndots--;
 			pos = p + 1;
 		}
+		else {
+			pos = p;
+		}
 
 		p--;
 	}
@@ -2580,6 +2580,12 @@ url_email_start (struct url_callback_data *cb,
 		/* We have mailto:// at the beginning */
 		match->m_begin = pos;
 
+		if (pos >= cb->begin + 1) {
+			match->st = *(pos - 1);
+		}
+		else {
+			match->st = '\0';
+		}
 	}
 	else {
 		/* Just '@' */
@@ -2593,12 +2599,7 @@ url_email_start (struct url_callback_data *cb,
 			/* Just @ at the start of input */
 			return FALSE;
 		}
-	}
 
-	if (pos >= cb->begin + 1) {
-		match->st = *(pos - 1);
-	}
-	else {
 		match->st = '\0';
 	}
 
@@ -2647,7 +2648,7 @@ url_email_end (struct url_callback_data *cb,
 		 */
 		g_assert (*pos == '@');
 
-		if (pos >= cb->end - 2 || pos <= cb->begin + 1) {
+		if (pos >= cb->end - 2 || pos < cb->begin + 1) {
 			/* Boundary violation */
 			return FALSE;
 		}

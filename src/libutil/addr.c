@@ -16,7 +16,6 @@
 #include "config.h"
 #include "addr.h"
 #include "util.h"
-#include "map_helpers.h"
 #include "logger.h"
 #include "cryptobox.h"
 #include "unix-std.h"
@@ -29,7 +28,7 @@
 #include <grp.h>
 #endif
 
-static struct rspamd_radix_map_helper *local_addrs;
+static void *local_addrs;
 
 enum {
 	RSPAMD_IPV6_UNDEFINED = 0,
@@ -163,13 +162,7 @@ rspamd_ip_check_ipv6 (void)
 
 			if (stat ("/proc/net/dev", &st) != -1) {
 				if (stat ("/proc/net/if_inet6", &st) != -1) {
-					if (st.st_size != 0) {
-						ipv6_status = RSPAMD_IPV6_SUPPORTED;
-					}
-					else {
-						/* Empty file, no ipv6 configuration at all */
-						ipv6_status = RSPAMD_IPV6_UNSUPPORTED;
-					}
+					ipv6_status = RSPAMD_IPV6_SUPPORTED;
 				}
 				else {
 					ipv6_status = RSPAMD_IPV6_UNSUPPORTED;
@@ -1352,6 +1345,7 @@ rspamd_parse_host_port_priority (const gchar *str,
 								 guint *priority,
 								 gchar **name_ptr,
 								 guint default_port,
+								 gboolean allow_listen,
 								 rspamd_mempool_t *pool)
 {
 	gchar portbuf[8];
@@ -1359,6 +1353,7 @@ rspamd_parse_host_port_priority (const gchar *str,
 	gsize namelen;
 	rspamd_inet_addr_t *cur_addr = NULL;
 	enum rspamd_parse_host_port_result ret = RSPAMD_PARSE_ADDR_FAIL;
+	union sa_union su;
 
 	/*
 	 * In this function, we can have several possibilities:
@@ -1368,19 +1363,62 @@ rspamd_parse_host_port_priority (const gchar *str,
 	 * 4) ip|host[:port[:priority]]
 	 */
 
-	if (str[0] == '*') {
-		if (!rspamd_check_port_priority (str + 1, default_port, priority,
+	if (allow_listen && str[0] == '*') {
+		bool v4_any = true, v6_any = true;
+
+		p = &str[1];
+
+		if (g_ascii_strncasecmp (p, "v4", 2) == 0) {
+			p += 2;
+			name = "*v4";
+			v6_any = false;
+		}
+		else if (g_ascii_strncasecmp (p, "v6", 2) == 0) {
+			p += 2;
+			name = "*v6";
+			v4_any = false;
+		}
+		else {
+			name = "*";
+		}
+
+		if (!rspamd_check_port_priority (p, default_port, priority,
 				portbuf, sizeof (portbuf), pool)) {
 			return ret;
 		}
 
-		if (rspamd_resolve_addrs (str, 0, addrs, portbuf, AI_PASSIVE, pool)
-				== RSPAMD_PARSE_ADDR_FAIL) {
-			return ret;
+		if (*addrs == NULL) {
+			*addrs = g_ptr_array_new_full (1,
+					(GDestroyNotify) rspamd_inet_address_free);
+
+			if (pool != NULL) {
+				rspamd_mempool_add_destructor (pool,
+						rspamd_ptr_array_free_hard, *addrs);
+			}
 		}
 
-		name = "*";
-		namelen = 1;
+		if (v4_any) {
+			cur_addr = rspamd_inet_addr_create (AF_INET, pool);
+			rspamd_parse_inet_address_ip4 ("0.0.0.0",
+					sizeof ("0.0.0.0") - 1, &su.s4.sin_addr);
+			memcpy (&cur_addr->u.in.addr.s4.sin_addr, &su.s4.sin_addr,
+					sizeof (struct in_addr));
+			rspamd_inet_address_set_port (cur_addr,
+					strtoul (portbuf, NULL, 10));
+			g_ptr_array_add (*addrs, cur_addr);
+		}
+		if (v6_any) {
+			cur_addr = rspamd_inet_addr_create (AF_INET6, pool);
+			rspamd_parse_inet_address_ip6 ("::",
+					sizeof ("::") - 1, &su.s6.sin6_addr);
+			memcpy (&cur_addr->u.in.addr.s6.sin6_addr, &su.s6.sin6_addr,
+					sizeof (struct in6_addr));
+			rspamd_inet_address_set_port (cur_addr,
+					strtoul (portbuf, NULL, 10));
+			g_ptr_array_add (*addrs, cur_addr);
+		}
+
+		namelen = strlen (name);
 		ret = RSPAMD_PARSE_ADDR_NUMERIC; /* No resolution here */
 	}
 	else if (str[0] == '[') {
@@ -1876,8 +1914,7 @@ rspamd_inet_address_port_equal (gconstpointer a, gconstpointer b)
 #endif
 
 gboolean
-rspamd_inet_address_is_local (const rspamd_inet_addr_t *addr,
-		gboolean check_laddrs)
+rspamd_inet_address_is_local (const rspamd_inet_addr_t *addr)
 {
 	if (addr == NULL) {
 		return FALSE;
@@ -1901,21 +1938,21 @@ rspamd_inet_address_is_local (const rspamd_inet_addr_t *addr,
 				return TRUE;
 			}
 		}
-
-		if (check_laddrs && local_addrs) {
-			if (rspamd_match_radix_map_addr (local_addrs, addr) != NULL) {
-				return TRUE;
-			}
-		}
 	}
 
 	return FALSE;
 }
 
-struct rspamd_radix_map_helper **
+void **
 rspamd_inet_library_init (void)
 {
 	return &local_addrs;
+}
+
+void *
+rspamd_inet_library_get_lib_ctx (void)
+{
+	return local_addrs;
 }
 
 void
