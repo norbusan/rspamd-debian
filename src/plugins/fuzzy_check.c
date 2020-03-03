@@ -32,8 +32,8 @@
 
 #include "config.h"
 #include "libmime/message.h"
-#include "libutil/map.h"
-#include "libutil/map_helpers.h"
+#include "libserver/maps/map.h"
+#include "libserver/maps/map_helpers.h"
 #include "libmime/images.h"
 #include "libserver/worker_util.h"
 #include "libserver/mempool_vars_internal.h"
@@ -42,11 +42,10 @@
 #include "ottery.h"
 #include "lua/lua_common.h"
 #include "unix-std.h"
-#include "libutil/http_private.h"
-#include "libutil/http_router.h"
+#include "libserver/http/http_private.h"
+#include "libserver/http/http_router.h"
 #include "libstat/stat_api.h"
 #include <math.h>
-#include <src/libmime/message.h>
 #include "libutil/libev_helper.h"
 
 #define DEFAULT_SYMBOL "R_FUZZY_HASH"
@@ -362,7 +361,7 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 				rspamd_kv_list_fin,
 				rspamd_kv_list_dtor,
 				(void **)&rule->skip_map,
-				NULL);
+				NULL, RSPAMD_MAP_DEFAULT);
 	}
 
 	if ((value = ucl_object_lookup (obj, "headers")) != NULL) {
@@ -1344,35 +1343,59 @@ struct rspamd_cached_shingles {
 	guchar digest[rspamd_cryptobox_HASHBYTES];
 };
 
+
 static struct rspamd_cached_shingles *
 fuzzy_cmd_get_cached (struct fuzzy_rule *rule,
-		rspamd_mempool_t *pool,
-		gpointer p)
+					  struct rspamd_task *task,
+					  struct rspamd_mime_part *mp)
 {
 	gchar key[32];
 	gint key_part;
+	struct rspamd_cached_shingles **cached;
 
 	memcpy (&key_part, rule->shingles_key->str, sizeof (key_part));
-	rspamd_snprintf (key, sizeof (key), "%p%s%d", p, rule->algorithm_str,
+	rspamd_snprintf (key, sizeof (key), "%s%d", rule->algorithm_str,
 			key_part);
 
-	return rspamd_mempool_get_variable (pool, key);
+	cached = (struct rspamd_cached_shingles **)rspamd_mempool_get_variable (
+			task->task_pool, key);
+
+	if (cached && cached[mp->part_number]) {
+		return cached[mp->part_number];
+	}
+
+	return NULL;
 }
 
 static void
 fuzzy_cmd_set_cached (struct fuzzy_rule *rule,
-		rspamd_mempool_t *pool,
-		gpointer p,
-		struct rspamd_cached_shingles *data)
+					  struct rspamd_task *task,
+					  struct rspamd_mime_part *mp,
+					  struct rspamd_cached_shingles *data)
 {
 	gchar key[32];
 	gint key_part;
+	struct rspamd_cached_shingles **cached;
 
 	memcpy (&key_part, rule->shingles_key->str, sizeof (key_part));
-	rspamd_snprintf (key, sizeof (key), "%p%s%d", p, rule->algorithm_str,
+	rspamd_snprintf (key, sizeof (key), "%s%d", rule->algorithm_str,
 			key_part);
-	/* Key is copied */
-	rspamd_mempool_set_variable (pool, key, data, NULL);
+
+	cached = (struct rspamd_cached_shingles **)rspamd_mempool_get_variable (
+			task->task_pool, key);
+
+	if (cached) {
+		cached[mp->part_number] = data;
+	}
+	else {
+		cached = rspamd_mempool_alloc0 (task->task_pool, sizeof (*cached) *
+				(MESSAGE_FIELD (task, parts)->len + 1));
+		cached[mp->part_number] = data;
+
+		rspamd_mempool_set_variable (task->task_pool, key, cached, NULL);
+	}
+
+
 }
 
 static gboolean
@@ -1448,7 +1471,7 @@ fuzzy_cmd_from_text_part (struct rspamd_task *task,
 	GArray *words;
 	struct fuzzy_cmd_io *io;
 
-	cached = fuzzy_cmd_get_cached (rule, pool, mp);
+	cached = fuzzy_cmd_get_cached (rule, task, mp);
 
 	if (cached) {
 		/* Copy cached */
@@ -1539,7 +1562,7 @@ fuzzy_cmd_from_text_part (struct rspamd_task *task,
 		 * Since it is copied when obtained from the cache, it is safe to use
 		 * it this way.
 		 */
-		fuzzy_cmd_set_cached (rule, pool, mp, cached);
+		fuzzy_cmd_set_cached (rule, task, mp, cached);
 	}
 
 	io = rspamd_mempool_alloc (pool, sizeof (*io));
@@ -1602,12 +1625,13 @@ fuzzy_cmd_from_text_part (struct rspamd_task *task,
 	return io;
 }
 
+#if 0
 static struct fuzzy_cmd_io *
 fuzzy_cmd_from_image_part (struct fuzzy_rule *rule,
 						   int c,
 						   gint flag,
 						   guint32 weight,
-						   rspamd_mempool_t *pool,
+						   struct rspamd_task *task,
 						   struct rspamd_image *img,
 						   struct rspamd_mime_part *mp)
 {
@@ -1617,11 +1641,11 @@ fuzzy_cmd_from_image_part (struct fuzzy_rule *rule,
 	struct rspamd_shingle *sh;
 	struct rspamd_cached_shingles *cached;
 
-	cached = fuzzy_cmd_get_cached (rule, pool, mp);
+	cached = fuzzy_cmd_get_cached (rule, task, mp);
 
 	if (cached) {
 		/* Copy cached */
-		encshcmd = rspamd_mempool_alloc0 (pool, sizeof (*encshcmd));
+		encshcmd = rspamd_mempool_alloc0 (task->task_pool, sizeof (*encshcmd));
 		shcmd = &encshcmd->cmd;
 		memcpy (&shcmd->sgl, cached->sh, sizeof (struct rspamd_shingle));
 		memcpy (shcmd->basic.digest, cached->digest,
@@ -1629,14 +1653,14 @@ fuzzy_cmd_from_image_part (struct fuzzy_rule *rule,
 		shcmd->basic.shingles_count = RSPAMD_SHINGLE_SIZE;
 	}
 	else {
-		encshcmd = rspamd_mempool_alloc0 (pool, sizeof (*encshcmd));
+		encshcmd = rspamd_mempool_alloc0 (task->task_pool, sizeof (*encshcmd));
 		shcmd = &encshcmd->cmd;
 
 		/*
 		 * Generate shingles
 		 */
 		sh = rspamd_shingles_from_image (img->dct,
-				rule->shingles_key->str, pool,
+				rule->shingles_key->str, task->task_pool,
 				rspamd_shingles_default_filter, NULL,
 				rule->alg);
 		if (sh != NULL) {
@@ -1653,7 +1677,7 @@ fuzzy_cmd_from_image_part (struct fuzzy_rule *rule,
 				(const guchar *)img->dct, RSPAMD_DCT_LEN / NBBY,
 				rule->hash_key->str, rule->hash_key->len);
 
-		msg_debug_pool ("loading shingles of type %s with key %*xs",
+		msg_debug_task ("loading shingles of type %s with key %*xs",
 				rule->algorithm_str,
 				16, rule->shingles_key->str);
 
@@ -1664,10 +1688,10 @@ fuzzy_cmd_from_image_part (struct fuzzy_rule *rule,
 		 * Since it is copied when obtained from the cache, it is safe to use
 		 * it this way.
 		 */
-		cached = rspamd_mempool_alloc (pool, sizeof (*cached));
+		cached = rspamd_mempool_alloc (task->task_pool, sizeof (*cached));
 		cached->sh = sh;
 		memcpy (cached->digest, shcmd->basic.digest, sizeof (cached->digest));
-		fuzzy_cmd_set_cached (rule, pool, mp, cached);
+		fuzzy_cmd_set_cached (rule, task, mp, cached);
 	}
 
 	shcmd->basic.tag = ottery_rand_uint32 ();
@@ -1679,7 +1703,7 @@ fuzzy_cmd_from_image_part (struct fuzzy_rule *rule,
 		shcmd->basic.value = weight;
 	}
 
-	io = rspamd_mempool_alloc (pool, sizeof (*io));
+	io = rspamd_mempool_alloc (task->task_pool, sizeof (*io));
 	io->part = mp;
 	io->tag = shcmd->basic.tag;
 	io->flags = FUZZY_CMD_FLAG_IMAGE;
@@ -1698,6 +1722,7 @@ fuzzy_cmd_from_image_part (struct fuzzy_rule *rule,
 
 	return io;
 }
+#endif
 
 static struct fuzzy_cmd_io *
 fuzzy_cmd_from_data_part (struct fuzzy_rule *rule,
@@ -1983,12 +2008,15 @@ fuzzy_insert_result (struct fuzzy_client_session *session,
 	if (map != NULL || !session->rule->skip_unknown) {
 		GList *fuzzy_var;
 		rspamd_fstring_t *hex_result;
+		gchar timebuf[64];
+		struct tm tm_split;
 
 		if (session->rule->skip_map) {
 			rspamd_encode_hex_buf (cmd->digest, sizeof (cmd->digest),
 				hexbuf, sizeof (hexbuf) - 1);
 			hexbuf[sizeof (hexbuf) - 1] = '\0';
-			if (rspamd_match_hash_map (session->rule->skip_map, hexbuf)) {
+			if (rspamd_match_hash_map (session->rule->skip_map, hexbuf,
+					sizeof (hexbuf) - 1)) {
 				return;
 			}
 		}
@@ -1997,10 +2025,17 @@ fuzzy_insert_result (struct fuzzy_client_session *session,
 				hexbuf, sizeof (hexbuf) - 1);
 		hexbuf[sizeof (hexbuf) - 1] = '\0';
 
+		rspamd_gmtime (rep->ts, &tm_split);
+		rspamd_snprintf (timebuf, sizeof (timebuf), "%02d.%02d.%4d %02d:%02d:%02d GMT",
+				tm_split.tm_mday,
+				tm_split.tm_mon,
+				tm_split.tm_year + 1900,
+				tm_split.tm_hour, tm_split.tm_min, tm_split.tm_sec);
+
 		if (is_fuzzy) {
 			msg_info_task (
 					"found fuzzy hash(%s) %s (%*xs requested) with weight: "
-					"%.2f, probability %.2f, in list: %s:%d%s",
+					"%.2f, probability %.2f, in list: %s:%d%s; added on %s",
 					type,
 					hexbuf,
 					(gint) sizeof (cmd->digest), cmd->digest,
@@ -2008,19 +2043,21 @@ fuzzy_insert_result (struct fuzzy_client_session *session,
 					(gdouble) rep->v1.prob,
 					symbol,
 					rep->v1.flag,
-					map == NULL ? "(unknown)" : "");
+					map == NULL ? "(unknown)" : "",
+					timebuf);
 		}
 		else {
 			msg_info_task (
 					"found exact fuzzy hash(%s) %s with weight: "
-					"%.2f, probability %.2f, in list: %s:%d%s",
+					"%.2f, probability %.2f, in list: %s:%d%s; added on %s",
 					type,
 					hexbuf,
 					nval,
 					(gdouble) rep->v1.prob,
 					symbol,
 					rep->v1.flag,
-					map == NULL ? "(unknown)" : "");
+					map == NULL ? "(unknown)" : "",
+					timebuf);
 		}
 
 		rspamd_snprintf (buf,

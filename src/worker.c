@@ -19,7 +19,7 @@
 
 #include "config.h"
 #include "libutil/util.h"
-#include "libutil/map.h"
+#include "libserver/maps/map.h"
 #include "libutil/upstream.h"
 #include "libserver/protocol.h"
 #include "libserver/cfg_file.h"
@@ -31,7 +31,7 @@
 #include "libserver/worker_util.h"
 #include "libserver/rspamd_control.h"
 #include "worker_private.h"
-#include "libutil/http_private.h"
+#include "libserver/http/http_private.h"
 #include "libserver/cfg_file_private.h"
 #include <math.h>
 #include "unix-std.h"
@@ -371,7 +371,7 @@ accept_socket (EV_P_ ev_io *w, int revents)
 	session->ctx = ctx;
 	session->worker = worker;
 
-	if (ctx->encrypted_only && !rspamd_inet_address_is_local (addr, FALSE)) {
+	if (ctx->encrypted_only && !rspamd_inet_address_is_local (addr)) {
 		http_opts = RSPAMD_HTTP_REQUIRE_ENCRYPTION;
 	}
 
@@ -561,7 +561,7 @@ start_worker (struct rspamd_worker *worker)
 
 	rspamd_stat_close ();
 	REF_RELEASE (ctx->cfg);
-	rspamd_log_close (worker->srv->logger, TRUE);
+	rspamd_log_close (worker->srv->logger);
 
 	exit (EXIT_SUCCESS);
 }

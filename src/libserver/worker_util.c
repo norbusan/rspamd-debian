@@ -21,15 +21,12 @@
 #include "utlist.h"
 #include "ottery.h"
 #include "rspamd_control.h"
-#include "libutil/map.h"
-#include "libutil/map_private.h"
-#include "libutil/http_private.h"
-#include "libutil/http_router.h"
+#include "libserver/maps/map.h"
+#include "libserver/maps/map_private.h"
+#include "libserver/http/http_private.h"
+#include "libserver/http/http_router.h"
 #include "libutil/rrd.h"
 
-#ifdef WITH_GPERF_TOOLS
-#include <gperftools/profiler.h>
-#endif
 /* sys/resource.h */
 #ifdef HAVE_SYS_RESOURCE_H
 #include <sys/resource.h>
@@ -218,9 +215,6 @@ rspamd_worker_on_delayed_shutdown (EV_P_ ev_timer *w, int revents)
 	worker->state = rspamd_worker_wanna_die;
 	ev_timer_stop (EV_A_ w);
 	ev_break (loop, EVBREAK_ALL);
-#ifdef WITH_GPERF_TOOLS
-	ProfilerStop ();
-#endif
 }
 
 static void
@@ -258,8 +252,13 @@ rspamd_worker_usr2_handler (struct rspamd_worker_signal_handler *sigh, void *arg
 		static ev_timer shutdown_ev, shutdown_check_ev;
 		ev_tstamp shutdown_ts;
 
-		shutdown_ts = MAX (SOFT_SHUTDOWN_TIME,
-				sigh->worker->srv->cfg->task_timeout * 2.0);
+		if (sigh->worker->flags & RSPAMD_WORKER_NO_TERMINATE_DELAY) {
+			shutdown_ts = 0.0;
+		}
+		else {
+			shutdown_ts = MAX (SOFT_SHUTDOWN_TIME,
+					sigh->worker->srv->cfg->task_timeout * 2.0);
+		}
 
 		rspamd_worker_ignore_signal (sigh);
 		sigh->worker->state = rspamd_worker_state_terminating;
@@ -277,11 +276,14 @@ rspamd_worker_usr2_handler (struct rspamd_worker_signal_handler *sigh, void *arg
 				shutdown_ts, 0.0);
 		ev_timer_start (sigh->event_loop, &shutdown_ev);
 
-		/* This timer checks if we are ready to die and is called frequently */
-		shutdown_check_ev.data = sigh->worker;
-		ev_timer_init (&shutdown_check_ev, rspamd_worker_shutdown_check,
-				0.5, 0.5);
-		ev_timer_start (sigh->event_loop, &shutdown_check_ev);
+		if (!(sigh->worker->flags & RSPAMD_WORKER_NO_TERMINATE_DELAY)) {
+			/* This timer checks if we are ready to die and is called frequently */
+			shutdown_check_ev.data = sigh->worker;
+			ev_timer_init (&shutdown_check_ev, rspamd_worker_shutdown_check,
+					0.5, 0.5);
+			ev_timer_start (sigh->event_loop, &shutdown_check_ev);
+		}
+
 		rspamd_worker_stop_accept (sigh->worker);
 	}
 
@@ -297,7 +299,7 @@ rspamd_worker_usr1_handler (struct rspamd_worker_signal_handler *sigh, void *arg
 {
 	struct rspamd_main *rspamd_main = sigh->worker->srv;
 
-	rspamd_log_reopen (sigh->worker->srv->logger);
+	rspamd_log_reopen (sigh->worker->srv->logger, rspamd_main->cfg, -1, -1);
 	msg_info_main ("logging reinitialised");
 
 	/* Get more signals */
@@ -311,8 +313,13 @@ rspamd_worker_term_handler (struct rspamd_worker_signal_handler *sigh, void *arg
 		static ev_timer shutdown_ev, shutdown_check_ev;
 		ev_tstamp shutdown_ts;
 
-		shutdown_ts = MAX (SOFT_SHUTDOWN_TIME,
-				sigh->worker->srv->cfg->task_timeout * 2.0);
+		if (sigh->worker->flags & RSPAMD_WORKER_NO_TERMINATE_DELAY) {
+			shutdown_ts = 0.0;
+		}
+		else {
+			shutdown_ts = MAX (SOFT_SHUTDOWN_TIME,
+					sigh->worker->srv->cfg->task_timeout * 2.0);
+		}
 
 		rspamd_worker_ignore_signal (sigh);
 		sigh->worker->state = rspamd_worker_state_terminating;
@@ -334,13 +341,16 @@ rspamd_worker_term_handler (struct rspamd_worker_signal_handler *sigh, void *arg
 					shutdown_ts, 0.0);
 			ev_timer_start (sigh->event_loop, &shutdown_ev);
 
-			/* This timer checks if we are ready to die and is called frequently */
-			shutdown_check_ev.data = sigh->worker;
-			ev_timer_init (&shutdown_check_ev, rspamd_worker_shutdown_check,
-					0.5, 0.5);
-			ev_timer_start (sigh->event_loop, &shutdown_check_ev);
+			if (!(sigh->worker->flags & RSPAMD_WORKER_NO_TERMINATE_DELAY)) {
+				/* This timer checks if we are ready to die and is called frequently */
+				shutdown_check_ev.data = sigh->worker;
+				ev_timer_init (&shutdown_check_ev, rspamd_worker_shutdown_check,
+						0.5, 0.5);
+				ev_timer_start (sigh->event_loop, &shutdown_check_ev);
+			}
 		}
 		else {
+			/* Flag to die has been already set */
 			ev_break (sigh->event_loop, EVBREAK_ALL);
 		}
 	}
@@ -464,13 +474,6 @@ rspamd_prepare_worker (struct rspamd_worker *worker, const char *name,
 	GList *cur;
 	struct rspamd_worker_listen_socket *ls;
 	struct rspamd_worker_accept_event *accept_ev;
-
-#ifdef WITH_PROFILER
-	extern void _start (void), etext (void);
-	monstartup ((u_long) & _start, (u_long) & etext);
-#endif
-
-	gperf_profiler_init (worker->srv->cfg, name);
 
 	worker->signal_events = g_hash_table_new_full (g_direct_hash, g_direct_equal,
 			NULL, rspamd_sigh_free);
@@ -980,9 +983,7 @@ rspamd_fork_worker (struct rspamd_main *rspamd_main,
 	switch (wrk->pid) {
 	case 0:
 		/* Update pid for logging */
-		rspamd_log_update_pid (cf->type, rspamd_main->logger);
-		/* To avoid atomic writes issue */
-		rspamd_log_reopen (rspamd_main->logger);
+		rspamd_log_on_fork (cf->type, rspamd_main->cfg, rspamd_main->logger);
 		wrk->pid = getpid ();
 
 		/* Init PRNG after fork */
@@ -1031,17 +1032,10 @@ rspamd_fork_worker (struct rspamd_main *rspamd_main,
 			rspamd_pidfile_close (rspamd_main->pfh);
 		}
 
-		/* Do silent log reopen to avoid collisions */
-		rspamd_log_close (rspamd_main->logger, FALSE);
-
-
 		if (rspamd_main->cfg->log_silent_workers) {
-			rspamd_main->cfg->log_level = G_LOG_LEVEL_MESSAGE;
-			rspamd_set_logger (rspamd_main->cfg, cf->type,
-					&rspamd_main->logger, rspamd_main->server_pool);
+			rspamd_log_set_log_level (rspamd_main->logger, G_LOG_LEVEL_MESSAGE);
 		}
 
-		rspamd_log_open (rspamd_main->logger);
 		wrk->start_time = rspamd_get_calendar_ticks ();
 
 		if (cf->bind_conf) {
@@ -1059,8 +1053,9 @@ rspamd_fork_worker (struct rspamd_main *rspamd_main,
 		rspamd_socket_nonblocking (wrk->control_pipe[1]);
 		rspamd_socket_nonblocking (wrk->srv_pipe[1]);
 		rspamd_main->cfg->cur_worker = wrk;
-		/* Execute worker */
+		/* Execute worker (this function should not return normally!) */
 		cf->worker->worker_start_func (wrk);
+		/* To distinguish from normal termination */
 		exit (EXIT_FAILURE);
 		break;
 	case -1:
@@ -1151,7 +1146,7 @@ rspamd_hard_terminate (struct rspamd_main *rspamd_main)
 
 	msg_err_main ("shutting down Rspamd due to fatal error");
 
-	rspamd_log_close (rspamd_main->logger, TRUE);
+	rspamd_log_close (rspamd_main->logger);
 	exit (EXIT_FAILURE);
 }
 

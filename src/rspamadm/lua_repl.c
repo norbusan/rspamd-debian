@@ -16,9 +16,9 @@
 
 #include "config.h"
 #include "rspamadm.h"
-#include "libutil/http_connection.h"
-#include "libutil/http_private.h"
-#include "libutil/http_router.h"
+#include "libserver/http/http_connection.h"
+#include "libserver/http/http_private.h"
+#include "libserver/http/http_router.h"
 #include "printf.h"
 #include "lua/lua_common.h"
 #include "lua/lua_thread_pool.h"
@@ -925,7 +925,7 @@ rspamadm_lua (gint argc, gchar **argv, const struct rspamadm_command *cmd)
 		struct rspamadm_lua_repl_context *ctx;
 
 		if (rspamd_parse_host_port_priority (serve, &addrs, NULL, &name,
-				10000, NULL) == RSPAMD_PARSE_ADDR_FAIL) {
+				10000, TRUE, NULL) == RSPAMD_PARSE_ADDR_FAIL) {
 			fprintf (stderr, "cannot listen on %s", serve);
 			exit (EXIT_FAILURE);
 		}

@@ -17,11 +17,11 @@
 #include "libserver/dynamic_cfg.h"
 #include "libserver/cfg_file_private.h"
 #include "libutil/rrd.h"
-#include "libutil/map.h"
-#include "libutil/map_helpers.h"
-#include "libutil/map_private.h"
-#include "libutil/http_private.h"
-#include "libutil/http_router.h"
+#include "libserver/maps/map.h"
+#include "libserver/maps/map_helpers.h"
+#include "libserver/maps/map_private.h"
+#include "libserver/http/http_private.h"
+#include "libserver/http/http_router.h"
 #include "libstat/stat_api.h"
 #include "rspamd.h"
 #include "libserver/worker_util.h"
@@ -3685,7 +3685,7 @@ start_controller_worker (struct rspamd_worker *worker)
 	g_hash_table_unref (ctx->custom_commands);
 
 	REF_RELEASE (ctx->cfg);
-	rspamd_log_close (worker->srv->logger, TRUE);
+	rspamd_log_close (worker->srv->logger);
 
 	exit (EXIT_SUCCESS);
 }

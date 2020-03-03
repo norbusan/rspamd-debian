@@ -103,7 +103,7 @@ end
 local redis_lua_script_can_store_train_vec = [[
   local prefix = KEYS[1]
   local locked = redis.call('HGET', prefix, 'lock')
-  if locked then return {tostring(-1),'locked by another process: ' .. locked} end
+  if locked then return {tostring(-1),'locked by another process till: ' .. locked} end
   local nspam = 0
   local nham = 0
   local lim = tonumber(KEYS[3])
@@ -200,6 +200,7 @@ local redis_maybe_lock_id = nil
 -- key4 - profile as JSON
 -- key5 - expire in seconds
 -- key6 - current time
+-- key7 - old key
 local redis_lua_script_save_unlock = [[
   local now = tonumber(KEYS[6])
   redis.call('ZADD', KEYS[2], now, KEYS[4])
@@ -207,6 +208,7 @@ local redis_lua_script_save_unlock = [[
   redis.call('DEL', KEYS[1] .. '_spam')
   redis.call('DEL', KEYS[1] .. '_ham')
   redis.call('HDEL', KEYS[1], 'lock')
+  redis.call('HDEL', KEYS[7], 'lock')
   redis.call('EXPIRE', KEYS[1], tonumber(KEYS[5]))
   return 1
 ]]
@@ -245,7 +247,7 @@ local function result_to_vector(task, profile)
     vec[i] = v
   end
 
-  task:process_ann_tokens(profile.symbols, vec, #mt)
+  task:process_ann_tokens(profile.symbols, vec, #mt, 0.1)
 
   return vec
 end
@@ -470,8 +472,8 @@ local function ann_push_task_result(rule, task, verdict, score, set)
           )
         else
           -- Negative result returned
-          rspamd_logger.infox(task, "cannot learn %s ANN %s:%s: %s (%s vectors stored)",
-              learn_type, rule.prefix, set.name, reason, -tonumber(nsamples))
+          rspamd_logger.infox(task, "cannot learn %s ANN %s:%s; redis_key: %s: %s (%s vectors stored)",
+              learn_type, rule.prefix, set.name, set.ann.redis_key, reason, -tonumber(nsamples))
         end
       else
         if err then
@@ -485,22 +487,34 @@ local function ann_push_task_result(rule, task, verdict, score, set)
       end
     end
 
-    if not set.ann then
-      -- Need to create or load a profile corresponding to the current configuration
-      set.ann = new_ann_profile(task, rule, set, 0)
-    end
     -- Check if we can learn
-    lua_redis.exec_redis_script(redis_can_store_train_vec_id,
-        {task = task, is_write = true},
-        can_train_cb,
-        {
-          set.ann.redis_key,
-          learn_type,
-          tostring(train_opts.max_trains),
-          tostring(math.random()),
-        })
+    if set.can_store_vectors then
+      if not set.ann then
+        -- Need to create or load a profile corresponding to the current configuration
+        set.ann = new_ann_profile(task, rule, set, 0)
+        lua_util.debugm(N, task,
+            'requested new profile for %s, set.ann is missing',
+            set.name)
+      end
+
+      lua_redis.exec_redis_script(redis_can_store_train_vec_id,
+          {task = task, is_write = true},
+          can_train_cb,
+          {
+            set.ann.redis_key,
+            learn_type,
+            tostring(train_opts.max_trains),
+            tostring(math.random()),
+          })
+    else
+      lua_util.debugm(N, task,
+          'do not push data to key %s: train condition not satisfied; reason: not checked existing ANNs',
+          set.ann.redis_key)
+    end
   else
-    lua_util.debugm(N, task, 'do not push data: train condition not satisfied; reason: %s',
+    lua_util.debugm(N, task,
+        'do not push data to key %s: train condition not satisfied; reason: %s',
+        set.ann.redis_key,
         skip_reason)
   end
 end
@@ -719,6 +733,7 @@ local function spawn_train(worker, ev_base, rule, set, ann_key, ham_vec, spam_ve
              profile_serialized,
              tostring(rule.ann_expire),
              tostring(os.time()),
+             ann_key, -- old key to unlock...
             })
       end
     end
@@ -726,6 +741,7 @@ local function spawn_train(worker, ev_base, rule, set, ann_key, ham_vec, spam_ve
     worker:spawn_process{
       func = train,
       on_complete = ann_trained,
+      proctitle = string.format("ANN train for %s/%s", rule.prefix, set.name),
     }
   end
   -- Spawn learn and register lock extension
@@ -1107,10 +1123,12 @@ local function check_anns(worker, cfg, ev_base, rule, process_callback, what)
       if err then
         rspamd_logger.errx(cfg, 'cannot get ANNs list from redis: %s',
             err)
+        set.can_store_vectors = true
       elseif type(data) == 'table' then
         lua_util.debugm(N, cfg, '%s: process element %s:%s',
             what, rule.prefix, set.name)
         process_callback(worker, ev_base, rule, set, fun.map(load_ann_profile, data))
+        set.can_store_vectors = true
       end
     end
 
@@ -1208,8 +1226,8 @@ local function process_rules_settings()
     if profile then
       -- Use static user defined profile
       -- Ensure that we have an array...
-      lua_util.debugm(N, rspamd_config, "use static profile for %s (%s)",
-          rule.prefix, selt.name)
+      lua_util.debugm(N, rspamd_config, "use static profile for %s (%s): %s",
+          rule.prefix, selt.name, profile)
       if not profile[1] then profile = lua_util.keys(profile) end
       selt.symbols = profile
     else
@@ -1261,7 +1279,7 @@ local function process_rules_settings()
         })
   end
 
-  for _,rule in pairs(settings.rules) do
+  for k,rule in pairs(settings.rules) do
     if not rule.allowed_settings then
       rule.allowed_settings = {}
     elseif rule.allowed_settings == 'all' then
@@ -1273,7 +1291,7 @@ local function process_rules_settings()
     rule.allowed_settings = lua_util.list_to_hash(rule.allowed_settings)
 
     -- Check if we can work without settings
-    if type(rule.default) ~= 'boolean' then
+    if k == 'default' or type(rule.default) ~= 'boolean' then
       rule.default = true
     end
 
@@ -1293,7 +1311,11 @@ local function process_rules_settings()
     -- We set table rule.settings[id] -> { name = name, symbols = symbols, digest = digest }
     for s,_ in pairs(rule.allowed_settings) do
       -- Here, we have a name, set of symbols and
-      local selt = lua_settings.settings_by_id(s)
+      local settings_id = s
+      if type(settings_id) ~= 'number' then
+        settings_id = lua_settings.numeric_settings_id(s)
+      end
+      local selt = lua_settings.settings_by_id(settings_id)
 
       local nelt = {
         symbols = selt.symbols, -- Already sorted
@@ -1308,16 +1330,16 @@ local function process_rules_settings()
             lua_util.debugm(N, rspamd_config,
                 'added reference from settings id %s to %s; same symbols',
                 nelt.name, ex.name)
-            rule.settings[s] = id
+            rule.settings[settings_id] = id
             nelt = nil
           end
         end
       end
 
       if nelt then
-        rule.settings[s] = nelt
-        lua_util.debugm(N, rspamd_config, 'added new settings id %s to %s',
-            nelt.name, rule.prefix)
+        rule.settings[settings_id] = nelt
+        lua_util.debugm(N, rspamd_config, 'added new settings id %s(%s) to %s',
+            nelt.name, settings_id, rule.prefix)
       end
     end
   end

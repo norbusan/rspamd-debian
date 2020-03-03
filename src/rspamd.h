@@ -21,8 +21,8 @@
 #include "libutil/fstring.h"
 #include "libutil/mem_pool.h"
 #include "libutil/util.h"
-#include "libutil/logger.h"
-#include "libutil/http_connection.h"
+#include "libserver/logger.h"
+#include "libserver/http/http_connection.h"
 #include "libutil/upstream.h"
 #include "libutil/radix.h"
 #include "libserver/cfg_file.h"
@@ -56,6 +56,8 @@
 extern "C" {
 #endif
 
+struct rspamd_main;
+
 enum rspamd_worker_flags {
 	RSPAMD_WORKER_HAS_SOCKET = (1 << 0),
 	RSPAMD_WORKER_UNIQUE = (1 << 1),
@@ -64,6 +66,7 @@ enum rspamd_worker_flags {
 	RSPAMD_WORKER_ALWAYS_START = (1 << 4),
 	RSPAMD_WORKER_SCANNER = (1 << 5),
 	RSPAMD_WORKER_CONTROLLER = (1 << 6),
+	RSPAMD_WORKER_NO_TERMINATE_DELAY = (1 << 7),
 };
 
 struct rspamd_worker_accept_event {
@@ -107,7 +110,7 @@ struct rspamd_worker {
 	struct rspamd_worker_accept_event *accept_events; /**< socket events				*/
 	struct rspamd_worker_conf *cf;  /**< worker config data								*/
 	gpointer ctx;                   /**< worker's specific data							*/
-	enum rspamd_worker_flags flags; /**< worker's flags									*/
+	gint flags;                     /**< worker's flags (enum rspamd_worker_flags)		*/
 	gint control_pipe[2];           /**< control pipe. [0] is used by main process,
 	                                                   [1] is used by a worker			*/
 	gint srv_pipe[2];               /**< used by workers to request something from the
@@ -149,17 +152,6 @@ struct rspamd_worker_signal_handler {
 	struct ev_loop *event_loop;
 	struct rspamd_worker *worker;
 	struct rspamd_worker_signal_handler_elt *cb;
-};
-
-struct rspamd_controller_pbkdf {
-	const char *name;
-	const char *alias;
-	const char *description;
-	enum rspamd_cryptobox_pbkdf_type type;
-	gint id;
-	guint complexity;
-	gsize salt_len;
-	gsize key_len;
 };
 
 /**
@@ -362,10 +354,8 @@ struct zstd_dictionary {
 	guint id;
 };
 
-struct rspamd_radix_map_helper;
-
 struct rspamd_external_libs_ctx {
-	struct rspamd_radix_map_helper **local_addrs;
+	void **local_addrs;
 	struct rspamd_cryptobox_library_ctx *crypto_ctx;
 	struct ottery_config *ottery_cfg;
 	SSL_CTX *ssl_ctx;
@@ -385,14 +375,6 @@ void register_custom_controller_command (const gchar *name,
 										 controller_func_t handler,
 										 gboolean privilleged,
 										 gboolean require_message);
-
-enum rspamd_pbkdf_version_id {
-	RSPAMD_PBKDF_ID_V1 = 1,
-	RSPAMD_PBKDF_ID_V2 = 2,
-	RSPAMD_PBKDF_ID_MAX
-};
-
-extern const struct rspamd_controller_pbkdf pbkdf_list[];
 
 #ifdef  __cplusplus
 }

@@ -241,6 +241,10 @@ rspamd_parse_long_option (const gchar *start, gsize len,
 		ret = TRUE;
 		a->type = RSPAMD_RE_URL;
 	}
+	else if (TYPE_CHECK (start, "email", len)) {
+		ret = TRUE;
+		a->type = RSPAMD_RE_EMAIL;
+	}
 	else if (TYPE_CHECK (start, "sa_body", len)) {
 		ret = TRUE;
 		a->type = RSPAMD_RE_SABODY;
@@ -380,7 +384,7 @@ rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line,
 			p++;
 			break;
 		case 'R':
-			result->type = RSPAMD_RE_RAWHEADER;
+			result->type = RSPAMD_RE_ALLHEADER;
 			p++;
 			break;
 		case 'B':
@@ -1022,6 +1026,7 @@ rspamd_mime_expr_priority (rspamd_expression_atom_t *atom)
 			ret = 100;
 			break;
 		case RSPAMD_RE_URL:
+		case RSPAMD_RE_EMAIL:
 			ret = 90;
 			break;
 		case RSPAMD_RE_MIME:

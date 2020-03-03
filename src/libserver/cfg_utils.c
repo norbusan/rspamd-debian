@@ -21,9 +21,9 @@
 #include "scan_result.h"
 #include "lua/lua_common.h"
 #include "lua/lua_thread_pool.h"
-#include "map.h"
-#include "map_helpers.h"
-#include "map_private.h"
+#include "maps/map.h"
+#include "maps/map_helpers.h"
+#include "maps/map_private.h"
 #include "dynamic_cfg.h"
 #include "utlist.h"
 #include "stat_api.h"
@@ -31,6 +31,28 @@
 #include "libutil/multipattern.h"
 #include "monitored.h"
 #include "ref.h"
+#include "cryptobox.h"
+#include "ssl_util.h"
+#include "contrib/libottery/ottery.h"
+#include "contrib/fastutf8/fastutf8.h"
+
+#define ZSTD_STATIC_LINKING_ONLY
+#include "contrib/zstd/zstd.h"
+#include "contrib/zstd/zdict.h"
+
+#ifdef HAVE_OPENSSL
+#include <openssl/rand.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/ssl.h>
+#include <openssl/conf.h>
+#endif
+#ifdef HAVE_LOCALE_H
+#include <locale.h>
+#endif
+#ifdef HAVE_SYS_RESOURCE_H
+#include <sys/resource.h>
+#endif
 #include <math.h>
 
 #define DEFAULT_SCORE 10.0
@@ -76,7 +98,7 @@ rspamd_parse_bind_line (struct rspamd_config *cfg,
 	const gchar *str)
 {
 	struct rspamd_worker_bind_conf *cnf;
-	gchar *err;
+	const gchar *fdname;
 	gboolean ret = TRUE;
 
 	if (str == NULL) {
@@ -90,11 +112,13 @@ rspamd_parse_bind_line (struct rspamd_config *cfg,
 
 	if (g_ascii_strncasecmp (str, "systemd:", sizeof ("systemd:") - 1) == 0) {
 		/* The actual socket will be passed by systemd environment */
+		fdname = str + sizeof ("systemd:") - 1;
 		cnf->is_systemd = TRUE;
-		cnf->cnt = strtoul (str + sizeof ("systemd:") - 1, &err, 10);
-		cnf->addrs = g_ptr_array_new ();
+		cnf->addrs = g_ptr_array_new_full (1, g_free);
 
-		if (err == NULL || *err == '\0') {
+		if (fdname[0]) {
+			g_ptr_array_add (cnf->addrs, g_strdup (fdname));
+			cnf->cnt = cnf->addrs->len;
 			cnf->name = g_strdup (str);
 			LL_PREPEND (cf->bind_conf, cnf);
 		}
@@ -105,7 +129,7 @@ rspamd_parse_bind_line (struct rspamd_config *cfg,
 	}
 	else {
 		if (rspamd_parse_host_port_priority (str, &cnf->addrs,
-				NULL, &cnf->name, DEFAULT_BIND_PORT, NULL) == RSPAMD_PARSE_ADDR_FAIL) {
+				NULL, &cnf->name, DEFAULT_BIND_PORT, TRUE, NULL) == RSPAMD_PARSE_ADDR_FAIL) {
 			msg_err_config ("cannot parse bind line: %s", str);
 			ret = FALSE;
 		}
@@ -1158,7 +1182,7 @@ rspamd_include_map_handler (const guchar *data, gsize len,
 			   rspamd_ucl_fin_cb,
 			   rspamd_ucl_dtor_cb,
 			   (void **)pcbdata,
-			   NULL) != NULL;
+			   NULL, RSPAMD_MAP_DEFAULT) != NULL;
 }
 
 /*
@@ -1508,7 +1532,7 @@ rspamd_check_worker (struct rspamd_config *cfg, worker_t *wrk)
 }
 
 gboolean
-rspamd_init_filters (struct rspamd_config *cfg, bool reconfig)
+rspamd_init_filters (struct rspamd_config *cfg, bool reconfig, bool strict)
 {
 	GList *cur;
 	module_t *mod, **pmod;
@@ -1559,8 +1583,12 @@ rspamd_init_filters (struct rspamd_config *cfg, bool reconfig)
 			}
 			else {
 				if (!mod->module_config_func (cfg)) {
-					msg_info_config ("config of %s failed!", mod->name);
+					msg_err_config ("config of %s failed", mod->name);
 					ret = FALSE;
+
+					if (strict) {
+						return FALSE;
+					}
 				}
 			}
 		}
@@ -1572,7 +1600,7 @@ rspamd_init_filters (struct rspamd_config *cfg, bool reconfig)
 		cur = g_list_next (cur);
 	}
 
-	ret = rspamd_init_lua_filters (cfg, 0) && ret;
+	ret = rspamd_init_lua_filters (cfg, 0, strict) && ret;
 
 	return ret;
 }
@@ -2218,7 +2246,7 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 						rspamd_radix_fin,
 						rspamd_radix_dtor,
 						(void **)target,
-						worker) == NULL) {
+						worker, RSPAMD_MAP_DEFAULT) == NULL) {
 					g_set_error (err,
 							g_quark_from_static_string ("rspamd-config"),
 							EINVAL, "bad map definition %s for %s", str,
@@ -2245,7 +2273,7 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 					rspamd_radix_fin,
 					rspamd_radix_dtor,
 					(void **)target,
-					worker) == NULL) {
+					worker, RSPAMD_MAP_DEFAULT) == NULL) {
 				g_set_error (err,
 						g_quark_from_static_string ("rspamd-config"),
 						EINVAL, "bad map object for %s", ucl_object_key (obj));
@@ -2614,4 +2642,327 @@ rspamd_config_ev_backend_to_string (int ev_backend, gboolean *effective)
 	SET_EFFECTIVE (FALSE);
 	return "unknown";
 #undef SET_EFFECTIVE
+}
+
+struct rspamd_external_libs_ctx *
+rspamd_init_libs (void)
+{
+	struct rlimit rlim;
+	struct rspamd_external_libs_ctx *ctx;
+	struct ottery_config *ottery_cfg;
+
+	ctx = g_malloc0 (sizeof (*ctx));
+	ctx->crypto_ctx = rspamd_cryptobox_init ();
+	ottery_cfg = g_malloc0 (ottery_get_sizeof_config ());
+	ottery_config_init (ottery_cfg);
+	ctx->ottery_cfg = ottery_cfg;
+
+	rspamd_openssl_maybe_init ();
+
+	/* Check if we have rdrand */
+	if ((ctx->crypto_ctx->cpu_config & CPUID_RDRAND) == 0) {
+		ottery_config_disable_entropy_sources (ottery_cfg,
+				OTTERY_ENTROPY_SRC_RDRAND);
+#if OPENSSL_VERSION_NUMBER >= 0x1000104fL && !defined(LIBRESSL_VERSION_NUMBER)
+		RAND_set_rand_engine (NULL);
+#endif
+	}
+
+	/* Configure utf8 library */
+	guint utf8_flags = 0;
+
+	if ((ctx->crypto_ctx->cpu_config & CPUID_SSE41)) {
+		utf8_flags |= RSPAMD_FAST_UTF8_FLAG_SSE41;
+	}
+	if ((ctx->crypto_ctx->cpu_config & CPUID_AVX2)) {
+		utf8_flags |= RSPAMD_FAST_UTF8_FLAG_AVX2;
+	}
+
+	rspamd_fast_utf8_library_init (utf8_flags);
+
+	g_assert (ottery_init (ottery_cfg) == 0);
+
+#ifdef HAVE_LOCALE_H
+	if (getenv ("LANG") == NULL) {
+		setlocale (LC_ALL, "C");
+		setlocale (LC_CTYPE, "C");
+		setlocale (LC_MESSAGES, "C");
+		setlocale (LC_TIME, "C");
+	}
+	else {
+		/* Just set the default locale */
+		setlocale (LC_ALL, "");
+		/* But for some issues we still want C locale */
+		setlocale (LC_NUMERIC, "C");
+	}
+#endif
+
+	ctx->ssl_ctx = rspamd_init_ssl_ctx ();
+	ctx->ssl_ctx_noverify = rspamd_init_ssl_ctx_noverify ();
+	rspamd_random_seed_fast ();
+
+	/* Set stack size for pcre */
+	getrlimit (RLIMIT_STACK, &rlim);
+	rlim.rlim_cur = 100 * 1024 * 1024;
+	rlim.rlim_max = rlim.rlim_cur;
+	setrlimit (RLIMIT_STACK, &rlim);
+
+	ctx->local_addrs = rspamd_inet_library_init ();
+	REF_INIT_RETAIN (ctx, rspamd_deinit_libs);
+
+	return ctx;
+}
+
+static struct zstd_dictionary *
+rspamd_open_zstd_dictionary (const char *path)
+{
+	struct zstd_dictionary *dict;
+
+	dict = g_malloc0 (sizeof (*dict));
+	dict->dict = rspamd_file_xmap (path, PROT_READ, &dict->size, TRUE);
+
+	if (dict->dict == NULL) {
+		g_free (dict);
+
+		return NULL;
+	}
+
+	dict->id = ZDICT_getDictID (dict->dict, dict->size);
+
+	if (dict->id == 0) {
+		g_free (dict);
+
+		return NULL;
+	}
+
+	return dict;
+}
+
+static void
+rspamd_free_zstd_dictionary (struct zstd_dictionary *dict)
+{
+	if (dict) {
+		munmap (dict->dict, dict->size);
+		g_free (dict);
+	}
+}
+
+#ifdef HAVE_CBLAS
+#ifdef HAVE_CBLAS_H
+#include "cblas.h"
+#else
+extern void openblas_set_num_threads(int num_threads);
+#endif
+#endif
+
+gboolean
+rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
+					struct rspamd_config *cfg)
+{
+	size_t r;
+	gboolean ret = TRUE;
+
+	g_assert (cfg != NULL);
+
+	if (ctx != NULL) {
+		if (cfg->local_addrs) {
+			rspamd_config_radix_from_ucl (cfg, cfg->local_addrs,
+					"Local addresses",
+					(struct rspamd_radix_map_helper **)ctx->local_addrs,
+					NULL,
+					NULL);
+		}
+
+		rspamd_free_zstd_dictionary (ctx->in_dict);
+		rspamd_free_zstd_dictionary (ctx->out_dict);
+
+		if (ctx->out_zstream) {
+			ZSTD_freeCStream (ctx->out_zstream);
+			ctx->out_zstream = NULL;
+		}
+
+		if (ctx->in_zstream) {
+			ZSTD_freeDStream (ctx->in_zstream);
+			ctx->in_zstream = NULL;
+		}
+
+		if (cfg->zstd_input_dictionary) {
+			ctx->in_dict = rspamd_open_zstd_dictionary (
+					cfg->zstd_input_dictionary);
+
+			if (ctx->in_dict == NULL) {
+				msg_err_config ("cannot open zstd dictionary in %s",
+						cfg->zstd_input_dictionary);
+			}
+		}
+		if (cfg->zstd_output_dictionary) {
+			ctx->out_dict = rspamd_open_zstd_dictionary (
+					cfg->zstd_output_dictionary);
+
+			if (ctx->out_dict == NULL) {
+				msg_err_config ("cannot open zstd dictionary in %s",
+						cfg->zstd_output_dictionary);
+			}
+		}
+
+		if (cfg->fips_mode) {
+#ifdef HAVE_FIPS_MODE
+			int mode = FIPS_mode ();
+			unsigned long err = (unsigned long)-1;
+
+			/* Toggle FIPS mode */
+			if (mode == 0) {
+				if (FIPS_mode_set (1) != 1) {
+					err = ERR_get_error ();
+				}
+			}
+			else {
+				msg_info_config ("OpenSSL FIPS mode is already enabled");
+			}
+
+			if (err != (unsigned long)-1) {
+				msg_err_config ("FIPS_mode_set failed: %s",
+						ERR_error_string (err, NULL));
+				ret = FALSE;
+			}
+			else {
+				msg_info_config ("OpenSSL FIPS mode is enabled");
+			}
+#else
+			msg_warn_config ("SSL FIPS mode is enabled but not supported by OpenSSL library!");
+#endif
+		}
+
+		rspamd_ssl_ctx_config (cfg, ctx->ssl_ctx);
+		rspamd_ssl_ctx_config (cfg, ctx->ssl_ctx_noverify);
+
+		/* Init decompression */
+		ctx->in_zstream = ZSTD_createDStream ();
+		r = ZSTD_initDStream (ctx->in_zstream);
+
+		if (ZSTD_isError (r)) {
+			msg_err ("cannot init decompression stream: %s",
+					ZSTD_getErrorName (r));
+			ZSTD_freeDStream (ctx->in_zstream);
+			ctx->in_zstream = NULL;
+		}
+
+		/* Init compression */
+		ctx->out_zstream = ZSTD_createCStream ();
+		r = ZSTD_initCStream (ctx->out_zstream, 1);
+
+		if (ZSTD_isError (r)) {
+			msg_err ("cannot init compression stream: %s",
+					ZSTD_getErrorName (r));
+			ZSTD_freeCStream (ctx->out_zstream);
+			ctx->out_zstream = NULL;
+		}
+#ifdef HAVE_CBLAS
+		openblas_set_num_threads (cfg->max_blas_threads);
+#endif
+	}
+
+	return ret;
+}
+
+gboolean
+rspamd_libs_reset_decompression (struct rspamd_external_libs_ctx *ctx)
+{
+	gsize r;
+
+	if (ctx->in_zstream == NULL) {
+		return FALSE;
+	}
+	else {
+		r = ZSTD_resetDStream (ctx->in_zstream);
+
+		if (ZSTD_isError (r)) {
+			msg_err ("cannot init decompression stream: %s",
+					ZSTD_getErrorName (r));
+			ZSTD_freeDStream (ctx->in_zstream);
+			ctx->in_zstream = NULL;
+
+			return FALSE;
+		}
+	}
+
+	return TRUE;
+}
+
+gboolean
+rspamd_libs_reset_compression (struct rspamd_external_libs_ctx *ctx)
+{
+	gsize r;
+
+	if (ctx->out_zstream == NULL) {
+		return FALSE;
+	}
+	else {
+		/* Dictionary will be reused automatically if specified */
+		r = ZSTD_resetCStream (ctx->out_zstream, 0);
+
+		if (ZSTD_isError (r)) {
+			msg_err ("cannot init compression stream: %s",
+					ZSTD_getErrorName (r));
+			ZSTD_freeCStream (ctx->out_zstream);
+			ctx->out_zstream = NULL;
+
+			return FALSE;
+		}
+	}
+
+	return TRUE;
+}
+
+void
+rspamd_deinit_libs (struct rspamd_external_libs_ctx *ctx)
+{
+	if (ctx != NULL) {
+		g_free (ctx->ottery_cfg);
+
+#ifdef HAVE_OPENSSL
+		EVP_cleanup ();
+		ERR_free_strings ();
+		rspamd_ssl_ctx_free (ctx->ssl_ctx);
+		rspamd_ssl_ctx_free (ctx->ssl_ctx_noverify);
+#endif
+		rspamd_inet_library_destroy ();
+		rspamd_free_zstd_dictionary (ctx->in_dict);
+		rspamd_free_zstd_dictionary (ctx->out_dict);
+
+		if (ctx->out_zstream) {
+			ZSTD_freeCStream (ctx->out_zstream);
+		}
+
+		if (ctx->in_zstream) {
+			ZSTD_freeDStream (ctx->in_zstream);
+		}
+
+		rspamd_cryptobox_deinit (ctx->crypto_ctx);
+
+		g_free (ctx);
+	}
+}
+
+gboolean
+rspamd_ip_is_local_cfg (struct rspamd_config *cfg,
+								 const rspamd_inet_addr_t *addr)
+{
+	struct rspamd_radix_map_helper *local_addrs = NULL;
+
+	if (cfg && cfg->libs_ctx) {
+		local_addrs = *(struct rspamd_radix_map_helper**)cfg->libs_ctx->local_addrs;
+	}
+
+	if (rspamd_inet_address_is_local (addr)) {
+		return TRUE;
+	}
+
+	if (local_addrs) {
+		if (rspamd_match_radix_map_addr (local_addrs, addr) != NULL) {
+			return TRUE;
+		}
+	}
+
+	return FALSE;
 }

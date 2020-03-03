@@ -503,6 +503,102 @@ rspamd_task_insert_result_full (struct rspamd_task *task,
 	return s;
 }
 
+static gchar *
+rspamd_task_option_safe_copy (struct rspamd_task *task,
+							  const gchar *val,
+							  gsize vlen,
+							  gsize *outlen)
+{
+	const gchar *p, *end;
+
+	p = val;
+	end = val + vlen;
+	vlen = 0; /* Reuse */
+
+	while (p < end) {
+		if (*p & 0x80) {
+			UChar32 uc;
+			gint off = 0;
+
+			U8_NEXT (p, off, end - p, uc);
+
+			if (uc > 0) {
+				if (u_isprint (uc)) {
+					vlen += off;
+				}
+				else {
+					/* We will replace it with 0xFFFD */
+					vlen += MAX (off, 3);
+				}
+			}
+			else {
+				vlen += MAX (off, 3);
+			}
+
+			p += off;
+		}
+		else if (!g_ascii_isprint (*p)) {
+			/* Another 0xFFFD */
+			vlen += 3;
+			p ++;
+		}
+		else {
+			p ++;
+			vlen ++;
+		}
+	}
+
+	gchar *dest, *d;
+
+	dest = rspamd_mempool_alloc (task->task_pool, vlen + 1);
+	d = dest;
+	p = val;
+
+	while (p < end) {
+		if (*p & 0x80) {
+			UChar32 uc;
+			gint off = 0;
+
+			U8_NEXT (p, off, end - p, uc);
+
+			if (uc > 0) {
+				if (u_isprint (uc)) {
+					memcpy (d, p, off);
+					d += off;
+				}
+				else {
+					/* We will replace it with 0xFFFD */
+					*d++ = '\357';
+					*d++ = '\277';
+					*d++ = '\275';
+				}
+			}
+			else {
+				*d++ = '\357';
+				*d++ = '\277';
+				*d++ = '\275';
+			}
+
+			p += off;
+		}
+		else if (!g_ascii_isprint (*p)) {
+			/* Another 0xFFFD */
+			*d++ = '\357';
+			*d++ = '\277';
+			*d++ = '\275';
+			p ++;
+		}
+		else {
+			*d++ = *p++;
+		}
+	}
+
+	*d = '\0';
+	*(outlen) = d - dest;
+
+	return dest;
+}
+
 gboolean
 rspamd_task_add_result_option (struct rspamd_task *task,
 							   struct rspamd_symbol_result *s,
@@ -512,6 +608,7 @@ rspamd_task_add_result_option (struct rspamd_task *task,
 	struct rspamd_symbol_option *opt, srch;
 	gboolean ret = FALSE;
 	gchar *opt_cpy = NULL;
+	gsize cpy_len;
 	khiter_t k;
 	gint r;
 
@@ -536,31 +633,20 @@ rspamd_task_add_result_option (struct rspamd_task *task,
 			s->opts_len = -1;
 		}
 
-		if (rspamd_fast_utf8_validate (val, vlen) != 0) {
-			opt_cpy = rspamd_str_make_utf_valid (val, vlen, &vlen,
-					task->task_pool);
-			val = opt_cpy;
-		}
-
 		if (!(s->sym && (s->sym->flags & RSPAMD_SYMBOL_FLAG_ONEPARAM)) &&
 				kh_size (s->options) < task->cfg->default_max_shots) {
+			opt_cpy = rspamd_task_option_safe_copy (task, val, vlen, &cpy_len);
 			/* Append new options */
-			srch.option = (gchar *)val;
-			srch.optlen = vlen;
+			srch.option = (gchar *)opt_cpy;
+			srch.optlen = cpy_len;
 			k = kh_get (rspamd_options_hash, s->options, &srch);
 
 			if (k == kh_end (s->options)) {
 				opt = rspamd_mempool_alloc0 (task->task_pool, sizeof (*opt));
-
-				if (opt_cpy == NULL) {
-					opt_cpy = rspamd_mempool_strdup (task->task_pool, val);
-				}
-
-				opt->optlen = vlen;
+				opt->optlen = cpy_len;
 				opt->option = opt_cpy;
 
-				k = kh_put (rspamd_options_hash, s->options, opt, &r);
-				opt->option = opt_cpy;
+				kh_put (rspamd_options_hash, s->options, opt, &r);
 				DL_APPEND (s->opts_head, opt);
 
 				ret = TRUE;
@@ -583,12 +669,13 @@ rspamd_task_add_result_option (struct rspamd_task *task,
 }
 
 struct rspamd_action*
-rspamd_check_action_metric (struct rspamd_task *task)
+rspamd_check_action_metric (struct rspamd_task *task,
+							struct rspamd_passthrough_result **ppr)
 {
 	struct rspamd_action_result *action_lim,
 			*noaction = NULL;
 	struct rspamd_action *selected_action = NULL, *least_action = NULL;
-	struct rspamd_passthrough_result *pr;
+	struct rspamd_passthrough_result *pr, *sel_pr = NULL;
 	double max_score = -(G_MAXDOUBLE), sc;
 	int i;
 	struct rspamd_scan_result *mres = task->result;
@@ -608,6 +695,10 @@ rspamd_check_action_metric (struct rspamd_task *task)
 						else {
 							mres->score = sc;
 						}
+					}
+
+					if (ppr) {
+						*ppr = pr;
 					}
 
 					return selected_action;
@@ -635,10 +726,12 @@ rspamd_check_action_metric (struct rspamd_task *task)
 						else {
 							sc = selected_action->threshold;
 							max_score = sc;
+							sel_pr = pr;
 						}
 					}
 					else {
 						max_score = sc;
+						sel_pr = pr;
 					}
 				}
 			}
@@ -681,15 +774,29 @@ rspamd_check_action_metric (struct rspamd_task *task)
 						selected_action->action_type != METRIC_ACTION_DISCARD) {
 					/* Override score based action with least action */
 					selected_action = least_action;
+
+					if (ppr) {
+						*ppr = sel_pr;
+					}
 				}
 			}
 			else {
 				/* Adjust score if needed */
-				mres->score = MAX (max_score, mres->score);
+				if (max_score > mres->score) {
+					if (ppr) {
+						*ppr = sel_pr;
+					}
+
+					mres->score = max_score;
+				}
 			}
 		}
 
 		return selected_action;
+	}
+
+	if (ppr) {
+		*ppr = sel_pr;
 	}
 
 	return noaction->action;
