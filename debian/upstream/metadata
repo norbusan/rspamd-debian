@@ -1,4 +1,8 @@
 ---
+Archive: GitHub
+Bug-Database: https://github.com/rspamd/rspamd/issues
+Bug-Submit: https://github.com/rspamd/rspamd/issues
+Changelog: https://github.com/rspamd/rspamd/tags
 Name: rspamd
 Repository: https://github.com/rspamd/rspamd.git
 Repository-Browse: https://github.com/rspamd/rspamd
