@@ -22,11 +22,11 @@
 #include "unix-std.h"
 #include "logger.h"
 #include "ottery.h"
-#include "libutil/http_connection.h"
-#include "libutil/http_private.h"
+#include "libserver/http/http_connection.h"
+#include "libserver/http/http_private.h"
 #include "libserver/protocol_internal.h"
 #include "libserver/cfg_file_private.h"
-#include "libmime/filter.h"
+#include "libmime/scan_result.h"
 #include "libserver/worker_util.h"
 #include "utlist.h"
 
@@ -135,11 +135,6 @@ rspamd_milter_session_reset (struct rspamd_milter_session *session,
 			session->from = NULL;
 		}
 
-		if (session->helo) {
-			msg_debug_milter ("cleanup helo");
-			session->helo->len = 0;
-		}
-
 		if (priv->headers) {
 			msg_debug_milter ("cleanup headers");
 			gchar *k;
@@ -186,10 +181,7 @@ rspamd_milter_session_dtor (struct rspamd_milter_session *session)
 		priv = session->priv;
 		msg_debug_milter ("destroying milter session");
 
-		if (rspamd_event_pending (&priv->ev, EV_TIMEOUT|EV_WRITE|EV_READ)) {
-			event_del (&priv->ev);
-		}
-
+		rspamd_ev_watcher_stop (priv->event_loop, &priv->ev);
 		rspamd_milter_session_reset (session, RSPAMD_MILTER_RESET_ALL);
 
 		if (priv->parser.buf) {
@@ -267,14 +259,7 @@ static inline void
 rspamd_milter_plan_io (struct rspamd_milter_session *session,
 		struct rspamd_milter_private *priv, gshort what)
 {
-	if (rspamd_event_pending (&priv->ev, EV_TIMEOUT|EV_WRITE|EV_READ)) {
-		event_del (&priv->ev);
-	}
-
-	event_set (&priv->ev, priv->fd, what, rspamd_milter_io_handler,
-			session);
-	event_base_set (priv->ev_base, &priv->ev);
-	event_add (&priv->ev, priv->ptv);
+	rspamd_ev_watcher_reschedule (priv->event_loop, &priv->ev, what);
 }
 
 
@@ -970,6 +955,8 @@ rspamd_milter_handle_session (struct rspamd_milter_session *session,
 		if (r == -1) {
 			if (errno == EAGAIN || errno == EINTR) {
 				rspamd_milter_plan_io (session, priv, EV_READ);
+
+				return TRUE;
 			}
 			else {
 				/* Fatal IO error */
@@ -979,6 +966,10 @@ rspamd_milter_handle_session (struct rspamd_milter_session *session,
 				priv->err_cb (priv->fd, session, priv->ud, err);
 				REF_RELEASE (session);
 				g_error_free (err);
+
+				REF_RELEASE (session);
+
+				return FALSE;
 			}
 		}
 		else if (r == 0) {
@@ -988,6 +979,10 @@ rspamd_milter_handle_session (struct rspamd_milter_session *session,
 			priv->err_cb (priv->fd, session, priv->ud, err);
 			REF_RELEASE (session);
 			g_error_free (err);
+
+			REF_RELEASE (session);
+
+			return FALSE;
 		}
 		else {
 			priv->parser.buf->len += r;
@@ -1038,6 +1033,8 @@ rspamd_milter_handle_session (struct rspamd_milter_session *session,
 						REF_RELEASE (session);
 						g_error_free (err);
 
+						REF_RELEASE (session);
+
 						return FALSE;
 					}
 				}
@@ -1048,6 +1045,8 @@ rspamd_milter_handle_session (struct rspamd_milter_session *session,
 					priv->err_cb (priv->fd, session, priv->ud, err);
 					REF_RELEASE (session);
 					g_error_free (err);
+
+					REF_RELEASE (session);
 
 					return FALSE;
 				}
@@ -1075,6 +1074,7 @@ rspamd_milter_handle_session (struct rspamd_milter_session *session,
 	case RSPAMD_MILTER_WANNA_DIE:
 		/* We are here after processing everything, so release session */
 		REF_RELEASE (session);
+		return FALSE;
 		break;
 	}
 
@@ -1083,9 +1083,9 @@ rspamd_milter_handle_session (struct rspamd_milter_session *session,
 
 
 gboolean
-rspamd_milter_handle_socket (gint fd, const struct timeval *tv,
+rspamd_milter_handle_socket (gint fd, ev_tstamp timeout,
 		rspamd_mempool_t *pool,
-		struct event_base *ev_base, rspamd_milter_finish finish_cb,
+		struct ev_loop *ev_base, rspamd_milter_finish finish_cb,
 		rspamd_milter_error error_cb, void *ud)
 {
 	struct rspamd_milter_session *session;
@@ -1103,11 +1103,15 @@ rspamd_milter_handle_socket (gint fd, const struct timeval *tv,
 	priv->err_cb = error_cb;
 	priv->parser.state = st_len_1;
 	priv->parser.buf = rspamd_fstring_sized_new (RSPAMD_MILTER_MESSAGE_CHUNK + 5);
-	priv->ev_base = ev_base;
+	priv->event_loop = ev_base;
 	priv->state = RSPAMD_MILTER_READ_MORE;
-	priv->pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), "milter");
+	priv->pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), "milter", 0);
 	priv->discard_on_reject = milter_ctx->discard_on_reject;
 	priv->quarantine_on_reject = milter_ctx->quarantine_on_reject;
+	priv->ev.timeout = timeout;
+
+	rspamd_ev_watcher_init (&priv->ev, fd, EV_READ|EV_WRITE,
+			rspamd_milter_io_handler, session);
 
 	if (pool) {
 		/* Copy tag */
@@ -1116,14 +1120,6 @@ rspamd_milter_handle_socket (gint fd, const struct timeval *tv,
 
 	priv->headers = kh_init (milter_headers_hash_t);
 	kh_resize (milter_headers_hash_t, priv->headers, 32);
-
-	if (tv) {
-		memcpy (&priv->tv, tv, sizeof (*tv));
-		priv->ptv = &priv->tv;
-	}
-	else {
-		priv->ptv = NULL;
-	}
 
 	session->priv = priv;
 	REF_INIT_RETAIN (session, rspamd_milter_session_dtor);
@@ -1175,7 +1171,7 @@ rspamd_milter_send_action (struct rspamd_milter_session *session,
 	rspamd_fstring_t *reply = NULL;
 	gsize len;
 	GString *name, *value;
-	const char *reason;
+	const char *reason, *body_str;
 	struct rspamd_milter_outbuf *obuf;
 	struct rspamd_milter_private *priv = session->priv;
 
@@ -1233,6 +1229,14 @@ rspamd_milter_send_action (struct rspamd_milter_session *session,
 		memcpy (pos, name->str, name->len + 1);
 		pos += name->len + 1;
 		memcpy (pos, value->str, value->len + 1);
+		break;
+	case RSPAMD_MILTER_REPLBODY:
+		len = va_arg (ap, gsize);
+		body_str = va_arg (ap, const char *);
+		msg_debug_milter ("want to change body; size = %uz",
+				len);
+		SET_COMMAND (cmd, len, reply, pos);
+		memcpy (pos, body_str, len);
 		break;
 	case RSPAMD_MILTER_REPLYCODE:
 	case RSPAMD_MILTER_ADDRCPT:
@@ -1503,7 +1507,7 @@ rspamd_milter_to_http (struct rspamd_milter_session *session)
 	}
 
 	rspamd_milter_macro_http (session, msg);
-	rspamd_http_message_add_header (msg, MILTER_HEADER, "Yes");
+	rspamd_http_message_add_header (msg, FLAGS_HEADER, "milter,body_block");
 
 	return msg;
 }
@@ -1566,6 +1570,67 @@ rspamd_milter_remove_header_safe (struct rspamd_milter_session *session,
 	}
 }
 
+static void
+rspamd_milter_extract_single_header (struct rspamd_milter_session *session,
+						  const gchar *hdr, const ucl_object_t *obj)
+{
+	GString *hname, *hvalue;
+	struct rspamd_milter_private *priv = session->priv;
+	gint idx = -1;
+	const ucl_object_t *val;
+
+	val = ucl_object_lookup (obj, "value");
+
+	if (val && ucl_object_type (val) == UCL_STRING) {
+		const ucl_object_t *idx_obj;
+		gboolean has_idx = FALSE;
+
+		idx_obj = ucl_object_lookup_any (obj, "order",
+				"index", NULL);
+
+		if (idx_obj) {
+			idx = ucl_object_toint (idx_obj);
+			has_idx = TRUE;
+		}
+
+		hname = g_string_new (hdr);
+		hvalue = g_string_new (ucl_object_tostring (val));
+
+		if (has_idx) {
+			if (idx >= 0) {
+				rspamd_milter_send_action (session,
+						RSPAMD_MILTER_INSHEADER,
+						idx,
+						hname, hvalue);
+			}
+			else {
+				/* Calculate negative offset */
+
+				if (-idx <= priv->cur_hdr) {
+					rspamd_milter_send_action (session,
+							RSPAMD_MILTER_INSHEADER,
+							priv->cur_hdr + idx + 1,
+							hname, hvalue);
+				}
+				else {
+					rspamd_milter_send_action (session,
+							RSPAMD_MILTER_INSHEADER,
+							0,
+							hname, hvalue);
+				}
+			}
+		}
+		else {
+			rspamd_milter_send_action (session,
+					RSPAMD_MILTER_ADDHEADER,
+					hname, hvalue);
+		}
+
+		g_string_free (hname, TRUE);
+		g_string_free (hvalue, TRUE);
+	}
+}
+
 /*
  * Returns `TRUE` if action has been processed internally by this function
  */
@@ -1577,7 +1642,6 @@ rspamd_milter_process_milter_block (struct rspamd_milter_session *session,
 	ucl_object_iter_t it;
 	struct rspamd_milter_private *priv = session->priv;
 	GString *hname, *hvalue;
-	gint idx = -1;
 
 	if (obj && ucl_object_type (obj) == UCL_OBJECT) {
 		elt = ucl_object_lookup (obj, "remove_headers");
@@ -1624,58 +1688,23 @@ rspamd_milter_process_milter_block (struct rspamd_milter_session *session,
 						g_string_free (hvalue, TRUE);
 					}
 					else if (ucl_object_type (cur_elt) == UCL_OBJECT) {
-						const ucl_object_t *val;
+						rspamd_milter_extract_single_header (session,
+								ucl_object_key (cur), cur_elt);
+					}
+					else if (ucl_object_type (cur_elt) == UCL_ARRAY) {
+						/* Multiple values for the same key */
+						ucl_object_iter_t *array_it;
+						const ucl_object_t *array_elt;
 
-						val = ucl_object_lookup (cur_elt, "value");
+						array_it = ucl_object_iterate_new (cur_elt);
 
-						if (val && ucl_object_type (val) == UCL_STRING) {
-							const ucl_object_t *idx_obj;
-							gboolean has_idx = FALSE;
-
-							idx_obj = ucl_object_lookup_any (cur_elt, "order",
-									"index", NULL);
-
-							if (idx_obj) {
-								idx = ucl_object_toint (idx_obj);
-								has_idx = TRUE;
-							}
-
-							hname = g_string_new (ucl_object_key (cur));
-							hvalue = g_string_new (ucl_object_tostring (val));
-
-							if (has_idx) {
-								if (idx >= 0) {
-									rspamd_milter_send_action (session,
-											RSPAMD_MILTER_INSHEADER,
-											idx,
-											hname, hvalue);
-								}
-								else {
-									/* Calculate negative offset */
-
-									if (-idx <= priv->cur_hdr) {
-										rspamd_milter_send_action (session,
-												RSPAMD_MILTER_INSHEADER,
-												priv->cur_hdr + idx + 1,
-												hname, hvalue);
-									}
-									else {
-										rspamd_milter_send_action (session,
-												RSPAMD_MILTER_INSHEADER,
-												0,
-												hname, hvalue);
-									}
-								}
-							}
-							else {
-								rspamd_milter_send_action (session,
-										RSPAMD_MILTER_ADDHEADER,
-										hname, hvalue);
-							}
-
-							g_string_free (hname, TRUE);
-							g_string_free (hvalue, TRUE);
+						while ((array_elt = ucl_object_iterate_safe (array_it,
+								true)) != NULL) {
+							rspamd_milter_extract_single_header (session,
+									ucl_object_key (cur), array_elt);
 						}
+
+						ucl_object_iterate_free (array_it);
 					}
 				}
 
@@ -1792,7 +1821,9 @@ rspamd_milter_process_milter_block (struct rspamd_milter_session *session,
 
 void
 rspamd_milter_send_task_results (struct rspamd_milter_session *session,
-		const ucl_object_t *results)
+								 const ucl_object_t *results,
+								 const gchar *new_body,
+								 gsize bodylen)
 {
 	const ucl_object_t *elt;
 	struct rspamd_milter_private *priv = session->priv;
@@ -1887,6 +1918,11 @@ rspamd_milter_send_task_results (struct rspamd_milter_session *session,
 
 	if (processed) {
 		goto cleanup;
+	}
+
+	if (new_body) {
+		rspamd_milter_send_action (session, RSPAMD_MILTER_REPLBODY,
+				bodylen, new_body);
 	}
 
 	if (priv->no_action) {

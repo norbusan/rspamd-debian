@@ -143,7 +143,6 @@ lua_dns_resolver_callback (struct rdns_reply *reply, gpointer arg)
 	struct lua_callback_state cbs;
 	rspamd_mempool_t *pool;
 	gint err_idx;
-	GString *tb = NULL;
 
 	pool = cd->pool;
 	lua_thread_pool_prepare_callback (cd->resolver->cfg->lua_thread_pool, &cbs);
@@ -199,12 +198,8 @@ lua_dns_resolver_callback (struct rdns_reply *reply, gpointer arg)
 	}
 
 	if (lua_pcall (L, 7, 0, err_idx) != 0) {
-		tb = lua_touserdata (L, -1);
-
-		if (tb) {
-			msg_err_pool_check ("call to dns callback failed: %s", tb->str);
-			g_string_free (tb, TRUE);
-		}
+		msg_err_pool_check ("call to dns callback failed: %s",
+				lua_tostring (L, -1));
 	}
 
 	lua_settop (L, err_idx - 1);
@@ -318,7 +313,7 @@ lua_dns_resolver_init (lua_State *L)
 {
 	struct rspamd_dns_resolver *resolver, **presolver;
 	struct rspamd_config *cfg, **pcfg;
-	struct event_base *base, **pbase;
+	struct ev_loop *base, **pbase;
 
 	/* Check args */
 	pbase = rspamd_lua_check_udata (L, 1, "rspamd{ev_base}");
@@ -365,6 +360,7 @@ lua_dns_resolver_resolve_common (lua_State *L,
 
 	/* Check arguments */
 	if (!rspamd_lua_parse_table_arguments (L, first, &err,
+			RSPAMD_LUA_PARSE_ARGUMENTS_DEFAULT,
 			"session=U{session};mempool=U{mempool};*name=S;*callback=F;"
 			"option=S;task=U{task};forced=B",
 			&session, &pool, &to_resolve, &cbref, &user_str, &task, &forced)) {
@@ -481,7 +477,6 @@ lua_dns_resolver_resolve_common (lua_State *L,
 			if (ret) {
 				cbdata->s = session;
 
-
 				if (item) {
 					cbdata->item = item;
 					rspamd_symcache_item_async_inc (task, item, M);
@@ -490,7 +485,11 @@ lua_dns_resolver_resolve_common (lua_State *L,
 				lua_pushboolean (L, TRUE);
 			}
 			else {
-				lua_pushnil (L);
+				if (item) {
+					rspamd_symcache_item_async_dec_check (task, item, M);
+				}
+
+				goto err;
 			}
 
 			if (item) {
@@ -508,6 +507,11 @@ err:
 		/* Free resources */
 		g_free (cbdata->to_resolve);
 		g_free (cbdata->user_str);
+	}
+
+	/* Callback is not called in this case */
+	if (cbdata->cbref != -1) {
+		luaL_unref (L, LUA_REGISTRYINDEX, cbdata->cbref);
 	}
 
 	lua_pushnil (L);
@@ -697,15 +701,7 @@ void
 luaopen_dns_resolver (lua_State * L)
 {
 
-	luaL_newmetatable (L, "rspamd{resolver}");
-	lua_pushstring (L, "__index");
-	lua_pushvalue (L, -2);
-	lua_settable (L, -3);
-
-	lua_pushstring (L, "class");
-	lua_pushstring (L, "rspamd{resolver}");
-	lua_rawset (L, -3);
-
+	rspamd_lua_new_class (L, "rspamd{resolver}", dns_resolverlib_m);
 	{
 		LUA_ENUM (L, DNS_A,	 RDNS_REQUEST_A);
 		LUA_ENUM (L, DNS_PTR, RDNS_REQUEST_PTR);
@@ -717,8 +713,7 @@ luaopen_dns_resolver (lua_State * L)
 		LUA_ENUM (L, DNS_SOA, RDNS_REQUEST_SOA);
 	}
 
-	luaL_register (L, NULL, dns_resolverlib_m);
-	rspamd_lua_add_preload (L, "rspamd_resolver", lua_load_dns_resolver);
+	lua_pop (L, 1);
 
-	lua_pop (L, 1);                      /* remove metatable from stack */
+	rspamd_lua_add_preload (L, "rspamd_resolver", lua_load_dns_resolver);
 }

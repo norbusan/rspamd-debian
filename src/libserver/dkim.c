@@ -21,7 +21,6 @@
 #include "utlist.h"
 #include "unix-std.h"
 #include "mempool_vars_internal.h"
-#include "libcryptobox/ed25519/ed25519.h"
 
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
@@ -105,15 +104,18 @@ struct rspamd_dkim_common_ctx {
 	rspamd_mempool_t *pool;
 	guint64 sig_hash;
 	gsize len;
-	gint header_canon_type;
-	gint body_canon_type;
-	gboolean is_sign;
 	GPtrArray *hlist;
 	GHashTable *htable; /* header -> count mapping */
 	EVP_MD_CTX *headers_hash;
 	EVP_MD_CTX *body_hash;
 	enum rspamd_dkim_type type;
 	guint idx;
+	gint header_canon_type;
+	gint body_canon_type;
+	guint body_canonicalised;
+	guint headers_canonicalised;
+	gboolean is_sign;
+
 };
 
 enum rspamd_arc_seal_cv {
@@ -1033,6 +1035,17 @@ rspamd_create_dkim_context (const gchar *sig,
 					if (!parser_funcs[param](ctx, c, tlen, err)) {
 						state = DKIM_STATE_ERROR;
 					}
+					if (state == DKIM_STATE_ERROR) {
+						/*
+						 * We need to return from here as state machine won't
+						 * do any more steps after p == end
+						 */
+						if (err) {
+							msg_info_dkim ("dkim parse failed: %e", *err);
+						}
+
+						return NULL;
+					}
 					/* Finish processing */
 					p++;
 				}
@@ -1499,16 +1512,16 @@ rspamd_dkim_parse_key (const gchar *txt, gsize *keylen, GError **err)
 	}
 
 	if (alglen == 8 && rspamd_lc_cmp (alg, "ecdsa256", alglen) == 0) {
-		return rspamd_dkim_make_key (c, klen,
+		return rspamd_dkim_make_key (key, klen,
 				RSPAMD_DKIM_KEY_ECDSA, err);
 	}
 	else if (alglen == 7 && rspamd_lc_cmp (alg, "ed25519", alglen) == 0) {
-		return rspamd_dkim_make_key (c, klen,
+		return rspamd_dkim_make_key (key, klen,
 				RSPAMD_DKIM_KEY_EDDSA, err);
 	}
 	else {
 		/* We assume RSA default in all cases */
-		return rspamd_dkim_make_key (c, klen,
+		return rspamd_dkim_make_key (key, klen,
 				RSPAMD_DKIM_KEY_RSA, err);
 	}
 
@@ -1660,17 +1673,14 @@ rspamd_dkim_relaxed_body_step (struct rspamd_dkim_common_ctx *ctx, EVP_MD_CTX *c
 	*start = h;
 
 	if (*remain > 0) {
-		size_t cklen = MIN(t - buf, *remain + added);
+		gsize cklen = MIN(t - buf, *remain + added);
+
 		EVP_DigestUpdate (ck, buf, cklen);
+		ctx->body_canonicalised += cklen;
 		*remain = *remain - (cklen - added);
-#if 0
-		msg_debug_dkim ("update signature with buffer (%ud size, %ud remain, %ud added): %*s",
-				cklen, *remain, added, cklen, buf);
-#else
 		msg_debug_dkim ("update signature with body buffer "
-				"(%ud size, %ud remain, %ud added)",
+				"(%z size, %ud remain, %ud added)",
 						cklen, *remain, added);
-#endif
 	}
 
 	return (len != 0);
@@ -1714,11 +1724,13 @@ rspamd_dkim_simple_body_step (struct rspamd_dkim_common_ctx *ctx,
 	*start = h;
 
 	if (*remain > 0) {
-		size_t cklen = MIN(t - buf, *remain + added);
+		gsize cklen = MIN(t - buf, *remain + added);
+
 		EVP_DigestUpdate (ck, buf, cklen);
+		ctx->body_canonicalised += cklen;
 		*remain = *remain - (cklen - added);
 		msg_debug_dkim ("update signature with body buffer "
-				"(%ud size, %ud remain, %ud added)",
+				"(%z size, %ud remain, %ud added)",
 				cklen, *remain, added);
 	}
 
@@ -1902,12 +1914,14 @@ rspamd_dkim_canonize_body (struct rspamd_dkim_common_ctx *ctx,
 {
 	const gchar *p;
 	guint remain = ctx->len ? ctx->len : (guint)(end - start);
+	guint total_len = end - start;
 	gboolean need_crlf = FALSE;
 
 	if (start == NULL) {
 		/* Empty body */
 		if (ctx->body_canon_type == DKIM_CANON_SIMPLE) {
 			EVP_DigestUpdate (ctx->body_hash, CRLF, sizeof (CRLF) - 1);
+			ctx->body_canonicalised += sizeof (CRLF) - 1;
 		}
 		else {
 			EVP_DigestUpdate (ctx->body_hash, "", 0);
@@ -1923,6 +1937,7 @@ rspamd_dkim_canonize_body (struct rspamd_dkim_common_ctx *ctx,
 			/* Empty body */
 			if (ctx->body_canon_type == DKIM_CANON_SIMPLE) {
 				EVP_DigestUpdate (ctx->body_hash, CRLF, sizeof (CRLF) - 1);
+				ctx->body_canonicalised += sizeof (CRLF) - 1;
 			}
 			else {
 				EVP_DigestUpdate (ctx->body_hash, "", 0);
@@ -1934,10 +1949,32 @@ rspamd_dkim_canonize_body (struct rspamd_dkim_common_ctx *ctx,
 				while (rspamd_dkim_simple_body_step (ctx, ctx->body_hash,
 						&start, end - start, &remain));
 
+				/*
+				 * If we have l= tag then we cannot add crlf...
+				 */
 				if (need_crlf) {
+					/* l is evil... */
+					if (ctx->len == 0) {
+						remain = 2;
+					}
+					else {
+						if (ctx->len <= total_len) {
+							/* We don't have enough l to add \r\n */
+							remain = 0;
+						}
+						else {
+							if (ctx->len - total_len >= 2) {
+								remain = 2;
+							}
+							else {
+								remain = ctx->len - total_len;
+							}
+						}
+					}
+
 					start = "\r\n";
 					end = start + 2;
-					remain = 2;
+
 					rspamd_dkim_simple_body_step (ctx, ctx->body_hash,
 							&start, end - start, &remain);
 				}
@@ -2017,8 +2054,9 @@ rspamd_dkim_signature_update (struct rspamd_dkim_common_ctx *ctx,
 		if (tag && p[0] == 'b' && p[1] == '=') {
 			/* Add to signature */
 			msg_debug_dkim ("initial update hash with signature part: %*s",
-				p - c + 2,
-				c);
+					(gint)(p - c + 2),
+					c);
+			ctx->headers_canonicalised += p - c + 2;
 			rspamd_dkim_hash_update (ctx->headers_hash, c, p - c + 2);
 			skip = TRUE;
 		}
@@ -2042,7 +2080,9 @@ rspamd_dkim_signature_update (struct rspamd_dkim_common_ctx *ctx,
 	}
 
 	if (p - c + 1 > 0) {
-		msg_debug_dkim ("final update hash with signature part: %*s", p - c + 1, c);
+		msg_debug_dkim ("final update hash with signature part: %*s",
+				(gint)(p - c + 1), c);
+		ctx->headers_canonicalised += p - c + 1;
 		rspamd_dkim_hash_update (ctx->headers_hash, c, p - c + 1);
 	}
 }
@@ -2117,9 +2157,10 @@ rspamd_dkim_canonize_header_relaxed_str (const gchar *hname,
 
 static gboolean
 rspamd_dkim_canonize_header_relaxed (struct rspamd_dkim_common_ctx *ctx,
-	const gchar *header,
-	const gchar *header_name,
-	gboolean is_sign)
+									 const gchar *header,
+									 const gchar *header_name,
+									 gboolean is_sign,
+									 guint count)
 {
 	static gchar st_buf[8192];
 	gchar *buf;
@@ -2143,7 +2184,7 @@ rspamd_dkim_canonize_header_relaxed (struct rspamd_dkim_common_ctx *ctx,
 	g_assert (r != -1);
 
 	if (!is_sign) {
-		msg_debug_dkim ("update signature with header: %s", buf);
+		msg_debug_dkim ("update signature with header (idx=%d): %s", count, buf);
 		EVP_DigestUpdate (ctx->headers_hash, buf, r);
 	}
 	else {
@@ -2166,35 +2207,43 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 	const gchar *dkim_header,
 	const gchar *dkim_domain)
 {
-	struct rspamd_mime_header *rh;
-	gint rh_num = 0;
-	GPtrArray *ar;
+	struct rspamd_mime_header *rh, *cur, *sel = NULL;
+	gint hdr_cnt = 0;
 
 	if (dkim_header == NULL) {
-		ar = g_hash_table_lookup (task->raw_headers, header_name);
+		rh = rspamd_message_get_header_array (task, header_name);
 
-		if (ar) {
-			/* Check uniqueness of the header */
-			rh = g_ptr_array_index (ar, 0);
-			if ((rh->type & RSPAMD_HEADER_UNIQUE) && ar->len > 1) {
+		if (rh) {
+			/* Check uniqueness of the header but we count from the bottom to top */
+			for (cur = rh->prev; ; cur = cur->prev) {
+				if (hdr_cnt == count) {
+					sel = cur;
+				}
+
+				hdr_cnt ++;
+
+				if (cur == rh) {
+					/* Cycle */
+					break;
+				}
+			}
+
+			if ((rh->flags & RSPAMD_HEADER_UNIQUE) && hdr_cnt > 1) {
 				guint64 random_cookie = ottery_rand_uint64 ();
 
 				msg_warn_dkim ("header %s is intended to be unique by"
 						" email standards, but we have %d headers of this"
 						" type, artificially break DKIM check", header_name,
-						ar->len);
+						hdr_cnt);
 				rspamd_dkim_hash_update (ctx->headers_hash,
 						(const gchar *)&random_cookie,
 						sizeof (random_cookie));
+				ctx->headers_canonicalised += sizeof (random_cookie);
 
 				return FALSE;
 			}
 
-			if (ar->len > count) {
-				/* Set skip count */
-				rh_num = ar->len - count - 1;
-			}
-			else {
+			if (hdr_cnt <= count) {
 				/*
 				 * If DKIM has less headers requested than there are in a
 				 * message, then it's fine, it allows adding extra headers
@@ -2202,22 +2251,24 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 				return TRUE;
 			}
 
-			rh = g_ptr_array_index (ar, rh_num);
+			/* Selected header must be non-null if previous condition is false */
+			g_assert (sel != NULL);
 
 			if (ctx->header_canon_type == DKIM_CANON_SIMPLE) {
-				rspamd_dkim_hash_update (ctx->headers_hash, rh->raw_value,
-						rh->raw_len);
-				msg_debug_dkim ("update signature with header: %*s",
-						(gint)rh->raw_len, rh->raw_value);
+				rspamd_dkim_hash_update (ctx->headers_hash, sel->raw_value,
+						sel->raw_len);
+				ctx->headers_canonicalised += sel->raw_len;
+				msg_debug_dkim ("update signature with header (idx=%d): %*s",
+						count, (gint)sel->raw_len, sel->raw_value);
 			}
 			else {
-				if (ctx->is_sign && (rh->type & RSPAMD_HEADER_FROM)) {
+				if (ctx->is_sign && (sel->flags & RSPAMD_HEADER_FROM)) {
 					/* Special handling of the From handling when rewrite is done */
 					gboolean has_rewrite = FALSE;
 					guint i;
 					struct rspamd_email_address *addr;
 
-					PTR_ARRAY_FOREACH (task->from_mime, i, addr) {
+					PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, from_mime), i, addr) {
 						if ((addr->flags & RSPAMD_EMAIL_ADDR_ORIGINAL)
 							&& !(addr->flags & RSPAMD_EMAIL_ADDR_ALIASED)) {
 							has_rewrite = TRUE;
@@ -2225,10 +2276,10 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 					}
 
 					if (has_rewrite) {
-						PTR_ARRAY_FOREACH (task->from_mime, i, addr) {
+						PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, from_mime), i, addr) {
 							if (!(addr->flags & RSPAMD_EMAIL_ADDR_ORIGINAL)) {
 								if (!rspamd_dkim_canonize_header_relaxed (ctx, addr->raw,
-										header_name, FALSE)) {
+										header_name, FALSE, i)) {
 									return FALSE;
 								}
 
@@ -2238,8 +2289,8 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 					}
 				}
 
-				if (!rspamd_dkim_canonize_header_relaxed (ctx, rh->value,
-						header_name, FALSE)) {
+				if (!rspamd_dkim_canonize_header_relaxed (ctx, sel->value,
+						header_name, FALSE, count)) {
 					return FALSE;
 				}
 			}
@@ -2249,17 +2300,15 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 		/* For signature check just use the saved dkim header */
 		if (ctx->header_canon_type == DKIM_CANON_SIMPLE) {
 			/* We need to find our own signature and use it */
-			guint i;
+			rh = rspamd_message_get_header_array (task, header_name);
 
-			ar = g_hash_table_lookup (task->raw_headers, header_name);
-
-			if (ar) {
+			if (rh) {
 				/* We need to find our own signature */
 				if (!dkim_domain) {
 					return FALSE;
 				}
 
-				PTR_ARRAY_FOREACH (ar, i, rh) {
+				DL_FOREACH (rh, cur) {
 					guint64 th = rspamd_cryptobox_fast_hash (rh->decoded,
 							strlen (rh->decoded), rspamd_hash_seed ());
 
@@ -2278,7 +2327,7 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 			if (!rspamd_dkim_canonize_header_relaxed (ctx,
 					dkim_header,
 					header_name,
-					TRUE)) {
+					TRUE, 0)) {
 				return FALSE;
 			}
 		}
@@ -2321,6 +2370,21 @@ rspamd_dkim_check_bh_cached (struct rspamd_dkim_common_ctx *ctx,
 	return res;
 }
 
+static const char *
+rspamd_dkim_type_to_string (enum rspamd_dkim_type t)
+{
+	switch (t) {
+	case RSPAMD_DKIM_NORMAL:
+		return "dkim";
+	case RSPAMD_DKIM_ARC_SIG:
+		return "arc_sig";
+	case RSPAMD_DKIM_ARC_SEAL:
+	default:
+		return "arc_seal";
+
+	}
+}
+
 /**
  * Check task for dkim context using dkim key
  * @param ctx dkim verify context
@@ -2349,7 +2413,8 @@ rspamd_dkim_check (rspamd_dkim_context_t *ctx,
 
 	/* First of all find place of body */
 	body_end = task->msg.begin + task->msg.len;
-	body_start = task->raw_headers_content.body_start;
+
+	body_start = MESSAGE_FIELD (task, raw_headers_content).body_start;
 
 	res = rspamd_mempool_alloc0 (task->task_pool, sizeof (*res));
 	res->ctx = ctx;
@@ -2417,11 +2482,12 @@ rspamd_dkim_check (rspamd_dkim_context_t *ctx,
 
 		/* Check bh field */
 		if (memcmp (ctx->bh, cached_bh->digest_normal, ctx->bhlen) != 0) {
+			msg_debug_dkim (
+					"bh value mismatch: %*xs versus %*xs, try add LF; try adding CRLF",
+					(gint)dlen, ctx->bh,
+					(gint)dlen, raw_digest);
+
 			if (cpy_ctx) {
-				msg_debug_dkim (
-						"bh value mismatch: %*xs versus %*xs, try add CRLF",
-						dlen, ctx->bh,
-						dlen, cached_bh->digest_normal);
 				/* Try add CRLF */
 #if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
 				EVP_MD_CTX_cleanup (cpy_ctx);
@@ -2437,9 +2503,9 @@ rspamd_dkim_check (rspamd_dkim_context_t *ctx,
 
 				if (memcmp (ctx->bh, raw_digest, ctx->bhlen) != 0) {
 					msg_debug_dkim (
-							"bh value mismatch: %*xs versus %*xs, try add LF",
-							dlen, ctx->bh,
-							dlen, raw_digest);
+							"bh value mismatch after added CRLF: %*xs versus %*xs, try add LF",
+							(gint)dlen, ctx->bh,
+							(gint)dlen, raw_digest);
 
 					/* Try add LF */
 #if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
@@ -2455,59 +2521,45 @@ rspamd_dkim_check (rspamd_dkim_context_t *ctx,
 					memcpy (cached_bh->digest_cr, raw_digest, sizeof (raw_digest));
 
 					if (memcmp (ctx->bh, raw_digest, ctx->bhlen) != 0) {
-						msg_debug_dkim ("bh value mismatch: %*xs versus %*xs",
-								dlen, ctx->bh,
-								dlen, raw_digest);
-#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
-						EVP_MD_CTX_cleanup (cpy_ctx);
-#else
-						EVP_MD_CTX_reset (cpy_ctx);
-#endif
+						msg_debug_dkim ("bh value mismatch after added LF: %*xs versus %*xs",
+								(gint)dlen, ctx->bh,
+								(gint)dlen, raw_digest);
 						res->fail_reason = "body hash did not verify";
 						res->rcode = DKIM_REJECT;
-						EVP_MD_CTX_destroy (cpy_ctx);
-
-						return res;
 					}
 				}
 			}
 			else if (cached_bh->digest_crlf) {
 				if (memcmp (ctx->bh, cached_bh->digest_crlf, ctx->bhlen) != 0) {
-					msg_debug_dkim ("bh value mismatch: %*xs versus %*xs",
-							dlen, ctx->bh,
-							dlen, cached_bh->digest_crlf);
+					msg_debug_dkim ("bh value mismatch after added CRLF: %*xs versus %*xs",
+							(gint)dlen, ctx->bh,
+							(gint)dlen, cached_bh->digest_crlf);
 
 					if (cached_bh->digest_cr) {
 						if (memcmp (ctx->bh, cached_bh->digest_cr, ctx->bhlen) != 0) {
 							msg_debug_dkim (
-									"bh value mismatch: %*xs versus %*xs",
-									dlen, ctx->bh,
-									dlen, cached_bh->digest_cr);
+									"bh value mismatch after added LF: %*xs versus %*xs",
+									(gint)dlen, ctx->bh,
+									(gint)dlen, cached_bh->digest_cr);
 
 							res->fail_reason = "body hash did not verify";
 							res->rcode = DKIM_REJECT;
-
-							return res;
 						}
 					}
 					else {
 
 						res->fail_reason = "body hash did not verify";
 						res->rcode = DKIM_REJECT;
-
-						return res;
 					}
 				}
 			}
 			else {
 				msg_debug_dkim (
 						"bh value mismatch: %*xs versus %*xs",
-						dlen, ctx->bh,
-						dlen, cached_bh->digest_normal);
+						(gint)dlen, ctx->bh,
+						(gint)dlen, cached_bh->digest_normal);
 				res->fail_reason = "body hash did not verify";
 				res->rcode = DKIM_REJECT;
-
-				return res;
 			}
 		}
 
@@ -2518,6 +2570,19 @@ rspamd_dkim_check (rspamd_dkim_context_t *ctx,
 			EVP_MD_CTX_reset (cpy_ctx);
 #endif
 			EVP_MD_CTX_destroy (cpy_ctx);
+		}
+
+		if (res->rcode == DKIM_REJECT) {
+			msg_info_dkim (
+					"%s: bh value mismatch: got %*Bs, expected %*Bs; "
+					"body length %d->%d; d=%s; s=%s",
+					rspamd_dkim_type_to_string (ctx->common.type),
+					(gint)dlen, cached_bh->digest_normal,
+					(gint)dlen, ctx->bh,
+					(gint)(body_end - body_start), ctx->common.body_canonicalised,
+					ctx->domain, ctx->selector);
+
+			return res;
 		}
 	}
 
@@ -2546,31 +2611,53 @@ rspamd_dkim_check (rspamd_dkim_context_t *ctx,
 	case RSPAMD_DKIM_KEY_RSA:
 		if (RSA_verify (nid, raw_digest, dlen, ctx->b, ctx->blen,
 				key->key.key_rsa) != 1) {
-			msg_debug_dkim ("rsa verify failed");
+			msg_debug_dkim ("headers rsa verify failed");
 			res->rcode = DKIM_REJECT;
-			res->fail_reason = "rsa verify failed";
+			res->fail_reason = "headers rsa verify failed";
+
+			msg_info_dkim (
+					"%s: headers RSA verification failure; "
+					"body length %d->%d; headers length %d; d=%s; s=%s; orig header: %s",
+					rspamd_dkim_type_to_string (ctx->common.type),
+					(gint)(body_end - body_start), ctx->common.body_canonicalised,
+					ctx->common.headers_canonicalised,
+					ctx->domain, ctx->selector, ctx->dkim_header);
 		}
 		break;
 	case RSPAMD_DKIM_KEY_ECDSA:
 		if (ECDSA_verify (nid, raw_digest, dlen, ctx->b, ctx->blen,
 				key->key.key_ecdsa) != 1) {
-			msg_debug_dkim ("ecdsa verify failed");
+			msg_info_dkim (
+					"%s: headers ECDSA verification failure; "
+					"body length %d->%d; headers length %d; d=%s; s=%s; orig header: %s",
+					rspamd_dkim_type_to_string (ctx->common.type),
+					(gint)(body_end - body_start), ctx->common.body_canonicalised,
+					ctx->common.headers_canonicalised,
+					ctx->domain, ctx->selector, ctx->dkim_header);
+			msg_debug_dkim ("headers ecdsa verify failed");
 			res->rcode = DKIM_REJECT;
-			res->fail_reason = "ecdsa verify failed";
+			res->fail_reason = "headers ecdsa verify failed";
 		}
 		break;
 	case RSPAMD_DKIM_KEY_EDDSA:
 		if (!rspamd_cryptobox_verify (ctx->b, ctx->blen, raw_digest, dlen,
 				key->key.key_eddsa, RSPAMD_CRYPTOBOX_MODE_25519)) {
-			msg_debug_dkim ("eddsa verify failed");
+			msg_info_dkim (
+					"%s: headers EDDSA verification failure; "
+					"body length %d->%d; headers length %d; d=%s; s=%s; orig header: %s",
+					rspamd_dkim_type_to_string (ctx->common.type),
+					(gint)(body_end - body_start), ctx->common.body_canonicalised,
+					ctx->common.headers_canonicalised,
+					ctx->domain, ctx->selector, ctx->dkim_header);
+			msg_debug_dkim ("headers eddsa verify failed");
 			res->rcode = DKIM_REJECT;
-			res->fail_reason = "eddsa verify failed";
+			res->fail_reason = "headers eddsa verify failed";
 		}
 		break;
 	}
 
 
-	if (ctx->common.type == RSPAMD_DKIM_ARC_SEAL && res == DKIM_CONTINUE) {
+	if (ctx->common.type == RSPAMD_DKIM_ARC_SEAL && res && res->rcode == DKIM_CONTINUE) {
 		switch (ctx->cv) {
 		case RSPAMD_ARC_INVALID:
 			msg_info_dkim ("arc seal is invalid i=%d", ctx->common.idx);
@@ -2697,7 +2784,7 @@ rspamd_dkim_sign_key_load (const gchar *key, gsize len,
 	nkey = g_malloc0 (sizeof (*nkey));
 	nkey->mtime = mtime;
 
-	msg_debug_dkim_taskless ("got public key with length %d and type %d",
+	msg_debug_dkim_taskless ("got public key with length %z and type %d",
 			len, type);
 
 	/* Load key file if needed */
@@ -2763,7 +2850,7 @@ rspamd_dkim_sign_key_load (const gchar *key, gsize len,
 			nkey->type = RSPAMD_DKIM_KEY_EDDSA;
 			nkey->key.key_eddsa = g_malloc (
 					rspamd_cryptobox_sk_sig_bytes (RSPAMD_CRYPTOBOX_MODE_25519));
-			ed25519_seed_keypair (pk, nkey->key.key_eddsa, (char *) key);
+			crypto_sign_ed25519_seed_keypair (pk, nkey->key.key_eddsa, key);
 			nkey->keylen = rspamd_cryptobox_sk_sig_bytes (RSPAMD_CRYPTOBOX_MODE_25519);
 		}
 		else {
@@ -2949,7 +3036,7 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 
 	/* First of all find place of body */
 	body_end = task->msg.begin + task->msg.len;
-	body_start = task->raw_headers_content.body_start;
+	body_start = MESSAGE_FIELD (task, raw_headers_content).body_start;
 
 	if (len > 0) {
 		ctx->common.len = len;
@@ -2999,12 +3086,13 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 	}
 	else {
 		g_assert (arc_cv != NULL);
-		rspamd_printf_gstring (hdr, "i=%d; a=%s; c=%s/%s; d=%s; s=%s; cv=%s; ",
-				arc_cv,
+		rspamd_printf_gstring (hdr, "i=%d; a=%s; d=%s; s=%s; cv=%s; ",
+				idx,
 				ctx->key->type == RSPAMD_DKIM_KEY_RSA ?
 						"rsa-sha256" : "ed25519-sha256",
-				idx,
-				domain, selector);
+				domain,
+				selector,
+				arc_cv);
 	}
 
 	if (expire > 0) {
@@ -3021,6 +3109,8 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 
 	/* Now canonize headers */
 	for (i = 0; i < ctx->common.hlist->len; i++) {
+		struct rspamd_mime_header *rh, *cur;
+
 		dh = g_ptr_array_index (ctx->common.hlist, i);
 
 		/* We allow oversigning if dh->count > number of headers with this name */
@@ -3028,25 +3118,25 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 
 		if (hstat.s.flags & RSPAMD_DKIM_FLAG_OVERSIGN) {
 			/* Do oversigning */
-			GPtrArray *ar;
 			guint count = 0;
 
-			ar = g_hash_table_lookup (task->raw_headers, dh->name);
+			rh = rspamd_message_get_header_array (task, dh->name);
 
-			if (ar) {
-				count = ar->len;
-			}
-
-			for (j = 0; j < count; j ++) {
-				/* Sign all existing headers */
-				rspamd_dkim_canonize_header (&ctx->common, task, dh->name, j,
-						NULL, NULL);
+			if (rh) {
+				DL_FOREACH (rh, cur) {
+					/* Sign all existing headers */
+					rspamd_dkim_canonize_header (&ctx->common, task, dh->name,
+							count,
+							NULL, NULL);
+					count++;
+				}
 			}
 
 			/* Now add one more entry to oversign */
 			if (count > 0 || !(hstat.s.flags & RSPAMD_DKIM_FLAG_OVERSIGN_EXISTING)) {
 				cur_len = (strlen (dh->name) + 1) * (count + 1);
 				headers_len += cur_len;
+
 				if (headers_len > 70 && i > 0 && i < ctx->common.hlist->len - 1) {
 					rspamd_printf_gstring (hdr, "  ");
 					headers_len = cur_len;
@@ -3058,7 +3148,9 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 			}
 		}
 		else {
-			if (g_hash_table_lookup (task->raw_headers, dh->name)) {
+			rh = rspamd_message_get_header_array (task, dh->name);
+
+			if (rh) {
 				if (hstat.s.count > 0) {
 
 					cur_len = (strlen (dh->name) + 1) * (hstat.s.count);
@@ -3120,7 +3212,8 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 		if (!rspamd_dkim_canonize_header_relaxed (&ctx->common,
 				hdr->str,
 				hname,
-				TRUE)) {
+				TRUE,
+				0)) {
 
 			g_string_free (hdr, TRUE);
 			return NULL;
@@ -3130,6 +3223,7 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 		/* Will likely have issues with folding */
 		rspamd_dkim_hash_update (ctx->common.headers_hash, hdr->str,
 				hdr->len);
+		ctx->common.headers_canonicalised += hdr->len;
 		msg_debug_task ("update signature with header: %*s",
 				(gint)hdr->len, hdr->str);
 	}
@@ -3161,13 +3255,13 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 		return NULL;
 	}
 
-	if (task->flags & RSPAMD_TASK_FLAG_MILTER) {
+	if (task->protocol_flags & RSPAMD_TASK_PROTOCOL_FLAG_MILTER) {
 		b64_data = rspamd_encode_base64_fold (sig_buf, sig_len, 70, NULL,
 				RSPAMD_TASK_NEWLINES_LF);
 	}
 	else {
 		b64_data = rspamd_encode_base64_fold (sig_buf, sig_len, 70, NULL,
-				task->nlines_type);
+				MESSAGE_FIELD (task, nlines_type));
 	}
 
 	rspamd_printf_gstring (hdr, "%s", b64_data);

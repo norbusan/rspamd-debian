@@ -15,6 +15,7 @@
  */
 #include "config.h"
 #include "rspamd.h"
+#include "libmime/message.h"
 #include "lua/lua_common.h"
 #include "unix-std.h"
 #include "cfg_file_private.h"
@@ -100,7 +101,7 @@ rspamd_roll_history_update (struct roll_history *history,
 {
 	guint row_num;
 	struct roll_history_row *row;
-	struct rspamd_metric_result *metric_res;
+	struct rspamd_scan_result *metric_res;
 	struct history_metric_callback_data cbdata;
 	struct rspamd_action *action;
 
@@ -136,11 +137,13 @@ rspamd_roll_history_update (struct roll_history *history,
 		rspamd_strlcpy (row->from_addr, "unknown", sizeof (row->from_addr));
 	}
 
-	memcpy (&row->tv, &task->tv, sizeof (row->tv));
+	row->timestamp = task->task_timestamp;
 
 	/* Strings */
-	rspamd_strlcpy (row->message_id, task->message_id,
-		sizeof (row->message_id));
+	if (task->message) {
+		rspamd_strlcpy (row->message_id, MESSAGE_FIELD (task, message_id),
+				sizeof (row->message_id));
+	}
 	if (task->user) {
 		rspamd_strlcpy (row->user, task->user, sizeof (row->user));
 	}
@@ -157,7 +160,7 @@ rspamd_roll_history_update (struct roll_history *history,
 	}
 	else {
 		row->score = metric_res->score;
-		action = rspamd_check_action_metric (task);
+		action = rspamd_check_action_metric (task, NULL);
 		row->action = action->action_type;
 		row->required_score = rspamd_task_get_required_score (task, metric_res);
 		cbdata.pos = row->symbols;
@@ -173,7 +176,7 @@ rspamd_roll_history_update (struct roll_history *history,
 		}
 	}
 
-	row->scan_time = task->time_real_finish - task->time_real;
+	row->scan_time = task->time_real_finish - task->task_timestamp;
 	row->len = task->msg.len;
 	g_atomic_int_set (&row->completed, TRUE);
 }
@@ -282,7 +285,7 @@ rspamd_roll_history_load (struct roll_history *history, const gchar *filename)
 			elt = ucl_object_lookup (cur, "time");
 
 			if (elt && ucl_object_type (elt) == UCL_FLOAT) {
-				double_to_tv (ucl_object_todouble (elt), &row->tv);
+				row->timestamp = ucl_object_todouble (elt);
 			}
 
 			elt = ucl_object_lookup (cur, "id");
@@ -391,8 +394,8 @@ rspamd_roll_history_save (struct roll_history *history, const gchar *filename)
 
 		elt = ucl_object_typed_new (UCL_OBJECT);
 
-		ucl_object_insert_key (elt, ucl_object_fromdouble (
-				tv_to_double (&row->tv)), "time", 0, false);
+		ucl_object_insert_key (elt, ucl_object_fromdouble (row->timestamp),
+				"time", 0, false);
 		ucl_object_insert_key (elt, ucl_object_fromstring (row->message_id),
 				"id", 0, false);
 		ucl_object_insert_key (elt, ucl_object_fromstring (row->symbols),

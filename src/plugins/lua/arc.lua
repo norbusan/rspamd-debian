@@ -1,5 +1,5 @@
 --[[
-Copyright (c) 2017, Vsevolod Stakhov <vsevolod@highsecure.ru>
+Copyright (c) 2020, Vsevolod Stakhov <vsevolod@highsecure.ru>
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -76,7 +76,7 @@ local settings = {
   allow_hdrfrom_mismatch_sign_networks = false,
   allow_hdrfrom_multiple = false,
   allow_username_mismatch = false,
-  auth_only = true,
+  sign_authenticated = true,
   domain = {},
   path = string.format('%s/%s/%s', rspamd_paths['DBDIR'], 'arc', '$domain.$selector.key'),
   sign_local = true,
@@ -88,6 +88,7 @@ local settings = {
   use_redis = false,
   key_prefix = 'arc_keys', -- default hash name
   reuse_auth_results = false, -- Reuse the existing authentication results
+  whitelisted_signers_map = nil, -- Trusted signers domains
 }
 
 -- To match normal AR
@@ -171,7 +172,7 @@ local function arc_callback(task)
     -- We mandate that count of seals is equal to count of signatures
     rspamd_logger.infox(task, 'number of seals (%s) is not equal to number of signatures (%s)',
         #arc_seal_headers, #arc_sig_headers)
-    task:insert_result(arc_symbols['invalid'], 'invalid count of seals and signatures')
+    task:insert_result(arc_symbols['invalid'], 1.0, 'invalid count of seals and signatures')
     return
   end
 
@@ -180,7 +181,8 @@ local function arc_callback(task)
     sigs = {},
     checked = 0,
     res = 'success',
-    errors = {}
+    errors = {},
+    allowed_by_trusted = false
   }
 
   parse_arc_header(arc_seal_headers, cbdata.seals)
@@ -214,26 +216,36 @@ local function arc_callback(task)
   task:cache_set('arc-sigs', cbdata.sigs)
   task:cache_set('arc-seals', cbdata.seals)
 
-  local function arc_seal_cb(_, res, err, domain)
-    cbdata.checked = cbdata.checked + 1
-    lua_util.debugm(N, task, 'checked arc seal: %s(%s), %s processed',
-        res, err, cbdata.checked)
+  local function gen_arc_seal_cb(sig)
+    return function (_, res, err, domain)
+      cbdata.checked = cbdata.checked + 1
+      lua_util.debugm(N, task, 'checked arc seal: %s(%s), %s processed',
+          res, err, cbdata.checked)
 
-    if not res then
-      cbdata.res = 'fail'
-      if err and domain then
-        table.insert(cbdata.errors, string.format('sig:%s:%s', domain, err))
+      if not res then
+        cbdata.res = 'fail'
+        if err and domain then
+          table.insert(cbdata.errors, string.format('sig:%s:%s', domain, err))
+        end
       end
-    end
 
-    if cbdata.checked == #arc_sig_headers then
-      if cbdata.res == 'success' then
-        task:insert_result(arc_symbols['allow'], 1.0, 'i=' ..
-            tostring(cbdata.checked))
-      else
-        task:insert_result(arc_symbols['reject'], 1.0,
-          rspamd_logger.slog('seal check failed: %s, %s', cbdata.res,
-            cbdata.errors))
+      if settings.whitelisted_signers_map and cbdata.res == 'success' then
+        if settings.whitelisted_signers_map:get_key(sig.d) then
+          -- Whitelisted signer has been found in a valid chain
+          task:insert_result(arc_symbols.trusted_allow, 1.0,
+              string.format('%s:s=%s:i=%d', domain, sig.s, cbdata.checked))
+        end
+      end
+
+      if cbdata.checked == #arc_sig_headers then
+        if cbdata.res == 'success' then
+          task:insert_result(arc_symbols.allow, 1.0, string.format('%s:s=%s:i=%d',
+              domain, sig.s, cbdata.checked))
+        else
+          task:insert_result(arc_symbols.reject, 1.0,
+              rspamd_logger.slog('seal check failed: %s, %s', cbdata.res,
+                  cbdata.errors))
+        end
       end
     end
   end
@@ -253,10 +265,11 @@ local function arc_callback(task)
       cbdata.checked = 0
       fun.each(
         function(sig)
-          local ret, lerr = dkim_verify(task, sig.header, arc_seal_cb, 'arc-seal')
+          local ret, lerr = dkim_verify(task, sig.header, gen_arc_seal_cb(sig), 'arc-seal')
           if not ret then
             cbdata.res = 'fail'
-            table.insert(cbdata.errors, string.format('sig:%s:%s', sig.d or '', lerr))
+            table.insert(cbdata.errors, string.format('seal:%s:s=%s:i=%s:%s',
+                sig.d or '', sig.s or '', sig.i or '', lerr))
             cbdata.checked = cbdata.checked + 1
             lua_util.debugm(N, task, 'checked arc seal %s: %s(%s), %s processed',
               sig.d, ret, lerr, cbdata.checked)
@@ -393,6 +406,24 @@ rspamd_config:register_symbol({
   group = 'policies',
   groups = {'arc'},
 })
+
+if settings.whitelisted_signers_map then
+  local lua_maps = require "lua_maps"
+  settings.whitelisted_signers_map = lua_maps.map_add_from_ucl(settings.whitelisted_signers_map,
+      'set',
+      'ARC trusted signers domains')
+  if settings.whitelisted_signers_map then
+    arc_symbols.trusted_allow = arc_symbols.trusted_allow or 'ARC_ALLOW_TRUSTED'
+    rspamd_config:register_symbol({
+      name = arc_symbols.trusted_allow,
+      parent = id,
+      type = 'virtual',
+      score = -2.0,
+      group = 'policies',
+      groups = {'arc'},
+    })
+  end
+end
 
 rspamd_config:register_dependency('ARC_CALLBACK', symbols['spf_allow_symbol'])
 rspamd_config:register_dependency('ARC_CALLBACK', symbols['dkim_allow_symbol'])

@@ -72,44 +72,13 @@ static const struct luaL_reg regexplib_f[] = {
 
 rspamd_mempool_t *regexp_static_pool = NULL;
 
-static struct rspamd_lua_regexp *
-lua_check_regexp (lua_State * L)
+struct rspamd_lua_regexp *
+lua_check_regexp (lua_State * L, gint pos)
 {
-	void *ud = rspamd_lua_check_udata (L, 1, "rspamd{regexp}");
+	void *ud = rspamd_lua_check_udata (L, pos, "rspamd{regexp}");
 
-	luaL_argcheck (L, ud != NULL, 1, "'regexp' expected");
+	luaL_argcheck (L, ud != NULL, pos, "'regexp' expected");
 	return ud ? *((struct rspamd_lua_regexp **)ud) : NULL;
-}
-
-static gchar *
-rspamd_lua_get_module_name (lua_State *L)
-{
-	lua_Debug d;
-	gchar *p;
-	gchar func_buf[128];
-
-	if (lua_getstack (L, 1, &d) == 1) {
-		(void) lua_getinfo (L, "Sl", &d);
-		if ((p = strrchr (d.short_src, '/')) == NULL) {
-			p = d.short_src;
-		}
-		else {
-			p++;
-		}
-
-		if (strlen (p) > 20) {
-			rspamd_snprintf (func_buf, sizeof (func_buf), "%10s...]:%d", p,
-					d.currentline);
-		}
-		else {
-			rspamd_snprintf (func_buf, sizeof (func_buf), "%s:%d", p,
-					d.currentline);
-		}
-
-		return g_strdup (func_buf);
-	}
-
-	return NULL;
 }
 
 /***
@@ -401,7 +370,7 @@ static int
 lua_regexp_get_pattern (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	struct rspamd_lua_regexp *re = lua_check_regexp (L, 1);
 
 	if (re && re->re && !IS_DESTROYED (re)) {
 		lua_pushstring (L, rspamd_regexp_get_pattern (re->re));
@@ -423,10 +392,10 @@ static int
 lua_regexp_set_limit (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	struct rspamd_lua_regexp *re = lua_check_regexp (L, 1);
 	gint64 lim;
 
-	lim = luaL_checknumber (L, 2);
+	lim = lua_tointeger (L, 2);
 
 	if (re && re->re && !IS_DESTROYED (re)) {
 		if (lim > 0) {
@@ -450,7 +419,7 @@ static int
 lua_regexp_set_max_hits (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	struct rspamd_lua_regexp *re = lua_check_regexp (L, 1);
 	guint lim;
 
 	lim = luaL_checkinteger (L, 2);
@@ -474,7 +443,7 @@ static int
 lua_regexp_get_max_hits (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	struct rspamd_lua_regexp *re = lua_check_regexp (L, 1);
 
 	if (re && re->re && !IS_DESTROYED (re)) {
 		lua_pushinteger (L, rspamd_regexp_get_maxhits (re->re));
@@ -517,12 +486,12 @@ static int
 lua_regexp_search (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	struct rspamd_lua_regexp *re = lua_check_regexp (L, 1);
 	const gchar *data = NULL;
 	struct rspamd_lua_text *t;
 	const gchar *start = NULL, *end = NULL;
 	gint i;
-	gsize len, capn;
+	gsize len = 0, capn;
 	gboolean matched = FALSE, capture = FALSE, raw = FALSE;
 	GArray *captures = NULL;
 	struct rspamd_re_capture *cap;
@@ -543,7 +512,7 @@ lua_regexp_search (lua_State *L)
 			raw = lua_toboolean (L, 3);
 		}
 
-		if (data) {
+		if (data && len > 0) {
 			if (lua_gettop (L) >= 4) {
 				capture = TRUE;
 				captures = g_array_new (FALSE, TRUE,
@@ -588,12 +557,14 @@ lua_regexp_search (lua_State *L)
 			if (capture) {
 				g_array_free (captures, TRUE);
 			}
-
-			return 1;
+		}
+		else {
+			lua_pushnil (L);
 		}
 	}
-
-	lua_pushnil (L);
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
 
 	return 1;
 }
@@ -611,7 +582,7 @@ static int
 lua_regexp_match (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	struct rspamd_lua_regexp *re = lua_check_regexp (L, 1);
 	struct rspamd_lua_text *t;
 	const gchar *data = NULL;
 	gsize len = 0;
@@ -633,7 +604,7 @@ lua_regexp_match (lua_State *L)
 			raw = lua_toboolean (L, 3);
 		}
 
-		if (data) {
+		if (data && len > 0) {
 			if (re->match_limit > 0) {
 				len = MIN (len, re->match_limit);
 			}
@@ -644,11 +615,14 @@ lua_regexp_match (lua_State *L)
 			else {
 				lua_pushboolean (L, FALSE);
 			}
-			return 1;
+		}
+		else {
+			lua_pushboolean (L, FALSE);
 		}
 	}
-
-	lua_pushnil (L);
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
 
 	return 1;
 }
@@ -669,7 +643,7 @@ static int
 lua_regexp_matchn (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	struct rspamd_lua_regexp *re = lua_check_regexp (L, 1);
 	struct rspamd_lua_text *t;
 	const gchar *data = NULL, *start = NULL, *end = NULL;
 	gint max_matches, matches;
@@ -688,14 +662,14 @@ lua_regexp_matchn (lua_State *L)
 			}
 		}
 
-		max_matches = lua_tonumber (L, 3);
+		max_matches = lua_tointeger (L, 3);
+		matches = 0;
 
 		if (lua_gettop (L) == 4) {
 			raw = lua_toboolean (L, 4);
 		}
 
-		if (data) {
-			matches = 0;
+		if (data && len > 0) {
 
 			if (re->match_limit > 0) {
 				len = MIN (len, re->match_limit);
@@ -714,14 +688,14 @@ lua_regexp_matchn (lua_State *L)
 					break;
 				}
 			}
-
-			lua_pushinteger (L, matches);
-
-			return 1;
 		}
+
+		lua_pushinteger (L, matches);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
 	}
 
-	lua_pushnil (L);
 
 	return 1;
 }
@@ -741,7 +715,7 @@ static int
 lua_regexp_split (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_regexp *re = lua_check_regexp (L);
+	struct rspamd_lua_regexp *re = lua_check_regexp (L, 1);
 	const gchar *data = NULL;
 	struct rspamd_lua_text *t;
 	gboolean matched = FALSE, is_text = FALSE;
@@ -770,10 +744,11 @@ lua_regexp_split (lua_State *L)
 			len = MIN (len, re->match_limit);
 		}
 
-		if (data) {
+		if (data && len > 0) {
 			lua_newtable (L);
 			i = 0;
 			old_start = data;
+
 			while (rspamd_regexp_search (re->re, data, len, &start, &end, FALSE,
 					NULL)) {
 				if (start - old_start > 0) {
@@ -824,6 +799,9 @@ lua_regexp_split (lua_State *L)
 			return 1;
 		}
 	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
 
 	lua_pushnil (L);
 	return 1;
@@ -837,7 +815,7 @@ static gint
 lua_regexp_destroy (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_regexp *to_del = lua_check_regexp (L);
+	struct rspamd_lua_regexp *to_del = lua_check_regexp (L, 1);
 
 	if (to_del) {
 		rspamd_regexp_cache_remove (NULL, to_del->re);
@@ -853,7 +831,7 @@ static gint
 lua_regexp_gc (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_regexp *to_del = lua_check_regexp (L);
+	struct rspamd_lua_regexp *to_del = lua_check_regexp (L, 1);
 
 	if (to_del) {
 		if (!IS_DESTROYED (to_del)) {
@@ -880,22 +858,18 @@ lua_load_regexp (lua_State * L)
 void
 luaopen_regexp (lua_State * L)
 {
-	luaL_newmetatable (L, "rspamd{regexp}");
-	lua_pushstring (L, "__index");
-	lua_pushvalue (L, -2);
-	lua_settable (L, -3);
-
-	lua_pushstring (L, "class");
-	lua_pushstring (L, "rspamd{regexp}");
-	lua_rawset (L, -3);
-
-	luaL_register (L, NULL, regexplib_m);
-	rspamd_lua_add_preload (L, "rspamd_regexp", lua_load_regexp);
-
-	if (regexp_static_pool == NULL) {
+	if (!regexp_static_pool) {
 		regexp_static_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (),
-				"regexp_lua_pool");
+				"regexp_lua_pool", 0);
 	}
 
-	lua_settop (L, 0);
+	rspamd_lua_new_class (L, "rspamd{regexp}", regexplib_m);
+	lua_pop (L, 1);
+	rspamd_lua_add_preload (L, "rspamd_regexp", lua_load_regexp);
+}
+
+RSPAMD_DESTRUCTOR (lua_re_static_pool_dtor) {
+	if (regexp_static_pool) {
+		rspamd_mempool_delete (regexp_static_pool);
+	}
 }

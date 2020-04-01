@@ -23,9 +23,10 @@ Check Rspamc
   ${inverse} =  Evaluate  'inverse' in $kwargs
   ${re} =  Evaluate  're' in $kwargs
   ${rc} =  Set Variable If  ${has_rc} == True  &{kwargs}[rc]  0
-  : FOR  ${i}  IN  @{args}
-  \  Run Keyword If  ${re} == True  Check Rspamc Match Regexp  ${result.stdout}  ${i}  ${inverse}
-  \  ...  ELSE  Check Rspamc Match String  ${result.stdout}  ${i}  ${inverse}
+  FOR  ${i}  IN  @{args}
+    Run Keyword If  ${re} == True  Check Rspamc Match Regexp  ${result.stdout}  ${i}  ${inverse}
+    ...  ELSE  Check Rspamc Match String  ${result.stdout}  ${i}  ${inverse}
+  END
   Run Keyword If  @{args} == @{EMPTY}  Check Rspamc Match Default  ${result.stdout}  ${inverse}
   Should Be Equal As Integers  ${result.rc}  ${rc}
 
@@ -61,17 +62,18 @@ Generic Setup
   [Arguments]  @{vargs}  &{kwargs}
   &{d} =  Run Rspamd  @{vargs}  &{kwargs}
   ${keys} =  Get Dictionary Keys  ${d}
-  : FOR  ${i}  IN  @{keys}
-  \  Run Keyword If  '${RSPAMD_SCOPE}' == 'Suite'  Set Suite Variable  ${${i}}  &{d}[${i}]
-  \  ...  ELSE IF  '${RSPAMD_SCOPE}' == 'Test'  Set Test Variable  ${${i}}  &{d}[${i}]
-  \  ...  ELSE  Fail  'RSPAMD_SCOPE must be Test or Suite'
+  FOR  ${i}  IN  @{keys}
+    Run Keyword If  '${RSPAMD_SCOPE}' == 'Suite'  Set Suite Variable  ${${i}}  &{d}[${i}]
+    ...  ELSE IF  '${RSPAMD_SCOPE}' == 'Test'  Set Test Variable  ${${i}}  &{d}[${i}]
+    ...  ELSE  Fail  'RSPAMD_SCOPE must be Test or Suite'
+  END
 
 Generic Teardown
   [Arguments]  @{ports}
   Run Keyword If  '${CONTROLLER_ERRORS}' == 'True'  Check Controller Errors
   Shutdown Process With Children  ${RSPAMD_PID}
   Log does not contain segfault record
-  Save Run Results  ${TMPDIR}  rspamd.log redis.log rspamd.conf clickhouse-server.log clickhouse-server.err.log clickhouse-config.xml
+  Save Run Results  ${TMPDIR}  rspamd.log redis.log rspamd.conf clickhouse-config.xml
   Collect Lua Coverage
   Cleanup Temporary Directory  ${TMPDIR}
 
@@ -108,9 +110,6 @@ Redis SET
   Should Be Equal As Integers  ${result.rc}  0
 
 Run Redis
-  ${has_TMPDIR} =  Evaluate  'TMPDIR'
-  ${tmpdir} =  Run Keyword If  '${has_TMPDIR}' == 'True'  Set Variable  &{kwargs}[TMPDIR]
-  ...  ELSE  Make Temporary Directory
   ${template} =  Get File  ${TESTDIR}/configs/redis-server.conf
   ${config} =  Replace Variables  ${template}
   Create File  ${TMPDIR}/redis-server.conf  ${config}
@@ -118,8 +117,8 @@ Run Redis
   ${result} =  Run Process  redis-server  ${TMPDIR}/redis-server.conf
   Run Keyword If  ${result.rc} != 0  Log  ${result.stderr}
   Should Be Equal As Integers  ${result.rc}  0
-  Wait Until Keyword Succeeds  30 sec  1 sec  Check Pidfile  ${TMPDIR}/redis.pid
-  Wait Until Keyword Succeeds  30 sec  1 sec  TCP Connect  ${REDIS_ADDR}  ${REDIS_PORT}
+  Wait Until Keyword Succeeds  5x  1 sec  Check Pidfile  ${TMPDIR}/redis.pid  timeout=0.5s
+  Wait Until Keyword Succeeds  5x  1 sec  Redis Check  ${REDIS_ADDR}  ${REDIS_PORT}
   ${REDIS_PID} =  Get File  ${TMPDIR}/redis.pid
   Run Keyword If  '${REDIS_SCOPE}' == 'Test'  Set Test Variable  ${REDIS_PID}
   ...  ELSE IF  '${REDIS_SCOPE}' == 'Suite'  Set Suite Variable  ${REDIS_PID}
@@ -134,8 +133,8 @@ Run Nginx
   ${result} =  Run Process  nginx  -c  ${TMPDIR}/nginx.conf
   Run Keyword If  ${result.rc} != 0  Log  ${result.stderr}
   Should Be Equal As Integers  ${result.rc}  0
-  Wait Until Keyword Succeeds  30 sec  1 sec  Check Pidfile  ${TMPDIR}/nginx.pid
-  Wait Until Keyword Succeeds  30 sec  1 sec  TCP Connect  ${NGINX_ADDR}  ${NGINX_PORT}
+  Wait Until Keyword Succeeds  10x  1 sec  Check Pidfile  ${TMPDIR}/nginx.pid  timeout=0.5s
+  Wait Until Keyword Succeeds  5x  1 sec  TCP Connect  ${NGINX_ADDR}  ${NGINX_PORT}
   ${NGINX_PID} =  Get File  ${TMPDIR}/nginx.pid
   Run Keyword If  '${NGINX_SCOPE}' == 'Test'  Set Test Variable  ${NGINX_PID}
   ...  ELSE IF  '${NGINX_SCOPE}' == 'Suite'  Set Suite Variable  ${NGINX_PID}
@@ -144,7 +143,8 @@ Run Nginx
 
 Run Rspamc
   [Arguments]  @{args}
-  ${result} =  Run Process  ${RSPAMC}  -t  60  --header  Queue-ID\=${TEST NAME}  @{args}  env:LD_LIBRARY_PATH=${TESTDIR}/../../contrib/aho-corasick
+  ${result} =  Run Process  ${RSPAMC}  -t  60  --header  Queue-ID\=${TEST NAME}
+  ...  @{args}  env:LD_LIBRARY_PATH=${TESTDIR}/../../contrib/aho-corasick
   Log  ${result.stdout}
   [Return]  ${result}
 
@@ -158,9 +158,10 @@ Run Rspamd
   ...  ELSE  Make Temporary Directory
   Set Directory Ownership  ${tmpdir}  ${RSPAMD_USER}  ${RSPAMD_GROUP}
   ${template} =  Get File  ${CONFIG}
-  : FOR  ${i}  IN  @{vargs}
-  \  ${newvalue} =  Replace Variables  ${${i}}
-  \  Set To Dictionary  ${d}  ${i}=${newvalue}
+  FOR  ${i}  IN  @{vargs}
+    ${newvalue} =  Replace Variables  ${${i}}
+    Set To Dictionary  ${d}  ${i}=${newvalue}
+  END
   ${config} =  Replace Variables  ${template}
   ${config} =  Replace Variables  ${config}
   Log  ${config}
@@ -170,7 +171,8 @@ Run Rspamd
   Run Keyword If  ${result.rc} != 0  Log  ${result.stderr}
   ${rspamd_logpos} =  Log Logs  ${tmpdir}/rspamd.log  0
   Should Be Equal As Integers  ${result.rc}  0
-  Wait Until Keyword Succeeds  30 sec  1 sec  Check Pidfile  ${tmpdir}/rspamd.pid
+  Wait Until Keyword Succeeds  10x  1 sec  Check Pidfile  ${tmpdir}/rspamd.pid  timeout=0.5s
+  Wait Until Keyword Succeeds  5x  1 sec  Ping Rspamd  ${LOCAL_ADDR}  ${PORT_NORMAL}
   ${rspamd_pid} =  Get File  ${tmpdir}/rspamd.pid
   Set To Dictionary  ${d}  RSPAMD_LOGPOS=${rspamd_logpos}  RSPAMD_PID=${rspamd_pid}  TMPDIR=${tmpdir}
   [Return]  &{d}
@@ -188,8 +190,10 @@ Simple Teardown
 Sync Fuzzy Storage
   [Arguments]  @{vargs}
   ${len} =  Get Length  ${vargs}
-  ${result} =  Run Keyword If  $len == 0  Run Process  ${RSPAMADM}  control  -s  ${TMPDIR}/rspamd.sock  fuzzy_sync
-  ...  ELSE  Run Process  ${RSPAMADM}  control  -s  @{vargs}[0]/rspamd.sock  fuzzy_sync
+  ${result} =  Run Keyword If  $len == 0  Run Process  ${RSPAMADM}  control  -s
+  ...  ${TMPDIR}/rspamd.sock  fuzzy_sync
+  ...  ELSE  Run Process  ${RSPAMADM}  control  -s  @{vargs}[0]/rspamd.sock
+  ...  fuzzy_sync
   Log  ${result.stdout}
   Run Keyword If  $len == 0  Follow Rspamd Log
   ...  ELSE  Custom Follow Rspamd Log  @{vargs}[0]/rspamd.log  @{vargs}[1]  @{vargs}[2]  @{vargs}[3]

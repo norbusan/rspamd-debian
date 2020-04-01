@@ -32,16 +32,16 @@ textarea {
 }
 
 /* local overrides */
-.disconnect {
-    margin: 9px 0 0;
-    padding-bottom: 5px;
-    font-size: 11px;
-    color: #777;
-    -moz-text-shadow: 0 1px 0 #fff;
-    -webkit-text-shadow: 0 1px 0 #fff;
-    -o-text-shadow: 0 1px 0 #fff;
-    -ms-text-shadow: 0 1px 0 #fff;
-    text-shadow: 0 1px 0 #fff;
+.navbar-brand {
+    margin-left: auto !important;
+    padding: 0;
+}
+.navbar-brand > img {
+    height: 50px;
+}
+.btn-group > .btn.btn-default.radius-right {
+    border-top-right-radius: 4px !important;
+    border-bottom-right-radius: 4px !important;
 }
 .chart-content {
     text-align: center;
@@ -495,17 +495,17 @@ td.maps-cell {
 }
 
 /* history table */
-#historyTable > tbody > tr > td,
-#historyTable > thead > tr > th {
+#historyTable_scan > tbody > tr > td,
+#historyTable_scan > thead > tr > th,
+#historyTable_history > tbody > tr > td,
+#historyTable_history > thead > tr > th {
     padding: 4px;
 }
-#historyTable > thead > tr > th {
+#historyTable_scan > thead > tr > th,
+#historyTable_history > thead > tr > th {
     padding-right: 20px;
 }
 
-#selSymOrder {
-    height: auto;
-}
 .widget-title-form label {
     font-size: 12px;
     font-weight: normal;

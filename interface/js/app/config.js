@@ -166,11 +166,7 @@ define(["jquery"],
         ui.setup = function (rspamd) {
         // Modal form for maps
             $(document).on("click", "[data-toggle=\"modal\"]", function () {
-                function getSelector(id) {
-                    var e = document.getElementById(id);
-                    return e.options[e.selectedIndex].value;
-                }
-                var checked_server = getSelector("selSrv");
+                var checked_server = rspamd.getSelector("selSrv");
                 var item = $(this).data("item");
                 rspamd.query("getmap", {
                     headers: {
@@ -192,7 +188,6 @@ define(["jquery"],
 
                         $("#modalTitle").html(item.uri);
                         $("#" + item.map).first().show();
-                        $("#modalDialog .progress").hide();
                         $("#modalDialog").modal({backdrop:true, keyboard:"show", show:true});
                         if (item.editable === false) {
                             $("#modalSave").hide();
@@ -208,8 +203,8 @@ define(["jquery"],
                 return false;
             });
             // close modal without saving
-            $("[data-dismiss=\"modal\"]").on("click", function () {
-                $("#modalBody form").hide();
+            $("#modalDialog").on("hidden.bs.modal", function () {
+                $("#modalBody form").remove();
             });
             // @save forms from modal
             function saveMap(server) {

@@ -21,7 +21,6 @@
 #define RSPAMD_MEMPOOL_AVG_WORDS_LEN "avg_words_len"
 #define RSPAMD_MEMPOOL_SHORT_WORDS_CNT "short_words_cnt"
 #define RSPAMD_MEMPOOL_HEADERS_HASH "headers_hash"
-#define RSPAMD_MEMPOOL_SETTINGS_HASH "settings_hash"
 #define RSPAMD_MEMPOOL_MTA_TAG "MTA-Tag"
 #define RSPAMD_MEMPOOL_MTA_NAME "MTA-Name"
 #define RSPAMD_MEMPOOL_SPF_DOMAIN "spf_domain"
@@ -39,5 +38,7 @@
 #define RSPAMD_MEMPOOL_ARC_SIGN_SELECTOR "arc_selector"
 #define RSPAMD_MEMPOOL_STAT_SIGNATURE "stat_signature"
 #define RSPAMD_MEMPOOL_FUZZY_RESULT "fuzzy_hashes"
+#define RSPAMD_MEMPOOL_SPAM_LEARNS "spam_learns"
+#define RSPAMD_MEMPOOL_HAM_LEARNS "ham_learns"
 
 #endif

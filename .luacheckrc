@@ -15,7 +15,6 @@ globals = {
   'classifiers',
   'config',
   'confighelp',
-  'kmail_msgid',
   'rspamd_classifiers',
   'rspamd_config',
   'rspamd_count_metatokens',
@@ -35,7 +34,9 @@ globals = {
   'rspamadm_ev_base',
   'rspamadm_session',
   'rspamadm_dns_resolver',
-  'jit'
+  'jit',
+  'table.unpack',
+  'unpack',
 }
 
 ignore = {
@@ -52,11 +53,10 @@ files['/**/src/plugins/lua/spamassassin.lua'].globals = {
 files['/**/src/plugins/lua/greylist.lua'].globals = {
   'math.ifloor',
 }
-
-files['/**/lualib/lua_util.lua'].globals = {
-  'table.unpack',
-  'unpack',
+files['/**/src/plugins/lua/reputation.lua'].globals = {
+  'math.tanh',
 }
+
 
 files['/**/lualib/lua_redis.lua'].globals = {
   'rspamadm_ev_base',

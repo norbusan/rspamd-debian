@@ -63,7 +63,7 @@ ENDMACRO(AddModules MLIST WLIST)
 # Rspamd core components
 IF (ENABLE_CLANG_PLUGIN MATCHES "ON")
 	SET(CMAKE_C_FLAGS
-			"${CMAKE_C_FLAGS} -Xclang -load -Xclang ${CMAKE_CURRENT_BINARY_DIR}/../clang-plugin/librspamd-clang.so -Xclang -add-plugin -Xclang rspamd-ast")
+			"${CMAKE_C_FLAGS} -Xclang -load -Xclang ${CMAKE_CURRENT_BINARY_DIR}/../clang-plugin/librspamd-clang${CMAKE_SHARED_LIBRARY_SUFFIX} -Xclang -add-plugin -Xclang rspamd-ast")
 	IF(CLANG_EXTRA_PLUGINS_LIBS)
 		FOREACH(_lib ${CLANG_EXTRA_PLUGINS_LIBS})
 			SET(CMAKE_C_FLAGS
@@ -89,23 +89,18 @@ ADD_SUBDIRECTORY(rspamadm)
 
 SET(RSPAMDSRC	controller.c
 				fuzzy_storage.c
-				lua_worker.c
 				rspamd.c
 				worker.c
-				rspamd_proxy.c
-				log_helper.c)
+				rspamd_proxy.c)
 
-SET(PLUGINSSRC	plugins/surbl.c
-				plugins/regexp.c
+SET(PLUGINSSRC  plugins/regexp.c
 				plugins/chartable.c
 				plugins/fuzzy_check.c
-				plugins/spf.c
 				plugins/dkim_check.c
-				libserver/rspamd_control.c
-				lua/lua_fann.c)
+				libserver/rspamd_control.c)
 
-SET(MODULES_LIST surbl regexp chartable fuzzy_check spf dkim)
-SET(WORKERS_LIST normal controller fuzzy lua rspamd_proxy log_helper)
+SET(MODULES_LIST regexp chartable fuzzy_check dkim)
+SET(WORKERS_LIST normal controller fuzzy rspamd_proxy)
 IF (ENABLE_HYPERSCAN MATCHES "ON")
 	LIST(APPEND WORKERS_LIST "hs_helper")
 	LIST(APPEND RSPAMDSRC "hs_helper.c")
@@ -167,10 +162,10 @@ ELSE()
 	ADD_LIBRARY(rspamd-server SHARED
 			${RSPAMD_CRYPTOBOX}
 			${RSPAMD_UTIL}
-			${RSPAMD_LUA}
 			${RSPAMD_SERVER}
 			${RSPAMD_STAT}
 			${RSPAMD_MIME}
+			${RSPAMD_LUA}
 			${CMAKE_CURRENT_BINARY_DIR}/modules.c
 			${PLUGINSSRC}
 			"${RAGEL_ragel_smtp_addr_OUTPUTS}"
@@ -188,9 +183,14 @@ TARGET_LINK_LIBRARIES(rspamd-server rspamd-cdb)
 TARGET_LINK_LIBRARIES(rspamd-server rspamd-lpeg)
 TARGET_LINK_LIBRARIES(rspamd-server lcbtrie)
 TARGET_LINK_LIBRARIES(rspamd-server rspamd-zstd)
+TARGET_LINK_LIBRARIES(rspamd-server rspamd-fastutf8)
 
 IF (ENABLE_CLANG_PLUGIN MATCHES "ON")
 	ADD_DEPENDENCIES(rspamd-server rspamd-clang)
+ENDIF()
+
+IF (NOT WITH_LUAJIT)
+	TARGET_LINK_LIBRARIES(rspamd-server rspamd-bit)
 ENDIF()
 
 IF (ENABLE_SNOWBALL MATCHES "ON")
@@ -206,7 +206,10 @@ IF (ENABLE_HYPERSCAN MATCHES "ON")
 	TARGET_LINK_LIBRARIES(rspamd-server hs)
 ENDIF()
 
-TARGET_LINK_LIBRARIES(rspamd-server rspamd-linenoise)
+IF(WITH_BLAS)
+	TARGET_LINK_LIBRARIES(rspamd-server ${BLAS_REQUIRED_LIBRARIES})
+ENDIF()
+
 TARGET_LINK_LIBRARIES(rspamd-server ${RSPAMD_REQUIRED_LIBRARIES})
 
 ADD_EXECUTABLE(rspamd ${RSPAMDSRC} ${CMAKE_CURRENT_BINARY_DIR}/workers.c)
@@ -220,7 +223,7 @@ IF(NOT DEBIAN_BUILD)
 	SET_TARGET_PROPERTIES(rspamd PROPERTIES VERSION ${RSPAMD_VERSION})
 ENDIF(NOT DEBIAN_BUILD)
 
-TARGET_LINK_LIBRARIES(rspamd ${RSPAMD_REQUIRED_LIBRARIES})
+#TARGET_LINK_LIBRARIES(rspamd ${RSPAMD_REQUIRED_LIBRARIES})
 TARGET_LINK_LIBRARIES(rspamd rspamd-server)
 
 INSTALL(TARGETS rspamd RUNTIME DESTINATION bin)

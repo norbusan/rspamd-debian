@@ -127,27 +127,26 @@ if __name__ == '__main__':
         if os.getenv('CIRCLECI'):
             j1['service_name'] = 'circleci'
             j1['service_job_id'] = os.getenv('CIRCLE_BUILD_NUM')
-        elif os.getenv('CI') == 'drone':
+        elif os.getenv('DRONE') == 'true':
             j1['service_name'] = 'drone'
-            j1['service_branch'] = os.getenv('CI_COMMIT_BRANCH')
+            j1['service_branch'] = os.getenv('DRONE_COMMIT_BRANCH')
             j1['service_build_url'] = os.getenv('DRONE_BUILD_LINK')
-            j1['service_job_id'] = os.getenv('CI_JOB_NUMBER')
-            j1['service_number'] = os.getenv('CI_BUILD_NUMBER')
-            j1['commit_sha'] = os.getenv('CI_COMMIT_SHA')
-            if os.getenv('CI_BUILD_EVENT') == 'pull_request':
-                j1['service_pull_request'] = os.getenv('CI_PULL_REQUEST')
+            j1['service_number'] = os.getenv('DRONE_BUILD_NUMBER')
+            j1['commit_sha'] = os.getenv('DRONE_COMMIT_SHA')
+            if os.getenv('DRONE_BUILD_EVENT') == 'pull_request':
+                j1['service_pull_request'] = os.getenv('DRONE_PULL_REQUEST')
             # git data can be filled by cpp-coveralls, but in our layout it can't find repo
             # so we can override git info witout merging
             j1['git'] = {
                 'head': {
                     'id': j1['commit_sha'],
-                    'author_email': os.getenv('CI_COMMIT_AUTHOR_EMAIL'),
-                    'message': os.getenv('CI_COMMIT_MESSAGE')
+                    'author_email': os.getenv('DRONE_COMMIT_AUTHOR_EMAIL'),
+                    'message': os.getenv('DRONE_COMMIT_MESSAGE')
                 },
                 'branch': j1['service_branch'],
                 'remotes': [{
                     'name': 'origin',
-                    'url': os.getenv('CI_REPO_REMOTE')
+                    'url': os.getenv('DRONE_GIT_HTTP_URL')
                 }]
             }
 
@@ -160,12 +159,17 @@ if __name__ == '__main__':
 
     if args.token:
         j1['repo_token'] = args.token
-        print("sending data to coveralls...")
-        r = requests.post('https://coveralls.io/api/v1/jobs', files={"json_file": json.dumps(j1)})
-        response = r.json()
-        print("[coveralls] %s" % response['message'])
-        if 'url' in response:
-            print("[coveralls] Uploaded to %s" % response['url'])
+        try:
+            r = requests.post('https://coveralls.io/api/v1/jobs', files={"json_file": json.dumps(j1)})
+            r.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            print("Failed to send data to coveralls: %s" % e)
+            sys.exit()
 
-    # post https://coveralls.io/api/v1/jobs
-    # print args
+        try:
+            response = r.json()
+            print("[coveralls] %s" % response['message'])
+            if 'url' in response:
+                print("[coveralls] Uploaded to %s" % response['url'])
+        except json.decoder.JSONDecodeError:
+            print("Bad resonse: '%s'" % r.text)

@@ -35,6 +35,8 @@
 #include "contrib/libottery/ottery.h"
 #include "libutil/ref.h"
 
+#include <stdalign.h>
+
 enum lua_cryptobox_hash_type {
 	LUA_CRYPTOBOX_HASH_BLAKE2,
 	LUA_CRYPTOBOX_HASH_SSL,
@@ -942,7 +944,7 @@ lua_cryptobox_hash_dtor (struct rspamd_lua_cryptobox_hash *h)
 	}
 	else if (h->type == LUA_CRYPTOBOX_HASH_BLAKE2) {
 		rspamd_explicit_memzero (h->content.h, sizeof (*h->content.h));
-		g_free (h->content.h);
+		free (h->content.h); /* Allocated by posix_memalign */
 	}
 	else {
 		g_free (h->content.fh);
@@ -963,13 +965,21 @@ rspamd_lua_hash_create (const gchar *type)
 		if (g_ascii_strcasecmp (type, "md5") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_SSL;
 			h->content.c = EVP_MD_CTX_create ();
-			EVP_DigestInit (h->content.c, EVP_md5 ());
+			/* Should never ever be used for crypto/security purposes! */
+#ifdef EVP_MD_CTX_FLAG_NON_FIPS_ALLOW
+			EVP_MD_CTX_set_flags (h->content.c, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
+#endif
+			EVP_DigestInit_ex (h->content.c, EVP_md5 (), NULL);
 		}
 		else if (g_ascii_strcasecmp (type, "sha1") == 0 ||
 					g_ascii_strcasecmp (type, "sha") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_SSL;
 			h->content.c = EVP_MD_CTX_create ();
-			EVP_DigestInit (h->content.c, EVP_sha1 ());
+			/* Should never ever be used for crypto/security purposes! */
+#ifdef EVP_MD_CTX_FLAG_NON_FIPS_ALLOW
+			EVP_MD_CTX_set_flags (h->content.c, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
+#endif
+			EVP_DigestInit_ex (h->content.c, EVP_sha1 (), NULL);
 		}
 		else if (g_ascii_strcasecmp (type, "sha256") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_SSL;
@@ -988,7 +998,9 @@ rspamd_lua_hash_create (const gchar *type)
 		}
 		else if (g_ascii_strcasecmp (type, "blake2") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_BLAKE2;
-			h->content.h = g_malloc0 (sizeof (*h->content.h));
+			posix_memalign ((void **)&h->content.h, _Alignof (rspamd_cryptobox_hash_state_t),
+					sizeof (*h->content.h));
+			g_assert (h->content.h != NULL);
 			rspamd_cryptobox_hash_init (h->content.h, NULL, 0);
 		}
 		else if (g_ascii_strcasecmp (type, "xxh64") == 0) {
@@ -1023,7 +1035,9 @@ rspamd_lua_hash_create (const gchar *type)
 	}
 	else {
 		h->type = LUA_CRYPTOBOX_HASH_BLAKE2;
-		h->content.h = g_malloc0 (sizeof (*h->content.h));
+		posix_memalign ((void **)&h->content.h, _Alignof (rspamd_cryptobox_hash_state_t),
+				sizeof (*h->content.h));
+		g_assert (h->content.h != NULL);
 		rspamd_cryptobox_hash_init (h->content.h, NULL, 0);
 	}
 
@@ -1075,8 +1089,8 @@ lua_cryptobox_hash_create (lua_State *L)
 /***
  * @function rspamd_cryptobox_hash.create_specific(type, [string])
  * Creates new hash context
- * @param {string} type type of signature
- * @param {string} data raw signature data
+ * @param {string} type type of hash (blake2, sha256, md5, sha512, mum, xxh64, xxh32, t1ha)
+ * @param {string} string initial data
  * @return {cryptobox_hash} hash object
  */
 static gint
@@ -1321,14 +1335,25 @@ lua_cryptobox_hash_hex (lua_State *L)
 	LUA_TRACE_POINT;
 	struct rspamd_lua_cryptobox_hash *h = lua_check_cryptobox_hash (L, 1);
 	guchar out[rspamd_cryptobox_HASHBYTES],
-		out_hex[rspamd_cryptobox_HASHBYTES * 2 + 1];
+		out_hex[rspamd_cryptobox_HASHBYTES * 2 + 1], *r;
 	guint dlen;
 
 	if (h && !h->is_finished) {
 		memset (out_hex, 0, sizeof (out_hex));
 
 		lua_cryptobox_hash_finish (h, out, &dlen);
-		rspamd_encode_hex_buf (out, dlen, out_hex, sizeof (out_hex));
+		r = out;
+
+		if (lua_isnumber (L, 2)) {
+			guint lim = lua_tonumber (L, 2);
+
+			if (lim < dlen) {
+				r += dlen - lim;
+				dlen = lim;
+			}
+		}
+
+		rspamd_encode_hex_buf (r, dlen, out_hex, sizeof (out_hex));
 		lua_pushstring (L, out_hex);
 
 	}
@@ -1350,13 +1375,24 @@ lua_cryptobox_hash_base32 (lua_State *L)
 	LUA_TRACE_POINT;
 	struct rspamd_lua_cryptobox_hash *h = lua_check_cryptobox_hash (L, 1);
 	guchar out[rspamd_cryptobox_HASHBYTES],
-		out_b32[rspamd_cryptobox_HASHBYTES * 2];
+		out_b32[rspamd_cryptobox_HASHBYTES * 2], *r;
 	guint dlen;
 
 	if (h && !h->is_finished) {
 		memset (out_b32, 0, sizeof (out_b32));
 		lua_cryptobox_hash_finish (h, out, &dlen);
-		rspamd_encode_base32_buf (out, dlen, out_b32, sizeof (out_b32));
+		r = out;
+
+		if (lua_isnumber (L, 2)) {
+			guint lim = lua_tonumber (L, 2);
+
+			if (lim < dlen) {
+				r += dlen - lim;
+				dlen = lim;
+			}
+		}
+
+		rspamd_encode_base32_buf (r, dlen, out_b32, sizeof (out_b32));
 		lua_pushstring (L, out_b32);
 		h->is_finished = TRUE;
 	}
@@ -1377,13 +1413,24 @@ lua_cryptobox_hash_base64 (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_lua_cryptobox_hash *h = lua_check_cryptobox_hash (L, 1);
-	guchar out[rspamd_cryptobox_HASHBYTES], *b64;
+	guchar out[rspamd_cryptobox_HASHBYTES], *b64, *r;
 	gsize len;
 	guint dlen;
 
 	if (h && !h->is_finished) {
 		lua_cryptobox_hash_finish (h, out, &dlen);
-		b64 = rspamd_encode_base64 (out, dlen, 0, &len);
+		r = out;
+
+		if (lua_isnumber (L, 2)) {
+			guint lim = lua_tonumber (L, 2);
+
+			if (lim < dlen) {
+				r += dlen - lim;
+				dlen = lim;
+			}
+		}
+
+		b64 = rspamd_encode_base64 (r, dlen, 0, &len);
 		lua_pushlstring (L, b64, len);
 		g_free (b64);
 		h->is_finished = TRUE;
@@ -1405,12 +1452,23 @@ lua_cryptobox_hash_bin (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_lua_cryptobox_hash *h = lua_check_cryptobox_hash (L, 1);
-	guchar out[rspamd_cryptobox_HASHBYTES];
+	guchar out[rspamd_cryptobox_HASHBYTES], *r;
 	guint dlen;
 
 	if (h && !h->is_finished) {
 		lua_cryptobox_hash_finish (h, out, &dlen);
-		lua_pushlstring (L, out, dlen);
+		r = out;
+
+		if (lua_isnumber (L, 2)) {
+			guint lim = lua_tonumber (L, 2);
+
+			if (lim < dlen) {
+				r += dlen - lim;
+				dlen = lim;
+			}
+		}
+
+		lua_pushlstring (L, r, dlen);
 		h->is_finished = TRUE;
 	}
 	else {
@@ -1607,10 +1665,13 @@ lua_cryptobox_sign_memory (lua_State *L)
 
 	sig = rspamd_fstring_sized_new (rspamd_cryptobox_signature_bytes (
 			rspamd_keypair_alg (kp)));
-	rspamd_cryptobox_sign (sig->str, &sig->len, data,
+
+	unsigned long long siglen = sig->len;
+	rspamd_cryptobox_sign (sig->str, &siglen, data,
 			len, rspamd_keypair_component (kp, RSPAMD_KEYPAIR_COMPONENT_SK,
 					NULL), rspamd_keypair_alg (kp));
 
+	sig->len = siglen;
 	psig = lua_newuserdata (L, sizeof (void *));
 	*psig = sig;
 	rspamd_lua_setclass (L, "rspamd{cryptobox_signature}", -1);
@@ -1651,10 +1712,14 @@ lua_cryptobox_sign_file (lua_State *L)
 	else {
 		sig = rspamd_fstring_sized_new (rspamd_cryptobox_signature_bytes (
 				rspamd_keypair_alg (kp)));
-		rspamd_cryptobox_sign (sig->str, &sig->len, data,
+
+		unsigned long long siglen = sig->len;
+
+		rspamd_cryptobox_sign (sig->str, &siglen, data,
 				len, rspamd_keypair_component (kp, RSPAMD_KEYPAIR_COMPONENT_SK,
 						NULL), rspamd_keypair_alg (kp));
 
+		sig->len = siglen;
 		psig = lua_newuserdata (L, sizeof (void *));
 		*psig = sig;
 		rspamd_lua_setclass (L, "rspamd{cryptobox_signature}", -1);
@@ -2264,6 +2329,16 @@ lua_cryptobox_gen_dkim_keypair (lua_State *L)
 
 		/* Process private key */
 		rc = i2d_RSAPrivateKey_bio (mbio, r);
+
+		if (rc == 0) {
+			BIO_free (mbio);
+			BN_free (e);
+			RSA_free (r);
+			EVP_PKEY_free (pk);
+
+			return luaL_error (L, "i2d_RSAPrivateKey_bio failed");
+		}
+
 		len = BIO_get_mem_data (mbio, &data);
 
 		b64_data = rspamd_encode_base64 (data, len, -1, &b64_len);
@@ -2277,6 +2352,16 @@ lua_cryptobox_gen_dkim_keypair (lua_State *L)
 		/* Process public key */
 		BIO_reset (mbio);
 		rc = i2d_RSA_PUBKEY_bio (mbio, r);
+
+		if (rc == 0) {
+			BIO_free (mbio);
+			BN_free (e);
+			RSA_free (r);
+			EVP_PKEY_free (pk);
+
+			return luaL_error (L, "i2d_RSA_PUBKEY_bio failed");
+		}
+
 		len = BIO_get_mem_data (mbio, &data);
 
 		b64_data = rspamd_encode_base64 (data, len, -1, &b64_len);
@@ -2380,54 +2465,20 @@ lua_load_cryptobox (lua_State * L)
 void
 luaopen_cryptobox (lua_State * L)
 {
-	luaL_newmetatable (L, "rspamd{cryptobox_pubkey}");
-	lua_pushstring (L, "__index");
-	lua_pushvalue (L, -2);
-	lua_settable (L, -3);
-
-	lua_pushstring (L, "class");
-	lua_pushstring (L, "rspamd{cryptobox_pubkey}");
-	lua_rawset (L, -3);
-
-	luaL_register (L, NULL, cryptoboxpubkeylib_m);
+	rspamd_lua_new_class (L, "rspamd{cryptobox_pubkey}", cryptoboxpubkeylib_m);
+	lua_pop (L, 1);
 	rspamd_lua_add_preload (L, "rspamd_cryptobox_pubkey", lua_load_pubkey);
 
-	luaL_newmetatable (L, "rspamd{cryptobox_keypair}");
-	lua_pushstring (L, "__index");
-	lua_pushvalue (L, -2);
-	lua_settable (L, -3);
-
-	lua_pushstring (L, "class");
-	lua_pushstring (L, "rspamd{cryptobox_keypair}");
-	lua_rawset (L, -3);
-
-	luaL_register (L, NULL, cryptoboxkeypairlib_m);
+	rspamd_lua_new_class (L, "rspamd{cryptobox_keypair}", cryptoboxkeypairlib_m);
+	lua_pop (L, 1);
 	rspamd_lua_add_preload (L, "rspamd_cryptobox_keypair", lua_load_keypair);
 
-	luaL_newmetatable (L, "rspamd{cryptobox_signature}");
-
-	lua_pushstring (L, "__index");
-	lua_pushvalue (L, -2);
-	lua_settable (L, -3);
-
-	lua_pushstring (L, "class");
-	lua_pushstring (L, "rspamd{cryptobox_signature}");
-	lua_rawset (L, -3);
-
-	luaL_register (L, NULL, cryptoboxsignlib_m);
+	rspamd_lua_new_class (L, "rspamd{cryptobox_signature}", cryptoboxsignlib_m);
+	lua_pop (L, 1);
 	rspamd_lua_add_preload (L, "rspamd_cryptobox_signature", lua_load_signature);
 
-	luaL_newmetatable (L, "rspamd{cryptobox_hash}");
-
-	lua_pushstring (L, "__index");
-	lua_pushvalue (L, -2);
-	lua_settable (L, -3);
-
-	lua_pushstring (L, "class");
-	lua_pushstring (L, "rspamd{cryptobox_hash}");
-	lua_rawset (L, -3);
-
-	luaL_register (L, NULL, cryptoboxhashlib_m);
+	rspamd_lua_new_class (L, "rspamd{cryptobox_hash}", cryptoboxhashlib_m);
+	lua_pop (L, 1);
 	rspamd_lua_add_preload (L, "rspamd_cryptobox_hash", lua_load_hash);
 
 	rspamd_lua_add_preload (L, "rspamd_cryptobox", lua_load_cryptobox);

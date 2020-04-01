@@ -56,6 +56,7 @@ local settings = {
     ['x-rspamd-server'] = {
       header = 'X-Rspamd-Server',
       remove = 0,
+      hostname = nil, -- Get the local computer host name
     },
     ['x-rspamd-queue-id'] = {
       header = 'X-Rspamd-Queue-Id',
@@ -77,6 +78,10 @@ local settings = {
       status_fail = nil,
       symbols_fail = {},
       symbols = {}, -- needs config
+    },
+    ['x-os-fingerprint'] = {
+      header = 'X-OS-Fingerprint',
+      remove = 0,
     },
     ['x-spamd-bar'] = {
       header = 'X-Spamd-Bar',
@@ -291,7 +296,8 @@ local function milter_headers(task)
     if settings.routines['x-rspamd-server'].remove then
       remove[settings.routines['x-rspamd-server'].header] = settings.routines['x-rspamd-server'].remove
     end
-    add[settings.routines['x-rspamd-server'].header] = HOSTNAME
+    local hostname = settings.routines['x-rspamd-server'].hostname
+    add[settings.routines['x-rspamd-server'].header] = hostname and hostname or HOSTNAME
   end
 
   routines['x-spamd-bar'] = function()
@@ -411,6 +417,26 @@ local function milter_headers(task)
         end
       end
     end
+  end
+
+  routines['x-os-fingerprint'] = function()
+    if skip_wanted('x-os-fingerprint') then return end
+
+    local os_string, link_type, uptime_min, distance =
+      task:get_mempool():get_variable('os_fingerprint',
+        'string, string, double, double');
+
+    if not os_string then return end
+
+    local value = string.format('%s, (up: %i min), (distance %i, link: %s)',
+      os_string, uptime_min, distance, link_type)
+
+    if settings.routines['x-os-fingerprint'].remove then
+      remove[settings.routines['x-os-fingerprint'].header]
+        = settings.routines['x-os-fingerprint'].remove
+    end
+
+    add_header('x-os-fingerprint', value)
   end
 
   routines['x-spam-status'] = function()

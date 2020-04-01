@@ -15,6 +15,19 @@ limitations under the License.
 ]]--
 
 if confighelp then
+  rspamd_config:add_example(nil, 'history_redis',
+      "Store history of checks for WebUI using Redis",
+      [[
+redis_history {
+  key_prefix = 'rs_history', # default key name
+  nrows = 200; # default rows limit
+  compress = true; # use zstd compression when storing data in redis
+  subject_privacy = false; # subject privacy is off
+  subject_privacy_alg = 'blake2'; # default hash-algorithm to obfuscate subject
+  subject_privacy_prefix = 'obf'; # prefix to show it's obfuscated
+  subject_privacy_length = 16; # cut the length of the hash
+}
+  ]])
   return
 end
 
@@ -238,7 +251,7 @@ if opts then
     settings[k] = v
   end
 
-  redis_params = rspamd_parse_redis_server('history_redis')
+  redis_params = lua_redis.parse_redis_server('history_redis')
   if not redis_params then
     rspamd_logger.infox(rspamd_config, 'no servers are specified, disabling module')
     lua_util.disable_module(N, "redis")
@@ -250,6 +263,10 @@ if opts then
       flags = 'empty,explicit_disable,ignore_passthrough',
       priority = 150
     })
+    lua_redis.register_prefix(settings.key_prefix .. hostname, N,
+        "Redis history", {
+          type = 'list',
+        })
     rspamd_plugins['history'] = {
       handler = handle_history_request
     }

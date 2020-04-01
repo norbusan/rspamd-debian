@@ -25,7 +25,7 @@ local E = {}
 
 local rcvd_cb_id = rspamd_config:register_symbol{
   name = 'CHECK_RECEIVED',
-  type = 'callback,mime',
+  type = 'callback',
   score = 0.0,
   group = 'headers',
   callback = function(task)
@@ -114,7 +114,8 @@ rspamd_config:register_symbol{
 
 local prio_cb_id = rspamd_config:register_symbol {
   name = 'HAS_X_PRIO',
-  type = 'callback,mime',
+  type = 'callback',
+  description = 'X-Priority check callback rule',
   score = 0.0,
   group = 'headers',
   callback = function (task)
@@ -185,7 +186,7 @@ local function get_raw_header(task, name)
 end
 
 local check_replyto_id = rspamd_config:register_symbol({
-  type = 'callback,mime',
+  type = 'callback',
   name = 'CHECK_REPLYTO',
   score = 0.0,
   group = 'headers',
@@ -333,48 +334,41 @@ rspamd_config:register_dependency('CHECK_REPLYTO', 'CHECK_FROM')
 
 local check_mime_id = rspamd_config:register_symbol{
   name = 'CHECK_MIME',
-  type = 'callback,mime',
+  type = 'callback',
   group = 'headers',
   score = 0.0,
   callback = function(task)
-    local parts = task:get_parts()
-    if not parts then return false end
-
-    -- Make sure there is a MIME-Version header
-    local mv = task:get_header('MIME-Version')
+    -- Check if there is a MIME-Version header
     local missing_mime = false
-    if (not mv) then
+    if not task:get_header('MIME-Version') then
       missing_mime = true
+    end
+
+    -- Check presense of MIME specific headers
+    local ct_header = task:get_header('Content-Type')
+    local cte_header = task:get_header('Content-Transfer-Encoding')
+
+    -- Add the symbol if we have MIME headers, but no MIME-Version
+    -- (do not add the symbol for RFC822 messages)
+    if (ct_header or cte_header) and missing_mime then
+      task:insert_result('MISSING_MIME_VERSION', 1.0)
     end
 
     local found_ma = false
     local found_plain = false
     local found_html = false
-    local cte_7bit = false
 
-    for _,p in ipairs(parts) do
-      local mtype,subtype = p:get_type()
+    for _, p in ipairs(task:get_parts()) do
+      local mtype, subtype = p:get_type()
       local ctype = mtype:lower() .. '/' .. subtype:lower()
       if (ctype == 'multipart/alternative') then
         found_ma = true
       end
       if (ctype == 'text/plain') then
-        if p:get_cte() == '7bit' then
-          cte_7bit = true
-        end
         found_plain = true
       end
       if (ctype == 'text/html') then
-        if p:get_cte() == '7bit' then
-          cte_7bit = true
-        end
         found_html = true
-      end
-    end
-
-    if missing_mime then
-      if not (not found_ma and ((found_plain or found_html) and cte_7bit)) then
-        task:insert_result('MISSING_MIME_VERSION', 1.0)
       end
     end
 
@@ -394,7 +388,7 @@ rspamd_config:register_symbol{
   score = 2.0,
   parent = check_mime_id,
   type = 'virtual',
-  description = 'MIME-Version header is missing',
+  description = 'MIME-Version header is missing in MIME message',
   group = 'headers',
 }
 rspamd_config:register_symbol{
@@ -575,7 +569,6 @@ rspamd_config.MISSING_FROM = {
     return false
   end,
   score = 2.0,
-  type = 'mime',
   group = 'headers',
   description = 'Missing From: header'
 }
@@ -597,7 +590,6 @@ rspamd_config.MULTIPLE_FROM = {
   end,
   score = 9.0,
   group = 'headers',
-  type = 'mime',
   description = 'Multiple addresses in From'
 }
 
@@ -608,8 +600,7 @@ rspamd_config.MV_CASE = {
   end,
   description = 'Mime-Version .vs. MIME-Version',
   score = 0.5,
-  group = 'headers',
-  type = 'mime',
+  group = 'headers'
 }
 
 rspamd_config.FAKE_REPLY = {
@@ -624,13 +615,12 @@ rspamd_config.FAKE_REPLY = {
   end,
   description = 'Fake reply',
   score = 1.0,
-  group = 'headers',
-  type = 'mime',
+  group = 'headers'
 }
 
 local check_from_id = rspamd_config:register_symbol{
   name = 'CHECK_FROM',
-  type = 'callback,mime',
+  type = 'callback',
   score = 0.0,
   group = 'headers',
   callback = function(task)
@@ -993,8 +983,7 @@ rspamd_config.CTYPE_MISSING_DISPOSITION = {
   end,
   description = 'Binary content-type not specified as an attachment',
   score = 4.0,
-  type = 'mime',
-  group = 'headers'
+  group = 'mime'
 }
 
 rspamd_config.CTYPE_MIXED_BOGUS = {
@@ -1022,8 +1011,7 @@ rspamd_config.CTYPE_MIXED_BOGUS = {
   end,
   description = 'multipart/mixed without non-textual part',
   score = 1.0,
-  type = 'mime',
-  group = 'headers'
+  group = 'mime'
 }
 
 local function check_for_base64_text(part)
@@ -1059,8 +1047,26 @@ rspamd_config.MIME_BASE64_TEXT = {
   end,
   description = 'Has text part encoded in base64',
   score = 0.1,
-  group = 'headers',
-  type = 'mime',
+  group = 'mime'
+}
+
+rspamd_config.MIME_BASE64_TEXT_BOGUS = {
+  callback = function(task)
+    local parts = task:get_text_parts()
+    if (not parts) then return false end
+    -- Check each part and look for base64 encoded text parts
+    -- where the part does not have any 8bit characters within it
+    for _, part in ipairs(parts) do
+      local mimepart = part:get_mimepart();
+      if (check_for_base64_text(mimepart) and not part:has_8bit()) then
+        return true
+      end
+    end
+    return false
+  end,
+  description = 'Has text part encoded in base64 that does not contain any 8bit characters',
+  score = 1.0,
+  group = 'mime'
 }
 
 local function is_8bit_addr(addr)
@@ -1081,8 +1087,7 @@ rspamd_config.INVALID_FROM_8BIT = {
   end,
   description = 'Invalid 8bit character in From header',
   score = 6.0,
-  group = 'headers',
-  type = 'mime',
+  group = 'headers'
 }
 
 rspamd_config.INVALID_RCPT_8BIT = {
@@ -1097,8 +1102,7 @@ rspamd_config.INVALID_RCPT_8BIT = {
   end,
   description = 'Invalid 8bit character in recipients headers',
   score = 6.0,
-  group = 'headers',
-  type = 'mime',
+  group = 'headers'
 }
 
 rspamd_config.XM_CASE = {
@@ -1108,6 +1112,5 @@ rspamd_config.XM_CASE = {
   end,
   description = 'X-mailer .vs. X-Mailer',
   score = 0.5,
-  group = 'headers',
-  type = 'mime',
+  group = 'headers'
 }

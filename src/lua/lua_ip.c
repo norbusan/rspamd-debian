@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include "lua_common.h"
+#include "libserver/maps/map_helpers.h"
 
 /***
  * @module rspamd_ip
@@ -187,6 +188,8 @@ static const struct luaL_reg iplib_m[] = {
 
 static const struct luaL_reg iplib_f[] = {
 	LUA_INTERFACE_DEF (ip, from_string),
+	{"fromstring", lua_ip_from_string},
+	{"fromip", lua_ip_copy},
 	{"from_ip", lua_ip_copy},
 	{NULL, NULL}
 };
@@ -369,13 +372,15 @@ lua_ip_from_string (lua_State *L)
 	LUA_TRACE_POINT;
 	struct rspamd_lua_ip *ip;
 	const gchar *ip_str;
+	gsize len;
 
-	ip_str = luaL_checkstring (L, 1);
+	ip_str = luaL_checklstring (L, 1, &len);
 	if (ip_str) {
 		ip = lua_ip_new (L, NULL);
 
-		if (!rspamd_parse_inet_address (&ip->addr, ip_str, 0)) {
-			msg_warn ("cannot parse ip: %s", ip_str);
+		if (!rspamd_parse_inet_address (&ip->addr,
+				ip_str, len, RSPAMD_INET_ADDRESS_PARSE_DEFAULT)) {
+			msg_warn ("cannot parse ip: %*s", (gint) len, ip_str);
 			ip->addr = NULL;
 		}
 	}
@@ -403,7 +408,7 @@ lua_ip_to_number (lua_State *L)
 			lua_pushinteger (L, ntohl (c));
 		}
 
-		return max;
+		return max / sizeof (c);
 	}
 	else {
 		lua_pushnil (L);
@@ -490,7 +495,7 @@ lua_ip_equal (lua_State *L)
 	gboolean res = FALSE;
 
 	if (ip1 && ip2 && ip1->addr && ip2->addr) {
-		res = rspamd_inet_address_compare (ip1->addr, ip2->addr, TRUE);
+		res = rspamd_inet_address_compare (ip1->addr, ip2->addr, TRUE) == 0;
 	}
 
 	lua_pushboolean (L, res);
@@ -526,8 +531,24 @@ lua_ip_is_local (lua_State *L)
 			check_laddrs = lua_toboolean (L, 2);
 		}
 
-		lua_pushboolean (L, rspamd_inet_address_is_local (ip->addr,
-				check_laddrs));
+		if ( rspamd_inet_address_is_local (ip->addr)) {
+			lua_pushboolean (L, true);
+
+			return 1;
+		}
+		else if (check_laddrs) {
+			struct rspamd_radix_map_helper *local_addrs =
+					rspamd_inet_library_get_lib_ctx ();
+			if (local_addrs) {
+				if (rspamd_match_radix_map_addr (local_addrs, ip->addr) != NULL) {
+					lua_pushboolean (L, true);
+
+					return 1;
+				}
+			}
+		}
+
+		lua_pushboolean (L, false);
 	}
 	else {
 		lua_pushnil (L);
@@ -559,7 +580,8 @@ rspamd_lua_ip_push_fromstring (lua_State *L, const gchar *ip_str)
 	else {
 		ip = g_malloc0 (sizeof (struct rspamd_lua_ip));
 
-		if (rspamd_parse_inet_address (&ip->addr, ip_str, 0)) {
+		if (rspamd_parse_inet_address (&ip->addr,
+				ip_str, strlen (ip_str), RSPAMD_INET_ADDRESS_PARSE_DEFAULT)) {
 
 			pip = lua_newuserdata (L, sizeof (struct rspamd_lua_ip *));
 			rspamd_lua_setclass (L, "rspamd{ip}", -1);
@@ -584,17 +606,7 @@ lua_load_ip (lua_State * L)
 void
 luaopen_ip (lua_State * L)
 {
-	luaL_newmetatable (L, "rspamd{ip}");
-	lua_pushstring (L, "__index");
-	lua_pushvalue (L, -2);
-	lua_settable (L, -3);
-
-	lua_pushstring (L, "class");
-	lua_pushstring (L, "rspamd{ip}");
-	lua_rawset (L, -3);
-
-	luaL_register (L, NULL,		   iplib_m);
-	rspamd_lua_add_preload (L, "rspamd_ip", lua_load_ip);
-
+	rspamd_lua_new_class (L, "rspamd{ip}", iplib_m);
 	lua_pop (L, 1);
+	rspamd_lua_add_preload (L, "rspamd_ip", lua_load_ip);
 }

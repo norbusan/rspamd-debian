@@ -22,6 +22,10 @@
 #include "libstat/stat_api.h"
 #include "libmime/message.h"
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 struct rspamd_lang_detector;
 struct rspamd_language_elt;
 struct rspamd_task;
@@ -46,6 +50,15 @@ enum rspamd_unicode_scripts {
 	RSPAMD_UNICODE_HANGUL = (1 << 16),
 };
 
+enum rspamd_language_elt_flags {
+	RS_LANGUAGE_DEFAULT = 0,
+	RS_LANGUAGE_LATIN = (1 << 0),
+	RS_LANGUAGE_TIER1 = (1 << 3),
+	RS_LANGUAGE_TIER0 = (1 << 4),
+	RS_LANGUAGE_DIACRITICS = (1 << 5),
+	RS_LANGUAGE_ASCII = (1 << 6),
+};
+
 struct rspamd_lang_detector_res {
 	gdouble prob;
 	const gchar *lang;
@@ -57,10 +70,11 @@ struct rspamd_lang_detector_res {
  * @param cfg
  * @return
  */
-struct rspamd_lang_detector* rspamd_language_detector_init (struct rspamd_config *cfg);
+struct rspamd_lang_detector *rspamd_language_detector_init (struct rspamd_config *cfg);
 
-struct rspamd_lang_detector* rspamd_language_detector_ref (struct rspamd_lang_detector* d);
-void rspamd_language_detector_unref (struct rspamd_lang_detector* d);
+struct rspamd_lang_detector *rspamd_language_detector_ref (struct rspamd_lang_detector *d);
+
+void rspamd_language_detector_unref (struct rspamd_lang_detector *d);
 
 /**
  * Try to detect language of words
@@ -70,8 +84,8 @@ void rspamd_language_detector_unref (struct rspamd_lang_detector* d);
  * @return array of struct rspamd_lang_detector_res sorted by freq descending
  */
 gboolean rspamd_language_detector_detect (struct rspamd_task *task,
-		struct rspamd_lang_detector *d,
-		struct rspamd_mime_text_part *part);
+										  struct rspamd_lang_detector *d,
+										  struct rspamd_mime_text_part *part);
 
 /**
  * Returns TRUE if the specified word is known to be a stop word
@@ -81,6 +95,16 @@ gboolean rspamd_language_detector_detect (struct rspamd_task *task,
  * @return
  */
 gboolean rspamd_language_detector_is_stop_word (struct rspamd_lang_detector *d,
-		const gchar *word, gsize wlen);
+												const gchar *word, gsize wlen);
+
+/**
+ * Return language flags for a specific language elt
+ * @param elt
+ * @return
+ */
+gint rspamd_language_detector_elt_flags (const struct rspamd_language_elt *elt);
+#ifdef  __cplusplus
+}
+#endif
 
 #endif

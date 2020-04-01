@@ -19,9 +19,14 @@
 
 #include "config.h"
 #include "libutil/mem_pool.h"
-#include <event.h>
+#include "contrib/libev/ev.h"
 #include "khash.h"
 #include "libutil/str_util.h"
+#include "libutil/libev_helper.h"
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
 
 enum rspamd_milter_state {
 	st_len_1 = 0,
@@ -59,11 +64,9 @@ KHASH_INIT (milter_headers_hash_t, char *, GArray *, true,
 
 struct rspamd_milter_private {
 	struct rspamd_milter_parser parser;
-	struct event ev;
-	struct timeval tv;
+	struct rspamd_io_ev ev;
 	struct rspamd_milter_outbuf *out_chain;
-	struct timeval *ptv;
-	struct event_base *ev_base;
+	struct ev_loop *event_loop;
 	rspamd_mempool_t *pool;
 	khash_t(milter_headers_hash_t) *headers;
 	gint cur_hdr;
@@ -98,45 +101,45 @@ enum rspamd_milter_io_cmd {
 /*
  * Protocol flags
  */
-#define RSPAMD_MILTER_FLAG_NOUNKNOWN 	(1L<<8)	/* filter does not want unknown cmd */
-#define RSPAMD_MILTER_FLAG_NODATA		(1L<<9)	/* filter does not want DATA */
-#define RSPAMD_MILTER_FLAG_NR_HDR		(1L<<7)	/* filter won't reply for header */
-#define RSPAMD_MILTER_FLAG_SKIP		(1L<<10)/* MTA supports SMFIR_SKIP */
-#define RSPAMD_MILTER_FLAG_RCPT_REJ	(1L<<11)/* filter wants rejected RCPTs */
-#define RSPAMD_MILTER_FLAG_NR_CONN	(1L<<12)/* filter won't reply for connect */
-#define RSPAMD_MILTER_FLAG_NR_HELO	(1L<<13)/* filter won't reply for HELO */
-#define RSPAMD_MILTER_FLAG_NR_MAIL	(1L<<14)/* filter won't reply for MAIL */
-#define RSPAMD_MILTER_FLAG_NR_RCPT	(1L<<15)/* filter won't reply for RCPT */
-#define RSPAMD_MILTER_FLAG_NR_DATA	(1L<<16)/* filter won't reply for DATA */
-#define RSPAMD_MILTER_FLAG_NR_UNKN	(1L<<17)/* filter won't reply for UNKNOWN */
-#define RSPAMD_MILTER_FLAG_NR_EOH	(1L<<18)/* filter won't reply for eoh */
-#define RSPAMD_MILTER_FLAG_NR_BODY	(1L<<19)/* filter won't reply for body chunk */
+#define RSPAMD_MILTER_FLAG_NOUNKNOWN    (1L<<8)    /* filter does not want unknown cmd */
+#define RSPAMD_MILTER_FLAG_NODATA        (1L<<9)    /* filter does not want DATA */
+#define RSPAMD_MILTER_FLAG_NR_HDR        (1L<<7)    /* filter won't reply for header */
+#define RSPAMD_MILTER_FLAG_SKIP        (1L<<10)/* MTA supports SMFIR_SKIP */
+#define RSPAMD_MILTER_FLAG_RCPT_REJ    (1L<<11)/* filter wants rejected RCPTs */
+#define RSPAMD_MILTER_FLAG_NR_CONN    (1L<<12)/* filter won't reply for connect */
+#define RSPAMD_MILTER_FLAG_NR_HELO    (1L<<13)/* filter won't reply for HELO */
+#define RSPAMD_MILTER_FLAG_NR_MAIL    (1L<<14)/* filter won't reply for MAIL */
+#define RSPAMD_MILTER_FLAG_NR_RCPT    (1L<<15)/* filter won't reply for RCPT */
+#define RSPAMD_MILTER_FLAG_NR_DATA    (1L<<16)/* filter won't reply for DATA */
+#define RSPAMD_MILTER_FLAG_NR_UNKN    (1L<<17)/* filter won't reply for UNKNOWN */
+#define RSPAMD_MILTER_FLAG_NR_EOH    (1L<<18)/* filter won't reply for eoh */
+#define RSPAMD_MILTER_FLAG_NR_BODY    (1L<<19)/* filter won't reply for body chunk */
 
 /*
  * For now, we specify that we want to reply just after EOM
  */
 #define RSPAMD_MILTER_FLAG_NOREPLY_MASK \
-	(RSPAMD_MILTER_FLAG_NR_CONN | RSPAMD_MILTER_FLAG_NR_HELO | \
-	RSPAMD_MILTER_FLAG_NR_MAIL | RSPAMD_MILTER_FLAG_NR_RCPT | \
-	RSPAMD_MILTER_FLAG_NR_DATA | RSPAMD_MILTER_FLAG_NR_UNKN | \
-	RSPAMD_MILTER_FLAG_NR_HDR | RSPAMD_MILTER_FLAG_NR_EOH | \
-	RSPAMD_MILTER_FLAG_NR_BODY)
+    (RSPAMD_MILTER_FLAG_NR_CONN | RSPAMD_MILTER_FLAG_NR_HELO | \
+    RSPAMD_MILTER_FLAG_NR_MAIL | RSPAMD_MILTER_FLAG_NR_RCPT | \
+    RSPAMD_MILTER_FLAG_NR_DATA | RSPAMD_MILTER_FLAG_NR_UNKN | \
+    RSPAMD_MILTER_FLAG_NR_HDR | RSPAMD_MILTER_FLAG_NR_EOH | \
+    RSPAMD_MILTER_FLAG_NR_BODY)
 
 /*
  * Options that the filter may send at initial handshake time, and message
  * modifications that the filter may request at the end of the message body.
  */
-#define RSPAMD_MILTER_FLAG_ADDHDRS	(1L<<0)	/* filter may add headers */
-#define RSPAMD_MILTER_FLAG_CHGBODY	(1L<<1)	/* filter may replace body */
-#define RSPAMD_MILTER_FLAG_ADDRCPT	(1L<<2)	/* filter may add recipients */
-#define RSPAMD_MILTER_FLAG_DELRCPT	(1L<<3)	/* filter may delete recipients */
-#define RSPAMD_MILTER_FLAG_CHGHDRS	(1L<<4)	/* filter may change/delete headers */
-#define RSPAMD_MILTER_FLAG_QUARANTINE	(1L<<5)	/* filter may request quarantine */
+#define RSPAMD_MILTER_FLAG_ADDHDRS    (1L<<0)    /* filter may add headers */
+#define RSPAMD_MILTER_FLAG_CHGBODY    (1L<<1)    /* filter may replace body */
+#define RSPAMD_MILTER_FLAG_ADDRCPT    (1L<<2)    /* filter may add recipients */
+#define RSPAMD_MILTER_FLAG_DELRCPT    (1L<<3)    /* filter may delete recipients */
+#define RSPAMD_MILTER_FLAG_CHGHDRS    (1L<<4)    /* filter may change/delete headers */
+#define RSPAMD_MILTER_FLAG_QUARANTINE    (1L<<5)    /* filter may request quarantine */
 
 #define RSPAMD_MILTER_ACTIONS_MASK \
-	(RSPAMD_MILTER_FLAG_ADDHDRS | RSPAMD_MILTER_FLAG_ADDRCPT | \
-	RSPAMD_MILTER_FLAG_DELRCPT | RSPAMD_MILTER_FLAG_CHGHDRS | \
-	RSPAMD_MILTER_FLAG_QUARANTINE)
+    (RSPAMD_MILTER_FLAG_ADDHDRS | RSPAMD_MILTER_FLAG_ADDRCPT | \
+    RSPAMD_MILTER_FLAG_DELRCPT | RSPAMD_MILTER_FLAG_CHGHDRS | \
+    RSPAMD_MILTER_FLAG_CHGBODY | RSPAMD_MILTER_FLAG_QUARANTINE)
 
 enum rspamd_milter_connect_proto {
 	RSPAMD_MILTER_CONN_UNKNOWN = 'U',
@@ -164,4 +167,9 @@ enum rspamd_milter_connect_proto {
 #define RSPAMD_MILTER_SPAM_HEADER "X-Spam"
 #define RSPAMD_MILTER_DKIM_HEADER "DKIM-Signature"
 #define RSPAMD_MILTER_ACTION_HEADER "X-Rspamd-Action"
+
+#ifdef  __cplusplus
+}
+#endif
+
 #endif

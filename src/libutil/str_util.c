@@ -27,6 +27,8 @@
 #endif
 #include <math.h>
 
+#include "contrib/fastutf8/fastutf8.h"
+
 const guchar lc_map[256] = {
 		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
 		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
@@ -62,7 +64,7 @@ const guchar lc_map[256] = {
 		0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff
 };
 
-void
+guint
 rspamd_str_lc (gchar *str, guint size)
 {
 	guint leftover = size % 4;
@@ -93,6 +95,7 @@ rspamd_str_lc (gchar *str, guint size)
 		*dest = lc_map[(guchar)str[i]];
 	}
 
+	return size;
 }
 
 gint
@@ -144,42 +147,33 @@ rspamd_lc_cmp (const gchar *s, const gchar *d, gsize l)
  * string to lower case, so some locale peculiarities are simply ignored
  * If the target string is longer than initial one, then we just trim it
  */
-void
+guint
 rspamd_str_lc_utf8 (gchar *str, guint size)
 {
-	const gchar *s = str, *p;
-	gchar *d = str, tst[6];
-	gint remain = size;
-	gint r;
-	gunichar uc;
+	guchar *d = (guchar *)str, tst[6];
+	gint32 i = 0, prev = 0;
+	UChar32 uc;
 
-	while (remain > 0) {
-		p = g_utf8_next_char (s);
+	while (i < size) {
+		prev = i;
 
-		if (p - s > remain) {
-			break;
-		}
+		U8_NEXT ((guint8*)str, i, size, uc);
+		uc = u_tolower (uc);
 
-		uc = g_utf8_get_char (s);
-		uc = g_unichar_tolower (uc);
+		gint32 olen = 0;
+		U8_APPEND_UNSAFE (tst, olen, uc);
 
-		if (remain >= 6) {
-			r = g_unichar_to_utf8 (uc, d);
+		if (olen <= (i - prev)) {
+			memcpy (d, tst, olen);
+			d += olen;
 		}
 		else {
-			/* We must be cautious here to avoid broken unicode being append */
-			r = g_unichar_to_utf8 (uc, tst);
-			if (r > remain) {
-				break;
-			}
-			else {
-				memcpy (d, tst, r);
-			}
+			/* Lowercasing has increased the length, so we need to ignore it */
+			d += i - prev;
 		}
-		remain -= r;
-		s = p;
-		d += r;
 	}
+
+	return d - (guchar *)str;
 }
 
 gboolean
@@ -255,7 +249,7 @@ rspamd_strcase_hash (gconstpointer key)
 
 	len = strlen (p);
 
-	return rspamd_icase_hash (p, len, rspamd_hash_seed ());
+	return (guint)rspamd_icase_hash (p, len, rspamd_hash_seed ());
 }
 
 guint
@@ -293,7 +287,7 @@ rspamd_ftok_icase_hash (gconstpointer key)
 {
 	const rspamd_ftok_t *f = key;
 
-	return rspamd_icase_hash (f->begin, f->len, rspamd_hash_seed ());
+	return (guint)rspamd_icase_hash (f->begin, f->len, rspamd_hash_seed ());
 }
 
 gboolean
@@ -791,7 +785,7 @@ while (0)
 	cols = 0;
 
 	while (inlen > 6) {
-		n = *(guint64 *)in;
+		memcpy (&n, in, sizeof (n));
 		n = GUINT64_TO_BE (n);
 
 		if (str_len <= 0 || cols <= str_len - 8) {
@@ -917,25 +911,61 @@ rspamd_encode_base64_fold (const guchar *in, gsize inlen, gint str_len,
 	return rspamd_encode_base64_common (in, inlen, str_len, outlen, TRUE, how);
 }
 
+#define QP_RANGE(x) (((x) >= 33 && (x) <= 60) || ((x) >= 62 && (x) <= 126) \
+		|| (x) == '\r' || (x) == '\n' || (x) == ' ' || (x) == '\t')
+#define QP_SPAN_NORMAL(span, str_len) ((str_len) > 0 && \
+		((span) + 1) >= (str_len))
+#define QP_SPAN_SPECIAL(span, str_len) ((str_len) > 0 && \
+		((span) + 4) >= (str_len))
+
 gchar *
 rspamd_encode_qp_fold (const guchar *in, gsize inlen, gint str_len,
 						   gsize *outlen, enum rspamd_newlines_type how)
 {
-	gsize olen = 0, span = 0, i = 0;
+	gsize olen = 0, span = 0, i = 0, seen_spaces = 0;
 	gchar *out;
-	gint ch;
+	gint ch, last_sp;
 	const guchar *end = in + inlen, *p = in;
 	static const gchar hexdigests[16] = "0123456789ABCDEF";
 
 	while (p < end) {
 		ch = *p;
 
-		if (ch < 128 && ch != '\r' && ch != '\n') {
+		if (QP_RANGE(ch)) {
 			olen ++;
 			span ++;
+
+			if (ch == '\r' || ch == '\n') {
+				if (seen_spaces > 0) {
+					/* We must encode spaces at the end of line */
+					olen += 3;
+					seen_spaces = 0;
+					/* Special stuff for space character at the end */
+					if (QP_SPAN_SPECIAL(span, str_len)) {
+						if (how == RSPAMD_TASK_NEWLINES_CRLF) {
+							/* =\r\n */
+							olen += 3;
+						}
+						else {
+							olen += 2;
+						}
+					}
+					/* Continue with the same `ch` but without spaces logic */
+					continue;
+				}
+
+				span = 0;
+			}
+			else if (ch == ' ' || ch == '\t') {
+				seen_spaces ++;
+				last_sp = ch;
+			}
+			else {
+				seen_spaces = 0;
+			}
 		}
 		else {
-			if (str_len > 0 && span + 5 >= str_len) {
+			if (QP_SPAN_SPECIAL(span, str_len)) {
 				if (how == RSPAMD_TASK_NEWLINES_CRLF) {
 					/* =\r\n */
 					olen += 3;
@@ -950,7 +980,7 @@ rspamd_encode_qp_fold (const guchar *in, gsize inlen, gint str_len,
 			span += 3;
 		}
 
-		if (str_len > 0 && span + 3 >= str_len) {
+		if (QP_SPAN_NORMAL(span, str_len)) {
 			if (how == RSPAMD_TASK_NEWLINES_CRLF) {
 				/* =\r\n */
 				olen += 3;
@@ -964,21 +994,112 @@ rspamd_encode_qp_fold (const guchar *in, gsize inlen, gint str_len,
 		p ++;
 	}
 
+	if (seen_spaces > 0) {
+		/* Reserve length for the last space encoded */
+		olen += 3;
+	}
+
 	out = g_malloc (olen + 1);
 	p = in;
 	i = 0;
 	span = 0;
+	seen_spaces = 0;
 
 	while (p < end) {
 		ch = *p;
 
-		if (ch < 128 && ch != '\r' && ch != '\n') {
+		if (QP_RANGE (ch)) {
+			if (ch == '\r' || ch == '\n') {
+				if (seen_spaces > 0) {
+					if (QP_SPAN_SPECIAL(span, str_len)) {
+						/* Add soft newline */
+						i --;
+
+						if (p + 1 < end || span + 3 >= str_len) {
+							switch (how) {
+							default:
+							case RSPAMD_TASK_NEWLINES_CRLF:
+								out[i++] = '=';
+								out[i++] = '\r';
+								out[i++] = '\n';
+								break;
+							case RSPAMD_TASK_NEWLINES_LF:
+								out[i++] = '=';
+								out[i++] = '\n';
+								break;
+							case RSPAMD_TASK_NEWLINES_CR:
+								out[i++] = '=';
+								out[i++] = '\r';
+								break;
+							}
+						}
+
+						/* Now write encoded `last_sp` but after newline */
+						out[i++] = '=';
+						out[i++] = hexdigests[((last_sp >> 4) & 0xF)];
+						out[i++] = hexdigests[(last_sp & 0xF)];
+
+						span = 0;
+					}
+					else {
+						/* Encode last space */
+						--i;
+						out[i++] = '=';
+						out[i++] = hexdigests[((last_sp >> 4) & 0xF)];
+						out[i++] = hexdigests[(last_sp & 0xF)];
+						seen_spaces = 0;
+					}
+
+					continue;
+				}
+				span = 0;
+			}
+			else if (ch == ' ' || ch == '\t') {
+				seen_spaces ++;
+				last_sp = ch;
+				span ++;
+			}
+			else {
+				seen_spaces = 0;
+				span ++;
+			}
+
 			out[i++] = ch;
-			span ++;
 		}
 		else {
-			if (str_len > 0 && span + 5 >= str_len) {
+			if (QP_SPAN_SPECIAL(span, str_len)) {
 				/* Add new line and then continue */
+				if (p + 1 < end || span + 3 >= str_len) {
+					switch (how) {
+					default:
+					case RSPAMD_TASK_NEWLINES_CRLF:
+						out[i++] = '=';
+						out[i++] = '\r';
+						out[i++] = '\n';
+						break;
+					case RSPAMD_TASK_NEWLINES_LF:
+						out[i++] = '=';
+						out[i++] = '\n';
+						break;
+					case RSPAMD_TASK_NEWLINES_CR:
+						out[i++] = '=';
+						out[i++] = '\r';
+						break;
+					}
+					span = 0;
+				}
+			}
+
+			out[i++] = '=';
+			out[i++] = hexdigests[((ch >> 4) & 0xF)];
+			out[i++] = hexdigests[(ch & 0xF)];
+			span += 3;
+			seen_spaces = 0;
+		}
+
+		if (QP_SPAN_NORMAL(span, str_len)) {
+			/* Add new line and then continue */
+			if (p + 1 < end || span > str_len || seen_spaces) {
 				switch (how) {
 				default:
 				case RSPAMD_TASK_NEWLINES_CRLF:
@@ -995,40 +1116,21 @@ rspamd_encode_qp_fold (const guchar *in, gsize inlen, gint str_len,
 					out[i++] = '\r';
 					break;
 				}
-
 				span = 0;
+				seen_spaces = 0;
 			}
-
-			out[i++] = '=';
-			out[i++] = hexdigests[((ch >> 4) & 0xF)];
-			out[i++] = hexdigests[(ch & 0xF)];
-			span += 3;
-		}
-
-		if (str_len > 0 && span + 3 >= str_len) {
-			/* Add new line and then continue */
-			switch (how) {
-			default:
-			case RSPAMD_TASK_NEWLINES_CRLF:
-				out[i++] = '=';
-				out[i++] = '\r';
-				out[i++] = '\n';
-				break;
-			case RSPAMD_TASK_NEWLINES_LF:
-				out[i++] = '=';
-				out[i++] = '\n';
-				break;
-			case RSPAMD_TASK_NEWLINES_CR:
-				out[i++] = '=';
-				out[i++] = '\r';
-				break;
-			}
-
-			span = 0;
 		}
 
 		g_assert (i <= olen);
 		p ++;
+	}
+
+	/* Deal with the last space character */
+	if (seen_spaces > 0) {
+		i --;
+		out[i++] = '=';
+		out[i++] = hexdigests[((last_sp >> 4) & 0xF)];
+		out[i++] = hexdigests[(last_sp & 0xF)];
 	}
 
 	out[i] = '\0';
@@ -1478,21 +1580,13 @@ rspamd_substring_preprocess_kmp (const gchar *pat, gsize len, goffset *fsm,
 }
 
 static inline goffset
-rspamd_substring_search_common (const gchar *in, gsize inlen,
-		const gchar *srch, gsize srchlen, rspamd_cmpchar_func_t f)
+rspamd_substring_search_preprocessed (const gchar *in, gsize inlen,
+								const gchar *srch,
+								gsize srchlen,
+								const goffset *fsm,
+								rspamd_cmpchar_func_t f)
 {
-	static goffset st_fsm[128];
-	goffset *fsm;
-	goffset i, j, k, ell, ret = -1;
-
-	if (G_LIKELY (srchlen < G_N_ELEMENTS (st_fsm))) {
-		fsm = st_fsm;
-	}
-	else {
-		fsm = g_malloc ((srchlen + 1) * sizeof (*fsm));
-	}
-
-	rspamd_substring_preprocess_kmp (srch, srchlen, fsm, f);
+	goffset i, j, k, ell;
 
 	for (ell = 1; f(srch[ell - 1], srch[ell]); ell++) {}
 	if (ell == srchlen) {
@@ -1514,8 +1608,7 @@ rspamd_substring_search_common (const gchar *in, gsize inlen,
 			}
 
 			if (k >= ell) {
-				ret = j;
-				goto out;
+				return j;
 			}
 		}
 
@@ -1535,7 +1628,26 @@ rspamd_substring_search_common (const gchar *in, gsize inlen,
 		}
 	}
 
-out:
+	return -1;
+}
+
+static inline goffset
+rspamd_substring_search_common (const gchar *in, gsize inlen,
+		const gchar *srch, gsize srchlen, rspamd_cmpchar_func_t f)
+{
+	static goffset st_fsm[128];
+	goffset *fsm, ret;
+
+	if (G_LIKELY (srchlen < G_N_ELEMENTS (st_fsm))) {
+		fsm = st_fsm;
+	}
+	else {
+		fsm = g_malloc ((srchlen + 1) * sizeof (*fsm));
+	}
+
+	rspamd_substring_preprocess_kmp (srch, srchlen, fsm, f);
+	ret = rspamd_substring_search_preprocessed (in, inlen, srch, srchlen, fsm, f);
+
 	if (G_UNLIKELY (srchlen >= G_N_ELEMENTS (st_fsm))) {
 		g_free (fsm);
 	}
@@ -1763,16 +1875,13 @@ rspamd_string_find_eoh (GString *input, goffset *body_start)
 					}
 					else {
 						/*
-						 * newline wsp+ \r <nwsp>, hence:
-						 * c -> eoh
-						 * p + 1 -> body start
+						 * <nline> <wsp>+ \r <nwsp>.
+						 * It is an empty header likely, so we can go further...
+						 * https://tools.ietf.org/html/rfc2822#section-4.2
 						 */
-						if (body_start) {
-							/* \r\n\r\n */
-							*body_start = p - input->str + 1;
-						}
-
-						return c - input->str;
+						c = p;
+						p ++;
+						state = got_cr;
 					}
 				}
 				else {
@@ -1787,33 +1896,36 @@ rspamd_string_find_eoh (GString *input, goffset *body_start)
 			else if (*p == '\n') {
 				/* Perform lookahead due to #2349 */
 				if (end - p > 1) {
+					/* Continue folding with an empty line */
 					if (p[1] == ' ' || p[1] == '\t') {
 						c = p;
 						p ++;
 						state = obs_fws;
 					}
 					else if (p[1] == '\r') {
+						/* WTF state: we have seen spaces, \n and then it follows \r */
 						c = p;
 						p ++;
 						state = got_lf;
 					}
 					else if (p[1] == '\n') {
+						/*
+						 * Switching to got_lf state here will let us to finish
+						 * the cycle.
+						 */
 						c = p;
 						p ++;
 						state = got_lf;
 					}
 					else {
 						/*
-						 * newline wsp+ \n <nwsp>, hence:
-						 * c -> eoh
-						 * p + 1 -> body start
+						 * <nline> <wsp>+ \n <nwsp>.
+						 * It is an empty header likely, so we can go further...
+						 * https://tools.ietf.org/html/rfc2822#section-4.2
 						 */
-						if (body_start) {
-							/* \r\n\r\n */
-							*body_start = p - input->str + 1;
-						}
-
-						return c - input->str;
+						c = p;
+						p ++;
+						state = got_lf;
 					}
 
 				}
@@ -1981,15 +2093,22 @@ rspamd_decode_qp_buf (const gchar *in, gsize inlen,
 
 	while (remain > 0 && o < end) {
 		if (*p == '=') {
-			p ++;
 			remain --;
 
 			if (remain == 0) {
+				/* Last '=' character, bugon */
 				if (end - o > 0) {
 					*o++ = *p;
-					break;
 				}
+				else {
+					/* Buffer overflow */
+					return (-1);
+				}
+
+				break;
 			}
+
+			p ++;
 decode:
 			/* Decode character after '=' */
 			c = *p++;
@@ -2046,9 +2165,29 @@ decode:
 					processed = pos - o;
 					remain -= processed;
 					p += processed;
-					o = pos - 1;
-					/* Skip comparison, as we know that we have found match */
-					goto decode;
+
+					if (remain > 0) {
+						o = pos - 1;
+						/*
+						 * Skip comparison and jump inside decode branch,
+						 * as we know that we have found match
+						 */
+						goto decode;
+					}
+					else {
+						/* Last '=' character, bugon */
+						o = pos;
+
+						if (end - o > 0) {
+							*o = '=';
+						}
+						else {
+							/* Buffer overflow */
+							return (-1);
+						}
+
+						break;
+					}
 				}
 			}
 			else {
@@ -2056,6 +2195,152 @@ decode:
 				return (-1);
 			}
 		}
+	}
+
+	return (o - out);
+}
+
+gssize
+rspamd_decode_uue_buf (const gchar *in, gsize inlen,
+					  gchar *out, gsize outlen)
+{
+	gchar *o, *out_end;
+	const gchar *p;
+	gssize remain;
+	gboolean base64 = FALSE;
+	goffset pos;
+	const gchar *nline = "\r\n";
+
+	p = in;
+	o = out;
+	out_end = out + outlen;
+	remain = inlen;
+
+	/* Skip newlines */
+#define SKIP_NEWLINE do { while (remain > 0 && (*p == '\n' || *p == '\r')) {p ++; remain --; } } while (0)
+	SKIP_NEWLINE;
+
+	/* First of all, we need to read the first line (and probably skip it) */
+	if (remain < sizeof ("begin-base64 ")) {
+		/* Obviously truncated */
+		return -1;
+	}
+
+	if (memcmp (p, "begin ", sizeof ("begin ") - 1) == 0) {
+		p += sizeof ("begin ") - 1;
+		remain -= sizeof ("begin ") - 1;
+
+		pos = rspamd_memcspn (p, nline, remain);
+	}
+	else if (memcmp (p, "begin-base64 ", sizeof ("begin-base64 ") - 1) == 0) {
+		base64 = TRUE;
+		p += sizeof ("begin-base64 ") - 1;
+		remain -= sizeof ("begin-base64 ") - 1;
+		pos = rspamd_memcspn (p, nline, remain);
+	}
+	else {
+		/* Crap */
+		return (-1);
+	}
+
+	if (pos == -1 || remain == 0) {
+		/* Crap */
+		return (-1);
+	}
+
+#define	DEC(c)	(((c) - ' ') & 077)		/* single character decode */
+#define IS_DEC(c) ( (((c) - ' ') >= 0) && (((c) - ' ') <= 077 + 1) )
+#define CHAR_OUT(c) do { if (o < out_end) { *o++ = c; } else { return (-1); } } while(0)
+
+	remain -= pos;
+	p = p + pos;
+	SKIP_NEWLINE;
+
+	if (base64) {
+		if (!rspamd_cryptobox_base64_decode (p,
+				remain,
+				out, &outlen)) {
+			return (-1);
+		}
+
+		return outlen;
+	}
+
+	while (remain > 0 && o < out_end) {
+		/* Main cycle */
+		const gchar *eol;
+		gint i, ch;
+
+		pos = rspamd_memcspn (p, nline, remain);
+
+		if (pos == 0) {
+			/* Skip empty lines */
+			SKIP_NEWLINE;
+
+			if (remain == 0) {
+				break;
+			}
+		}
+
+		eol = p + pos;
+		remain -= eol - p;
+
+		if ((i = DEC(*p)) <= 0) {
+			/* Last pos */
+			break;
+		}
+
+		/* i can be less than eol - p, it means uue padding which we ignore */
+		for (++p; i > 0 && p < eol; p += 4, i -= 3) {
+			if (i >= 3 && p + 3 < eol) {
+				/* Process 4 bytes of input */
+				if (!IS_DEC(*p)) {
+					return (-1);
+				}
+				if (!IS_DEC(*(p + 1))) {
+					return (-1);
+				}
+				if (!IS_DEC(*(p + 2))) {
+					return (-1);
+				}
+				if (!IS_DEC(*(p + 3))) {
+					return (-1);
+				}
+				ch = DEC(p[0]) << 2 | DEC(p[1]) >> 4;
+				CHAR_OUT(ch);
+				ch = DEC(p[1]) << 4 | DEC(p[2]) >> 2;
+				CHAR_OUT(ch);
+				ch = DEC(p[2]) << 6 | DEC(p[3]);
+				CHAR_OUT(ch);
+			}
+			else {
+				if (i >= 1 && p + 1 < eol) {
+					if (!IS_DEC(*p)) {
+						return (-1);
+					}
+					if (!IS_DEC(*(p + 1))) {
+						return (-1);
+					}
+
+					ch = DEC(p[0]) << 2 | DEC(p[1]) >> 4;
+					CHAR_OUT(ch);
+				}
+				if (i >= 2 && p + 2 < eol) {
+					if (!IS_DEC(*(p + 1))) {
+						return (-1);
+					}
+					if (!IS_DEC(*(p + 2))) {
+						return (-1);
+					}
+
+					ch = DEC(p[1]) << 4 | DEC(p[2]) >> 2;
+					CHAR_OUT(ch);
+				}
+			}
+		}
+		/* Skip newline */
+		p = eol;
+		SKIP_NEWLINE;
 	}
 
 	return (o - out);
@@ -2598,7 +2883,7 @@ rspamd_str_regexp_escape (const gchar *pattern, gsize slen,
 	gsize len;
 	static const gchar hexdigests[16] = "0123456789abcdef";
 
-	len = slen;
+	len = 0;
 	p = pattern;
 
 	/* [-[\]{}()*+?.,\\^$|#\s] need to be escaped */
@@ -2649,18 +2934,15 @@ rspamd_str_regexp_escape (const gchar *pattern, gsize slen,
 	}
 
 	if (flags & RSPAMD_REGEXP_ESCAPE_UTF) {
-		if (!g_utf8_validate (pattern, slen, NULL)) {
-			tmp_utf = rspamd_str_make_utf_valid (pattern, slen, NULL);
+		if (rspamd_fast_utf8_validate (pattern, slen) != 0) {
+			tmp_utf = rspamd_str_make_utf_valid (pattern, slen, NULL, NULL);
 		}
 	}
 
-	if (slen == len) {
+	if (len == 0) {
+		/* No need to escape anything */
+
 		if (dst_len) {
-
-			if (tmp_utf) {
-				slen = strlen (tmp_utf);
-			}
-
 			*dst_len = slen;
 		}
 
@@ -2672,10 +2954,12 @@ rspamd_str_regexp_escape (const gchar *pattern, gsize slen,
 		}
 	}
 
+	/* Escape logic */
 	if (tmp_utf) {
 		pattern = tmp_utf;
 	}
 
+	len = slen + len;
 	res = g_malloc (len + 1);
 	p = pattern;
 	d = res;
@@ -2768,61 +3052,117 @@ rspamd_str_regexp_escape (const gchar *pattern, gsize slen,
 
 
 gchar *
-rspamd_str_make_utf_valid (const guchar *src, gsize slen, gsize *dstlen)
+rspamd_str_make_utf_valid (const guchar *src, gsize slen,
+		gsize *dstlen,
+		rspamd_mempool_t *pool)
 {
-	GString *dst;
-	const gchar *last;
-	gchar *dchar;
-	gsize valid, prev;
 	UChar32 uc;
-	gint32 i;
+	goffset err_offset;
+	const guchar *p;
+	gchar *dst, *d;
+	gsize remain = slen, dlen = 0;
 
 	if (src == NULL) {
 		return NULL;
 	}
 
 	if (slen == 0) {
-		slen = strlen (src);
+		if (dstlen) {
+			*dstlen = 0;
+		}
+
+		return pool ? rspamd_mempool_strdup (pool, "") : g_strdup ("");
 	}
 
-	dst = g_string_sized_new (slen);
-	i = 0;
-	last = src;
-	valid = 0;
-	prev = 0;
+	p = src;
+	dlen = slen + 1; /* As we add '\0' */
 
-	while (i < slen) {
-		U8_NEXT (src, i, slen, uc);
+	/* Check space required */
+	while (remain > 0 && (err_offset = rspamd_fast_utf8_validate (p, remain)) > 0) {
+		gint i = 0;
 
-		if (uc <= 0) {
-			if (valid > 0) {
-				g_string_append_len (dst, last, valid);
+		err_offset --; /* As it returns it 1 indexed */
+		p += err_offset;
+		remain -= err_offset;
+		dlen += err_offset;
+
+		/* Each invalid character of input requires 3 bytes of output (+2 bytes) */
+		while (i < remain) {
+			U8_NEXT (p, i, remain, uc);
+
+			if (uc < 0) {
+				dlen += 2;
 			}
-			/* 0xFFFD in UTF8 */
-			g_string_append_len (dst, "\357\277\275", 3);
-			valid = 0;
-			last = &src[i];
-		}
-		else {
-			valid += i - prev;
+			else {
+				break;
+			}
 		}
 
-		prev = i;
+		p += i;
+		remain -= i;
 	}
 
-	if (valid > 0) {
-		g_string_append_len (dst, last, valid);
+	if (pool) {
+		dst = rspamd_mempool_alloc (pool, dlen + 1);
+	}
+	else {
+		dst = g_malloc (dlen + 1);
 	}
 
-	dchar = dst->str;
+	p = src;
+	d = dst;
+	remain = slen;
+
+	while (remain > 0 && (err_offset = rspamd_fast_utf8_validate (p, remain)) > 0) {
+		/* Copy valid */
+		err_offset --; /* As it returns it 1 indexed */
+		memcpy (d, p, err_offset);
+		d += err_offset;
+
+		/* Append 0xFFFD for each bad character */
+		gint i = 0;
+
+		p += err_offset;
+		remain -= err_offset;
+
+		while (i < remain) {
+			gint old_i = i;
+			U8_NEXT (p, i, remain, uc);
+
+			if (uc < 0) {
+				*d++ = '\357';
+				*d++ = '\277';
+				*d++ = '\275';
+			}
+			else {
+				/* Adjust p and remaining stuff and go to the outer cycle */
+				i = old_i;
+				break;
+			}
+		}
+		/*
+		 * Now p is the first valid utf8 character and remain is the rest of the string
+		 * so we can continue our loop
+		 */
+		p += i;
+		remain -= i;
+	}
+
+	if (err_offset == 0 && remain > 0) {
+		/* Last piece */
+		memcpy (d, p, remain);
+		d += remain;
+	}
+
+	/* Last '\0' */
+	g_assert (dlen > d - dst);
+	*d = '\0';
 
 	if (dstlen) {
-		*dstlen = dst->len;
+		*dstlen = d - dst;
 	}
 
-	g_string_free (dst, FALSE);
-
-	return dchar;
+	return dst;
 }
 
 gsize
@@ -2924,4 +3264,135 @@ const gchar* rspamd_string_len_strip (const gchar *in,
 	}
 
 	return in;
+}
+
+gchar **
+rspamd_string_len_split (const gchar *in, gsize len, const gchar *spill,
+		gint max_elts, rspamd_mempool_t *pool)
+{
+	const gchar *p = in, *end = in + len;
+	gsize detected_elts = 0;
+	gchar **res;
+
+	/* Detect number of elements */
+	while (p < end) {
+		gsize cur_fragment = rspamd_memcspn (p, spill, end - p);
+
+		if (cur_fragment > 0) {
+			detected_elts ++;
+			p += cur_fragment;
+
+			if (max_elts > 0 && detected_elts >= max_elts) {
+				break;
+			}
+		}
+
+		/* Something like a,,b produces {'a', 'b'} not {'a', '', 'b'} */
+		p += rspamd_memspn (p, spill, end - p);
+	}
+
+	res = pool ?
+			rspamd_mempool_alloc (pool, sizeof (gchar *) * (detected_elts + 1)) :
+			g_malloc (sizeof (gchar *) * (detected_elts + 1));
+	/* Last one */
+	res[detected_elts] = NULL;
+	detected_elts = 0;
+	p = in;
+
+	while (p < end) {
+		gsize cur_fragment = rspamd_memcspn (p, spill, end - p);
+
+		if (cur_fragment > 0) {
+			gchar *elt;
+
+			elt = pool ?
+				  rspamd_mempool_alloc (pool, cur_fragment + 1) :
+				  g_malloc (cur_fragment + 1);
+
+			memcpy (elt, p, cur_fragment);
+			elt[cur_fragment] = '\0';
+
+			res[detected_elts ++] = elt;
+			p += cur_fragment;
+
+			if (max_elts > 0 && detected_elts >= max_elts) {
+				break;
+			}
+		}
+
+		p += rspamd_memspn (p, spill, end - p);
+	}
+
+	return res;
+}
+
+#if defined(__x86_64__)
+#include <x86intrin.h>
+#endif
+
+static inline gboolean
+rspamd_str_has_8bit_u64 (const guchar *beg, gsize len)
+{
+	guint8 orb = 0;
+
+	if (len >= 16) {
+		const guchar *nextd = beg+8;
+		guint64 n1 = 0, n2 = 0;
+
+		do {
+			n1 |= *(const guint64 *)beg;
+			n2 |= *(const guint64 *)nextd;
+			beg += 16;
+			nextd += 16;
+			len -= 16;
+		} while (len >= 16);
+
+		/*
+		 * Idea from Benny Halevy <bhalevy@scylladb.com>
+		 * - 7-th bit set   ==> orb = !(non-zero) - 1 = 0 - 1 = 0xFF
+		 * - 7-th bit clear ==> orb = !0 - 1          = 1 - 1 = 0x00
+		 */
+		orb = !((n1 | n2) & 0x8080808080808080ULL) - 1;
+	}
+
+	while (len--) {
+		orb |= *beg++;
+	}
+
+	return orb >= 0x80;
+}
+
+gboolean
+rspamd_str_has_8bit (const guchar *beg, gsize len)
+{
+#if defined(__x86_64__)
+	if (len >= 32) {
+		const uint8_t *nextd = beg + 16;
+
+		__m128i n1 = _mm_set1_epi8 (0), n2;
+
+		n2 = n1;
+
+		while (len >= 32) {
+			__m128i xmm1 = _mm_loadu_si128 ((const __m128i *)beg);
+			__m128i xmm2 = _mm_loadu_si128 ((const __m128i *)nextd);
+
+			n1 = _mm_or_si128 (n1, xmm1);
+			n2 = _mm_or_si128 (n2, xmm2);
+
+			beg += 32;
+			nextd += 32;
+			len -= 32;
+		}
+
+		n1 = _mm_or_si128 (n1, n2);
+
+		/* We assume 2 complement here */
+		if (_mm_movemask_epi8 (n1)) {
+			return TRUE;
+		}
+	}
+#endif
+
+	return rspamd_str_has_8bit_u64 (beg, len);
 }
