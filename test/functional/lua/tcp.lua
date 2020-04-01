@@ -32,6 +32,78 @@ local function http_simple_tcp_async_symbol(task)
   })
 end
 
+local function http_simple_tcp_ssl_symbol(task)
+  logger.errx(task, 'ssl_tcp_symbol: begin')
+  local function ssl_get_cb(err, data, conn)
+    logger.errx(task, 'ssl_get_cb: got reply: %s, error: %s, conn: %s', data, err, conn)
+    task:insert_result('TCP_SSL_RESPONSE_2', 1.0, tostring(data):gsub('%s', ''))
+  end
+  local function ssl_read_post_cb(err, conn)
+    logger.errx(task, 'ssl_read_post_cb: write done: error: %s, conn: %s', err, conn)
+    conn:add_read(ssl_get_cb)
+  end
+  local function ssl_read_cb(err, data, conn)
+    logger.errx(task, 'ssl_read_cb: got reply: %s, error: %s, conn: %s', data, err, conn)
+    conn:add_write(ssl_read_post_cb, "test2\n")
+    task:insert_result('TCP_SSL_RESPONSE', 1.0, tostring(data):gsub('%s', ''))
+  end
+  rspamd_tcp:request({
+    task = task,
+    callback = ssl_read_cb,
+    host = '127.0.0.1',
+    data = {'test\n'},
+    read = true,
+    ssl = true,
+    ssl_noverify = true,
+    port = 14433,
+  })
+end
+
+local function http_large_tcp_ssl_symbol(task)
+  local data = {}
+
+  local function ssl_get_cb(err, rep, conn)
+    logger.errx(task, 'ssl_get_cb: got reply: %s, error: %s, conn: %s', rep, err, conn)
+    task:insert_result('TCP_SSL_LARGE_2', 1.0)
+  end
+  local function ssl_read_post_cb(err, conn)
+    logger.errx(task, 'ssl_large_read_post_cb: write done: error: %s, conn: %s', err, conn)
+    conn:add_read(ssl_get_cb)
+  end
+  local function ssl_read_cb(err, rep, conn)
+    logger.errx(task, 'ssl_large_read_cb: got reply: %s, error: %s, conn: %s', rep, err, conn)
+    conn:add_write(ssl_read_post_cb, 'foo\n')
+    task:insert_result('TCP_SSL_LARGE', 1.0)
+  end
+
+  if task:get_queue_id() == 'SSL Large TCP request' then
+    logger.errx(task, 'ssl_large_tcp_symbol: begin')
+    for i = 1,2 do
+      local st = {}
+      for j=1,300000 do
+        st[j] = 't'
+      end
+      data[i] = table.concat(st)
+    end
+    data[#data + 1] = '\n'
+
+    rspamd_tcp:request({
+      task = task,
+      callback = ssl_read_cb,
+      host = '127.0.0.1',
+      data = data,
+      read = true,
+      ssl = true,
+      stop_pattern = '\n',
+      ssl_noverify = true,
+      port = 14433,
+      timeout = 20,
+    })
+  else
+    logger.errx(task, 'ssl_large_tcp_symbol: skip')
+  end
+end
+
 local function http_simple_tcp_symbol(task)
   logger.errx(task, 'connect_sync, before')
 
@@ -176,6 +248,18 @@ rspamd_config:register_symbol({
   name = 'SIMPLE_TCP_ASYNC_TEST',
   score = 1.0,
   callback = http_simple_tcp_async_symbol,
+  no_squeeze = true
+})
+rspamd_config:register_symbol({
+  name = 'SIMPLE_TCP_ASYNC_SSL_TEST',
+  score = 1.0,
+  callback = http_simple_tcp_ssl_symbol,
+  no_squeeze = true
+})
+rspamd_config:register_symbol({
+  name = 'LARGE_TCP_ASYNC_SSL_TEST',
+  score = 1.0,
+  callback = http_large_tcp_ssl_symbol,
   no_squeeze = true
 })
 rspamd_config:register_symbol({

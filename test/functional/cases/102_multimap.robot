@@ -21,8 +21,14 @@ ${URL3}         ${TESTDIR}/messages/url3.eml
 ${URL4}         ${TESTDIR}/messages/url4.eml
 ${URL5}         ${TESTDIR}/messages/url5.eml
 ${URL_TLD}      ${TESTDIR}/../lua/unit/test_tld.dat
+${FREEMAIL_CC}  ${TESTDIR}/messages/freemailcc.eml
+${URL_ICS}      ${TESTDIR}/messages/ics.eml
 
 *** Test Cases ***
+URL_ICS
+  ${result} =  Scan Message With Rspamc  ${URL_ICS}
+  Check Rspamc  ${result}  Urls: ["test.com"]
+
 MAP - DNSBL HIT
   ${result} =  Scan Message With Rspamc  ${MESSAGE}  -i  127.0.0.2
   Check Rspamc  ${result}  DNSBL_MAP
@@ -58,6 +64,26 @@ MAP - IP V6 MISS
 MAP - FROM
   ${result} =  Scan Message With Rspamc  ${MESSAGE}  --from  user@example.com
   Check Rspamc  ${result}  FROM_MAP
+
+MAP - COMBINED IP MASK FROM
+  ${result} =  Scan Message With Rspamc  ${MESSAGE}  -i  10.1.0.10  --from  user@example.com
+  Check Rspamc  ${result}  COMBINED_MAP_AND
+  Check Rspamc  ${result}  COMBINED_MAP_OR
+
+MAP - COMBINED IP MASK ONLY
+  ${result} =  Scan Message With Rspamc  ${MESSAGE}  -i  10.1.0.10
+  Check Rspamc  ${result}  COMBINED_MAP_AND  inverse=1
+  Check Rspamc  ${result}  COMBINED_MAP_OR
+
+MAP - COMBINED FROM ONLY
+  ${result} =  Scan Message With Rspamc  ${MESSAGE}  --from  user@example.com
+  Check Rspamc  ${result}  COMBINED_MAP_AND  inverse=1
+  Check Rspamc  ${result}  COMBINED_MAP_OR
+
+MAP - COMBINED MISS
+  ${result} =  Scan Message With Rspamc  ${MESSAGE}  -i  11.1.0.10  --from  user@other.com
+  Check Rspamc  ${result}  COMBINED_MAP_AND  inverse=1
+  Check Rspamc  ${result}  COMBINED_MAP_OR  inverse=1
 
 MAP - FROM MISS
   ${result} =  Scan Message With Rspamc  ${MESSAGE}  --from  user@other.com
@@ -300,6 +326,12 @@ RCVD_AUTHED_TWO HIT / RCVD_AUTHED_ONE MISS
   ${result} =  Scan Message With Rspamc  ${RCVD4}
   Check Rspamc  ${result}  RCVD_AUTHED_TWO
   Should Not Contain  ${result.stdout}  RCVD_AUTHED_ONE
+
+FREEMAIL_CC
+  ${result} =  Scan Message With Rspamc  ${FREEMAIL_CC}
+  Check Rspamc  ${result}  FREEMAIL_CC (19.00)[test.com, test1.com, test2.com, test3.com, test4.com, test5.com, test6.com, test7.com, test8.com, test9.com, test10.com, test11.com, test12.com, test13.com, test14.com]
+
+
 
 *** Keywords ***
 Multimap Setup

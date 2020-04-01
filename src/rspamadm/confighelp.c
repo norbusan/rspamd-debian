@@ -216,9 +216,11 @@ rspamadm_confighelp (gint argc, gchar **argv, const struct rspamadm_command *cmd
 	if (!g_option_context_parse (context, &argc, &argv, &error)) {
 		rspamd_fprintf (stderr, "option parsing failed: %s\n", error->message);
 		g_error_free (error);
+		g_option_context_free (context);
 		exit (1);
 	}
 
+	g_option_context_free (context);
 	pworker = &workers[0];
 	while (*pworker) {
 		/* Init string quarks */
@@ -258,7 +260,7 @@ rspamadm_confighelp (gint argc, gchar **argv, const struct rspamadm_command *cmd
 
 	/* Init lua modules */
 	rspamd_lua_set_path (cfg->lua_state, cfg->rcl_obj, ucl_vars);
-	rspamd_init_lua_filters (cfg, TRUE);
+	rspamd_init_lua_filters (cfg, true, false);
 
 	if (argc > 1) {
 		for (i = 1; i < argc; i ++) {

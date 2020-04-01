@@ -22,7 +22,7 @@
 #include "libmime/message.h"
 #include "expression.h"
 #include "mime_expressions.h"
-#include "libutil/map.h"
+#include "libserver/maps/map.h"
 #include "lua/lua_common.h"
 
 static const guint64 rspamd_regexp_cb_magic = 0xca9d9649fc3e2659ULL;
@@ -136,7 +136,7 @@ regexp_module_config (struct rspamd_config *cfg)
 	struct regexp_module_item *cur_item = NULL;
 	const ucl_object_t *sec, *value, *elt;
 	ucl_object_iter_t it = NULL;
-	gint res = TRUE, id, nre = 0, nlua = 0, nshots = cfg->default_max_shots;
+	gint res = TRUE, nre = 0, nlua = 0, nshots = cfg->default_max_shots;
 
 	if (!rspamd_config_is_module_enabled (cfg, "regexp")) {
 		return TRUE;
@@ -272,7 +272,7 @@ regexp_module_config (struct rspamd_config *cfg)
 					}
 				}
 
-				id = rspamd_symcache_add_symbol (cfg->cache,
+				rspamd_symcache_add_symbol (cfg->cache,
 						cur_item->symbol,
 						0,
 						process_regexp_item,
@@ -442,7 +442,7 @@ regexp_module_reconfig (struct rspamd_config *cfg)
 static gboolean
 rspamd_lua_call_expression_func (struct ucl_lua_funcdata *lua_data,
 		struct rspamd_task *task,
-		GArray *args, gint *res,
+		GArray *args, gdouble *res,
 		const gchar *symbol)
 {
 	lua_State *L = lua_data->L;
@@ -511,7 +511,7 @@ process_regexp_item (struct rspamd_task *task,
 		void *user_data)
 {
 	struct regexp_module_item *item = user_data;
-	gint res = FALSE;
+	gdouble res = FALSE;
 
 	/* Non-threaded version */
 	if (item->lua_function) {
@@ -526,12 +526,7 @@ process_regexp_item (struct rspamd_task *task,
 	else {
 		/* Process expression */
 		if (item->expr) {
-			struct rspamd_expr_process_data process_data;
-			memset (&process_data, 0, sizeof process_data);
-
-			process_data.task = task;
-
-			res = rspamd_process_expression (item->expr, &process_data);
+			res = rspamd_process_expression (item->expr, 0, task);
 		}
 		else {
 			msg_warn_task ("FIXME: %s symbol is broken with new expressions",
@@ -539,7 +534,7 @@ process_regexp_item (struct rspamd_task *task,
 		}
 	}
 
-	if (res) {
+	if (res != 0) {
 		rspamd_task_insert_result (task, item->symbol, res, NULL);
 	}
 

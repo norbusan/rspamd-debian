@@ -18,7 +18,6 @@
 -- Definitions of header regexps
 
 local reconf = config['regexp']
-local rspamd_regexp = require "rspamd_regexp"
 
 -- Subject needs encoding
 -- Define encodings types
@@ -316,7 +315,8 @@ local hotmail_baydav_msgid = 'Message-Id=/^<?BAY\\d+-DAV\\d+[A-Z0-9]{25}\\@phx\\
 -- Sympatico message id
 local sympatico_msgid = 'Message-Id=/^<?BAYC\\d+-PASMTP\\d+[A-Z0-9]{25}\\@CEZ\\.ICE>?$/H'
 -- Mailman message id
-local mailman_msgid = 'Message-ID=/^<mailman\\.\\d+\\.\\d+\\.\\d+\\..+\\@\\S+>$/H'
+-- https://bazaar.launchpad.net/~mailman-coders/mailman/2.1/view/head:/Mailman/Utils.py#L811
+local mailman_msgid = [[Message-ID=/^<mailman\.\d+\.\d+\.\d+\.[-+.:=\w]+@[-a-zA-Z\d.]+>$/H]]
 -- Message id seems to be forged
 local unusable_msgid = string.format('(%s | %s | %s | %s | %s | %s)',
 					lyris_ezml_remailer, wacky_sendmail_version, iplanet_messaging_server, hotmail_baydav_msgid, sympatico_msgid, mailman_msgid)
@@ -415,23 +415,6 @@ reconf['FORGED_MUA_THEBAT_MSGID_UNKNOWN'] = {
 local kmail_mua = 'User-Agent=/^\\s*KMail\\/1\\.\\d+\\.\\d+/H'
 -- KMail common Message-ID template
 local kmail_msgid_common = 'Message-Id=/^<?\\s*\\d+\\.\\d+\\.\\S+\\@\\S+>?$/mH'
-function kmail_msgid (task)
-	local regexp_text = '<(\\S+)>\\|(19[789]\\d|20\\d\\d)(0\\d|1[012])([012]\\d|3[01])([0-5]\\d)([0-5]\\d)\\.\\d+\\.\\1$'
-	local re = rspamd_regexp.create_cached(regexp_text)
-	local header_msgid = task:get_header('Message-Id')
-	if header_msgid then
-		local header_from = task:get_header('From')
-		if header_from and re:match(header_from.."|"..header_msgid) then return true end
-	end
-	return false
-end
--- Summary rule for forged KMail Message-ID header
-reconf['FORGED_MUA_KMAIL_MSGID'] = {
-  re = string.format('(%s) & (%s) & !(%s) & !(%s)', kmail_mua, kmail_msgid_common, 'kmail_msgid', unusable_msgid),
-  score = 3.0,
-  description = 'Message pretends to be send from KMail but has forged Message-ID',
-  group = 'mua'
-}
 -- Summary rule for forged KMail Message-ID header with unknown template
 reconf['FORGED_MUA_KMAIL_MSGID_UNKNOWN'] = {
   re = string.format('(%s) & !(%s) & !(%s)', kmail_mua, kmail_msgid_common, unusable_msgid),
@@ -677,11 +660,11 @@ local no_inr_yes_ref = string.format('(%s) | (%s) | (%s) | (%s) | (%s) | (%s) | 
 local subj_re = 'Subject=/^R[eE]:/H'
 local has_ref = '(header_exists(References) | header_exists(In-Reply-To))'
 local missing_ref = string.format('!(%s)', has_ref)
--- Fake reply (has RE in subject, but has not References header)
+-- Fake reply (has RE in subject, but has no References header)
 reconf['FAKE_REPLY_C'] = {
   re = string.format('(%s) & (%s) & (%s) & !(%s)', subj_re, missing_ref, no_inr_yes_ref, xm_msoe6),
   score = 6.0,
-  description = 'Fake reply (has RE in subject, but has not References header)',
+  description = 'Fake reply (has RE in subject, but has no References header)',
   group = 'subject'
 }
 

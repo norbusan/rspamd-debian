@@ -24,6 +24,10 @@
 #include "backends/backends.h"
 #include "learn_cache/learn_cache.h"
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 struct rspamd_statfile_runtime {
 	struct rspamd_statfile_config *st;
 	gpointer backend_runtime;
@@ -39,6 +43,7 @@ struct rspamd_classifier {
 	gpointer cachecf;
 	gulong spam_learns;
 	gulong ham_learns;
+	gint autolearn_cbref;
 	struct rspamd_classifier_config *cfg;
 	struct rspamd_stat_classifier *subrs;
 	gpointer specific;
@@ -54,16 +59,17 @@ struct rspamd_statfile {
 
 struct rspamd_stat_async_elt;
 
-typedef void (*rspamd_stat_async_handler)(struct rspamd_stat_async_elt *elt,
-		gpointer ud);
-typedef void (*rspamd_stat_async_cleanup)(struct rspamd_stat_async_elt *elt,
-		gpointer ud);
+typedef void (*rspamd_stat_async_handler) (struct rspamd_stat_async_elt *elt,
+										   gpointer ud);
+
+typedef void (*rspamd_stat_async_cleanup) (struct rspamd_stat_async_elt *elt,
+										   gpointer ud);
 
 struct rspamd_stat_async_elt {
 	rspamd_stat_async_handler handler;
 	rspamd_stat_async_cleanup cleanup;
-	struct event timer_ev;
-	struct timeval tv;
+	struct ev_loop *event_loop;
+	ev_timer timer_ev;
 	gdouble timeout;
 	gboolean enabled;
 	gpointer ud;
@@ -93,7 +99,7 @@ struct rspamd_stat_ctx {
 	struct rspamd_stat_tokenizer *tokenizer;
 	gpointer tkcf;
 
-	struct event_base *ev_base;
+	struct ev_loop *event_loop;
 };
 
 typedef enum rspamd_learn_cache_result {
@@ -102,18 +108,26 @@ typedef enum rspamd_learn_cache_result {
 	RSPAMD_LEARN_INGORE
 } rspamd_learn_t;
 
-struct rspamd_stat_ctx * rspamd_stat_get_ctx (void);
-struct rspamd_stat_classifier * rspamd_stat_get_classifier (const gchar *name);
-struct rspamd_stat_backend * rspamd_stat_get_backend (const gchar *name);
-struct rspamd_stat_tokenizer * rspamd_stat_get_tokenizer (const gchar *name);
-struct rspamd_stat_cache * rspamd_stat_get_cache (const gchar *name);
-struct rspamd_stat_async_elt* rspamd_stat_ctx_register_async (
+struct rspamd_stat_ctx *rspamd_stat_get_ctx (void);
+
+struct rspamd_stat_classifier *rspamd_stat_get_classifier (const gchar *name);
+
+struct rspamd_stat_backend *rspamd_stat_get_backend (const gchar *name);
+
+struct rspamd_stat_tokenizer *rspamd_stat_get_tokenizer (const gchar *name);
+
+struct rspamd_stat_cache *rspamd_stat_get_cache (const gchar *name);
+
+struct rspamd_stat_async_elt *rspamd_stat_ctx_register_async (
 		rspamd_stat_async_handler handler, rspamd_stat_async_cleanup cleanup,
 		gpointer d, gdouble timeout);
 
-static GQuark rspamd_stat_quark (void)
-{
+static GQuark rspamd_stat_quark (void) {
 	return g_quark_from_static_string ("rspamd-statistics");
 }
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif /* STAT_INTERNAL_H_ */

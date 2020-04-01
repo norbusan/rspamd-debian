@@ -134,6 +134,21 @@ local function prepare_dkim_signing(N, task, settings)
     end
   end
 
+  if settings.sign_condition and type(settings.sign_condition) == 'function' then
+    -- Use sign condition only
+    local ret = settings.sign_condition(task)
+
+    if not ret then
+      return false,{}
+    end
+
+    if ret[1] then
+      return true,ret
+    else
+      return true,{ret}
+    end
+  end
+
   local auser = task:get_user()
   local ip = task:get_from_ip()
 
@@ -141,7 +156,7 @@ local function prepare_dkim_signing(N, task, settings)
     is_local = true
   end
 
-  if settings.auth_only and auser then
+  if settings.sign_authenticated and auser then
     lua_util.debugm(N, task, 'user is authenticated')
     is_authed = true
   elseif (settings.sign_networks and settings.sign_networks:get_key(ip)) then
@@ -152,15 +167,19 @@ local function prepare_dkim_signing(N, task, settings)
   elseif settings.sign_inbound and not is_local and not auser then
     lua_util.debugm(N, task, 'mail was sent to us')
   else
-    lua_util.debugm(N, task, 'ignoring unauthenticated mail')
+    lua_util.debugm(N, task, 'mail is ineligible for signing')
     return false,{}
   end
 
   local efrom = task:get_from('smtp')
-  if not settings.allow_envfrom_empty and
-      #(((efrom or E)[1] or E).addr or '') == 0 then
-    lua_util.debugm(N, task, 'empty envelope from not allowed')
-    return false,{}
+  local empty_envelope = false
+  if #(((efrom or E)[1] or E).addr or '') == 0 then
+    if not settings.allow_envfrom_empty then
+      lua_util.debugm(N, task, 'empty envelope from not allowed')
+      return false,{}
+    else
+      empty_envelope = true
+    end
   end
 
   local hfrom = task:get_from('mime')
@@ -192,9 +211,9 @@ local function prepare_dkim_signing(N, task, settings)
   end
 
   local function is_skip_sign()
-    return (settings.sign_networks and not is_sign_networks) and
-        (settings.auth_only and not is_authed) and
-        (settings.sign_local and not is_local)
+    return not (settings.sign_networks and is_sign_networks) and
+        not (settings.sign_authenticated and is_authed) and
+        not (settings.sign_local and is_local)
   end
 
   if hdom then
@@ -227,6 +246,7 @@ local function prepare_dkim_signing(N, task, settings)
     local sign_entry = settings.signing_table:get_key(hfrom[1].addr)
 
     if sign_entry then
+      -- Check opendkim style entries
       lua_util.debugm(N, task,
           'signing_table: found entry for %s: %s', hfrom[1].addr, sign_entry)
       if sign_entry == '%' then
@@ -388,8 +408,12 @@ local function prepare_dkim_signing(N, task, settings)
     elseif settings.allow_hdrfrom_mismatch_sign_networks and is_sign_networks then
       lua_util.debugm(N, task, 'domain mismatch allowed for sign_networks: %1 != %2', hdom, edom)
     else
-      lua_util.debugm(N, task, 'domain mismatch not allowed: %1 != %2', hdom, edom)
-      return false,{}
+      if empty_envelope and hdom then
+        lua_util.debugm(N, task, 'domain mismatch allowed for empty envelope: %1 != %2', hdom, edom)
+      else
+        lua_util.debugm(N, task, 'domain mismatch not allowed: %1 != %2', hdom, edom)
+        return false,{}
+      end
     end
   end
 
@@ -655,7 +679,8 @@ exports.validate_signing_settings = function(settings)
       settings.selector_map or
       settings.use_http_headers or
       (settings.signing_table and settings.key_table) or
-      (settings.use_vault and settings.vault_url and settings.vault_token)
+      (settings.use_vault and settings.vault_url and settings.vault_token) or
+      settings.sign_condition
 end
 
 exports.process_signing_settings = function(N, settings, opts)
@@ -673,6 +698,13 @@ exports.process_signing_settings = function(N, settings, opts)
       settings[k] = lua_maps.map_add(N, k, 'glob', 'DKIM keys table')
     elseif k == 'vault_domains' then
       settings[k] = lua_maps.map_add(N, k, 'glob', 'DKIM signing domains in vault')
+    elseif k == 'sign_condition' then
+      local ret,f = lua_util.callback_from_string(v)
+      if ret then
+        settings[k] = f
+      else
+        logger.errx(rspamd_config, 'cannot load sign condition %s: %s', v, f)
+      end
     else
       settings[k] = v
     end

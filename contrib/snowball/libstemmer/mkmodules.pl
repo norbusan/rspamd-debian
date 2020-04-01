@@ -1,19 +1,12 @@
-#!/usr/bin/perl -w
+#!/usr/bin/env perl
 use strict;
-use Getopt::Std;
+use 5.006;
+use warnings;
 
 my $progname = $0;
 
-my $include_path = '../';
-our($opt_f);
-
-getopts('f');
-if ($opt_f) {
-	$include_path = '';
-}
-
 if (scalar @ARGV < 4 || scalar @ARGV > 5) {
-  print "Usage: $progname <outfile> <C source directory> <modules description file> <source list file> [<extn>]\n";
+  print "Usage: $progname <outfile> <C source directory> <modules description file> <source list file> [<enc>]\n";
   exit 1;
 }
 
@@ -21,9 +14,11 @@ my $outname = shift(@ARGV);
 my $c_src_dir = shift(@ARGV);
 my $descfile = shift(@ARGV);
 my $srclistfile = shift(@ARGV);
+my $enc_only;
 my $extn = '';
 if (@ARGV) {
-  $extn = '_'.shift(@ARGV);
+  $enc_only = shift(@ARGV);
+  $extn = '_'.$enc_only;
 }
 
 my %aliases = ();
@@ -35,6 +30,14 @@ my %encs = ();
 sub addalgenc($$) {
   my $alg = shift();
   my $enc = shift();
+
+  if (defined $enc_only) {
+      my $norm_enc = lc $enc;
+      $norm_enc =~ s/_//g;
+      if ($norm_enc ne $enc_only) {
+	  return;
+      }
+  }
 
   if (defined $algorithm_encs{$alg}) {
       my $hashref = $algorithm_encs{$alg};
@@ -51,7 +54,7 @@ sub readinput()
 {
     open DESCFILE, $descfile;
     my $line;
-    while($line = <DESCFILE>)
+    while ($line = <DESCFILE>)
     {
         next if $line =~ m/^\s*#/;
         next if $line =~ m/^\s*$/;
@@ -109,7 +112,7 @@ EOS
     foreach $lang (@algorithms) {
         my $hashref = $algorithm_encs{$lang};
         foreach $enc (sort keys (%$hashref)) {
-            print OUT "#include \"${include_path}$c_src_dir/stem_${enc}_$lang.h\"\n";
+            print OUT "#include \"../$c_src_dir/stem_${enc}_$lang.h\"\n";
         }
     }
 
@@ -132,7 +135,7 @@ struct stemmer_encoding {
   const char * name;
   stemmer_encoding_t enc;
 };
-static struct stemmer_encoding encodings[] = {
+static const struct stemmer_encoding encodings[] = {
 EOS
     for $enc (sort keys %encs) {
         print OUT "  {\"${enc}\", ENC_${enc}},\n";
@@ -148,7 +151,7 @@ struct stemmer_modules {
   void (*close)(struct SN_env *);
   int (*stem)(struct SN_env *);
 };
-static struct stemmer_modules modules[] = {
+static const struct stemmer_modules modules[] = {
 EOS
 
     for $lang (sort keys %aliases) {
@@ -171,7 +174,6 @@ static const char * algorithm_names[] = {
 EOS
 
     for $lang (@algorithms) {
-        my $l = $aliases{$lang};
         print OUT "  \"$lang\", \n";
     }
 

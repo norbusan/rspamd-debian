@@ -35,26 +35,35 @@ HTTP empty response
   Check url  /empty  get  HTTP_ERROR  HTTP_ERROR  HTTP_CORO_DNS_ERROR  HTTP_CORO_ERROR  method_get  IO read error: unexpected EOF
   Check url  /empty  post  HTTP_DNS_ERROR  HTTP_ERROR  HTTP_CORO_DNS_ERROR  HTTP_CORO_ERROR  method_post  IO read error: unexpected EOF
 
+SSL Large HTTP request
+  ${result} =  Scan Message With Rspamc  ${MESSAGE}
+  Check Rspamc  ${result}  HTTP_SSL_LARGE
 
 *** Keywords ***
 Lua Setup
   [Arguments]  ${LUA_SCRIPT}
-  Set Global Variable  ${LUA_SCRIPT}
+  Set Suite Variable  ${LUA_SCRIPT}
   Generic Setup
 
 Http Setup
   Run Dummy Http
+  Run Dummy Https
   Lua Setup  ${TESTDIR}/lua/http.lua
 
 Http Teardown
   ${http_pid} =  Get File  /tmp/dummy_http.pid
   Shutdown Process With Children  ${http_pid}
+  ${https_pid} =  Get File  /tmp/dummy_https.pid
+  Shutdown Process With Children  ${https_pid}
   Normal Teardown
 
 Run Dummy Http
   ${result} =  Start Process  ${TESTDIR}/util/dummy_http.py
   Wait Until Created  /tmp/dummy_http.pid
 
+Run Dummy Https
+  ${result} =  Start Process  ${TESTDIR}/util/dummy_https.py  ${TESTDIR}/util/server.pem
+  Wait Until Created  /tmp/dummy_https.pid
 
 Check url
   [Arguments]  ${url}  ${method}  @{expect_results}

@@ -19,13 +19,11 @@ limitations under the License.
 
 local rspamd_logger = require "rspamd_logger"
 local mempool = require "rspamd_mempool"
-local rspamd_tcp = require "rspamd_tcp"
 local rspamd_url = require "rspamd_url"
 local rspamd_util = require "rspamd_util"
 local rspamd_redis = require "lua_redis"
 local lua_util = require "lua_util"
-local check_local = false
-local check_authed = false
+local auth_and_local_conf
 
 if confighelp then
   return
@@ -46,15 +44,17 @@ local report_settings = {
   smtp_port = 25,
   retries = 2,
   from_name = 'Rspamd',
+  msgid_from = 'rspamd',
 }
-local report_template = [[From: "%s" <%s>
-To: %s
-Subject: Report Domain: %s
-	Submitter: %s
-	Report-ID: <%s>
-Date: %s
+local report_template = [[From: "{= from_name =}" <{= from_addr =}>
+To: {= rcpt =}
+{%+ if is_string(bcc) %}Bcc: {= bcc =}{%- endif %}
+Subject: Report Domain: {= reporting_domain =}
+	Submitter: {= submitter =}
+	Report-ID: {= report_id =}
+Date: {= report_date =}
 MIME-Version: 1.0
-Message-ID: <%s>
+Message-ID: <{= message_id =}>
 Content-Type: multipart/mixed;
 	boundary="----=_NextPart_000_024E_01CC9B0A.AFE54C00"
 
@@ -64,17 +64,17 @@ This is a multipart message in MIME format.
 Content-Type: text/plain; charset="us-ascii"
 Content-Transfer-Encoding: 7bit
 
-This is an aggregate report from %s.
+This is an aggregate report from {= submitter =}.
 
-Report domain: %s
-Submitter: %s
-Report ID: %s
+Report domain: {= reporting_domain =}
+Submitter: {= submitter =}
+Report ID: {= report_id =}
 
 ------=_NextPart_000_024E_01CC9B0A.AFE54C00
 Content-Type: application/gzip
 Content-Transfer-Encoding: base64
 Content-Disposition: attachment;
-	filename="%s!%s!%s!%s.xml.gz"
+	filename="{= submitter =}!{= reporting_domain =}!{= report_start =}!{= report_end =}.xml.gz"
 
 ]]
 local report_footer = [[
@@ -127,8 +127,18 @@ end
 
 local xml_grammar = gen_xml_grammar()
 
-local function escape_xml(goo)
-  return xml_grammar:match(goo)
+local function escape_xml(input)
+  if type(input) == 'string' or type(input) == 'userdata' then
+    return xml_grammar:match(input)
+  else
+    input = tostring(input)
+
+    if input then
+      return xml_grammar:match(input)
+    end
+  end
+
+  return ''
 end
 
 -- Default port for redis upstreams
@@ -179,10 +189,27 @@ end
 
 local dmarc_grammar = gen_dmarc_grammar()
 
+local function dmarc_key_value_case(elts)
+  if type(elts) ~= "table" then
+    return elts
+  end
+  local result = {}
+  for k, v in pairs(elts) do
+    k = k:lower()
+    if k ~= "v" then
+      v = v:lower()
+    end
+
+    result[k] = v
+  end
+
+  return result
+end
+
 local function dmarc_report(task, spf_ok, dkim_ok, disposition,
     sampled_out, hfromdom, spfdom, dres, spf_result)
   local ip = task:get_from_ip()
-  if not ip:is_valid() then
+  if ip and not ip:is_valid() then
     return nil
   end
   local rspamd_lua_utils = require "lua_util"
@@ -229,6 +256,8 @@ local function dmarc_check_record(task, record, is_tld)
       record, is_tld, elts)
 
   if elts then
+    elts = dmarc_key_value_case(elts)
+
     local dkim_pol = elts['adkim']
     if dkim_pol then
       if dkim_pol == 's' then
@@ -560,7 +589,7 @@ local function dmarc_callback(task)
   local hfromdom = ((from or E)[1] or E).domain
   local dmarc_domain
   local ip_addr = task:get_ip()
-  local dmarc_checks = task:get_mempool():get_variable('dmarc_checks', 'int') or 0
+  local dmarc_checks = task:get_mempool():get_variable('dmarc_checks', 'double') or 0
   local seen_invalid = false
 
   if dmarc_checks ~= 2 then
@@ -568,8 +597,7 @@ local function dmarc_callback(task)
     return
   end
 
-  if ((not check_authed and task:get_user()) or
-      (not check_local and ip_addr and ip_addr:is_local())) then
+  if lua_util.is_skip_local_or_authed(task, auth_and_local_conf, ip_addr) then
     rspamd_logger.infox(task, "skip DMARC checks for local networks and authorized users")
     return
   end
@@ -664,6 +692,11 @@ local function dmarc_callback(task)
               end
             end
           end
+
+          if not has_valid_policy and not seen_invalid then
+            policy_target.err = lookup_domain .. ':' .. ' no valid DMARC record'
+            policy_target.symbol = dmarc_symbols['na']
+          end
         end
       end
 
@@ -705,29 +738,14 @@ local function dmarc_callback(task)
 end
 
 
-local function try_opts(where)
-  local ret = false
-  local opts = rspamd_config:get_all_opt(where)
-  if type(opts) == 'table' then
-    if type(opts['check_local']) == 'boolean' then
-      check_local = opts['check_local']
-      ret = true
-    end
-    if type(opts['check_authed']) == 'boolean' then
-      check_authed = opts['check_authed']
-      ret = true
-    end
-  end
-
-  return ret
-end
-
-if not try_opts(N) then try_opts('options') end
-
 local opts = rspamd_config:get_all_opt('dmarc')
 if not opts or type(opts) ~= 'table' then
   return
 end
+
+auth_and_local_conf = lua_util.config_check_local_or_authed(rspamd_config, N,
+    false, false)
+
 no_sampling_domains = rspamd_map_add(N, 'no_sampling_domains', 'map', 'Domains not to apply DMARC sampling to')
 no_reporting_domains = rspamd_map_add(N, 'no_reporting_domains', 'map', 'Domains not to apply DMARC reporting to')
 
@@ -763,7 +781,9 @@ if opts['reporting'] == true then
     take_report_id = rspamd_redis.add_redis_script(take_report_script, redis_params)
     rspamd_config:add_on_load(function(cfg, ev_base, worker)
       if not worker:is_primary_controller() then return end
+
       pool = mempool.create()
+
       rspamd_config:register_finish_script(function ()
         local stamp = pool:get_variable(VAR_NAME, 'double')
         if not stamp then
@@ -779,8 +799,11 @@ if opts['reporting'] == true then
         assert(f:close())
         pool:destroy()
       end)
-      local get_reporting_domain, reporting_domain, report_start, report_end, report_id, want_period, report_key
-      local reporting_addr = {}
+
+      local get_reporting_domain, reporting_domain, report_start,
+            report_end, report_id, want_period, report_key
+      local reporting_addrs = {}
+      local bcc_addrs = {}
       local domain_policy = {}
       local to_verify = {}
       local cursor = 0
@@ -817,7 +840,8 @@ if opts['reporting'] == true then
       end
       local function dmarc_report_xml()
         local entries = {}
-        report_id = string.format('%s.%d.%d', reporting_domain, report_start, report_end)
+        report_id = string.format('%s.%d.%d',
+            reporting_domain, report_start, report_end)
         lua_util.debugm(N, rspamd_config, 'new report: %s', report_id)
         local actions = {
           push = function(t)
@@ -854,13 +878,15 @@ if opts['reporting'] == true then
               end
             end
             if split[10] and split[10] ~= '' then
-              local tmp = rspamd_str_split(split[10], '|')
+              local tmp = lua_util.str_split(split[10], '|')
               for _, d in ipairs(tmp) do
-                table.insert(row.dkim_results, {domain = d, result = 'permerror'})
+                table.insert(row.dkim_results,
+                    {domain = d, result = 'permerror'})
               end
             end
             table.insert(entries, row)
           end,
+          -- TODO: please rework this shit
           header = function()
               return table.concat({
                 '<?xml version="1.0" encoding="utf-8"?><feedback><report_metadata><org_name>',
@@ -870,7 +896,8 @@ if opts['reporting'] == true then
                 '</begin><end>', report_end, '</end></date_range></report_metadata><policy_published><domain>',
                 reporting_domain, '</domain><adkim>', escape_xml(domain_policy.adkim), '</adkim><aspf>',
                 escape_xml(domain_policy.aspf), '</aspf><p>', escape_xml(domain_policy.p),
-                '</p><sp>', escape_xml(domain_policy.sp), '</sp><pct>', escape_xml(domain_policy.pct),
+                '</p><sp>', escape_xml(domain_policy.sp), '</sp><pct>',
+                escape_xml(domain_policy.pct),
                 '</pct></policy_published>'
               })
           end,
@@ -891,167 +918,88 @@ if opts['reporting'] == true then
           return f(p)
         end
       end
+
+
       local function send_report_via_email(xmlf, retry)
         if not retry then retry = 0 end
-        if retry > report_settings.retries then
-          rspamd_logger.errx(rspamd_config, "Couldn't send mail for %s: retries exceeded", reporting_domain)
-          return get_reporting_domain()
+
+        local function sendmail_cb(ret, err)
+          if not ret then
+            rspamd_logger.errx(rspamd_config, "Couldn't send mail for %s: %s", err)
+            if retry >= report_settings.retries then
+              rspamd_logger.errx(rspamd_config, "Couldn't send mail for %s: retries exceeded", reporting_domain)
+              return get_reporting_domain()
+            else
+              send_report_via_email(xmlf, retry + 1)
+            end
+          else
+            get_reporting_domain()
+          end
         end
-        local tmp_addr = {}
-        for k in pairs(reporting_addr) do
-          table.insert(tmp_addr, k)
-        end
+
+        -- Format message
+        local list_rcpt = lua_util.keys(reporting_addrs)
+
         local encoded = rspamd_util.encode_base64(rspamd_util.gzip_compress(
               table.concat(
                 {xmlf('header'),
                  xmlf('entries'),
                  xmlf('footer')})), 73)
-        local function mail_cb(err, data, conn)
-          local function no_error(merr, mdata, wantcode)
-            wantcode = wantcode or '2'
-            if merr then
-              rspamd_logger.errx(ev_base, 'got error in tcp callback: %s', merr)
-              if conn then
-                conn:close()
-              end
-              send_report_via_email(xmlf, retry+1)
-              return false
-            end
-            if mdata then
-              if type(mdata) ~= 'string' then
-                mdata = tostring(mdata)
-              end
-              if string.sub(mdata, 1, 1) ~= wantcode then
-                rspamd_logger.errx(ev_base, 'got bad smtp response: %s', mdata)
-                if conn then
-                  conn:close()
-                end
-                send_report_via_email(xmlf, retry+1)
-                return false
-              end
-            else
-              rspamd_logger.errx(ev_base, 'no data')
-              if conn then
-                conn:close()
-              end
-              send_report_via_email(xmlf, retry+1)
-              return false
-            end
-            return true
-          end
-          local function all_done_cb(merr, mdata)
-            if conn then
-              conn:close()
-            end
-            get_reporting_domain()
-            return true
-          end
-          local function quit_done_cb(merr, mdata)
-            conn:add_read(all_done_cb, '\r\n')
-          end
-          local function quit_cb(merr, mdata)
-            if no_error(merr, mdata) then
-              conn:add_write(quit_done_cb, 'QUIT\r\n')
-            end
-          end
-          local function pre_quit_cb(merr, mdata)
-            if no_error(merr, '2') then
-              conn:add_read(quit_cb, '\r\n')
-            end
-          end
-          local function data_done_cb(merr, mdata)
-            if no_error(merr, mdata, '3') then
-              local atmp = {}
-              for k in pairs(reporting_addr) do
-                table.insert(atmp, k)
-              end
-              local addr_string = table.concat(atmp, ', ')
-              -- TODO: migrate to templates and remove this shit
-              local rhead = string.format(report_template:gsub("\n", "\r\n"),
-                  report_settings.from_name,
-                  report_settings.email,
-                  addr_string,
-                  reporting_domain,
-                  report_settings.domain,
-                  report_id,
-                  rspamd_util.time_to_string(rspamd_util.get_time()),
-                  rspamd_util.random_hex(12) .. '@rspamd', -- Message-id
-                  report_settings.domain, -- Plain text part
-                  reporting_domain,
-                  addr_string,
-                  report_id,
-                  report_settings.domain,
-                  reporting_domain,
-                  report_start, report_end)
-              conn:add_write(pre_quit_cb, {rhead,
-                                           encoded,
-                                           report_footer:gsub("\n", "\r\n"),
-                                           '\r\n.\r\n'})
-            end
-          end
-          local function data_cb(merr, mdata)
-            if no_error(merr, '2') then
-              conn:add_read(data_done_cb, '\r\n')
-            end
-          end
-          local function rcpt_done_cb(merr, mdata)
-            if no_error(merr, mdata) then
-              conn:add_write(data_cb, 'DATA\r\n')
-            end
-          end
-          local from_done_cb
-          local function rcpt_cb(merr, mdata)
-            if no_error(merr, '2') then
-              if tmp_addr[1] then
-                conn:add_read(from_done_cb, '\r\n')
-              else
-                conn:add_read(rcpt_done_cb, '\r\n')
-              end
-            end
-          end
-          from_done_cb = function(merr, mdata)
-            if no_error(merr, mdata) then
-              conn:add_write(rcpt_cb, {'RCPT TO: <', table.remove(tmp_addr), '>\r\n'})
-            end
-          end
-          local function from_cb(merr, mdata)
-            if no_error(merr, '2') then
-              conn:add_read(from_done_cb, '\r\n')
-            end
-          end
-            local function hello_done_cb(merr, mdata)
-            if no_error(merr, mdata) then
-              conn:add_write(from_cb, {'MAIL FROM: <', report_settings.email, '>\r\n'})
-            end
-          end
-          local function hello_cb(merr)
-            if no_error(merr, '2') then
-              conn:add_read(hello_done_cb, '\r\n')
-            end
-          end
-          if no_error(err, data) then
-            conn:add_write(hello_cb, {'HELO ', report_settings.helo, '\r\n'})
-          end
+        local addr_string = table.concat(list_rcpt, ', ')
+
+        bcc_addrs = lua_util.keys(bcc_addrs)
+        local bcc_string
+        if #bcc_addrs > 0 then
+          bcc_string = table.concat(bcc_addrs, ', ')
         end
-        rspamd_tcp.request({
+
+        local rhead = lua_util.jinja_template(report_template,
+            {
+              from_name = report_settings.from_name,
+              from_addr = report_settings.email,
+              rcpt = addr_string,
+              bcc = bcc_string,
+              reporting_domain = reporting_domain,
+              submitter = report_settings.domain,
+              report_id = report_id,
+              report_date = rspamd_util.time_to_string(rspamd_util.get_time()),
+              message_id = rspamd_util.random_hex(16) .. '@' .. report_settings.msgid_from,
+              report_start = report_start,
+              report_end = report_end
+            }, true)
+        local message = {
+          (rhead:gsub("\n", "\r\n")),
+          encoded,
+          (report_footer:gsub("\n", "\r\n"))
+        }
+
+        local lua_smtp = require "lua_smtp"
+        lua_smtp.sendmail({
           ev_base = ev_base,
-          callback = mail_cb,
           config = rspamd_config,
-          stop_pattern = '\r\n',
           host = report_settings.smtp,
           port = report_settings.smtp_port,
           resolver = rspamd_config:get_resolver(),
-        })
+          from = report_settings.email,
+          recipients = list_rcpt,
+          helo =  report_settings.helo,
+        }, message, sendmail_cb)
       end
+
+
       local function make_report()
         if type(report_settings.override_address) == 'string' then
-          reporting_addr = {[report_settings.override_address] = true}
+          reporting_addrs = { [report_settings.override_address] = true}
         end
         if type(report_settings.additional_address) == 'string' then
-          reporting_addr[report_settings.additional_address] = true
+          if report_settings.additional_address_bcc then
+            bcc_addrs[report_settings.additional_address] = true
+          else
+            reporting_addrs[report_settings.additional_address] = true
+          end
         end
-        rspamd_logger.infox(ev_base, 'sending report for %s <%s>',
-            reporting_domain, table.concat(reporting_addr, ','))
+        rspamd_logger.infox(ev_base, 'sending report for %s <%s> (<%s> bcc)',
+            reporting_domain, reporting_addrs, bcc_addrs)
         local dmarc_xml = dmarc_report_xml()
         local dmarc_push_cb
         dmarc_push_cb = function(err, data)
@@ -1083,6 +1031,7 @@ if opts['reporting'] == true then
             end
           end
         end
+
         local ret = rspamd_redis.redis_make_request_taskless(ev_base,
           rspamd_config,
           redis_params,
@@ -1156,12 +1105,12 @@ if opts['reporting'] == true then
                 rspamd_logger.infox(rspamd_config, 'Reports to %s for %s not authorised', test_addr, reporting_domain)
               else
                 to_verify[test_addr] = nil
-                reporting_addr[test_addr] = true
+                reporting_addrs[test_addr] = true
               end
             end
             local t, nvdom = next(to_verify)
             if not t then
-              if next(reporting_addr) then
+              if next(reporting_addrs) then
                 make_report()
               else
                 rspamd_logger.infox(rspamd_config, 'No valid reporting addresses for %s', reporting_domain)
@@ -1221,7 +1170,7 @@ if opts['reporting'] == true then
                 failed_policy = true
               elseif elts then
                 found_policy = true
-                policy = elts
+                policy = dmarc_key_value_case(elts)
               end
             end
             if not found_policy then
@@ -1254,7 +1203,7 @@ if opts['reporting'] == true then
                     rspamd_logger.errx(rspamd_config, 'Invalid URL: %s', url)
                   else
                     if urlt['tld'] == rspamd_util.get_tld(reporting_domain) then
-                      reporting_addr[string.format('%s@%s', urlt['user'], urlt['host'])] = true
+                      reporting_addrs[string.format('%s@%s', urlt['user'], urlt['host'])] = true
                     else
                       to_verify[string.format('%s@%s', urlt['user'], urlt['host'])] = urlt['host']
                     end
@@ -1269,7 +1218,7 @@ if opts['reporting'] == true then
               domain_policy['sp'] = policy['sp'] or 'none'
               if next(to_verify) then
                 verify_reporting_address()
-              elseif next(reporting_addr) then
+              elseif next(reporting_addrs) then
                 make_report()
               else
                 rspamd_logger.errx(rspamd_config, 'No reporting address for %s', reporting_domain)
@@ -1287,7 +1236,7 @@ if opts['reporting'] == true then
       end
       get_reporting_domain = function()
         reporting_domain = nil
-        reporting_addr = {}
+        reporting_addrs = {}
         domain_policy = {}
         cursor = 0
         local function get_reporting_domain_cb(err, data)
@@ -1468,6 +1417,13 @@ rspamd_config:register_symbol({
 })
 rspamd_config:register_symbol({
   name = dmarc_symbols['dnsfail'],
+  parent = id,
+  group = 'policies',
+  groups = {'dmarc'},
+  type = 'virtual'
+})
+rspamd_config:register_symbol({
+  name = dmarc_symbols['badpolicy'],
   parent = id,
   group = 'policies',
   groups = {'dmarc'},

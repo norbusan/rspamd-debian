@@ -18,12 +18,12 @@
 #include "cfg_file.h"
 #include "rspamd.h"
 #include "cfg_file_private.h"
-#include "filter.h"
+#include "scan_result.h"
 #include "lua/lua_common.h"
 #include "lua/lua_thread_pool.h"
-#include "map.h"
-#include "map_helpers.h"
-#include "map_private.h"
+#include "maps/map.h"
+#include "maps/map_helpers.h"
+#include "maps/map_private.h"
 #include "dynamic_cfg.h"
 #include "utlist.h"
 #include "stat_api.h"
@@ -31,6 +31,28 @@
 #include "libutil/multipattern.h"
 #include "monitored.h"
 #include "ref.h"
+#include "cryptobox.h"
+#include "ssl_util.h"
+#include "contrib/libottery/ottery.h"
+#include "contrib/fastutf8/fastutf8.h"
+
+#define ZSTD_STATIC_LINKING_ONLY
+#include "contrib/zstd/zstd.h"
+#include "contrib/zstd/zdict.h"
+
+#ifdef HAVE_OPENSSL
+#include <openssl/rand.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/ssl.h>
+#include <openssl/conf.h>
+#endif
+#ifdef HAVE_LOCALE_H
+#include <locale.h>
+#endif
+#ifdef HAVE_SYS_RESOURCE_H
+#include <sys/resource.h>
+#endif
 #include <math.h>
 
 #define DEFAULT_SCORE 10.0
@@ -76,28 +98,28 @@ rspamd_parse_bind_line (struct rspamd_config *cfg,
 	const gchar *str)
 {
 	struct rspamd_worker_bind_conf *cnf;
-	gchar *err;
+	const gchar *fdname;
 	gboolean ret = TRUE;
 
 	if (str == NULL) {
 		return FALSE;
 	}
 
-	cnf =
-		rspamd_mempool_alloc0 (cfg->cfg_pool,
-			sizeof (struct rspamd_worker_bind_conf));
+	cnf = g_malloc0 (sizeof (struct rspamd_worker_bind_conf));
 
 	cnf->cnt = 1024;
-	cnf->bind_line = str;
+	cnf->bind_line = g_strdup (str);
 
 	if (g_ascii_strncasecmp (str, "systemd:", sizeof ("systemd:") - 1) == 0) {
 		/* The actual socket will be passed by systemd environment */
+		fdname = str + sizeof ("systemd:") - 1;
 		cnf->is_systemd = TRUE;
-		cnf->cnt = strtoul (str + sizeof ("systemd:") - 1, &err, 10);
-		cnf->addrs = NULL;
+		cnf->addrs = g_ptr_array_new_full (1, g_free);
 
-		if (err == NULL || *err == '\0') {
-			cnf->name = rspamd_mempool_strdup (cfg->cfg_pool, str);
+		if (fdname[0]) {
+			g_ptr_array_add (cnf->addrs, g_strdup (fdname));
+			cnf->cnt = cnf->addrs->len;
+			cnf->name = g_strdup (str);
 			LL_PREPEND (cf->bind_conf, cnf);
 		}
 		else {
@@ -106,8 +128,8 @@ rspamd_parse_bind_line (struct rspamd_config *cfg,
 		}
 	}
 	else {
-		if (!rspamd_parse_host_port_priority (str, &cnf->addrs,
-				NULL, &cnf->name, DEFAULT_BIND_PORT, cfg->cfg_pool)) {
+		if (rspamd_parse_host_port_priority (str, &cnf->addrs,
+				NULL, &cnf->name, DEFAULT_BIND_PORT, TRUE, NULL) == RSPAMD_PARSE_ADDR_FAIL) {
 			msg_err_config ("cannot parse bind line: %s", str);
 			ret = FALSE;
 		}
@@ -117,6 +139,15 @@ rspamd_parse_bind_line (struct rspamd_config *cfg,
 		}
 	}
 
+	if (!ret) {
+		if (cnf->addrs) {
+			g_ptr_array_free (cnf->addrs, TRUE);
+		}
+
+		g_free (cnf->name);
+		g_free (cnf);
+	}
+
 	return ret;
 }
 
@@ -124,15 +155,14 @@ struct rspamd_config *
 rspamd_config_new (enum rspamd_config_init_flags flags)
 {
 	struct rspamd_config *cfg;
+	rspamd_mempool_t *pool;
 
-	cfg = g_malloc0 (sizeof (*cfg));
+	pool = rspamd_mempool_new (8 * 1024 * 1024, "cfg", 0);
+	cfg = rspamd_mempool_alloc0 (pool, sizeof (*cfg));
 	/* Allocate larger pool for cfg */
-	cfg->cfg_pool = rspamd_mempool_new (8 * 1024 * 1024, "cfg");
-	cfg->dns_timeout = 1000;
+	cfg->cfg_pool = pool;
+	cfg->dns_timeout = 1.0;
 	cfg->dns_retransmits = 5;
-	/* After 20 errors do throttling for 10 seconds */
-	cfg->dns_throttling_errors = 20;
-	cfg->dns_throttling_time = 10000;
 	/* 16 sockets per DNS server */
 	cfg->dns_io_per_server = 16;
 
@@ -189,12 +219,16 @@ rspamd_config_new (enum rspamd_config_init_flags flags)
 	cfg->log_error_elts = 10;
 	cfg->log_error_elt_maxlen = 1000;
 	cfg->cache_reload_time = 30.0;
+	cfg->max_lua_urls = 1024;
+	cfg->max_urls = cfg->max_lua_urls * 10;
+	cfg->max_blas_threads = 1;
+	cfg->max_opts_len = 4096;
 
 	/* Default log line */
 	cfg->log_format_str = "id: <$mid>,$if_qid{ qid: <$>,}$if_ip{ ip: $,}"
 			"$if_user{ user: $,}$if_smtp_from{ from: <$>,} (default: $is_spam "
-			"($action): [$scores] [$symbols_scores_params]), len: $len, time: $time_real real,"
-			" $time_virtual virtual, dns req: $dns_req, digest: <$digest>"
+			"($action): [$scores] [$symbols_scores_params]), len: $len, time: $time_real, "
+			"dns req: $dns_req, digest: <$digest>"
 			"$if_smtp_rcpts{ rcpts: <$>, }$if_mime_rcpt{ mime_rcpt: <$>, }";
 	/* Allow non-mime input by default */
 	cfg->allow_raw_input = TRUE;
@@ -236,6 +270,7 @@ rspamd_config_new (enum rspamd_config_init_flags flags)
 	cfg->max_sessions_cache = DEFAULT_MAX_SESSIONS;
 	cfg->maps_cache_dir = rspamd_mempool_strdup (cfg->cfg_pool, RSPAMD_DBDIR);
 	cfg->c_modules = g_ptr_array_new ();
+	cfg->heartbeat_interval = 10.0;
 
 	REF_INIT_RETAIN (cfg, rspamd_config_free);
 
@@ -245,17 +280,31 @@ rspamd_config_new (enum rspamd_config_init_flags flags)
 void
 rspamd_config_free (struct rspamd_config *cfg)
 {
-	struct rspamd_config_post_load_script *sc, *sctmp;
+	struct rspamd_config_cfg_lua_script *sc, *sctmp;
+	struct rspamd_config_settings_elt *set, *stmp;
 	struct rspamd_worker_log_pipe *lp, *ltmp;
 
-	DL_FOREACH_SAFE (cfg->finish_callbacks, sc, sctmp) {
+	rspamd_lua_run_config_unload (cfg->lua_state, cfg);
+
+	/* Scripts part */
+	DL_FOREACH_SAFE (cfg->on_term_scripts, sc, sctmp) {
 		luaL_unref (cfg->lua_state, LUA_REGISTRYINDEX, sc->cbref);
-		g_free (sc);
 	}
 
-	DL_FOREACH_SAFE (cfg->on_load, sc, sctmp) {
+	DL_FOREACH_SAFE (cfg->on_load_scripts, sc, sctmp) {
 		luaL_unref (cfg->lua_state, LUA_REGISTRYINDEX, sc->cbref);
-		g_free (sc);
+	}
+
+	DL_FOREACH_SAFE (cfg->post_init_scripts, sc, sctmp) {
+		luaL_unref (cfg->lua_state, LUA_REGISTRYINDEX, sc->cbref);
+	}
+
+	DL_FOREACH_SAFE (cfg->config_unload_scripts, sc, sctmp) {
+		luaL_unref (cfg->lua_state, LUA_REGISTRYINDEX, sc->cbref);
+	}
+
+	DL_FOREACH_SAFE (cfg->setting_ids, set, stmp) {
+		REF_RELEASE (set);
 	}
 
 	rspamd_map_remove_all (cfg);
@@ -299,7 +348,7 @@ rspamd_config_free (struct rspamd_config *cfg)
 
 	HASH_CLEAR (hh, cfg->actions);
 
-	rspamd_mempool_delete (cfg->cfg_pool);
+	rspamd_mempool_destructors_enforce (cfg->cfg_pool);
 
 	if (cfg->checksum) {
 		g_free (cfg->checksum);
@@ -312,7 +361,7 @@ rspamd_config_free (struct rspamd_config *cfg)
 		g_free (lp);
 	}
 
-	g_free (cfg);
+	rspamd_mempool_delete (cfg->cfg_pool);
 }
 
 const ucl_object_t *
@@ -440,6 +489,12 @@ rspamd_config_process_var (struct rspamd_config *cfg, const rspamd_ftok_t *var,
 		type = RSPAMD_LOG_SYMBOLS;
 		flags |= RSPAMD_LOG_FMT_FLAG_SYMBOLS_PARAMS|RSPAMD_LOG_FMT_FLAG_SYMBOLS_SCORES;
 	}
+	else if (rspamd_ftok_cstr_equal (&tok, "groups", TRUE)) {
+		type = RSPAMD_LOG_GROUPS;
+	}
+	else if (rspamd_ftok_cstr_equal (&tok, "public_groups", TRUE)) {
+		type = RSPAMD_LOG_PUBLIC_GROUPS;
+	}
 	else if (rspamd_ftok_cstr_equal (&tok, "ip", TRUE)) {
 		type = RSPAMD_LOG_IP;
 	}
@@ -485,6 +540,15 @@ rspamd_config_process_var (struct rspamd_config *cfg, const rspamd_ftok_t *var,
 	}
 	else if (rspamd_ftok_cstr_equal (&tok, "forced_action", TRUE)) {
 		type = RSPAMD_LOG_FORCED_ACTION;
+	}
+	else if (rspamd_ftok_cstr_equal (&tok, "settings_id", TRUE)) {
+		type = RSPAMD_LOG_SETTINGS_ID;
+	}
+	else if (rspamd_ftok_cstr_equal (&tok, "mempool_size", TRUE)) {
+		type = RSPAMD_LOG_MEMPOOL_SIZE;
+	}
+	else if (rspamd_ftok_cstr_equal (&tok, "mempool_waste", TRUE)) {
+		type = RSPAMD_LOG_MEMPOOL_WASTE;
 	}
 	else {
 		msg_err_config ("unknown log variable: %T", &tok);
@@ -819,32 +883,16 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 	}
 
 	if (opts & RSPAMD_CONFIG_INIT_SYMCACHE) {
-		lua_State *L = cfg->lua_state;
-		int err_idx;
-
-		/* Process squeezed Lua rules */
-		lua_pushcfunction (L, &rspamd_lua_traceback);
-		err_idx = lua_gettop (L);
-
-		if (rspamd_lua_require_function (cfg->lua_state, "lua_squeeze_rules",
-				"squeeze_init")) {
-			if (lua_pcall (L, 0, 0, err_idx) != 0) {
-				GString *tb = lua_touserdata (L, -1);
-				msg_err_config ("call to squeeze_init script failed: %v", tb);
-
-				if (tb) {
-					g_string_free (tb, TRUE);
-				}
-			}
-		}
-
-		lua_settop (L, err_idx - 1);
-
 		/* Init config cache */
 		rspamd_symcache_init (cfg->cache);
 
 		/* Init re cache */
 		rspamd_re_cache_init (cfg->re_cache, cfg);
+
+		/* Try load Hypersan */
+		rspamd_re_cache_load_hyperscan (cfg->re_cache,
+				cfg->hs_cache_dir ? cfg->hs_cache_dir :  RSPAMD_DBDIR "/",
+				true);
 	}
 
 	if (opts & RSPAMD_CONFIG_INIT_LIBS) {
@@ -884,6 +932,10 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 
 	if (opts & RSPAMD_CONFIG_INIT_PRELOAD_MAPS) {
 		rspamd_map_preload (cfg);
+	}
+
+	if (opts & RSPAMD_CONFIG_INIT_POST_LOAD_LUA) {
+		rspamd_lua_run_config_post_init (cfg->lua_state, cfg);
 	}
 
 	return ret;
@@ -1060,6 +1112,15 @@ static void
 rspamd_worker_conf_dtor (struct rspamd_worker_conf *wcf)
 {
 	if (wcf) {
+		struct rspamd_worker_bind_conf *cnf, *tmp;
+
+		LL_FOREACH_SAFE (wcf->bind_conf, cnf, tmp) {
+			g_free (cnf->name);
+			g_free (cnf->bind_line);
+			g_ptr_array_free (cnf->addrs, TRUE);
+			g_free (cnf);
+		}
+
 		ucl_object_unref (wcf->options);
 		g_queue_free (wcf->active_workers);
 		g_hash_table_unref (wcf->params);
@@ -1125,7 +1186,8 @@ rspamd_include_map_handler (const guchar *data, gsize len,
 			   rspamd_ucl_read_cb,
 			   rspamd_ucl_fin_cb,
 			   rspamd_ucl_dtor_cb,
-			   (void **)pcbdata) != NULL;
+			   (void **)pcbdata,
+			   NULL, RSPAMD_MAP_DEFAULT) != NULL;
 }
 
 /*
@@ -1153,7 +1215,6 @@ rspamd_include_map_handler (const guchar *data, gsize len,
 #define RSPAMD_VERSION_MACRO "VERSION"
 #define RSPAMD_VERSION_MAJOR_MACRO "VERSION_MAJOR"
 #define RSPAMD_VERSION_MINOR_MACRO "VERSION_MINOR"
-#define RSPAMD_VERSION_PATCH_MACRO "VERSION_PATCH"
 #define RSPAMD_BRANCH_VERSION_MACRO "BRANCH_VERSION"
 #define RSPAMD_HOSTNAME_MACRO "HOSTNAME"
 
@@ -1195,18 +1256,8 @@ rspamd_ucl_add_conf_variables (struct ucl_parser *parser, GHashTable *vars)
 			RSPAMD_VERSION_MAJOR);
 	ucl_parser_register_variable (parser, RSPAMD_VERSION_MINOR_MACRO,
 			RSPAMD_VERSION_MINOR);
-	ucl_parser_register_variable (parser, RSPAMD_VERSION_PATCH_MACRO,
-			RSPAMD_VERSION_PATCH);
 	ucl_parser_register_variable (parser, RSPAMD_BRANCH_VERSION_MACRO,
 			RSPAMD_VERSION_BRANCH);
-
-#if defined(WITH_TORCH) && defined(WITH_LUAJIT) && defined(__x86_64__)
-	ucl_parser_register_variable (parser, "HAS_TORCH",
-			"yes");
-#else
-	ucl_parser_register_variable (parser, "HAS_TORCH",
-			"no");
-#endif
 
 	hostlen = sysconf (_SC_HOST_NAME_MAX);
 
@@ -1486,7 +1537,7 @@ rspamd_check_worker (struct rspamd_config *cfg, worker_t *wrk)
 }
 
 gboolean
-rspamd_init_filters (struct rspamd_config *cfg, bool reconfig)
+rspamd_init_filters (struct rspamd_config *cfg, bool reconfig, bool strict)
 {
 	GList *cur;
 	module_t *mod, **pmod;
@@ -1537,8 +1588,12 @@ rspamd_init_filters (struct rspamd_config *cfg, bool reconfig)
 			}
 			else {
 				if (!mod->module_config_func (cfg)) {
-					msg_info_config ("config of %s failed!", mod->name);
+					msg_err_config ("config of %s failed", mod->name);
 					ret = FALSE;
+
+					if (strict) {
+						return FALSE;
+					}
 				}
 			}
 		}
@@ -1550,7 +1605,7 @@ rspamd_init_filters (struct rspamd_config *cfg, bool reconfig)
 		cur = g_list_next (cur);
 	}
 
-	ret = rspamd_init_lua_filters (cfg, 0) && ret;
+	ret = rspamd_init_lua_filters (cfg, 0, strict) && ret;
 
 	return ret;
 }
@@ -1568,13 +1623,25 @@ rspamd_config_new_symbol (struct rspamd_config *cfg, const gchar *symbol,
 		rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (struct rspamd_symbol));
 	score_ptr = rspamd_mempool_alloc (cfg->cfg_pool, sizeof (gdouble));
 
+	if (isnan (score)) {
+		/* In fact, it could be defined later */
+		msg_debug_config ("score is not defined for symbol %s, set it to zero",
+				symbol);
+		score = 0.0;
+		/* Also set priority to 0 to allow override by anything */
+		sym_def->priority = 0;
+		flags |= RSPAMD_SYMBOL_FLAG_UNSCORED;
+	}
+	else {
+		sym_def->priority = priority;
+	}
+
 	*score_ptr = score;
 	sym_def->score = score;
 	sym_def->weight_ptr = score_ptr;
 	sym_def->name = rspamd_mempool_strdup (cfg->cfg_pool, symbol);
-	sym_def->priority = priority;
 	sym_def->flags = flags;
-	sym_def->nshots = nshots;
+	sym_def->nshots = nshots != 0 ? nshots : cfg->default_max_shots;
 	sym_def->groups = g_ptr_array_sized_new (1);
 	rspamd_mempool_add_destructor (cfg->cfg_pool, rspamd_ptr_array_free_hard,
 			sym_def->groups);
@@ -1617,9 +1684,12 @@ rspamd_config_new_symbol (struct rspamd_config *cfg, const gchar *symbol,
 gboolean
 rspamd_config_add_symbol (struct rspamd_config *cfg,
 						  const gchar *symbol,
-						  gdouble score, const gchar *description,
+						  gdouble score,
+						  const gchar *description,
 						  const gchar *group,
-						  guint flags, guint priority, gint nshots)
+						  guint flags,
+						  guint priority,
+						  gint nshots)
 {
 	struct rspamd_symbol *sym_def;
 	struct rspamd_symbols_group *sym_group;
@@ -1661,7 +1731,8 @@ rspamd_config_add_symbol (struct rspamd_config *cfg,
 			}
 		}
 
-		if (sym_def->priority > priority) {
+		if (sym_def->priority > priority &&
+			(isnan(score) || !(sym_def->flags & RSPAMD_SYMBOL_FLAG_UNSCORED))) {
 			msg_debug_config ("symbol %s has been already registered with "
 					"priority %ud, do not override (new priority: %ud)",
 					symbol,
@@ -1673,29 +1744,48 @@ rspamd_config_add_symbol (struct rspamd_config *cfg,
 						description);
 			}
 
+			/* Or nshots in case of non-default setting */
+			if (nshots != 0 && sym_def->nshots == cfg->default_max_shots) {
+				sym_def->nshots = nshots;
+			}
+
 			return FALSE;
 		}
 		else {
-			msg_debug_config ("symbol %s has been already registered with "
-					"priority %ud, override it with new priority: %ud, "
-					"old score: %.2f, new score: %.2f",
-					symbol,
-					sym_def->priority,
-					priority,
-					sym_def->score,
-					score);
 
-			*sym_def->weight_ptr = score;
-			sym_def->score = score;
+			if (!isnan (score)) {
+				msg_debug_config ("symbol %s has been already registered with "
+								  "priority %ud, override it with new priority: %ud, "
+								  "old score: %.2f, new score: %.2f",
+						symbol,
+						sym_def->priority,
+						priority,
+						sym_def->score,
+						score);
+
+				*sym_def->weight_ptr = score;
+				sym_def->score = score;
+				sym_def->priority = priority;
+				sym_def->flags &= ~RSPAMD_SYMBOL_FLAG_UNSCORED;
+			}
+
 			sym_def->flags = flags;
-			sym_def->nshots = nshots;
+
+			if (nshots != 0) {
+				sym_def->nshots = nshots;
+			}
+			else {
+				/* Do not reset unless we have exactly lower priority */
+				if (sym_def->priority < priority) {
+					sym_def->nshots = cfg->default_max_shots;
+				}
+			}
 
 			if (description) {
 				sym_def->description = rspamd_mempool_strdup (cfg->cfg_pool,
 						description);
 			}
 
-			sym_def->priority = priority;
 
 			/* We also check group information in this case */
 			if (group != NULL && sym_def->gr != NULL &&
@@ -1721,6 +1811,7 @@ rspamd_config_add_symbol (struct rspamd_config *cfg,
 		}
 	}
 
+	/* This is called merely when we have an undefined symbol */
 	rspamd_config_new_symbol (cfg, symbol, score, description,
 			group, flags, priority, nshots);
 
@@ -2089,7 +2180,9 @@ rspamd_config_maybe_disable_action (struct rspamd_config *cfg,
 					act->priority,
 					priority);
 
-			HASH_DEL (cfg->actions, act);
+			act->threshold = NAN;
+			act->priority = priority;
+			act->flags |= RSPAMD_ACTION_NO_THRESHOLD;
 
 			return TRUE;
 		}
@@ -2132,10 +2225,11 @@ rspamd_config_get_action_by_type (struct rspamd_config *cfg,
 
 gboolean
 rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
-		const ucl_object_t *obj,
-		const gchar *description,
-		struct rspamd_radix_map_helper **target,
-		GError **err)
+							  const ucl_object_t *obj,
+							  const gchar *description,
+							  struct rspamd_radix_map_helper **target,
+							  GError **err,
+							  struct rspamd_worker *worker)
 {
 	ucl_type_t type;
 	ucl_object_iter_t it = NULL;
@@ -2159,8 +2253,10 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 						rspamd_radix_read,
 						rspamd_radix_fin,
 						rspamd_radix_dtor,
-						(void **)target) == NULL) {
-					g_set_error (err, g_quark_from_static_string ("rspamd-config"),
+						(void **)target,
+						worker, RSPAMD_MAP_DEFAULT) == NULL) {
+					g_set_error (err,
+							g_quark_from_static_string ("rspamd-config"),
 							EINVAL, "bad map definition %s for %s", str,
 							ucl_object_key (obj));
 					return FALSE;
@@ -2184,8 +2280,10 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 					rspamd_radix_read,
 					rspamd_radix_fin,
 					rspamd_radix_dtor,
-					(void **)target) == NULL) {
-				g_set_error (err, g_quark_from_static_string ("rspamd-config"),
+					(void **)target,
+					worker, RSPAMD_MAP_DEFAULT) == NULL) {
+				g_set_error (err,
+						g_quark_from_static_string ("rspamd-config"),
 						EINVAL, "bad map object for %s", ucl_object_key (obj));
 				return FALSE;
 			}
@@ -2357,4 +2455,548 @@ void
 rspamd_actions_sort (struct rspamd_config *cfg)
 {
 	HASH_SORT (cfg->actions, rspamd_actions_cmp);
+}
+
+static void
+rspamd_config_settings_elt_dtor (struct rspamd_config_settings_elt *e)
+{
+	if (e->symbols_enabled) {
+		ucl_object_unref (e->symbols_enabled);
+	}
+	if (e->symbols_disabled) {
+		ucl_object_unref (e->symbols_disabled);
+	}
+}
+
+guint32
+rspamd_config_name_to_id (const gchar *name, gsize namelen)
+{
+	guint64 h;
+
+	h = rspamd_cryptobox_fast_hash_specific (RSPAMD_CRYPTOBOX_XXHASH64,
+			name, namelen, 0x0);
+	/* Take the lower part of hash as LE number */
+	return ((guint32)GUINT64_TO_LE (h));
+}
+
+struct rspamd_config_settings_elt *
+rspamd_config_find_settings_id_ref (struct rspamd_config *cfg,
+									guint32 id)
+{
+	struct rspamd_config_settings_elt *cur;
+
+	DL_FOREACH (cfg->setting_ids, cur) {
+		if (cur->id == id) {
+			REF_RETAIN (cur);
+			return cur;
+		}
+	}
+
+	return NULL;
+}
+
+struct rspamd_config_settings_elt *rspamd_config_find_settings_name_ref (
+		struct rspamd_config *cfg,
+		const gchar *name, gsize namelen)
+{
+	guint32 id;
+
+	id = rspamd_config_name_to_id (name, namelen);
+
+	return rspamd_config_find_settings_id_ref (cfg, id);
+}
+
+void
+rspamd_config_register_settings_id (struct rspamd_config *cfg,
+									const gchar *name,
+									ucl_object_t *symbols_enabled,
+									ucl_object_t *symbols_disabled,
+									enum rspamd_config_settings_policy policy)
+{
+	struct rspamd_config_settings_elt *elt;
+	guint32 id;
+
+	id = rspamd_config_name_to_id (name, strlen (name));
+	elt = rspamd_config_find_settings_id_ref (cfg, id);
+
+	if (elt) {
+		/* Need to replace */
+		struct rspamd_config_settings_elt *nelt;
+
+		DL_DELETE (cfg->setting_ids, elt);
+
+		nelt = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*nelt));
+
+		nelt->id = id;
+		nelt->name = rspamd_mempool_strdup (cfg->cfg_pool, name);
+
+		if (symbols_enabled) {
+			nelt->symbols_enabled = ucl_object_ref (symbols_enabled);
+		}
+
+		if (symbols_disabled) {
+			nelt->symbols_disabled = ucl_object_ref (symbols_disabled);
+		}
+
+		nelt->policy = policy;
+
+		REF_INIT_RETAIN (nelt, rspamd_config_settings_elt_dtor);
+		msg_warn_config ("replace settings id %ud (%s)", id, name);
+		rspamd_symcache_process_settings_elt (cfg->cache, elt);
+		DL_APPEND (cfg->setting_ids, nelt);
+
+		/*
+		 * Need to unref old element twice as there are two reference holders:
+		 * 1. Config structure as we call REF_INIT_RETAIN
+		 * 2. rspamd_config_find_settings_id_ref also increases refcount
+		 */
+		REF_RELEASE (elt);
+		REF_RELEASE (elt);
+	}
+	else {
+		elt = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*elt));
+
+		elt->id = id;
+		elt->name = rspamd_mempool_strdup (cfg->cfg_pool, name);
+
+		if (symbols_enabled) {
+			elt->symbols_enabled = ucl_object_ref (symbols_enabled);
+		}
+
+		if (symbols_disabled) {
+			elt->symbols_disabled = ucl_object_ref (symbols_disabled);
+		}
+
+		elt->policy = policy;
+
+		msg_info_config ("register new settings id %ud (%s)", id, name);
+		REF_INIT_RETAIN (elt, rspamd_config_settings_elt_dtor);
+		rspamd_symcache_process_settings_elt (cfg->cache, elt);
+		DL_APPEND (cfg->setting_ids, elt);
+	}
+}
+
+int
+rspamd_config_ev_backend_get (struct rspamd_config *cfg)
+{
+#define AUTO_BACKEND (ev_supported_backends () & ~EVBACKEND_IOURING)
+	if (cfg == NULL || cfg->events_backend == NULL) {
+		return AUTO_BACKEND;
+	}
+
+	if (strcmp (cfg->events_backend, "auto") == 0) {
+		return AUTO_BACKEND;
+	}
+	else if (strcmp (cfg->events_backend, "epoll") == 0) {
+		if (ev_supported_backends () & EVBACKEND_EPOLL) {
+			return EVBACKEND_EPOLL;
+		}
+		else {
+			msg_warn_config ("unsupported events_backend: %s; defaulting to auto",
+					cfg->events_backend);
+			return AUTO_BACKEND;
+		}
+	}
+	else if (strcmp (cfg->events_backend, "iouring") == 0) {
+		if (ev_supported_backends () & EVBACKEND_IOURING) {
+			return EVBACKEND_IOURING;
+		}
+		else {
+			msg_warn_config ("unsupported events_backend: %s; defaulting to auto",
+					cfg->events_backend);
+			return AUTO_BACKEND;
+		}
+	}
+	else if (strcmp (cfg->events_backend, "kqueue") == 0) {
+		if (ev_supported_backends () & EVBACKEND_KQUEUE) {
+			return EVBACKEND_KQUEUE;
+		}
+		else {
+			msg_warn_config ("unsupported events_backend: %s; defaulting to auto",
+					cfg->events_backend);
+			return AUTO_BACKEND;
+		}
+	}
+	else if (strcmp (cfg->events_backend, "poll") == 0) {
+		return EVBACKEND_POLL;
+	}
+	else if (strcmp (cfg->events_backend, "select") == 0) {
+		return EVBACKEND_SELECT;
+	}
+	else {
+		msg_warn_config ("unknown events_backend: %s; defaulting to auto",
+				cfg->events_backend);
+	}
+
+	return AUTO_BACKEND;
+}
+
+const gchar *
+rspamd_config_ev_backend_to_string (int ev_backend, gboolean *effective)
+{
+#define SET_EFFECTIVE(b) do { if ((effective) != NULL) *(effective) = b; } while(0)
+
+	if ((ev_backend & EVBACKEND_ALL) == EVBACKEND_ALL) {
+		SET_EFFECTIVE (TRUE);
+		return "auto";
+	}
+
+	if (ev_backend & EVBACKEND_IOURING) {
+		SET_EFFECTIVE (TRUE);
+		return "epoll+io_uring";
+	}
+	if (ev_backend & EVBACKEND_LINUXAIO) {
+		SET_EFFECTIVE (TRUE);
+		return "epoll+aio";
+	}if (ev_backend & EVBACKEND_IOURING) {
+		SET_EFFECTIVE (TRUE);
+		return "epoll+io_uring";
+	}
+	if (ev_backend & EVBACKEND_LINUXAIO) {
+		SET_EFFECTIVE (TRUE);
+		return "epoll+aio";
+	}
+	if (ev_backend & EVBACKEND_EPOLL) {
+		SET_EFFECTIVE (TRUE);
+		return "epoll";
+	}
+	if (ev_backend & EVBACKEND_KQUEUE) {
+		SET_EFFECTIVE (TRUE);
+		return "kqueue";
+	}
+	if (ev_backend & EVBACKEND_POLL) {
+		SET_EFFECTIVE (FALSE);
+		return "poll";
+	}
+	if (ev_backend & EVBACKEND_SELECT) {
+		SET_EFFECTIVE (FALSE);
+		return "select";
+	}
+
+	SET_EFFECTIVE (FALSE);
+	return "unknown";
+#undef SET_EFFECTIVE
+}
+
+struct rspamd_external_libs_ctx *
+rspamd_init_libs (void)
+{
+	struct rlimit rlim;
+	struct rspamd_external_libs_ctx *ctx;
+	struct ottery_config *ottery_cfg;
+
+	ctx = g_malloc0 (sizeof (*ctx));
+	ctx->crypto_ctx = rspamd_cryptobox_init ();
+	ottery_cfg = g_malloc0 (ottery_get_sizeof_config ());
+	ottery_config_init (ottery_cfg);
+	ctx->ottery_cfg = ottery_cfg;
+
+	rspamd_openssl_maybe_init ();
+
+	/* Check if we have rdrand */
+	if ((ctx->crypto_ctx->cpu_config & CPUID_RDRAND) == 0) {
+		ottery_config_disable_entropy_sources (ottery_cfg,
+				OTTERY_ENTROPY_SRC_RDRAND);
+#if OPENSSL_VERSION_NUMBER >= 0x1000104fL && !defined(LIBRESSL_VERSION_NUMBER)
+		RAND_set_rand_engine (NULL);
+#endif
+	}
+
+	/* Configure utf8 library */
+	guint utf8_flags = 0;
+
+	if ((ctx->crypto_ctx->cpu_config & CPUID_SSE41)) {
+		utf8_flags |= RSPAMD_FAST_UTF8_FLAG_SSE41;
+	}
+	if ((ctx->crypto_ctx->cpu_config & CPUID_AVX2)) {
+		utf8_flags |= RSPAMD_FAST_UTF8_FLAG_AVX2;
+	}
+
+	rspamd_fast_utf8_library_init (utf8_flags);
+
+	g_assert (ottery_init (ottery_cfg) == 0);
+
+#ifdef HAVE_LOCALE_H
+	if (getenv ("LANG") == NULL) {
+		setlocale (LC_ALL, "C");
+		setlocale (LC_CTYPE, "C");
+		setlocale (LC_MESSAGES, "C");
+		setlocale (LC_TIME, "C");
+	}
+	else {
+		/* Just set the default locale */
+		setlocale (LC_ALL, "");
+		/* But for some issues we still want C locale */
+		setlocale (LC_NUMERIC, "C");
+	}
+#endif
+
+	ctx->ssl_ctx = rspamd_init_ssl_ctx ();
+	ctx->ssl_ctx_noverify = rspamd_init_ssl_ctx_noverify ();
+	rspamd_random_seed_fast ();
+
+	/* Set stack size for pcre */
+	getrlimit (RLIMIT_STACK, &rlim);
+	rlim.rlim_cur = 100 * 1024 * 1024;
+	rlim.rlim_max = rlim.rlim_cur;
+	setrlimit (RLIMIT_STACK, &rlim);
+
+	ctx->local_addrs = rspamd_inet_library_init ();
+	REF_INIT_RETAIN (ctx, rspamd_deinit_libs);
+
+	return ctx;
+}
+
+static struct zstd_dictionary *
+rspamd_open_zstd_dictionary (const char *path)
+{
+	struct zstd_dictionary *dict;
+
+	dict = g_malloc0 (sizeof (*dict));
+	dict->dict = rspamd_file_xmap (path, PROT_READ, &dict->size, TRUE);
+
+	if (dict->dict == NULL) {
+		g_free (dict);
+
+		return NULL;
+	}
+
+	dict->id = ZDICT_getDictID (dict->dict, dict->size);
+
+	if (dict->id == 0) {
+		g_free (dict);
+
+		return NULL;
+	}
+
+	return dict;
+}
+
+static void
+rspamd_free_zstd_dictionary (struct zstd_dictionary *dict)
+{
+	if (dict) {
+		munmap (dict->dict, dict->size);
+		g_free (dict);
+	}
+}
+
+#ifdef HAVE_CBLAS
+#ifdef HAVE_CBLAS_H
+#include "cblas.h"
+#else
+extern void openblas_set_num_threads(int num_threads);
+#endif
+#endif
+
+gboolean
+rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
+					struct rspamd_config *cfg)
+{
+	size_t r;
+	gboolean ret = TRUE;
+
+	g_assert (cfg != NULL);
+
+	if (ctx != NULL) {
+		if (cfg->local_addrs) {
+			rspamd_config_radix_from_ucl (cfg, cfg->local_addrs,
+					"Local addresses",
+					(struct rspamd_radix_map_helper **)ctx->local_addrs,
+					NULL,
+					NULL);
+		}
+
+		rspamd_free_zstd_dictionary (ctx->in_dict);
+		rspamd_free_zstd_dictionary (ctx->out_dict);
+
+		if (ctx->out_zstream) {
+			ZSTD_freeCStream (ctx->out_zstream);
+			ctx->out_zstream = NULL;
+		}
+
+		if (ctx->in_zstream) {
+			ZSTD_freeDStream (ctx->in_zstream);
+			ctx->in_zstream = NULL;
+		}
+
+		if (cfg->zstd_input_dictionary) {
+			ctx->in_dict = rspamd_open_zstd_dictionary (
+					cfg->zstd_input_dictionary);
+
+			if (ctx->in_dict == NULL) {
+				msg_err_config ("cannot open zstd dictionary in %s",
+						cfg->zstd_input_dictionary);
+			}
+		}
+		if (cfg->zstd_output_dictionary) {
+			ctx->out_dict = rspamd_open_zstd_dictionary (
+					cfg->zstd_output_dictionary);
+
+			if (ctx->out_dict == NULL) {
+				msg_err_config ("cannot open zstd dictionary in %s",
+						cfg->zstd_output_dictionary);
+			}
+		}
+
+		if (cfg->fips_mode) {
+#ifdef HAVE_FIPS_MODE
+			int mode = FIPS_mode ();
+			unsigned long err = (unsigned long)-1;
+
+			/* Toggle FIPS mode */
+			if (mode == 0) {
+				if (FIPS_mode_set (1) != 1) {
+					err = ERR_get_error ();
+				}
+			}
+			else {
+				msg_info_config ("OpenSSL FIPS mode is already enabled");
+			}
+
+			if (err != (unsigned long)-1) {
+				msg_err_config ("FIPS_mode_set failed: %s",
+						ERR_error_string (err, NULL));
+				ret = FALSE;
+			}
+			else {
+				msg_info_config ("OpenSSL FIPS mode is enabled");
+			}
+#else
+			msg_warn_config ("SSL FIPS mode is enabled but not supported by OpenSSL library!");
+#endif
+		}
+
+		rspamd_ssl_ctx_config (cfg, ctx->ssl_ctx);
+		rspamd_ssl_ctx_config (cfg, ctx->ssl_ctx_noverify);
+
+		/* Init decompression */
+		ctx->in_zstream = ZSTD_createDStream ();
+		r = ZSTD_initDStream (ctx->in_zstream);
+
+		if (ZSTD_isError (r)) {
+			msg_err ("cannot init decompression stream: %s",
+					ZSTD_getErrorName (r));
+			ZSTD_freeDStream (ctx->in_zstream);
+			ctx->in_zstream = NULL;
+		}
+
+		/* Init compression */
+		ctx->out_zstream = ZSTD_createCStream ();
+		r = ZSTD_initCStream (ctx->out_zstream, 1);
+
+		if (ZSTD_isError (r)) {
+			msg_err ("cannot init compression stream: %s",
+					ZSTD_getErrorName (r));
+			ZSTD_freeCStream (ctx->out_zstream);
+			ctx->out_zstream = NULL;
+		}
+#ifdef HAVE_CBLAS
+		openblas_set_num_threads (cfg->max_blas_threads);
+#endif
+	}
+
+	return ret;
+}
+
+gboolean
+rspamd_libs_reset_decompression (struct rspamd_external_libs_ctx *ctx)
+{
+	gsize r;
+
+	if (ctx->in_zstream == NULL) {
+		return FALSE;
+	}
+	else {
+		r = ZSTD_resetDStream (ctx->in_zstream);
+
+		if (ZSTD_isError (r)) {
+			msg_err ("cannot init decompression stream: %s",
+					ZSTD_getErrorName (r));
+			ZSTD_freeDStream (ctx->in_zstream);
+			ctx->in_zstream = NULL;
+
+			return FALSE;
+		}
+	}
+
+	return TRUE;
+}
+
+gboolean
+rspamd_libs_reset_compression (struct rspamd_external_libs_ctx *ctx)
+{
+	gsize r;
+
+	if (ctx->out_zstream == NULL) {
+		return FALSE;
+	}
+	else {
+		/* Dictionary will be reused automatically if specified */
+		r = ZSTD_resetCStream (ctx->out_zstream, 0);
+
+		if (ZSTD_isError (r)) {
+			msg_err ("cannot init compression stream: %s",
+					ZSTD_getErrorName (r));
+			ZSTD_freeCStream (ctx->out_zstream);
+			ctx->out_zstream = NULL;
+
+			return FALSE;
+		}
+	}
+
+	return TRUE;
+}
+
+void
+rspamd_deinit_libs (struct rspamd_external_libs_ctx *ctx)
+{
+	if (ctx != NULL) {
+		g_free (ctx->ottery_cfg);
+
+#ifdef HAVE_OPENSSL
+		EVP_cleanup ();
+		ERR_free_strings ();
+		rspamd_ssl_ctx_free (ctx->ssl_ctx);
+		rspamd_ssl_ctx_free (ctx->ssl_ctx_noverify);
+#endif
+		rspamd_inet_library_destroy ();
+		rspamd_free_zstd_dictionary (ctx->in_dict);
+		rspamd_free_zstd_dictionary (ctx->out_dict);
+
+		if (ctx->out_zstream) {
+			ZSTD_freeCStream (ctx->out_zstream);
+		}
+
+		if (ctx->in_zstream) {
+			ZSTD_freeDStream (ctx->in_zstream);
+		}
+
+		rspamd_cryptobox_deinit (ctx->crypto_ctx);
+
+		g_free (ctx);
+	}
+}
+
+gboolean
+rspamd_ip_is_local_cfg (struct rspamd_config *cfg,
+								 const rspamd_inet_addr_t *addr)
+{
+	struct rspamd_radix_map_helper *local_addrs = NULL;
+
+	if (cfg && cfg->libs_ctx) {
+		local_addrs = *(struct rspamd_radix_map_helper**)cfg->libs_ctx->local_addrs;
+	}
+
+	if (rspamd_inet_address_is_local (addr)) {
+		return TRUE;
+	}
+
+	if (local_addrs) {
+		if (rspamd_match_radix_map_addr (local_addrs, addr) != NULL) {
+			return TRUE;
+		}
+	}
+
+	return FALSE;
 }

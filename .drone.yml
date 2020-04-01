@@ -1,39 +1,58 @@
 ---
-workspace:
-  base: /rspamd
+kind: pipeline
+type: docker
+name: default
 
-pipeline:
+platform:
+  os: linux
+  arch: amd64
 
-  prepare:
-    # ubuntu used as base image for build and test images
-    # and we need to download it anyway
+steps:
+  - name: prepare
+
+    # any image with a root shell can be used here, but Ubuntu used as base
+    # image for build and test images and we need to download it anyway
     image: ubuntu:18.04
+    pull: if-not-exists
+    volumes:
+      - name: rspamd
+        path: /rspamd
     commands:
       - install -d -o nobody -g nogroup /rspamd/build /rspamd/install /rspamd/fedora/build /rspamd/fedora/install
-      # lua-torch CMakeLists writes to src dir
-      - chown nobody $CI_WORKSPACE/contrib/lua-torch/nn
-      # for debug
-      - echo $CI_COMMIT_AUTHOR
 
-  build:
+  - name: build
     # https://github.com/rspamd/rspamd-build-docker/blob/master/ubuntu-build/Dockerfile
     image: rspamd/ci-ubuntu-build
-    group: build
+    pull: always
+    volumes:
+      - name: rspamd
+        path: /rspamd
+    depends_on: [ prepare ]
     commands:
       # build directories should be writable by nobody, for rspamd in functional tests
       # works as nobody and writes coverage files there
       - test "$(id -un)" = nobody
       - cd /rspamd/build
-      - cmake $CI_WORKSPACE -DENABLE_COVERAGE=ON -DENABLE_LIBUNWIND=ON -DCMAKE_INSTALL_PREFIX=/rspamd/install -DCMAKE_RULE_MESSAGES=OFF
+      - >
+        cmake
+        -DCMAKE_INSTALL_PREFIX=/rspamd/install
+        -DCMAKE_RULE_MESSAGES=OFF
+        -DCMAKE_VERBOSE_MAKEFILE=ON
+        -DENABLE_COVERAGE=ON
+        -DENABLE_LIBUNWIND=ON
+        $CI_WORKSPACE
       - ncpu=$(getconf _NPROCESSORS_ONLN)
       - make -j $ncpu install
       - make -j $ncpu rspamd-test
 
-  build-clang:
+  - name: build-clang
     # https://github.com/rspamd/rspamd-build-docker/blob/master/fedora-build/Dockerfile
     image: rspamd/ci-fedora-build
-    pull: true
-    group: build
+    pull: always
+    volumes:
+      - name: rspamd
+        path: /rspamd
+    depends_on: [ prepare ]
     commands:
       - test "$(id -un)" = nobody
       - cd /rspamd/fedora/build
@@ -42,38 +61,16 @@ pipeline:
       - export ASAN_OPTIONS=detect_leaks=0
       - >
         cmake
-        -DENABLE_CLANG_PLUGIN=ON
-        -DLLVM_CONFIG_BINARY=/usr/bin/llvm-config
-        -DENABLE_TORCH=OFF
-        -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++
         -DCMAKE_INSTALL_PREFIX=/rspamd/fedora/install
-        -DENABLE_FULL_DEBUG=ON
+        -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++
         -DCMAKE_RULE_MESSAGES=OFF
+        -DCMAKE_VERBOSE_MAKEFILE=ON
+        -DENABLE_CLANG_PLUGIN=ON
+        -DENABLE_FULL_DEBUG=ON
         $CI_WORKSPACE
       - ncpu=$(getconf _NPROCESSORS_ONLN)
       - make -j $ncpu install
       - make -j $ncpu rspamd-test
-
-  eslint:
-    image: node:10-alpine
-    group: build
-    commands:
-      - npm install
-      - ./node_modules/.bin/eslint -v
-      - ./node_modules/.bin/eslint ./
-      # Run stylelint checks
-      - ./node_modules/.bin/stylelint -v
-      - npm show stylelint-config-standard version
-      - ./node_modules/.bin/stylelint ./**/*.css ./**/*.html ./**/*.js
-
-  # Run checks on perl source using tidyall
-  perl-tidyall:
-    # https://github.com/rspamd/rspamd-build-docker/blob/master/perl-tidyall/Dockerfile
-    image: rspamd/ci-perl-tidyall
-    group: build
-    commands:
-      # checks are configured in .tidyallrc at the top of rspamd repo
-      - tidyall --all --check-only --no-cache --data-dir /tmp/tidyall
 
   # We run rspamd-test (unit test) and functional test (runned by robot) in
   # parallel to save time. To avoid conflict in saving lua coverage we run them
@@ -85,11 +82,14 @@ pipeline:
   # will try to write .gcda file simultaneous.  But it is very unlikely and
   # performance is more important then correct coverage data.
 
-  rspamd-test:
+  - name: rspamd-test
     # https://github.com/rspamd/rspamd-build-docker/blob/master/ubuntu-test/Dockerfile
     image: rspamd/ci-ubuntu-test
-    pull: true
-    group: tests
+    pull: always
+    volumes:
+      - name: rspamd
+        path: /rspamd
+    depends_on: [ build ]
     commands:
       - test "$(id -un)" = nobody
       - ulimit -c unlimited
@@ -111,15 +111,19 @@ pipeline:
       - luacov-coveralls -o /rspamd/build/unit_test_lua.json --dryrun
       - exit $EXIT_CODE
 
-  test-fedora-clang:
+  - name: test-fedora-clang
     # https://github.com/rspamd/rspamd-build-docker/blob/master/fedora-test/Dockerfile
     image: rspamd/ci-fedora-test
-    pull: true
-    group: tests
+    pull: always
+    volumes:
+      - name: rspamd
+        path: /rspamd
+    depends_on: [ build-clang ]
     commands:
       - test "$(id -un)" = nobody
       # Asan reserves 20Tb of virtual memory, limit core size to 2 Gb to avoid writing huge core
       - ulimit -c 2097152
+      - ulimit -s unlimited
       # disable leak sanitizer: too many leaks detected, most of them probably FP
       - export ASAN_OPTIONS="detect_leaks=0:print_stacktrace=1:disable_coredump=0"
       - export UBSAN_OPTIONS="print_stacktrace=1:print_summary=0:log_path=/tmp/ubsan"
@@ -136,14 +140,18 @@ pipeline:
       - cat /tmp/ubsan.*
       - exit $EXIT_CODE
 
-  functional:
+  - name: functional
     # https://github.com/rspamd/rspamd-build-docker/blob/master/ubuntu-test-func/Dockerfile
     image: rspamd/ci-ubuntu-test-func
-    pull: true
-    group: tests
+    pull: always
+    volumes:
+      - name: rspamd
+        path: /rspamd
+    depends_on: [ build ]
     commands:
       - cd /rspamd/build
       - ulimit -c unlimited
+      - ulimit -s unlimited
       # some rspamd processes during this test work as root and some as nobody
       # use umask to create world-writable files so nobody can write to *.gcda files created by root
       - umask 0000
@@ -153,7 +161,7 @@ pipeline:
       # upload test results to nginx frontent using WebDAV PUT
       - >
         if [ -n "$HTTP_PUT_AUTH" ]; then
-        $CI_WORKSPACE/test/tools/http_put.py log.html report.html $CI_SYSTEM_LINK/testlogs/$CI_REPO_NAME/$CI_BUILD_NUMBER/;
+        $CI_WORKSPACE/test/tools/http_put.py log.html report.html https://$DRONE_SYSTEM_HOSTNAME/testlogs/$DRONE_REPO/$DRONE_BUILD_NUMBER/;
         fi
       # core_pattern=/var/tmp/%u.%e.core so one or two cores can be saved for each binary
       - core_files=$(find /var/tmp/ -name '*.core')
@@ -166,11 +174,16 @@ pipeline:
         gdb --batch -ex 'bt' -c $core $exe; echo '---';
         done
       - exit $EXIT_CODE
-    secrets: [http_put_auth]
+    environment:
+      HTTP_PUT_AUTH: { from_secret: http_put_auth }
 
-  send-coverage:
+  - name: send-coverage
     image: rspamd/ci-ubuntu-test
-    secrets: [ coveralls_repo_token ]
+    pull: if-not-exists
+    volumes:
+      - name: rspamd
+        path: /rspamd
+    depends_on: [ functional, rspamd-test ]
     commands:
       - cd /rspamd/build
       # extract coverage data for C code from .gcda files and save it in a format suitable for coveralls.io
@@ -183,14 +196,62 @@ pipeline:
       # * remove prefixes from absolute paths (in luacov-coveralls files), filter test, contrib, e. t.c
       # * upload report to coveralls.io
       - $CI_WORKSPACE/test/tools/merge_coveralls.py --root $CI_WORKSPACE --input coverage.c.json unit_test_lua.json coverage.functional.lua.json --token=$COVERALLS_REPO_TOKEN
+    environment:
+      COVERALLS_REPO_TOKEN: { from_secret: coveralls_repo_token }
     when:
-      branch: master
+      branch: [ master ]
       # don't send coverage report for pull request
       event: [push, tag]
 
-  notify:
+  - name: eslint
+    image: node:10-alpine
+    pull: if-not-exists
+    commands:
+      - npm install
+      - ./node_modules/.bin/eslint -v
+      - ./node_modules/.bin/eslint ./
+      # Run stylelint checks
+      - ./node_modules/.bin/stylelint -v
+      - npm show stylelint-config-standard version
+      - ./node_modules/.bin/stylelint ./**/*.css ./**/*.html ./**/*.js
+
+  - name: perl-tidyall
+    # https://github.com/rspamd/rspamd-build-docker/blob/master/perl-tidyall/Dockerfile
+    image: rspamd/ci-perl-tidyall
+    pull: if-not-exists
+    commands:
+      - tidyall --version
+      - perltidy --version | head -1
+      # checks are configured in .tidyallrc at the top of rspamd repo
+      - tidyall --all --check-only --no-cache --data-dir /tmp/tidyall
+
+  - name: notify
     image: drillster/drone-email
-    from: noreply@rspamd.com
-    secrets: [email_host, email_username, email_password]
+    pull: if-not-exists
+    depends_on:
+      - rspamd-test
+      - test-fedora-clang
+      - functional
+      - send-coverage
+      - eslint
+      - perl-tidyall
+    settings:
+      from: noreply@rspamd.com
+      host: { from_secret: email_host }
+      username: { from_secret: email_username }
+      password: { from_secret: email_password }
     when:
-      status: failure
+      status: [ failure ]
+
+volumes:
+  - name: rspamd
+    temp: {}
+
+trigger:
+  event: [push, tag, pull_request]
+
+---
+kind: signature
+hmac: 9997b0189f3cf3acce7575372f728ccc57bf57b9a72936d86e91b1cff852a48b
+
+...

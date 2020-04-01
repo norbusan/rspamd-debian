@@ -6,7 +6,12 @@
 #define RSPAMD_HTML_H
 
 #include "config.h"
-#include "mem_pool.h"
+#include "libutil/mem_pool.h"
+#include "libserver/url.h"
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
 
 /*
  * HTML content flags
@@ -85,7 +90,7 @@ struct html_block {
 	struct html_tag_component style;
 	guint font_size;
 	gboolean visible;
-	gchar *class;
+	gchar *html_class;
 };
 
 /* Public tags flags */
@@ -103,9 +108,9 @@ struct html_block {
 struct html_tag {
 	gint id;
 	gint flags;
-	guint content_length;
 	struct html_tag_component name;
-	const gchar *content;
+	guint content_length;
+	goffset content_offset;
 	GQueue *params;
 	gpointer extra; /** Additional data associated with tag (e.g. image) */
 	GNode *parent;
@@ -123,6 +128,7 @@ struct html_content {
 	guchar *tags_seen;
 	GPtrArray *images;
 	GPtrArray *blocks;
+	GByteArray *parsed;
 };
 
 /*
@@ -130,13 +136,14 @@ struct html_content {
  */
 guint rspamd_html_decode_entitles_inplace (gchar *s, gsize len);
 
-GByteArray* rspamd_html_process_part (rspamd_mempool_t *pool,
-		struct html_content *hc,
-		GByteArray *in);
+GByteArray *rspamd_html_process_part (rspamd_mempool_t *pool,
+									  struct html_content *hc,
+									  GByteArray *in);
 
-GByteArray* rspamd_html_process_part_full (rspamd_mempool_t *pool,
-		struct html_content *hc,
-		GByteArray *in, GList **exceptions, GHashTable *urls, GHashTable *emails);
+GByteArray *rspamd_html_process_part_full (rspamd_mempool_t *pool,
+										   struct html_content *hc,
+										   GByteArray *in, GList **exceptions,
+										   khash_t (rspamd_url_hash) *url_set);
 
 /*
  * Returns true if a specified tag has been seen in a part
@@ -148,7 +155,7 @@ gboolean rspamd_html_tag_seen (struct html_content *hc, const gchar *tagname);
  * @param id
  * @return
  */
-const gchar* rspamd_html_tag_by_id (gint id);
+const gchar *rspamd_html_tag_by_id (gint id);
 
 /**
  * Returns HTML tag id by name
@@ -165,8 +172,12 @@ gint rspamd_html_tag_by_name (const gchar *name);
  * @param comp
  * @return
  */
-struct rspamd_url * rspamd_html_process_url (rspamd_mempool_t *pool,
-		const gchar *start, guint len,
-		struct html_tag_component *comp);
+struct rspamd_url *rspamd_html_process_url (rspamd_mempool_t *pool,
+											const gchar *start, guint len,
+											struct html_tag_component *comp);
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif

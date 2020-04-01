@@ -18,8 +18,9 @@ CHECK HIT AND MISS
   Check Rspamc  ${result}  MAP_SET_HIT_AND_MISS (1.00)[example.com]
 
 WRITE NEW MAP
-  Sleep  1s  Wait for new time
-  Create File  ${MAP_FILE}  ${MAP2}
+  ${TMP_FILE} =  Make Temporary File
+  Copy File  ${TESTDIR}/configs/maps/domains.list.2  ${TMP_FILE}
+  Move File  ${TMP_FILE}  ${MAP_FILE}
 
 CHECK HIT AND MISS AFTER RELOAD
   Sleep  1s  Wait for map reload
@@ -29,13 +30,11 @@ CHECK HIT AND MISS AFTER RELOAD
 *** Keywords ***
 Map Reload Setup
   ${MAP1} =  Get File  ${TESTDIR}/configs/maps/domains.list
-  ${MAP2} =  Get File  ${TESTDIR}/configs/maps/domains.list.2
   ${MAP_FILE} =  Make Temporary File
   ${LUA_SCRIPT} =  Make Temporary File
   Set Suite Variable  ${LUA_SCRIPT}
   Set Suite Variable  ${MAP_FILE}
   Set Suite Variable  ${MAP1}
-  Set Suite Variable  ${MAP2}
   ${lua} =  Get File  ${TESTDIR}/lua/mapreload.lua
   ${lua} =  Replace Variables  ${lua}
   Create File  ${LUA_SCRIPT}  ${lua}

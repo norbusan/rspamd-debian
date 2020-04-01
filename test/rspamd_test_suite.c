@@ -3,14 +3,16 @@
 #include "libstat/stat_api.h"
 #include "lua/lua_common.h"
 #include "tests.h"
+#include "contrib/libev/ev.h"
 
 struct rspamd_main             *rspamd_main = NULL;
-struct event_base              *base = NULL;
+struct ev_loop              *event_loop = NULL;
 worker_t *workers[] = { NULL };
 
 gchar *lua_test = NULL;
 gchar *lua_test_case = NULL;
 gboolean verbose = FALSE;
+gchar *argv0_dirname = NULL;
 
 static GOptionEntry entries[] =
 {
@@ -30,19 +32,15 @@ main (int argc, char **argv)
 
 	rspamd_main = (struct rspamd_main *)g_malloc (sizeof (struct rspamd_main));
 	memset (rspamd_main, 0, sizeof (struct rspamd_main));
-	rspamd_main->server_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), NULL);
+	rspamd_main->server_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), NULL, 0);
 	cfg = rspamd_config_new (RSPAMD_CONFIG_INIT_DEFAULT);
 	cfg->libs_ctx = rspamd_init_libs ();
 	rspamd_main->cfg = cfg;
-	cfg->cfg_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), NULL);
-	cfg->log_type = RSPAMD_LOG_CONSOLE;
-	cfg->log_level = G_LOG_LEVEL_MESSAGE;
-
-	rspamd_set_logger (cfg, g_quark_from_static_string("rspamd-test"),
-			&rspamd_main->logger, rspamd_main->server_pool);
-	(void)rspamd_log_open (rspamd_main->logger);
+	cfg->cfg_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), NULL, 0);
 
 	g_test_init (&argc, &argv, NULL);
+
+	argv0_dirname = g_path_get_dirname (argv[0]);
 
 	context = g_option_context_new ("- run rspamd test");
 	g_option_context_add_main_entries (context, entries, NULL);
@@ -53,17 +51,24 @@ main (int argc, char **argv)
 		exit (1);
 	}
 
-	rspamd_lua_set_path ((lua_State *)cfg->lua_state, NULL, NULL);
-	base = event_init ();
-	rspamd_stat_init (cfg, base);
-	rspamd_url_init (NULL);
+	/* Setup logger */
+	rspamd_main->logger = rspamd_log_open_emergency (rspamd_main->server_pool);
 
-	if (g_test_verbose ()) {
-		cfg->log_level = G_LOG_LEVEL_DEBUG;
-		rspamd_set_logger (cfg, g_quark_from_static_string("rspamd-test"),
-				&rspamd_main->logger, rspamd_main->server_pool);
-		(void)rspamd_log_reopen (rspamd_main->logger);
+	/* Setup logger */
+	if (verbose || g_test_verbose ()) {
+		rspamd_log_set_log_level (rspamd_main->logger, G_LOG_LEVEL_DEBUG);
+		rspamd_log_set_log_flags (rspamd_main->logger,
+				RSPAMD_LOG_FLAG_USEC|RSPAMD_LOG_FLAG_ENFORCED|RSPAMD_LOG_FLAG_RSPAMADM);
 	}
+	else {
+		rspamd_log_set_log_level (rspamd_main->logger, G_LOG_LEVEL_MESSAGE);
+		rspamd_log_set_log_flags (rspamd_main->logger,RSPAMD_LOG_FLAG_RSPAMADM);
+	}
+
+	rspamd_lua_set_path ((lua_State *)cfg->lua_state, NULL, NULL);
+	event_loop = ev_default_loop (EVFLAG_SIGNALFD|EVBACKEND_ALL);
+	rspamd_stat_init (cfg, event_loop);
+	rspamd_url_init (NULL);
 
 	g_log_set_default_handler (rspamd_glib_log_function, rspamd_main->logger);
 
@@ -86,7 +91,6 @@ main (int argc, char **argv)
 	g_test_add_func ("/rspamd/aio", rspamd_async_test_func);
 #endif
 	g_test_run ();
-	rspamd_regexp_library_finalize ();
 
 	return 0;
 }

@@ -19,6 +19,7 @@
 #include "ref.h"
 #include "util.h"
 #include "rspamd.h"
+#include "contrib/fastutf8/fastutf8.h"
 
 #ifndef WITH_PCRE2
 /* Normal pcre path */
@@ -158,35 +159,48 @@ rspamd_regexp_post_process (rspamd_regexp_t *r)
 	}
 #if defined(WITH_PCRE2)
 	gsize jsz;
-	guint jit_flags = PCRE2_JIT_COMPLETE;
-	/* Create match context */
+	static const guint max_recursion_depth = 100000, max_backtrack = 1000000;
 
+	guint jit_flags = can_jit ? PCRE2_JIT_COMPLETE : 0;
+
+	/* Create match context */
 	r->mcontext = pcre2_match_context_create (NULL);
+	g_assert (r->mcontext != NULL);
+	pcre2_set_recursion_limit (r->mcontext, max_recursion_depth);
+	pcre2_set_match_limit (r->mcontext, max_backtrack);
 
 	if (r->re != r->raw_re) {
 		r->raw_mcontext = pcre2_match_context_create (NULL);
+		g_assert (r->raw_mcontext != NULL);
+		pcre2_set_recursion_limit (r->raw_mcontext, max_recursion_depth);
+		pcre2_set_match_limit (r->raw_mcontext, max_backtrack);
 	}
 	else {
 		r->raw_mcontext = r->mcontext;
 	}
 
 #ifdef HAVE_PCRE_JIT
-	if (pcre2_jit_compile (r->re, jit_flags) < 0) {
-		msg_err ("jit compilation of %s is not supported: %d", r->pattern, jit_flags);
-		r->flags |= RSPAMD_REGEXP_FLAG_DISABLE_JIT;
-	}
-	else {
-		if (!(pcre2_pattern_info (r->re, PCRE2_INFO_JITSIZE, &jsz) >= 0 && jsz > 0)) {
-			msg_err ("jit compilation of %s is not supported", r->pattern);
+	if (can_jit) {
+		if (pcre2_jit_compile (r->re, jit_flags) < 0) {
+			msg_err ("jit compilation of %s is not supported: %d", r->pattern, jit_flags);
 			r->flags |= RSPAMD_REGEXP_FLAG_DISABLE_JIT;
 		}
+		else {
+			if (!(pcre2_pattern_info (r->re, PCRE2_INFO_JITSIZE, &jsz) >= 0 && jsz > 0)) {
+				msg_err ("jit compilation of %s is not supported", r->pattern);
+				r->flags |= RSPAMD_REGEXP_FLAG_DISABLE_JIT;
+			}
+		}
+	}
+	else {
+		r->flags |= RSPAMD_REGEXP_FLAG_DISABLE_JIT;
 	}
 
 	if (!(r->flags & RSPAMD_REGEXP_FLAG_DISABLE_JIT)) {
 		pcre2_jit_stack_assign (r->mcontext, NULL, global_re_cache->jstack);
 	}
 
-	if (r->re != r->raw_re) {
+	if (r->raw_re && r->re != r->raw_re && !(r->flags & RSPAMD_REGEXP_FLAG_DISABLE_JIT)) {
 		if (pcre2_jit_compile (r->raw_re, jit_flags) < 0) {
 			msg_debug ("jit compilation of %s is not supported", r->pattern);
 			r->flags |= RSPAMD_REGEXP_FLAG_DISABLE_JIT;
@@ -196,6 +210,7 @@ rspamd_regexp_post_process (rspamd_regexp_t *r)
 			msg_debug ("jit compilation of raw %s is not supported", r->pattern);
 		}
 		else if (!(r->flags & RSPAMD_REGEXP_FLAG_DISABLE_JIT)) {
+			g_assert (r->raw_mcontext != NULL);
 			pcre2_jit_stack_assign (r->raw_mcontext, NULL, global_re_cache->jstack);
 		}
 	}
@@ -437,8 +452,8 @@ fin:
 
 	if (r == NULL) {
 		g_set_error (err, rspamd_regexp_quark(), EINVAL,
-			"regexp parsing error: '%s' at position %d",
-			err_str, (gint)err_off);
+			"regexp parsing error: '%s' at position %d; pattern: %s",
+			err_str, (gint)err_off, real_pattern);
 		g_free (real_pattern);
 
 		return NULL;
@@ -562,11 +577,11 @@ rspamd_regexp_search (rspamd_regexp_t *re, const gchar *text, gsize len,
 		r = re->re;
 		ext = re->extra;
 #if defined(HAVE_PCRE_JIT) && defined(HAVE_PCRE_JIT_FAST) && !defined(DISABLE_JIT_FAST)
-		if (g_utf8_validate (mt, remain, NULL)) {
+		if (rspamd_fast_utf8_validate (mt, remain) == 0) {
 			st = global_re_cache->jstack;
 		}
 		else {
-			msg_err ("bad utf8 input for JIT re");
+			msg_err ("bad utf8 input for JIT re '%s'", re->pattern);
 			return FALSE;
 		}
 #endif
@@ -694,12 +709,17 @@ rspamd_regexp_search (rspamd_regexp_t *re, const gchar *text, gsize len,
 		mcontext = re->mcontext;
 	}
 
+	if (r == NULL) {
+		/* Invalid regexp type for the specified input */
+		return FALSE;
+	}
+
 	match_data = pcre2_match_data_create (re->ncaptures + 1, NULL);
 
 #ifdef HAVE_PCRE_JIT
 	if (!(re->flags & RSPAMD_REGEXP_FLAG_DISABLE_JIT) && can_jit) {
-		if (re->re != re->raw_re && !g_utf8_validate (mt, remain, NULL)) {
-			msg_err ("bad utf8 input for JIT re");
+		if (re->re != re->raw_re && rspamd_fast_utf8_validate (mt, remain) != 0) {
+			msg_err ("bad utf8 input for JIT re '%s'", re->pattern);
 			return FALSE;
 		}
 
@@ -858,6 +878,10 @@ rspamd_regexp_match (rspamd_regexp_t *re, const gchar *text, gsize len,
 	g_assert (re != NULL);
 	g_assert (text != NULL);
 
+	if (len == 0 && text != NULL) {
+		len = strlen (text);
+	}
+
 	if (rspamd_regexp_search (re, text, len, &start, &end, raw, NULL)) {
 		if (start == text && end == text + len) {
 			return TRUE;
@@ -989,7 +1013,7 @@ rspamd_regexp_cache_create (struct rspamd_regexp_cache *cache,
 	res = rspamd_regexp_new (pattern, flags, err);
 
 	if (res) {
-		REF_RETAIN (res);
+		/* REF_RETAIN (res); */
 		g_hash_table_insert (cache->tbl, res->id, res);
 	}
 
@@ -1046,8 +1070,27 @@ rspamd_regexp_cache_destroy (struct rspamd_regexp_cache *cache)
 		}
 #endif
 #endif
+		g_free (cache);
 	}
 }
+
+RSPAMD_CONSTRUCTOR (rspamd_re_static_pool_ctor)
+{
+	global_re_cache = rspamd_regexp_cache_new ();
+#ifdef WITH_PCRE2
+	pcre2_ctx = pcre2_compile_context_create (NULL);
+	pcre2_set_newline (pcre2_ctx, PCRE_FLAG(NEWLINE_ANY));
+#endif
+}
+
+RSPAMD_DESTRUCTOR (rspamd_re_static_pool_dtor)
+{
+	rspamd_regexp_cache_destroy (global_re_cache);
+#ifdef WITH_PCRE2
+	pcre2_compile_context_free (pcre2_ctx);
+#endif
+}
+
 
 void
 rspamd_regexp_library_init (struct rspamd_config *cfg)
@@ -1057,19 +1100,16 @@ rspamd_regexp_library_init (struct rspamd_config *cfg)
 			can_jit = FALSE;
 			check_jit = FALSE;
 		}
+		else if (!can_jit) {
+			check_jit = TRUE;
+		}
 	}
 
-	if (global_re_cache == NULL) {
-		global_re_cache = rspamd_regexp_cache_new ();
+	if (check_jit) {
 #ifdef HAVE_PCRE_JIT
 		gint jit, rc;
 		gchar *str;
 
-		if (check_jit) {
-#ifdef WITH_PCRE2
-			pcre2_ctx = pcre2_compile_context_create (NULL);
-			pcre2_set_newline (pcre2_ctx, PCRE_FLAG(NEWLINE_ANY));
-#endif
 #ifndef WITH_PCRE2
 			rc = pcre_config (PCRE_CONFIG_JIT, &jit);
 #else
@@ -1107,23 +1147,14 @@ rspamd_regexp_library_init (struct rspamd_config *cfg)
 			} else {
 				msg_info ("pcre is compiled without JIT support, so many optimizations"
 						  " are impossible");
+				can_jit = FALSE;
 			}
-		}
 #else
 		msg_info ("pcre is too old and has no JIT support, so many optimizations"
-				" are impossible");
+				  " are impossible");
+		can_jit = FALSE;
 #endif
-	}
-}
-
-void
-rspamd_regexp_library_finalize (void)
-{
-	if (global_re_cache != NULL) {
-		rspamd_regexp_cache_destroy (global_re_cache);
-#ifdef WITH_PCRE2
-		pcre2_compile_context_free (pcre2_ctx);
-#endif
+		check_jit = FALSE;
 	}
 }
 

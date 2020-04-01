@@ -15,8 +15,9 @@
  */
 #include "task.h"
 #include "rspamd.h"
-#include "filter.h"
-#include "protocol.h"
+#include "scan_result.h"
+#include "libserver/protocol.h"
+#include "libserver/protocol_internal.h"
 #include "message.h"
 #include "lua/lua_common.h"
 #include "email_addr.h"
@@ -28,7 +29,7 @@
 #include "libserver/mempool_vars_internal.h"
 #include "libserver/cfg_file_private.h"
 #include "libmime/lang_detection.h"
-#include "libmime/filter_private.h"
+#include "libmime/scan_result_private.h"
 
 #ifdef WITH_JEMALLOC
 #include <jemalloc/jemalloc.h>
@@ -39,6 +40,10 @@
 #endif
 
 #include <math.h>
+
+__KHASH_IMPL (rspamd_req_headers_hash, static inline,
+		rspamd_ftok_t *, struct rspamd_request_header_chain *, 1,
+				rspamd_ftok_icase_hash, rspamd_ftok_icase_equal)
 
 /*
  * Do not print more than this amount of elts
@@ -51,35 +56,33 @@ rspamd_task_quark (void)
 	return g_quark_from_static_string ("task-error");
 }
 
-static void
-rspamd_request_header_dtor (gpointer p)
-{
-	GPtrArray *ar = p;
-	guint i;
-	rspamd_ftok_t *tok;
-
-	if (ar) {
-		for (i = 0; i < ar->len; i ++) {
-			tok = g_ptr_array_index (ar, i);
-			rspamd_fstring_mapped_ftok_free (tok);
-		}
-
-		g_ptr_array_free (ar, TRUE);
-	}
-}
-
 /*
  * Create new task
  */
 struct rspamd_task *
-rspamd_task_new (struct rspamd_worker *worker, struct rspamd_config *cfg,
+rspamd_task_new (struct rspamd_worker *worker,
+				 struct rspamd_config *cfg,
 				 rspamd_mempool_t *pool,
 				 struct rspamd_lang_detector *lang_det,
-				 struct event_base *ev_base)
+				 struct ev_loop *event_loop,
+				 gboolean debug_mem)
 {
 	struct rspamd_task *new_task;
+	rspamd_mempool_t *task_pool;
+	guint flags = 0;
 
-	new_task = g_malloc0 (sizeof (struct rspamd_task));
+	if (pool == NULL) {
+		task_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (),
+				"task", debug_mem ? RSPAMD_MEMPOOL_DEBUG : 0);
+		flags |= RSPAMD_TASK_FLAG_OWN_POOL;
+	}
+	else {
+		task_pool = pool;
+	}
+
+	new_task = rspamd_mempool_alloc0 (task_pool, sizeof (struct rspamd_task));
+	new_task->task_pool = task_pool;
+	new_task->flags = flags;
 	new_task->worker = worker;
 	new_task->lang_det = lang_det;
 
@@ -101,80 +104,16 @@ rspamd_task_new (struct rspamd_worker *worker, struct rspamd_config *cfg,
 		}
 	}
 
-	new_task->ev_base = ev_base;
-
-#ifdef HAVE_EVENT_NO_CACHE_TIME_FUNC
-	if (ev_base) {
-		event_base_update_cache_time (ev_base);
-		event_base_gettimeofday_cached (ev_base, &new_task->tv);
-		new_task->time_real = tv_to_double (&new_task->tv);
-	}
-	else {
-		gettimeofday (&new_task->tv, NULL);
-		new_task->time_real = tv_to_double (&new_task->tv);
-	}
-#else
-	gettimeofday (&new_task->tv, NULL);
-	new_task->time_real = tv_to_double (&new_task->tv);
-#endif
-
-	new_task->time_virtual = rspamd_get_virtual_ticks ();
+	new_task->event_loop = event_loop;
+	new_task->task_timestamp = ev_time ();
 	new_task->time_real_finish = NAN;
-	new_task->time_virtual_finish = NAN;
 
-	if (pool == NULL) {
-		new_task->task_pool =
-				rspamd_mempool_new (rspamd_mempool_suggest_size (), "task");
-		new_task->flags |= RSPAMD_TASK_FLAG_OWN_POOL;
-	}
-	else {
-		new_task->task_pool = pool;
-	}
-
-	new_task->raw_headers = g_hash_table_new_full (rspamd_strcase_hash,
-			rspamd_strcase_equal, NULL, rspamd_ptr_array_free_hard);
-	new_task->headers_order = g_queue_new ();
-	new_task->request_headers = g_hash_table_new_full (rspamd_ftok_icase_hash,
-			rspamd_ftok_icase_equal, rspamd_fstring_mapped_ftok_free,
-			rspamd_request_header_dtor);
-	rspamd_mempool_add_destructor (new_task->task_pool,
-		(rspamd_mempool_destruct_t) g_hash_table_unref,
-		new_task->request_headers);
-	new_task->reply_headers = g_hash_table_new_full (rspamd_ftok_icase_hash,
-			rspamd_ftok_icase_equal, rspamd_fstring_mapped_ftok_free,
-			rspamd_fstring_mapped_ftok_free);
-	rspamd_mempool_add_destructor (new_task->task_pool,
-			(rspamd_mempool_destruct_t) g_hash_table_unref,
-			new_task->reply_headers);
-	rspamd_mempool_add_destructor (new_task->task_pool,
-			(rspamd_mempool_destruct_t) g_hash_table_unref,
-			new_task->raw_headers);
-	rspamd_mempool_add_destructor (new_task->task_pool,
-			(rspamd_mempool_destruct_t) g_queue_free,
-			new_task->headers_order);
-	new_task->emails = g_hash_table_new (rspamd_email_hash, rspamd_emails_cmp);
-	rspamd_mempool_add_destructor (new_task->task_pool,
-			(rspamd_mempool_destruct_t) g_hash_table_unref,
-			new_task->emails);
-	new_task->urls = g_hash_table_new (rspamd_url_hash, rspamd_urls_cmp);
-	rspamd_mempool_add_destructor (new_task->task_pool,
-			(rspamd_mempool_destruct_t) g_hash_table_unref,
-			new_task->urls);
-	new_task->parts = g_ptr_array_sized_new (4);
-	rspamd_mempool_add_destructor (new_task->task_pool,
-			rspamd_ptr_array_free_hard, new_task->parts);
-	new_task->text_parts = g_ptr_array_sized_new (2);
-	rspamd_mempool_add_destructor (new_task->task_pool,
-			rspamd_ptr_array_free_hard, new_task->text_parts);
-	new_task->received = g_ptr_array_sized_new (8);
-	rspamd_mempool_add_destructor (new_task->task_pool,
-			rspamd_ptr_array_free_hard, new_task->received);
-
+	new_task->request_headers = kh_init (rspamd_req_headers_hash);
 	new_task->sock = -1;
-	new_task->flags |= (RSPAMD_TASK_FLAG_MIME|RSPAMD_TASK_FLAG_JSON);
+	new_task->flags |= (RSPAMD_TASK_FLAG_MIME);
 	new_task->result = rspamd_create_metric_result (new_task);
 
-	new_task->message_id = new_task->queue_id = "undef";
+	new_task->queue_id = "undef";
 	new_task->messages = ucl_object_typed_new (UCL_OBJECT);
 	new_task->lua_cache = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
 
@@ -185,11 +124,15 @@ rspamd_task_new (struct rspamd_worker *worker, struct rspamd_config *cfg,
 static void
 rspamd_task_reply (struct rspamd_task *task)
 {
+	const ev_tstamp write_timeout = 2.0;
+
 	if (task->fin_callback) {
 		task->fin_callback (task, task->fin_arg);
 	}
 	else {
-		rspamd_protocol_write_reply (task);
+		if (!(task->processed_stages & RSPAMD_TASK_STAGE_REPLIED)) {
+			rspamd_protocol_write_reply (task, write_timeout);
+		}
 	}
 }
 
@@ -237,8 +180,6 @@ rspamd_task_restore (void *arg)
 void
 rspamd_task_free (struct rspamd_task *task)
 {
-	struct rspamd_mime_part *p;
-	struct rspamd_mime_text_part *tp;
 	struct rspamd_email_address *addr;
 	struct rspamd_lua_cached_entry *entry;
 	static guint free_iters = 0;
@@ -248,38 +189,6 @@ rspamd_task_free (struct rspamd_task *task)
 
 	if (task) {
 		debug_task ("free pointer %p", task);
-
-		for (i = 0; i < task->parts->len; i ++) {
-			p = g_ptr_array_index (task->parts, i);
-
-			if (p->raw_headers) {
-				g_hash_table_unref (p->raw_headers);
-			}
-
-			if (p->headers_order) {
-				g_queue_free (p->headers_order);
-			}
-
-			if (IS_CT_MULTIPART (p->ct)) {
-				if (p->specific.mp->children) {
-					g_ptr_array_free (p->specific.mp->children, TRUE);
-				}
-			}
-		}
-
-		for (i = 0; i < task->text_parts->len; i ++) {
-			tp = g_ptr_array_index (task->text_parts, i);
-
-			if (tp->utf_words) {
-				g_array_free (tp->utf_words, TRUE);
-			}
-			if (tp->normalized_hashes) {
-				g_array_free (tp->normalized_hashes, TRUE);
-			}
-			if (tp->languages) {
-				g_ptr_array_unref (tp->languages);
-			}
-		}
 
 		if (task->rcpt_envelope) {
 			for (i = 0; i < task->rcpt_envelope->len; i ++) {
@@ -313,6 +222,10 @@ rspamd_task_free (struct rspamd_task *task)
 			ucl_object_unref (task->settings);
 		}
 
+		if (task->settings_elt != NULL) {
+			REF_RELEASE (task->settings_elt);
+		}
+
 		if (task->client_addr) {
 			rspamd_inet_address_free (task->client_addr);
 		}
@@ -325,13 +238,8 @@ rspamd_task_free (struct rspamd_task *task)
 			g_error_free (task->err);
 		}
 
-		if (rspamd_event_pending (&task->timeout_ev, EV_TIMEOUT)) {
-			event_del (&task->timeout_ev);
-		}
-
-		if (task->guard_ev) {
-			event_del (task->guard_ev);
-		}
+		ev_timer_stop (task->event_loop, &task->timeout_ev);
+		ev_io_stop (task->event_loop, &task->guard_ev);
 
 		if (task->sock != -1) {
 			close (task->sock);
@@ -387,11 +295,12 @@ rspamd_task_free (struct rspamd_task *task)
 			REF_RELEASE (task->cfg);
 		}
 
+		kh_destroy (rspamd_req_headers_hash, task->request_headers);
+		rspamd_message_unref (task->message);
+
 		if (task->flags & RSPAMD_TASK_FLAG_OWN_POOL) {
 			rspamd_mempool_delete (task->task_pool);
 		}
-
-		g_free (task);
 	}
 }
 
@@ -489,7 +398,7 @@ rspamd_task_load_message (struct rspamd_task *task,
 
 			if (offset > (gulong)st.st_size) {
 				msg_err_task ("invalid offset %ul (%ul available) for shm "
-							  "segment %s", offset, st.st_size, fp);
+							  "segment %s", offset, (gulong)st.st_size, fp);
 				munmap (map, st.st_size);
 				close (fd);
 
@@ -506,7 +415,7 @@ rspamd_task_load_message (struct rspamd_task *task,
 
 			if (shmem_size > (gulong)st.st_size) {
 				msg_err_task ("invalid length %ul (%ul available) for %s "
-							  "segment %s", shmem_size, st.st_size, ft, fp);
+							  "segment %s", shmem_size, (gulong)st.st_size, ft, fp);
 				munmap (map, st.st_size);
 				close (fd);
 
@@ -687,7 +596,7 @@ rspamd_task_load_message (struct rspamd_task *task,
 
 				if (zout.pos == zout.size) {
 					/* We need to extend output buffer */
-					zout.size = zout.size * 1.5 + 1.0;
+					zout.size = zout.size * 2 + 1;
 					zout.dst = g_realloc (zout.dst, zout.size);
 				}
 			}
@@ -695,7 +604,7 @@ rspamd_task_load_message (struct rspamd_task *task,
 			rspamd_mempool_add_destructor (task->task_pool, g_free, zout.dst);
 			task->msg.begin = zout.dst;
 			task->msg.len = zout.pos;
-			task->flags |= RSPAMD_TASK_FLAG_COMPRESSED;
+			task->protocol_flags |= RSPAMD_TASK_PROTOCOL_FLAG_COMPRESSED;
 
 			msg_info_task ("loaded message from zstd compressed stream; "
 						   "compressed: %ul; uncompressed: %ul",
@@ -717,16 +626,20 @@ rspamd_task_load_message (struct rspamd_task *task,
 		task->flags |= RSPAMD_TASK_FLAG_EMPTY;
 	}
 
-	if (task->flags & RSPAMD_TASK_FLAG_HAS_CONTROL) {
-		/* We have control chunk, so we need to process it separately */
-		if (task->msg.len < task->message_len) {
+	if (task->protocol_flags & RSPAMD_TASK_PROTOCOL_FLAG_HAS_CONTROL) {
+		rspamd_ftok_t *hv = rspamd_task_get_request_header (task, MLEN_HEADER);
+		gulong message_len = 0;
+
+		if (!hv || !rspamd_strtoul (hv->begin, hv->len, &message_len) ||
+				task->msg.len < message_len) {
 			msg_warn_task ("message has invalid message length: %ul and total len: %ul",
-					task->message_len, task->msg.len);
+					message_len, task->msg.len);
 			g_set_error (&task->err, rspamd_task_quark(), RSPAMD_PROTOCOL_ERROR,
 					"Invalid length");
 			return FALSE;
 		}
-		control_len = task->msg.len - task->message_len;
+
+		control_len = task->msg.len - message_len;
 
 		if (control_len > 0) {
 			parser = ucl_parser_new (UCL_PARSER_KEY_LOWERCASE);
@@ -786,7 +699,7 @@ gboolean
 rspamd_task_process (struct rspamd_task *task, guint stages)
 {
 	gint st;
-	gboolean ret = TRUE;
+	gboolean ret = TRUE, all_done = TRUE;
 	GError *stat_error = NULL;
 
 	/* Avoid nested calls */
@@ -809,20 +722,16 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 		}
 		break;
 
+	case RSPAMD_TASK_STAGE_PRE_FILTERS_EMPTY:
 	case RSPAMD_TASK_STAGE_PRE_FILTERS:
-		rspamd_symcache_process_symbols (task, task->cfg->cache,
-				RSPAMD_TASK_STAGE_PRE_FILTERS);
+	case RSPAMD_TASK_STAGE_FILTERS:
+		all_done = rspamd_symcache_process_symbols (task, task->cfg->cache, st);
 		break;
 
 	case RSPAMD_TASK_STAGE_PROCESS_MESSAGE:
 		if (!(task->flags & RSPAMD_TASK_FLAG_SKIP_PROCESS)) {
 			rspamd_message_process (task);
 		}
-		break;
-
-	case RSPAMD_TASK_STAGE_FILTERS:
-		rspamd_symcache_process_symbols (task, task->cfg->cache,
-				RSPAMD_TASK_STAGE_FILTERS);
 		break;
 
 	case RSPAMD_TASK_STAGE_CLASSIFIERS:
@@ -842,10 +751,10 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 		break;
 
 	case RSPAMD_TASK_STAGE_POST_FILTERS:
-		rspamd_symcache_process_symbols (task, task->cfg->cache,
-				RSPAMD_TASK_STAGE_POST_FILTERS);
+		all_done = rspamd_symcache_process_symbols (task, task->cfg->cache,
+				st);
 
-		if ((task->flags & RSPAMD_TASK_FLAG_LEARN_AUTO) &&
+		if (all_done && (task->flags & RSPAMD_TASK_FLAG_LEARN_AUTO) &&
 				!RSPAMD_TASK_IS_EMPTY (task) &&
 				!(task->flags & (RSPAMD_TASK_FLAG_LEARN_SPAM|RSPAMD_TASK_FLAG_LEARN_HAM))) {
 			rspamd_stat_check_autolearn (task);
@@ -899,9 +808,14 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 		/* Second run of composites processing before idempotent filters */
 		rspamd_make_composites (task);
 		break;
+
 	case RSPAMD_TASK_STAGE_IDEMPOTENT:
-		rspamd_symcache_process_symbols (task, task->cfg->cache,
-				RSPAMD_TASK_STAGE_IDEMPOTENT);
+		/* Stop task timeout */
+		if (ev_can_stop (&task->timeout_ev)) {
+			ev_timer_stop (task->event_loop, &task->timeout_ev);
+		}
+
+		all_done = rspamd_symcache_process_symbols (task, task->cfg->cache, st);
 		break;
 
 	case RSPAMD_TASK_STAGE_DONE:
@@ -931,17 +845,24 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 		return ret;
 	}
 
-	if (rspamd_session_events_pending (task->s) != 0) {
-		/* We have events pending, so we consider this stage as incomplete */
-		msg_debug_task ("need more work on stage %d", st);
-	}
-	else {
-		/* Mark the current stage as done and go to the next stage */
-		msg_debug_task ("completed stage %d", st);
-		task->processed_stages |= st;
+	if (ret) {
+		if (rspamd_session_events_pending (task->s) != 0) {
+			/* We have events pending, so we consider this stage as incomplete */
+			msg_debug_task ("need more work on stage %d", st);
+		}
+		else {
+			if (all_done) {
+				/* Mark the current stage as done and go to the next stage */
+				msg_debug_task ("completed stage %d", st);
+				task->processed_stages |= st;
+			}
+			else {
+				msg_debug_task ("need more processing on stage %d", st);
+			}
 
-		/* Tail recursion */
-		return rspamd_task_process (task, stages);
+			/* Tail recursion */
+			return rspamd_task_process (task, stages);
+		}
 	}
 
 	return ret;
@@ -1001,8 +922,9 @@ rspamd_task_get_principal_recipient (struct rspamd_task *task)
 		}
 	}
 
-	if (task->rcpt_mime != NULL && task->rcpt_mime->len > 0) {
-		PTR_ARRAY_FOREACH (task->rcpt_mime, i, addr) {
+	GPtrArray *rcpt_mime = MESSAGE_FIELD_CHECK (task, rcpt_mime);
+	if (rcpt_mime != NULL && rcpt_mime->len > 0) {
+		PTR_ARRAY_FOREACH (rcpt_mime, i, addr) {
 			if (addr->addr && !(addr->flags & RSPAMD_EMAIL_ADDR_ORIGINAL)) {
 				return rspamd_task_cache_principal_recipient (task, addr->addr,
 						addr->addr_len);
@@ -1039,7 +961,8 @@ rspamd_task_log_check_condition (struct rspamd_task *task,
 
 	switch (lf->type) {
 	case RSPAMD_LOG_MID:
-		if (task->message_id && strcmp (task->message_id, "undef") != 0) {
+		if (MESSAGE_FIELD_CHECK (task, message_id) &&
+			strcmp (MESSAGE_FIELD (task, message_id) , "undef") != 0) {
 			ret = TRUE;
 		}
 		break;
@@ -1066,7 +989,8 @@ rspamd_task_log_check_condition (struct rspamd_task *task,
 		break;
 	case RSPAMD_LOG_MIME_RCPT:
 	case RSPAMD_LOG_MIME_RCPTS:
-		if (task->rcpt_mime && task->rcpt_mime->len > 0) {
+		if (MESSAGE_FIELD_CHECK (task, rcpt_mime) &&
+			MESSAGE_FIELD (task, rcpt_mime)->len > 0) {
 			ret = TRUE;
 		}
 		break;
@@ -1076,7 +1000,8 @@ rspamd_task_log_check_condition (struct rspamd_task *task,
 		}
 		break;
 	case RSPAMD_LOG_MIME_FROM:
-		if (task->from_mime && task->from_mime->len > 0) {
+		if (MESSAGE_FIELD_CHECK (task, from_mime) &&
+			MESSAGE_FIELD (task, from_mime)->len > 0) {
 			ret = TRUE;
 		}
 		break;
@@ -1087,6 +1012,11 @@ rspamd_task_log_check_condition (struct rspamd_task *task,
 		break;
 	case RSPAMD_LOG_FORCED_ACTION:
 		if (task->result->passthrough_result) {
+			ret = TRUE;
+		}
+		break;
+	case RSPAMD_LOG_SETTINGS_ID:
+		if (task->settings_elt) {
 			ret = TRUE;
 		}
 		break;
@@ -1119,22 +1049,34 @@ rspamd_task_compare_log_sym (gconstpointer a, gconstpointer b)
 	return (w2 - w1) * 1000.0;
 }
 
+static gint
+rspamd_task_compare_log_group (gconstpointer a, gconstpointer b)
+{
+	const struct rspamd_symbols_group *s1 = *(const struct rspamd_symbols_group **)a,
+			*s2 = *(const struct rspamd_symbols_group **)b;
+
+	return strcmp (s1->name, s2->name);
+}
+
+
 static rspamd_ftok_t
 rspamd_task_log_metric_res (struct rspamd_task *task,
 		struct rspamd_log_format *lf)
 {
 	static gchar scorebuf[32];
 	rspamd_ftok_t res = {.begin = NULL, .len = 0};
-	struct rspamd_metric_result *mres;
+	struct rspamd_scan_result *mres;
 	gboolean first = TRUE;
 	rspamd_fstring_t *symbuf;
 	struct rspamd_symbol_result *sym;
 	GPtrArray *sorted_symbols;
 	struct rspamd_action *act;
+	struct rspamd_symbols_group *gr;
 	guint i, j;
+	khiter_t k;
 
 	mres = task->result;
-	act = rspamd_check_action_metric (task);
+	act = rspamd_check_action_metric (task, NULL);
 
 	if (mres != NULL) {
 		switch (lf->type) {
@@ -1195,7 +1137,8 @@ rspamd_task_log_metric_res (struct rspamd_task *task,
 						j = 0;
 
 						DL_FOREACH (sym->opts_head, opt) {
-							rspamd_printf_fstring (&symbuf, "%s;", opt->option);
+							rspamd_printf_fstring (&symbuf, "%*s;",
+									(gint)opt->optlen, opt->option);
 
 							if (j >= max_log_elts) {
 								rspamd_printf_fstring (&symbuf, "...;");
@@ -1217,6 +1160,53 @@ rspamd_task_log_metric_res (struct rspamd_task *task,
 			rspamd_mempool_add_destructor (task->task_pool,
 					(rspamd_mempool_destruct_t)rspamd_fstring_free,
 					symbuf);
+			rspamd_mempool_notify_alloc (task->task_pool, symbuf->len);
+			res.begin = symbuf->str;
+			res.len = symbuf->len;
+			break;
+
+		case RSPAMD_LOG_GROUPS:
+		case RSPAMD_LOG_PUBLIC_GROUPS:
+
+			symbuf = rspamd_fstring_sized_new (128);
+			sorted_symbols = g_ptr_array_sized_new (kh_size (mres->sym_groups));
+
+			kh_foreach_key (mres->sym_groups, gr,{
+				if (!(gr->flags & RSPAMD_SYMBOL_GROUP_PUBLIC)) {
+					if (lf->type == RSPAMD_LOG_PUBLIC_GROUPS) {
+						continue;
+					}
+				}
+
+				g_ptr_array_add (sorted_symbols, gr);
+			});
+
+			g_ptr_array_sort (sorted_symbols, rspamd_task_compare_log_group);
+
+			for (i = 0; i < sorted_symbols->len; i++) {
+				gr = g_ptr_array_index (sorted_symbols, i);
+
+				if (first) {
+					rspamd_printf_fstring (&symbuf, "%s", gr->name);
+				}
+				else {
+					rspamd_printf_fstring (&symbuf, ",%s", gr->name);
+				}
+
+				k = kh_get (rspamd_symbols_group_hash, mres->sym_groups, gr);
+
+				rspamd_printf_fstring (&symbuf, "(%.2f)",
+						kh_value (mres->sym_groups, k));
+
+				first = FALSE;
+			}
+
+			g_ptr_array_free (sorted_symbols, TRUE);
+
+			rspamd_mempool_add_destructor (task->task_pool,
+					(rspamd_mempool_destruct_t) rspamd_fstring_free,
+					symbuf);
+			rspamd_mempool_notify_alloc (task->task_pool, symbuf->len);
 			res.begin = symbuf->str;
 			res.len = symbuf->len;
 			break;
@@ -1395,8 +1385,8 @@ rspamd_task_log_variable (struct rspamd_task *task,
 	switch (lf->type) {
 	/* String vars */
 	case RSPAMD_LOG_MID:
-		if (task->message_id) {
-			var.begin = task->message_id;
+		if (MESSAGE_FIELD_CHECK (task, message_id)) {
+			var.begin = MESSAGE_FIELD (task, message_id);
 			var.len = strlen (var.begin);
 		}
 		else {
@@ -1446,14 +1436,14 @@ rspamd_task_log_variable (struct rspamd_task *task,
 		var.begin = numbuf;
 		break;
 	case RSPAMD_LOG_TIME_REAL:
-		var.begin = rspamd_log_check_time (task->time_real,
+		var.begin = rspamd_log_check_time (task->task_timestamp,
 				task->time_real_finish,
 				task->cfg->clock_res);
 		var.len = strlen (var.begin);
 		break;
 	case RSPAMD_LOG_TIME_VIRTUAL:
-		var.begin = rspamd_log_check_time (task->time_virtual,
-				task->time_virtual_finish,
+		var.begin = rspamd_log_check_time (task->task_timestamp,
+				task->time_real_finish,
 				task->cfg->clock_res);
 		var.len = strlen (var.begin);
 		break;
@@ -1465,8 +1455,11 @@ rspamd_task_log_variable (struct rspamd_task *task,
 		}
 		break;
 	case RSPAMD_LOG_MIME_FROM:
-		if (task->from_mime) {
-			return rspamd_task_write_ialist (task, task->from_mime, 1, lf,
+		if (MESSAGE_FIELD_CHECK (task, from_mime)) {
+			return rspamd_task_write_ialist (task,
+					MESSAGE_FIELD (task, from_mime),
+					1,
+					lf,
 					logbuf);
 		}
 		break;
@@ -1477,8 +1470,11 @@ rspamd_task_log_variable (struct rspamd_task *task,
 		}
 		break;
 	case RSPAMD_LOG_MIME_RCPT:
-		if (task->rcpt_mime) {
-			return rspamd_task_write_ialist (task, task->rcpt_mime, 1, lf,
+		if (MESSAGE_FIELD_CHECK (task, rcpt_mime)) {
+			return rspamd_task_write_ialist (task,
+					MESSAGE_FIELD (task, rcpt_mime),
+					1,
+					lf,
 					logbuf);
 		}
 		break;
@@ -1489,15 +1485,25 @@ rspamd_task_log_variable (struct rspamd_task *task,
 		}
 		break;
 	case RSPAMD_LOG_MIME_RCPTS:
-		if (task->rcpt_mime) {
-			return rspamd_task_write_ialist (task, task->rcpt_mime, -1, lf,
+		if (MESSAGE_FIELD_CHECK (task, rcpt_mime)) {
+			return rspamd_task_write_ialist (task,
+					MESSAGE_FIELD (task, rcpt_mime),
+					-1, /* All addresses */
+					lf,
 					logbuf);
 		}
 		break;
 	case RSPAMD_LOG_DIGEST:
-		var.len = rspamd_snprintf (numbuf, sizeof (numbuf), "%*xs",
-				(gint)sizeof (task->digest), task->digest);
-		var.begin = numbuf;
+		if (task->message) {
+			var.len = rspamd_snprintf (numbuf, sizeof (numbuf), "%*xs",
+					(gint) sizeof (MESSAGE_FIELD (task, digest)),
+					MESSAGE_FIELD (task, digest));
+			var.begin = numbuf;
+		}
+		else {
+			var.begin = undef;
+			var.len = sizeof (undef) - 1;
+		}
 		break;
 	case RSPAMD_LOG_FILENAME:
 		if (task->msg.fpath) {
@@ -1535,6 +1541,28 @@ rspamd_task_log_variable (struct rspamd_task *task,
 			var.len = sizeof (undef) - 1;
 		}
 		break;
+	case RSPAMD_LOG_SETTINGS_ID:
+		if (task->settings_elt) {
+			var.begin = task->settings_elt->name;
+			var.len = strlen (task->settings_elt->name);
+		}
+		else {
+			var.begin = undef;
+			var.len = sizeof (undef) - 1;
+		}
+		break;
+	case RSPAMD_LOG_MEMPOOL_SIZE:
+		var.len = rspamd_snprintf (numbuf, sizeof (numbuf),
+				"%Hz",
+				rspamd_mempool_get_used_size (task->task_pool));
+		var.begin = numbuf;
+		break;
+	case RSPAMD_LOG_MEMPOOL_WASTE:
+		var.len = rspamd_snprintf (numbuf, sizeof (numbuf),
+				"%Hz",
+				rspamd_mempool_get_wasted_size (task->task_pool));
+		var.begin = numbuf;
+		break;
 	default:
 		var = rspamd_task_log_metric_res (task, lf);
 		break;
@@ -1562,6 +1590,7 @@ rspamd_task_write_log (struct rspamd_task *task)
 
 	if (task->cfg->log_format == NULL ||
 			(task->flags & RSPAMD_TASK_FLAG_NO_LOG)) {
+		msg_debug_task ("skip logging due to no log flag");
 		return;
 	}
 
@@ -1612,7 +1641,7 @@ rspamd_task_write_log (struct rspamd_task *task)
 }
 
 gdouble
-rspamd_task_get_required_score (struct rspamd_task *task, struct rspamd_metric_result *m)
+rspamd_task_get_required_score (struct rspamd_task *task, struct rspamd_scan_result *m)
 {
 	gint i;
 
@@ -1641,32 +1670,33 @@ rspamd_ftok_t *
 rspamd_task_get_request_header (struct rspamd_task *task,
 		const gchar *name)
 {
-	GPtrArray *ret;
-	rspamd_ftok_t srch;
-
-	srch.begin = (gchar *)name;
-	srch.len = strlen (name);
-
-	ret = g_hash_table_lookup (task->request_headers, &srch);
+	struct rspamd_request_header_chain *ret =
+			rspamd_task_get_request_header_multiple (task, name);
 
 	if (ret) {
-		return (rspamd_ftok_t *)g_ptr_array_index (ret, 0);
+		return ret->hdr;
 	}
 
 	return NULL;
 }
 
-GPtrArray*
+struct rspamd_request_header_chain *
 rspamd_task_get_request_header_multiple (struct rspamd_task *task,
 		const gchar *name)
 {
-	GPtrArray *ret;
+	struct rspamd_request_header_chain *ret = NULL;
 	rspamd_ftok_t srch;
+	khiter_t k;
 
 	srch.begin = (gchar *)name;
 	srch.len = strlen (name);
 
-	ret = g_hash_table_lookup (task->request_headers, &srch);
+	k = kh_get (rspamd_req_headers_hash, task->request_headers,
+			&srch);
+
+	if (k != kh_end (task->request_headers)) {
+		ret = kh_value (task->request_headers, k);
+	}
 
 	return ret;
 }
@@ -1676,20 +1706,30 @@ void
 rspamd_task_add_request_header (struct rspamd_task *task,
 		rspamd_ftok_t *name, rspamd_ftok_t *value)
 {
-	GPtrArray *ret;
 
-	ret = g_hash_table_lookup (task->request_headers, name);
+	khiter_t k;
+	gint res;
+	struct rspamd_request_header_chain *chain, *nchain;
 
-	if (ret) {
-		g_ptr_array_add (ret, value);
+	k = kh_put (rspamd_req_headers_hash, task->request_headers,
+		name, &res);
 
-		/* We need to free name token */
-		rspamd_fstring_mapped_ftok_free (name);
+	if (res == 0) {
+		/* Existing name */
+		nchain = rspamd_mempool_alloc (task->task_pool, sizeof (*nchain));
+		nchain->hdr = value;
+		nchain->next = NULL;
+		chain = kh_value (task->request_headers, k);
+
+		/* Slow but OK here */
+		LL_APPEND (chain, nchain);
 	}
 	else {
-		ret = g_ptr_array_sized_new (2);
-		g_ptr_array_add (ret, value);
-		g_hash_table_replace (task->request_headers, name, ret);
+		nchain = rspamd_mempool_alloc (task->task_pool, sizeof (*nchain));
+		nchain->hdr = value;
+		nchain->next = NULL;
+
+		kh_value (task->request_headers, k) = nchain;
 	}
 }
 
@@ -1744,25 +1784,8 @@ rspamd_task_profile_get (struct rspamd_task *task, const gchar *key)
 gboolean
 rspamd_task_set_finish_time (struct rspamd_task *task)
 {
-	struct timeval tv;
-
 	if (isnan (task->time_real_finish)) {
-
-#ifdef HAVE_EVENT_NO_CACHE_TIME_FUNC
-		if (task->ev_base) {
-			event_base_update_cache_time (task->ev_base);
-			event_base_gettimeofday_cached (task->ev_base, &tv);
-			task->time_real_finish = tv_to_double (&tv);
-		}
-		else {
-			gettimeofday (&tv, NULL);
-			task->time_real_finish = tv_to_double (&tv);
-		}
-#else
-		gettimeofday (&tv, NULL);
-		task->time_real_finish = tv_to_double (&tv);
-#endif
-		task->time_virtual_finish = rspamd_get_virtual_ticks ();
+		task->time_real_finish = ev_time ();
 
 		return TRUE;
 	}
@@ -1835,4 +1858,113 @@ rspamd_task_stage_name (enum rspamd_task_stage stg)
 	}
 
 	return ret;
+}
+
+void
+rspamd_task_timeout (EV_P_ ev_timer *w, int revents)
+{
+	struct rspamd_task *task = (struct rspamd_task *)w->data;
+
+	if (!(task->processed_stages & RSPAMD_TASK_STAGE_FILTERS)) {
+		ev_now_update_if_cheap (task->event_loop);
+		msg_info_task ("processing of task time out: %.1fs spent; %.1fs limit; "
+					   "forced processing",
+				ev_now (task->event_loop) - task->task_timestamp,
+				w->repeat);
+
+		if (task->cfg->soft_reject_on_timeout) {
+			struct rspamd_action *action, *soft_reject;
+
+			action = rspamd_check_action_metric (task, NULL);
+
+			if (action->action_type != METRIC_ACTION_REJECT) {
+				soft_reject = rspamd_config_get_action_by_type (task->cfg,
+						METRIC_ACTION_SOFT_REJECT);
+				rspamd_add_passthrough_result (task,
+						soft_reject,
+						0,
+						NAN,
+						"timeout processing message",
+						"task timeout",
+						0);
+			}
+		}
+
+		ev_timer_again (EV_A_ w);
+		task->processed_stages |= RSPAMD_TASK_STAGE_FILTERS;
+		rspamd_session_cleanup (task->s);
+		rspamd_task_process (task, RSPAMD_TASK_PROCESS_ALL);
+		rspamd_session_pending (task->s);
+	}
+	else {
+		/* Postprocessing timeout */
+		msg_info_task ("post-processing of task time out: %.1f second spent; forced processing",
+				ev_now (task->event_loop) - task->task_timestamp);
+
+		if (task->cfg->soft_reject_on_timeout) {
+			struct rspamd_action *action, *soft_reject;
+
+			action = rspamd_check_action_metric (task, NULL);
+
+			if (action->action_type != METRIC_ACTION_REJECT) {
+				soft_reject = rspamd_config_get_action_by_type (task->cfg,
+						METRIC_ACTION_SOFT_REJECT);
+				rspamd_add_passthrough_result (task,
+						soft_reject,
+						0,
+						NAN,
+						"timeout post-processing message",
+						"task timeout",
+						0);
+			}
+		}
+
+		ev_timer_stop (EV_A_ w);
+		task->processed_stages |= RSPAMD_TASK_STAGE_DONE;
+		rspamd_session_cleanup (task->s);
+		rspamd_task_process (task, RSPAMD_TASK_PROCESS_ALL);
+		rspamd_session_pending (task->s);
+	}
+}
+
+void
+rspamd_worker_guard_handler (EV_P_ ev_io *w, int revents)
+{
+	struct rspamd_task *task = (struct rspamd_task *)w->data;
+	gchar fake_buf[1024];
+	gssize r;
+
+	r = read (w->fd, fake_buf, sizeof (fake_buf));
+
+	if (r > 0) {
+		msg_warn_task ("received extra data after task is loaded, ignoring");
+	}
+	else {
+		if (r == 0) {
+			/*
+			 * Poor man approach, that might break things in case of
+			 * shutdown (SHUT_WR) but sockets are so bad that there's no
+			 * reliable way to distinguish between shutdown(SHUT_WR) and
+			 * close.
+			 */
+			if (task->cmd != CMD_CHECK_V2 && task->cfg->enable_shutdown_workaround) {
+				msg_info_task ("workaround for shutdown enabled, please update "
+							   "your client, this support might be removed in future");
+				shutdown (w->fd, SHUT_RD);
+				ev_io_stop (task->event_loop, &task->guard_ev);
+			}
+			else {
+				msg_err_task ("the peer has closed connection unexpectedly");
+				rspamd_session_destroy (task->s);
+			}
+		}
+		else if (errno != EAGAIN) {
+			msg_err_task ("the peer has closed connection unexpectedly: %s",
+					strerror (errno));
+			rspamd_session_destroy (task->s);
+		}
+		else {
+			return;
+		}
+	}
 }

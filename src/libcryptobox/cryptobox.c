@@ -23,11 +23,6 @@
 #include "cryptobox.h"
 #include "platform_config.h"
 #include "chacha20/chacha.h"
-#include "poly1305/poly1305.h"
-#include "curve25519/curve25519.h"
-#include "ed25519/ed25519.h"
-#include "blake2/blake2.h"
-#include "siphash/siphash.h"
 #include "catena/catena.h"
 #include "base64/base64.h"
 #include "ottery.h"
@@ -58,8 +53,11 @@
 
 #include <signal.h>
 #include <setjmp.h>
+#include <stdalign.h>
 
-unsigned long cpu_config = 0;
+#include <sodium.h>
+
+unsigned cpu_config = 0;
 
 static gboolean cryptobox_loaded = FALSE;
 
@@ -68,78 +66,6 @@ static const guchar n0[16] = {0};
 #define CRYPTOBOX_ALIGNMENT   16
 #define cryptobox_align_ptr(p, a)                                             \
     (void *) (((uintptr_t) (p) + ((uintptr_t) a - 1)) & ~((uintptr_t) a - 1))
-
-#ifdef HAVE_WEAK_SYMBOLS
-__attribute__((weak)) void
-_dummy_symbol_to_prevent_lto_memzero(void * const pnt, const size_t len);
-__attribute__((weak)) void
-_dummy_symbol_to_prevent_lto_memzero(void * const pnt, const size_t len)
-{
-	(void) pnt;
-	(void) len;
-}
-
-__attribute__((weak)) void
-_dummy_symbol_to_prevent_lto_memcmp(const unsigned char *b1,
-		const unsigned char *b2,
-		const size_t         len);
-__attribute__((weak)) void
-_dummy_symbol_to_prevent_lto_memcmp(const unsigned char *b1,
-		const unsigned char *b2,
-		const size_t         len)
-{
-	(void) b1;
-	(void) b2;
-	(void) len;
-}
-#endif
-
-void
-rspamd_explicit_memzero(void * const pnt, const gsize len)
-{
-#if defined(HAVE_MEMSET_S)
-	if (memset_s (pnt, (rsize_t) len, 0, (rsize_t) len) != 0) {
-		g_assert (0);
-	}
-#elif defined(HAVE_EXPLICIT_BZERO)
-	explicit_bzero (pnt, len);
-#elif defined(HAVE_WEAK_SYMBOLS)
-	memset (pnt, 0, len);
-	_dummy_symbol_to_prevent_lto_memzero (pnt, len);
-#else
-	volatile unsigned char *pnt_ = (volatile unsigned char *) pnt;
-	gsize i = (gsize) 0U;
-	while (i < len) {
-		pnt_[i++] = 0U;
-	}
-#endif
-}
-
-gint
-rspamd_cryptobox_memcmp (const void *const b1_, const void *const b2_, gsize len)
-{
-#ifdef HAVE_WEAK_SYMBOLS
-	const unsigned char *b1 = (const unsigned char *) b1_;
-	const unsigned char *b2 = (const unsigned char *) b2_;
-#else
-	const volatile unsigned char *volatile b1 =
-			(const volatile unsigned char *volatile) b1_;
-	const volatile unsigned char *volatile b2 =
-			(const volatile unsigned char *volatile) b2_;
-#endif
-	gsize i;
-	volatile unsigned char d = 0U;
-
-#if HAVE_WEAK_SYMBOLS
-	_dummy_symbol_to_prevent_lto_memcmp (b1, b2, len);
-#endif
-
-	for (i = 0U; i < len; i++) {
-		d |= b1[i] ^ b2[i];
-	}
-
-	return (1 & ((d - 1) >> 8)) - 1;
-}
 
 static void
 rspamd_cryptobox_cpuid (gint cpu[4], gint info)
@@ -370,13 +296,9 @@ rspamd_cryptobox_init (void)
 	ctx->cpu_extensions = buf->str;
 	g_string_free (buf, FALSE);
 	ctx->cpu_config = cpu_config;
+	g_assert (sodium_init () != -1);
 
 	ctx->chacha20_impl = chacha_load ();
-	ctx->poly1305_impl = poly1305_load ();
-	ctx->siphash_impl = siphash_load ();
-	ctx->curve25519_impl = curve25519_load ();
-	ctx->blake2_impl = blake2b_load ();
-	ctx->ed25519_impl = ed25519_load ();
 	ctx->base64_impl = base64_load ();
 #if defined(HAVE_USABLE_OPENSSL) && (OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER))
 	/* Needed for old openssl api, not sure about LibreSSL */
@@ -389,6 +311,15 @@ rspamd_cryptobox_init (void)
 }
 
 void
+rspamd_cryptobox_deinit (struct rspamd_cryptobox_library_ctx *ctx)
+{
+	if (ctx) {
+		g_free (ctx->cpu_extensions);
+		g_free (ctx);
+	}
+}
+
+void
 rspamd_cryptobox_keypair (rspamd_pk_t pk, rspamd_sk_t sk,
 		enum rspamd_cryptobox_mode mode)
 {
@@ -398,7 +329,7 @@ rspamd_cryptobox_keypair (rspamd_pk_t pk, rspamd_sk_t sk,
 		sk[31] &= 127;
 		sk[31] |= 64;
 
-		curve25519_base (pk, sk);
+		crypto_scalarmult_base (pk, sk);
 	}
 	else {
 #ifndef HAVE_USABLE_OPENSSL
@@ -438,7 +369,7 @@ rspamd_cryptobox_keypair_sig (rspamd_sig_pk_t pk, rspamd_sig_sk_t sk,
 		enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		ed25519_keypair (pk, sk);
+		crypto_sign_keypair (pk, sk);
 	}
 	else {
 #ifndef HAVE_USABLE_OPENSSL
@@ -487,8 +418,9 @@ rspamd_cryptobox_nm (rspamd_nm_t nm,
 		e[31] &= 127;
 		e[31] |= 64;
 
-		curve25519 (s, e, pk);
-		hchacha (s, n0, nm, 20);
+		if (crypto_scalarmult (s, e, pk) != -1) {
+			hchacha (s, n0, nm, 20);
+		}
 
 		rspamd_explicit_memzero (e, 32);
 	}
@@ -528,13 +460,13 @@ rspamd_cryptobox_nm (rspamd_nm_t nm,
 }
 
 void
-rspamd_cryptobox_sign (guchar *sig, gsize *siglen_p,
+rspamd_cryptobox_sign (guchar *sig, unsigned long long *siglen_p,
 		const guchar *m, gsize mlen,
 		const rspamd_sk_t sk,
 		enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		ed25519_sign (sig, siglen_p, m, mlen, sk);
+		crypto_sign (sig, siglen_p, m, mlen, sk);
 	}
 	else {
 #ifndef HAVE_USABLE_OPENSSL
@@ -590,8 +522,9 @@ rspamd_cryptobox_verify (const guchar *sig,
 	bool ret = false;
 
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		g_assert (siglen == rspamd_cryptobox_signature_bytes (RSPAMD_CRYPTOBOX_MODE_25519));
-		ret = ed25519_verify (sig, m, mlen, pk);
+		if (siglen == rspamd_cryptobox_signature_bytes (RSPAMD_CRYPTOBOX_MODE_25519)) {
+			ret = (crypto_sign_verify_detached (sig, m, mlen, pk) == 0);
+		}
 	}
 	else {
 #ifndef HAVE_USABLE_OPENSSL
@@ -652,7 +585,7 @@ static gsize
 rspamd_cryptobox_auth_ctx_len (enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		return sizeof (poly1305_state) + CRYPTOBOX_ALIGNMENT;
+		return sizeof (crypto_onetimeauth_state) + _Alignof (crypto_onetimeauth_state);
 	}
 	else {
 #ifndef HAVE_USABLE_OPENSSL
@@ -707,13 +640,13 @@ rspamd_cryptobox_auth_init (void *auth_ctx, void *enc_ctx,
 		enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		poly1305_state *mac_ctx;
+		crypto_onetimeauth_state *mac_ctx;
 		guchar RSPAMD_ALIGNED(32) subkey[CHACHA_BLOCKBYTES];
 
 		mac_ctx = cryptobox_align_ptr (auth_ctx, CRYPTOBOX_ALIGNMENT);
 		memset (subkey, 0, sizeof (subkey));
 		chacha_update (enc_ctx, subkey, subkey, sizeof (subkey));
-		poly1305_init (mac_ctx, (const poly1305_key *) subkey);
+		crypto_onetimeauth_init (mac_ctx, subkey);
 		rspamd_explicit_memzero (subkey, sizeof (subkey));
 
 		return mac_ctx;
@@ -738,8 +671,11 @@ rspamd_cryptobox_encrypt_update (void *enc_ctx, const guchar *in, gsize inlen,
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
 		gsize r;
+		chacha_state *s;
 
-		r = chacha_update (enc_ctx, in, out, inlen);
+		s = cryptobox_align_ptr (enc_ctx, CRYPTOBOX_ALIGNMENT);
+
+		r = chacha_update (s, in, out, inlen);
 
 		if (outlen != NULL) {
 			*outlen = r;
@@ -773,7 +709,10 @@ rspamd_cryptobox_auth_update (void *auth_ctx, const guchar *in, gsize inlen,
 		enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		poly1305_update (auth_ctx, in, inlen);
+		crypto_onetimeauth_state *mac_ctx;
+
+		mac_ctx = cryptobox_align_ptr (auth_ctx, CRYPTOBOX_ALIGNMENT);
+		crypto_onetimeauth_update (mac_ctx, in, inlen);
 
 		return TRUE;
 	}
@@ -793,7 +732,10 @@ rspamd_cryptobox_encrypt_final (void *enc_ctx, guchar *out, gsize remain,
 		enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		return chacha_final (enc_ctx, out);
+		chacha_state *s;
+
+		s = cryptobox_align_ptr (enc_ctx, CRYPTOBOX_ALIGNMENT);
+		return chacha_final (s, out);
 	}
 	else {
 #ifndef HAVE_USABLE_OPENSSL
@@ -816,7 +758,10 @@ rspamd_cryptobox_auth_final (void *auth_ctx, rspamd_mac_t sig,
 		enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		poly1305_finish (auth_ctx, sig);
+		crypto_onetimeauth_state *mac_ctx;
+
+		mac_ctx = cryptobox_align_ptr (auth_ctx, CRYPTOBOX_ALIGNMENT);
+		crypto_onetimeauth_final (mac_ctx, sig);
 
 		return TRUE;
 	}
@@ -879,13 +824,13 @@ rspamd_cryptobox_auth_verify_init (void *auth_ctx, void *enc_ctx,
 		enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		poly1305_state *mac_ctx;
+		crypto_onetimeauth_state *mac_ctx;
 		guchar RSPAMD_ALIGNED(32) subkey[CHACHA_BLOCKBYTES];
 
 		mac_ctx = cryptobox_align_ptr (auth_ctx, CRYPTOBOX_ALIGNMENT);
 		memset (subkey, 0, sizeof (subkey));
 		chacha_update (enc_ctx, subkey, subkey, sizeof (subkey));
-		poly1305_init (mac_ctx, (const poly1305_key *) subkey);
+		crypto_onetimeauth_init (mac_ctx, subkey);
 		rspamd_explicit_memzero (subkey, sizeof (subkey));
 
 		return mac_ctx;
@@ -910,8 +855,10 @@ rspamd_cryptobox_decrypt_update (void *enc_ctx, const guchar *in, gsize inlen,
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
 		gsize r;
+		chacha_state *s;
 
-		r = chacha_update (enc_ctx, in, out, inlen);
+		s = cryptobox_align_ptr (enc_ctx, CRYPTOBOX_ALIGNMENT);
+		r = chacha_update (s, in, out, inlen);
 
 		if (outlen != NULL) {
 			*outlen = r;
@@ -944,7 +891,10 @@ rspamd_cryptobox_auth_verify_update (void *auth_ctx,
 		enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		poly1305_update (auth_ctx, in, inlen);
+		crypto_onetimeauth_state *mac_ctx;
+
+		mac_ctx = cryptobox_align_ptr (auth_ctx, CRYPTOBOX_ALIGNMENT);
+		crypto_onetimeauth_update (mac_ctx, in, inlen);
 
 		return TRUE;
 	}
@@ -964,7 +914,10 @@ rspamd_cryptobox_decrypt_final (void *enc_ctx, guchar *out, gsize remain,
 		enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		chacha_final (enc_ctx, out);
+		chacha_state *s;
+
+		s = cryptobox_align_ptr (enc_ctx, CRYPTOBOX_ALIGNMENT);
+		chacha_final (s, out);
 
 		return TRUE;
 	}
@@ -992,10 +945,12 @@ rspamd_cryptobox_auth_verify_final (void *auth_ctx, const rspamd_mac_t sig,
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
 		rspamd_mac_t mac;
+		crypto_onetimeauth_state *mac_ctx;
 
-		poly1305_finish (auth_ctx, mac);
+		mac_ctx = cryptobox_align_ptr (auth_ctx, CRYPTOBOX_ALIGNMENT);
+		crypto_onetimeauth_final (mac_ctx, mac);
 
-		if (!poly1305_verify (mac, sig)) {
+		if (crypto_verify_16 (mac, sig) != 0) {
 			return FALSE;
 		}
 
@@ -1024,7 +979,10 @@ rspamd_cryptobox_cleanup (void *enc_ctx, void *auth_ctx,
 		enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		rspamd_explicit_memzero (auth_ctx, sizeof (poly1305_state));
+		crypto_onetimeauth_state *mac_ctx;
+
+		mac_ctx = cryptobox_align_ptr (auth_ctx, CRYPTOBOX_ALIGNMENT);
+		rspamd_explicit_memzero (mac_ctx, sizeof (*mac_ctx));
 	}
 	else {
 #ifndef HAVE_USABLE_OPENSSL
@@ -1271,7 +1229,7 @@ rspamd_cryptobox_siphash (unsigned char *out, const unsigned char *in,
 		unsigned long long inlen,
 		const rspamd_sipkey_t k)
 {
-	siphash24 (out, in, inlen, k);
+	crypto_shorthash_siphash24 (out, in, inlen, k);
 }
 
 /*
@@ -1283,8 +1241,9 @@ rspamd_cryptobox_pbkdf2 (const char *pass, gsize pass_len,
 		const guint8 *salt, gsize salt_len, guint8 *key, gsize key_len,
 		unsigned int rounds)
 {
-	guint8 *asalt, obuf[BLAKE2B_OUTBYTES];
-	guint8 d1[BLAKE2B_OUTBYTES], d2[BLAKE2B_OUTBYTES];
+	guint8 *asalt, obuf[crypto_generichash_blake2b_BYTES_MAX];
+	guint8 d1[crypto_generichash_blake2b_BYTES_MAX],
+			d2[crypto_generichash_blake2b_BYTES_MAX];
 	unsigned int i, j;
 	unsigned int count;
 	gsize r;
@@ -1304,11 +1263,44 @@ rspamd_cryptobox_pbkdf2 (const char *pass, gsize pass_len,
 		asalt[salt_len + 1] = (count >> 16) & 0xff;
 		asalt[salt_len + 2] = (count >> 8) & 0xff;
 		asalt[salt_len + 3] = count & 0xff;
-		blake2b_keyed (d1, asalt, salt_len + 4, pass, pass_len);
+
+		if (pass_len <= crypto_generichash_blake2b_KEYBYTES_MAX) {
+			crypto_generichash_blake2b (d1, sizeof (d1), asalt, salt_len + 4,
+					pass, pass_len);
+		}
+		else {
+			guint8 k[crypto_generichash_blake2b_BYTES_MAX];
+
+			/*
+			 * We use additional blake2 iteration to store large key
+			 * XXX: it is not compatible with the original implementation but safe
+			 */
+			crypto_generichash_blake2b (k, sizeof (k), pass, pass_len,
+					NULL, 0);
+			crypto_generichash_blake2b (d1, sizeof (d1), asalt, salt_len + 4,
+					k, sizeof (k));
+		}
+
 		memcpy (obuf, d1, sizeof(obuf));
 
 		for (i = 1; i < rounds; i++) {
-			blake2b_keyed (d2, d1, BLAKE2B_OUTBYTES, pass, pass_len);
+			if (pass_len <= crypto_generichash_blake2b_KEYBYTES_MAX) {
+				crypto_generichash_blake2b (d2, sizeof (d2), d1, sizeof (d1),
+						pass, pass_len);
+			}
+			else {
+				guint8 k[crypto_generichash_blake2b_BYTES_MAX];
+
+				/*
+				 * We use additional blake2 iteration to store large key
+				 * XXX: it is not compatible with the original implementation but safe
+				 */
+				crypto_generichash_blake2b (k, sizeof (k), pass, pass_len,
+						NULL, 0);
+				crypto_generichash_blake2b (d2, sizeof (d2), d1, sizeof (d1),
+						k, sizeof (k));
+			}
+
 			memcpy (d1, d2, sizeof(d1));
 
 			for (j = 0; j < sizeof(obuf); j++) {
@@ -1316,7 +1308,7 @@ rspamd_cryptobox_pbkdf2 (const char *pass, gsize pass_len,
 			}
 		}
 
-		r = MIN(key_len, BLAKE2B_OUTBYTES);
+		r = MIN(key_len, crypto_generichash_blake2b_BYTES_MAX);
 		memcpy (key, obuf, r);
 		key += r;
 		key_len -= r;
@@ -1442,13 +1434,19 @@ rspamd_cryptobox_mac_bytes (enum rspamd_cryptobox_mode mode)
 }
 
 void
-rspamd_cryptobox_hash_init (void *st, const guchar *key, gsize keylen)
+rspamd_cryptobox_hash_init (void *p, const guchar *key, gsize keylen)
 {
 	if (key != NULL && keylen > 0) {
-		blake2b_keyed_init (st, key, keylen);
+		crypto_generichash_blake2b_state *st = cryptobox_align_ptr (p,
+				_Alignof(crypto_generichash_blake2b_state));
+		crypto_generichash_blake2b_init (st, key, keylen,
+				crypto_generichash_blake2b_BYTES_MAX);
 	}
 	else {
-		blake2b_init (st);
+		crypto_generichash_blake2b_state *st = cryptobox_align_ptr (p,
+				_Alignof(crypto_generichash_blake2b_state));
+		crypto_generichash_blake2b_init (st, key, keylen,
+				crypto_generichash_blake2b_BYTES_MAX);
 	}
 }
 
@@ -1456,19 +1454,22 @@ rspamd_cryptobox_hash_init (void *st, const guchar *key, gsize keylen)
  * Update hash with data portion
  */
 void
-rspamd_cryptobox_hash_update (void *st, const guchar *data, gsize len)
+rspamd_cryptobox_hash_update (void *p, const guchar *data, gsize len)
 {
-	blake2b_update (st, data, len);
+	crypto_generichash_blake2b_state *st = cryptobox_align_ptr (p,
+			_Alignof(crypto_generichash_blake2b_state));
+	crypto_generichash_blake2b_update (st, data, len);
 }
 
 /**
  * Output hash to the buffer of rspamd_cryptobox_HASHBYTES length
  */
 void
-rspamd_cryptobox_hash_final (void *st, guchar *out)
+rspamd_cryptobox_hash_final (void *p, guchar *out)
 {
-	blake2b_final (st, out);
-	rspamd_explicit_memzero (st, rspamd_cryptobox_HASHSTATEBYTES);
+	crypto_generichash_blake2b_state *st = cryptobox_align_ptr (p,
+			_Alignof(crypto_generichash_blake2b_state));
+	crypto_generichash_blake2b_final (st, out, crypto_generichash_blake2b_BYTES_MAX);
 }
 
 /**
@@ -1480,11 +1481,8 @@ void rspamd_cryptobox_hash (guchar *out,
 		const guchar *key,
 		gsize keylen)
 {
-	blake2b_state RSPAMD_ALIGNED(32) st;
-
-	rspamd_cryptobox_hash_init (&st, key, keylen);
-	rspamd_cryptobox_hash_update (&st, data, len);
-	rspamd_cryptobox_hash_final (&st, out);
+	crypto_generichash_blake2b (out, crypto_generichash_blake2b_BYTES_MAX,
+			data, len, key, keylen);
 }
 
 G_STATIC_ASSERT (sizeof (t1ha_context_t) <=

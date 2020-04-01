@@ -4,9 +4,8 @@ requirejs.config({
     baseUrl: "js/lib",
     paths: {
         app: "../app",
-        jquery: "jquery-3.3.1.min",
+        jquery: "jquery-3.4.1.min",
         visibility: "visibility.min",
-        humanize: "humanize.min",
         bootstrap: "bootstrap.min",
         d3: "d3.min",
         d3evolution: "d3evolution.min",
@@ -21,7 +20,8 @@ requirejs.config({
         d3evolution: {exports:"D3Evolution", deps:["d3", "jquery"]},
         footable: {deps:["bootstrap", "jquery"]},
         stickytabs: {deps:["jquery"]}
-    }
+    },
+    waitSeconds: 30,
 });
 
 document.title = window.location.hostname +

@@ -2,7 +2,9 @@
 
 context("URL check functions", function()
   local mpool = require("rspamd_mempool")
+  local lua_urls_compose = require "lua_urls_compose"
   local url = require("rspamd_url")
+  local lua_util = require("lua_util")
   local logger = require("rspamd_logger")
   local test_helper = require("rspamd_test_helper")
   local ffi = require("ffi")
@@ -25,6 +27,8 @@ context("URL check functions", function()
     {"http://user:password@тест2.РФ:18 text", {"тест2.рф", "user"}},
     {"somebody@example.com", {"example.com", "somebody"}},
     {"https://127.0.0.1/abc text", {"127.0.0.1", nil}},
+    {"https:\\\\127.0.0.1/abc text", {"127.0.0.1", nil}},
+    {"https:\\\\127.0.0.1", {"127.0.0.1", nil}},
     {"https://127.0.0.1 text", {"127.0.0.1", nil}},
     {"https://[::1]:1", {"::1", nil}},
     {"https://user:password@[::1]:1", {"::1", nil}},
@@ -54,13 +58,34 @@ context("URL check functions", function()
   end
 
   cases = {
-    {"http://%30%78%63%30%2e%30%32%35%30.01", true, { --0xc0.0250.01
+    {[[http://example.net/path/]], true, {
+      host = 'example.net', path = 'path/'
+    }},
+    {'http://example.net/hello%20world.php?arg=x#fragment', true, {
+      host = 'example.net', fragment = 'fragment', query = 'arg=x',
+      path = 'hello world.php',
+    }},
+    {'http://example.net/?arg=%23#fragment', true, {
+      host = 'example.net', fragment = 'fragment', query = 'arg=#',
+    }},
+    {"http:/\\[::eeee:192.168.0.1]/#test", true, {
+      host = '::eeee:c0a8:1', fragment = 'test'
+    }},
+    {"http:/\\[::eeee:192.168.0.1]#test", true, {
+      host = '::eeee:c0a8:1', fragment = 'test'
+    }},
+    {"http:/\\[::eeee:192.168.0.1]?test", true, {
+      host = '::eeee:c0a8:1', query = 'test'
+    }},
+    {"http:\\\\%30%78%63%30%2e%30%32%35%30.01", true, { --0xc0.0250.01
       host = '192.168.0.1',
     }},
-    {"http://www.google.com/foo?bar=baz#", true, {
+    {"http:/\\www.google.com/foo?bar=baz#", true, {
       host = 'www.google.com', path = 'foo', query = 'bar=baz', tld = 'google.com'
     }},
-    {"http://[www.google.com]/", false},
+    {"http://[www.google.com]/", true, {
+      host = 'www.google.com',
+    }},
     {"<test.com", true, {
       host = 'test.com', tld = 'test.com',
     }},
@@ -78,17 +103,14 @@ context("URL check functions", function()
     {"http://0.0xFFFFFF", true, {
       host = '0.255.255.255'
     }},
-    {"http://030052000001", true, {
+    {"http:/\\030052000001", true, {
       host = '192.168.0.1'
     }},
-    {"http://0xc0.052000001", true, {
+    {"http:\\/0xc0.052000001", true, {
       host = '192.168.0.1'
     }},
-    {"http://192.168.0.1.", true, {
-      host = '192.168.0.1'
-    }},
-    {"http://[::eeee:192.168.0.1]", true, {
-      host = '::eeee:c0a8:1'
+    {"http://192.168.0.1.?foo", true, {
+      host = '192.168.0.1', query = 'foo',
     }},
     {"http://twitter.com#test", true, {
       host = 'twitter.com', fragment = 'test'
@@ -102,9 +124,9 @@ context("URL check functions", function()
   for i,c in ipairs(cases) do
     local res = url.create(pool, c[1])
 
-    test("Parse urls " .. i, function()
+    test("Parse url: " .. c[1], function()
       if c[2] then
-        assert_not_nil(res, "cannot parse " .. c[1])
+        assert_not_nil(res, "we are able to parse url: " .. c[1])
 
         local uf = res:to_table()
 
@@ -128,8 +150,8 @@ context("URL check functions", function()
     {"/././foo", "/foo"},
     {"/a/b/c/./../../g", "/a/g"},
     {"/./.foo", "/.foo"},
-    {"/foo/.", "/foo"},
-    {"/foo/./", "/foo"},
+    {"/foo/.", "/foo/"},
+    {"/foo/./", "/foo/"},
     {"/foo/bar/..", "/foo"},
     {"/foo/bar/../", "/foo/"},
     {"/foo/..bar", "/foo/..bar"},
@@ -157,6 +179,34 @@ context("URL check functions", function()
       ffi.C.rspamd_http_normalize_path_inplace(buf, #v[1], sizbuf)
       local res = ffi.string(buf, tonumber(sizbuf[0]))
       assert_equal(v[2], res, 'expected ' .. v[2] .. ' but got ' .. res .. ' in path ' .. v[1])
+    end)
+  end
+
+  cases = {
+    {'example.com', 'example.com'},
+    {'baz.example.com', 'baz.example.com'},
+    {'3.baz.example.com', 'baz.example.com'},
+    {'bar.example.com', 'example.com'},
+    {'foo.example.com', 'foo.example.com'},
+    {'3.foo.example.com', '3.foo.example.com'},
+    {'foo.com', 'foo.com'},
+    {'bar.foo.com', 'foo.com'},
+  }
+
+  local excl_rules1 = {
+      'example.com',
+      '*.foo.example.com',
+      '!bar.example.com'
+  }
+
+  local comp_rules = lua_urls_compose.inject_composition_rules(rspamd_config, excl_rules1)
+
+  for _,v in ipairs(cases) do
+    test("URL composition " .. v[1], function()
+      local u = url.create(pool, v[1])
+      assert_not_nil(u, "we are able to parse url: " .. v[1])
+      local res = comp_rules:process_url(nil, u:get_tld(), u:get_host())
+      assert_equal(v[2], res, 'expected ' .. v[2] .. ' but got ' .. res .. ' in url ' .. v[1])
     end)
   end
 end)

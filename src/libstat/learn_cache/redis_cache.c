@@ -21,8 +21,9 @@
 #include "cryptobox.h"
 #include "ucl.h"
 #include "hiredis.h"
-#include "adapters/libevent.h"
+#include "adapters/libev.h"
 #include "lua/lua_common.h"
+#include "libmime/message.h"
 
 #define REDIS_DEFAULT_TIMEOUT 0.5
 #define REDIS_STAT_TIMEOUT 30
@@ -45,7 +46,7 @@ struct rspamd_redis_cache_runtime {
 	struct rspamd_redis_cache_ctx *ctx;
 	struct rspamd_task *task;
 	struct upstream *selected;
-	struct event timeout_event;
+	ev_timer timer_ev;
 	redisAsyncContext *redis;
 	gboolean has_event;
 };
@@ -92,9 +93,7 @@ rspamd_redis_cache_fin (gpointer data)
 	redisAsyncContext *redis;
 
 	rt->has_event = FALSE;
-	if (rspamd_event_pending (&rt->timeout_event, EV_TIMEOUT)) {
-		event_del (&rt->timeout_event);
-	}
+	ev_timer_stop (rt->task->event_loop, &rt->timer_ev);
 
 	if (rt->redis) {
 		redis = rt->redis;
@@ -105,19 +104,20 @@ rspamd_redis_cache_fin (gpointer data)
 }
 
 static void
-rspamd_redis_cache_timeout (gint fd, short what, gpointer d)
+rspamd_redis_cache_timeout (EV_P_ ev_timer *w, int revents)
 {
-	struct rspamd_redis_cache_runtime *rt = d;
+	struct rspamd_redis_cache_runtime *rt =
+			(struct rspamd_redis_cache_runtime *)w->data;
 	struct rspamd_task *task;
 
 	task = rt->task;
 
 	msg_err_task ("connection to redis server %s timed out",
 			rspamd_upstream_name (rt->selected));
-	rspamd_upstream_fail (rt->selected, FALSE);
+	rspamd_upstream_fail (rt->selected, FALSE, "timeout");
 
 	if (rt->has_event) {
-		rspamd_session_remove_event (task->s, rspamd_redis_cache_fin, d);
+		rspamd_session_remove_event (task->s, rspamd_redis_cache_fin, rt);
 	}
 }
 
@@ -154,7 +154,7 @@ rspamd_stat_cache_redis_get (redisAsyncContext *c, gpointer r, gpointer priv)
 				(val < 0 && (task->flags & RSPAMD_TASK_FLAG_LEARN_HAM))) {
 			/* Already learned */
 			msg_info_task ("<%s> has been already "
-					"learned as %s, ignore it", task->message_id,
+					"learned as %s, ignore it", MESSAGE_FIELD (task, message_id),
 					(task->flags & RSPAMD_TASK_FLAG_LEARN_SPAM) ? "spam" : "ham");
 			task->flags |= RSPAMD_TASK_FLAG_ALREADY_LEARNED;
 		}
@@ -166,7 +166,7 @@ rspamd_stat_cache_redis_get (redisAsyncContext *c, gpointer r, gpointer priv)
 		rspamd_upstream_ok (rt->selected);
 	}
 	else {
-		rspamd_upstream_fail (rt->selected, FALSE);
+		rspamd_upstream_fail (rt->selected, FALSE, c->errstr);
 	}
 
 	if (rt->has_event) {
@@ -188,7 +188,7 @@ rspamd_stat_cache_redis_set (redisAsyncContext *c, gpointer r, gpointer priv)
 		rspamd_upstream_ok (rt->selected);
 	}
 	else {
-		rspamd_upstream_fail (rt->selected, FALSE);
+		rspamd_upstream_fail (rt->selected, FALSE, c->errstr);
 	}
 
 	if (rt->has_event) {
@@ -222,9 +222,17 @@ rspamd_stat_cache_redis_generate_id (struct rspamd_task *task)
 
 	rspamd_cryptobox_hash_final (&st, out);
 
-	b32out = rspamd_encode_base32 (out, sizeof (out));
-	g_assert (b32out != NULL);
-	rspamd_mempool_set_variable (task->task_pool, "words_hash", b32out, g_free);
+	b32out = rspamd_mempool_alloc (task->task_pool,
+			sizeof (out) * 8 / 5 + 3);
+	i = rspamd_encode_base32_buf (out, sizeof (out), b32out,
+			sizeof (out) * 8 / 5 + 2);
+
+	if (i > 0) {
+		/* Zero terminate */
+		b32out[i] = '\0';
+	}
+
+	rspamd_mempool_set_variable (task->task_pool, "words_hash", b32out, NULL);
 }
 
 gpointer
@@ -396,13 +404,29 @@ rspamd_stat_cache_redis_runtime (struct rspamd_task *task,
 				rspamd_inet_address_get_port (addr));
 	}
 
-	g_assert (rt->redis != NULL);
+	if (rt->redis == NULL) {
+		msg_warn_task ("cannot connect to redis server %s: %s",
+				rspamd_inet_address_to_string_pretty (addr),
+				strerror (errno));
 
-	redisLibeventAttach (rt->redis, task->ev_base);
+		return NULL;
+	}
+	else if (rt->redis->err != REDIS_OK) {
+		msg_warn_task ("cannot connect to redis server %s: %s",
+				rspamd_inet_address_to_string_pretty (addr),
+				rt->redis->errstr);
+		redisAsyncFree (rt->redis);
+		rt->redis = NULL;
+
+		return NULL;
+	}
+
+	redisLibevAttach (task->event_loop, rt->redis);
 
 	/* Now check stats */
-	event_set (&rt->timeout_event, -1, EV_TIMEOUT, rspamd_redis_cache_timeout, rt);
-	event_base_set (task->ev_base, &rt->timeout_event);
+	rt->timer_ev.data = rt;
+	ev_timer_init (&rt->timer_ev, rspamd_redis_cache_timeout,
+			rt->ctx->timeout, 0.0);
 	rspamd_redis_cache_maybe_auth (ctx, rt->redis);
 
 	if (!learn) {
@@ -418,7 +442,6 @@ rspamd_stat_cache_redis_check (struct rspamd_task *task,
 		gpointer runtime)
 {
 	struct rspamd_redis_cache_runtime *rt = runtime;
-	struct timeval tv;
 	gchar *h;
 
 	if (rspamd_session_blocked (task->s)) {
@@ -431,8 +454,6 @@ rspamd_stat_cache_redis_check (struct rspamd_task *task,
 		return RSPAMD_LEARN_INGORE;
 	}
 
-	double_to_tv (rt->ctx->timeout, &tv);
-
 	if (redisAsyncCommand (rt->redis, rspamd_stat_cache_redis_get, rt,
 			"HGET %s %s",
 			rt->ctx->redis_object, h) == REDIS_OK) {
@@ -440,7 +461,7 @@ rspamd_stat_cache_redis_check (struct rspamd_task *task,
 				rspamd_redis_cache_fin,
 				rt,
 				M);
-		event_add (&rt->timeout_event, &tv);
+		ev_timer_start (rt->task->event_loop, &rt->timer_ev);
 		rt->has_event = TRUE;
 	}
 
@@ -454,18 +475,16 @@ rspamd_stat_cache_redis_learn (struct rspamd_task *task,
 		gpointer runtime)
 {
 	struct rspamd_redis_cache_runtime *rt = runtime;
-	struct timeval tv;
 	gchar *h;
 	gint flag;
 
-	if (rspamd_session_blocked (task->s)) {
+	if (rt == NULL || rt->ctx == NULL || rspamd_session_blocked (task->s)) {
 		return RSPAMD_LEARN_INGORE;
 	}
 
 	h = rspamd_mempool_get_variable (task->task_pool, "words_hash");
 	g_assert (h != NULL);
 
-	double_to_tv (rt->ctx->timeout, &tv);
 	flag = (task->flags & RSPAMD_TASK_FLAG_LEARN_SPAM) ? 1 : -1;
 
 	if (redisAsyncCommand (rt->redis, rspamd_stat_cache_redis_set, rt,
@@ -473,7 +492,7 @@ rspamd_stat_cache_redis_learn (struct rspamd_task *task,
 			rt->ctx->redis_object, h, flag) == REDIS_OK) {
 		rspamd_session_add_event (task->s,
 				rspamd_redis_cache_fin, rt, M);
-		event_add (&rt->timeout_event, &tv);
+		ev_timer_start (rt->task->event_loop, &rt->timer_ev);
 		rt->has_event = TRUE;
 	}
 

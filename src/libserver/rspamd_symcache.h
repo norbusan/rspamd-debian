@@ -18,18 +18,25 @@
 
 #include "config.h"
 #include "ucl.h"
+#include "cfg_file.h"
+#include "contrib/libev/ev.h"
+
 #include <lua.h>
-#include <event.h>
+
+#ifdef  __cplusplus
+extern "C" {
+#endif
 
 struct rspamd_task;
 struct rspamd_config;
 struct rspamd_symcache;
 struct rspamd_worker;
 struct rspamd_symcache_item;
+struct rspamd_config_settings_elt;
 
-typedef void (*symbol_func_t)(struct rspamd_task *task,
-							  struct rspamd_symcache_item *item,
-							  gpointer user_data);
+typedef void (*symbol_func_t) (struct rspamd_task *task,
+							   struct rspamd_symcache_item *item,
+							   gpointer user_data);
 
 enum rspamd_symbol_type {
 	SYMBOL_TYPE_NORMAL = (1u << 0u),
@@ -45,12 +52,12 @@ enum rspamd_symbol_type {
 	SYMBOL_TYPE_POSTFILTER = (1u << 10u),
 	SYMBOL_TYPE_NOSTAT = (1u << 11u), /* Skip as statistical symbol */
 	SYMBOL_TYPE_IDEMPOTENT = (1u << 12u), /* Symbol cannot change metric */
-	SYMBOL_TYPE_SQUEEZED = (1u << 13u), /* Symbol is squeezed inside Lua */
 	SYMBOL_TYPE_TRIVIAL = (1u << 14u), /* Symbol is trivial */
 	SYMBOL_TYPE_MIME_ONLY = (1u << 15u), /* Symbol is mime only */
 	SYMBOL_TYPE_EXPLICIT_DISABLE = (1u << 16u), /* Symbol should be disabled explicitly only */
 	SYMBOL_TYPE_IGNORE_PASSTHROUGH = (1u << 17u), /* Symbol ignores passthrough result */
-	SYMBOL_TYPE_USE_CORO = (1u << 18u), /* Symbol uses lua coroutines */
+	SYMBOL_TYPE_EXPLICIT_ENABLE = (1u << 18u), /* Symbol should be enabled explicitly only */
+	SYMBOL_TYPE_USE_CORO = (1u << 19u), /* Symbol uses lua coroutines */
 };
 
 /**
@@ -61,11 +68,22 @@ struct rspamd_abstract_callback_data {
 	char data[];
 };
 
+struct rspamd_symcache_item_stat {
+	struct rspamd_counter_data time_counter;
+	gdouble avg_time;
+	gdouble weight;
+	guint hits;
+	guint64 total_hits;
+	struct rspamd_counter_data frequency_counter;
+	gdouble avg_frequency;
+	gdouble stddev_frequency;
+};
+
 /**
  * Creates new cache structure
  * @return
  */
-struct rspamd_symcache* rspamd_symcache_new (struct rspamd_config *cfg);
+struct rspamd_symcache *rspamd_symcache_new (struct rspamd_config *cfg);
 
 /**
  * Remove the cache structure syncing data if needed
@@ -110,6 +128,7 @@ gint rspamd_symcache_add_symbol (struct rspamd_symcache *cache,
  */
 void rspamd_symcache_set_peak_callback (struct rspamd_symcache *cache,
 										gint cbref);
+
 /**
  * Add delayed condition to the specific symbol in cache. So symbol can be absent
  * to the moment of addition
@@ -147,14 +166,15 @@ gboolean rspamd_symcache_stat_symbol (struct rspamd_symcache *cache,
 									  gdouble *freq_stddev,
 									  gdouble *tm,
 									  guint *nhits);
+
 /**
  * Find symbol in cache by its id
  * @param cache
  * @param id
  * @return symbol's name or NULL
  */
-const gchar * rspamd_symcache_symbol_by_id (struct rspamd_symcache *cache,
-											gint id);
+const gchar *rspamd_symcache_symbol_by_id (struct rspamd_symcache *cache,
+										   gint id);
 
 /**
  * Returns number of symbols registered in symbols cache
@@ -196,7 +216,7 @@ ucl_object_t *rspamd_symcache_counters (struct rspamd_symcache *cache);
  * @param ev_base
  */
 void rspamd_symcache_start_refresh (struct rspamd_symcache *cache,
-									struct event_base *ev_base,
+									struct ev_loop *ev_base,
 									struct rspamd_worker *w);
 
 /**
@@ -205,7 +225,7 @@ void rspamd_symcache_start_refresh (struct rspamd_symcache *cache,
  * @param symbol
  */
 void rspamd_symcache_inc_frequency (struct rspamd_symcache *cache,
-									const gchar *symbol);
+									struct rspamd_symcache_item *item);
 
 /**
  * Add dependency relation between two symbols identified by id (source) and
@@ -215,7 +235,8 @@ void rspamd_symcache_inc_frequency (struct rspamd_symcache *cache,
  * @param to destination name
  */
 void rspamd_symcache_add_dependency (struct rspamd_symcache *cache,
-									 gint id_from, const gchar *to);
+									 gint id_from, const gchar *to,
+									 gint virtual_id_from);
 
 /**
  * Add delayed dependency that is resolved on cache post-load routine
@@ -232,7 +253,8 @@ void rspamd_symcache_add_delayed_dependency (struct rspamd_symcache *cache,
  * @param symbol
  */
 void rspamd_symcache_disable_symbol_perm (struct rspamd_symcache *cache,
-										  const gchar *symbol);
+										  const gchar *symbol,
+										  gboolean resolve_parent);
 
 /**
  * Enable specific symbol in the cache
@@ -241,13 +263,14 @@ void rspamd_symcache_disable_symbol_perm (struct rspamd_symcache *cache,
  */
 void rspamd_symcache_enable_symbol_perm (struct rspamd_symcache *cache,
 										 const gchar *symbol);
+
 /**
  * Get abstract callback data for a symbol (or its parent symbol)
  * @param cache cache object
  * @param symbol symbol name
  * @return abstract callback data or NULL if symbol is absent or has no data attached
  */
-struct rspamd_abstract_callback_data* rspamd_symcache_get_cbdata (
+struct rspamd_abstract_callback_data *rspamd_symcache_get_cbdata (
 		struct rspamd_symcache *cache, const gchar *symbol);
 
 /**
@@ -257,7 +280,7 @@ struct rspamd_abstract_callback_data* rspamd_symcache_get_cbdata (
  * @return
  */
 const gchar *rspamd_symcache_get_parent (struct rspamd_symcache *cache,
-		const gchar *symbol);
+										 const gchar *symbol);
 
 /**
  * Adds flags to a symbol
@@ -267,15 +290,16 @@ const gchar *rspamd_symcache_get_parent (struct rspamd_symcache *cache,
  * @return
  */
 gboolean rspamd_symcache_add_symbol_flags (struct rspamd_symcache *cache,
-										  const gchar *symbol,
-										  guint flags);
+										   const gchar *symbol,
+										   guint flags);
 
 gboolean rspamd_symcache_set_symbol_flags (struct rspamd_symcache *cache,
 										   const gchar *symbol,
 										   guint flags);
 
 guint rspamd_symcache_get_symbol_flags (struct rspamd_symcache *cache,
-										   const gchar *symbol);
+										const gchar *symbol);
+
 /**
  * Process settings for task
  * @param task
@@ -336,6 +360,7 @@ gboolean rspamd_symcache_enable_symbol (struct rspamd_task *task,
 gboolean rspamd_symcache_disable_symbol (struct rspamd_task *task,
 										 struct rspamd_symcache *cache,
 										 const gchar *symbol);
+
 /**
  * Process specific function for each cache element (in order they are added)
  * @param cache
@@ -343,8 +368,7 @@ gboolean rspamd_symcache_disable_symbol (struct rspamd_task *task,
  * @param ud
  */
 void rspamd_symcache_foreach (struct rspamd_symcache *cache,
-							  void (*func) (gint /* id */, const gchar * /* name */,
-											gint /* flags */, gpointer /* userdata */),
+							  void (*func) (struct rspamd_symcache_item *item, gpointer /* userdata */),
 							  gpointer ud);
 
 /**
@@ -375,20 +399,24 @@ void rspamd_symcache_finalize_item (struct rspamd_task *task,
  * Increase number of async events pending for an item
  */
 guint rspamd_symcache_item_async_inc_full (struct rspamd_task *task,
-									  struct rspamd_symcache_item *item,
-									  const gchar *subsystem,
-									  const gchar *loc);
+										   struct rspamd_symcache_item *item,
+										   const gchar *subsystem,
+										   const gchar *loc);
+
 #define rspamd_symcache_item_async_inc(task, item, subsystem) \
-	rspamd_symcache_item_async_inc_full(task, item, subsystem, G_STRLOC)
+    rspamd_symcache_item_async_inc_full(task, item, subsystem, G_STRLOC)
+
 /*
  * Decrease number of async events pending for an item, asserts if no events pending
  */
 guint rspamd_symcache_item_async_dec_full (struct rspamd_task *task,
-									  struct rspamd_symcache_item *item,
-									  const gchar *subsystem,
-									  const gchar *loc);
+										   struct rspamd_symcache_item *item,
+										   const gchar *subsystem,
+										   const gchar *loc);
+
 #define rspamd_symcache_item_async_dec(task, item, subsystem) \
-	rspamd_symcache_item_async_dec_full(task, item, subsystem, G_STRLOC)
+    rspamd_symcache_item_async_dec_full(task, item, subsystem, G_STRLOC)
+
 /**
  * Decrease number of async events pending for an item, asserts if no events pending
  * If no events are left, this function calls `rspamd_symbols_cache_finalize_item` and returns TRUE
@@ -397,11 +425,12 @@ guint rspamd_symcache_item_async_dec_full (struct rspamd_task *task,
  * @return
  */
 gboolean rspamd_symcache_item_async_dec_check_full (struct rspamd_task *task,
-											   struct rspamd_symcache_item *item,
-											   const gchar *subsystem,
-											   const gchar *loc);
+													struct rspamd_symcache_item *item,
+													const gchar *subsystem,
+													const gchar *loc);
+
 #define rspamd_symcache_item_async_dec_check(task, item, subsystem) \
-	rspamd_symcache_item_async_dec_check_full(task, item, subsystem, G_STRLOC)
+    rspamd_symcache_item_async_dec_check_full(task, item, subsystem, G_STRLOC)
 
 /**
  * Disables execution of all symbols, excluding those specified in `skip_mask`
@@ -424,4 +453,129 @@ void rspamd_symcache_composites_foreach (struct rspamd_task *task,
 										 struct rspamd_symcache *cache,
 										 GHFunc func,
 										 gpointer fd);
+
+/**
+ * Sets allowed settings ids for a symbol
+ * @param cache
+ * @param symbol
+ * @param ids
+ * @param nids
+ */
+bool rspamd_symcache_set_allowed_settings_ids (struct rspamd_symcache *cache,
+											   const gchar *symbol,
+											   const guint32 *ids,
+											   guint nids);
+/**
+ * Sets denied settings ids for a symbol
+ * @param cache
+ * @param symbol
+ * @param ids
+ * @param nids
+ */
+bool rspamd_symcache_set_forbidden_settings_ids (struct rspamd_symcache *cache,
+												 const gchar *symbol,
+												 const guint32 *ids,
+												 guint nids);
+
+/**
+ * Returns allowed ids for a symbol as a constant array
+ * @param cache
+ * @param symbol
+ * @param nids
+ * @return
+ */
+const guint32 *rspamd_symcache_get_allowed_settings_ids (struct rspamd_symcache *cache,
+														 const gchar *symbol,
+														 guint *nids);
+
+/**
+ * Returns denied ids for a symbol as a constant array
+ * @param cache
+ * @param symbol
+ * @param nids
+ * @return
+ */
+const guint32 *rspamd_symcache_get_forbidden_settings_ids (struct rspamd_symcache *cache,
+														   const gchar *symbol,
+														   guint *nids);
+
+
+/**
+ * Processes settings_elt in cache and converts it to a set of
+ * adjustments for forbidden/allowed settings_ids for each symbol
+ * @param cache
+ * @param elt
+ */
+void rspamd_symcache_process_settings_elt (struct rspamd_symcache *cache,
+										   struct rspamd_config_settings_elt *elt);
+
+/**
+ * Check if a symbol is allowed for execution/insertion, this does not involve
+ * condition scripts to be checked (so it is intended to be fast).
+ * @param task
+ * @param item
+ * @param exec_only
+ * @return
+ */
+gboolean rspamd_symcache_is_item_allowed (struct rspamd_task *task,
+										  struct rspamd_symcache_item *item,
+										  gboolean exec_only);
+
+/**
+ * Returns symbcache item flags
+ * @param item
+ * @return
+ */
+gint rspamd_symcache_item_flags (struct rspamd_symcache_item *item);
+/**
+ * Returns cache item name
+ * @param item
+ * @return
+ */
+const gchar* rspamd_symcache_item_name (struct rspamd_symcache_item *item);
+/**
+ * Returns the current item stat
+ * @param item
+ * @return
+ */
+const struct rspamd_symcache_item_stat *
+		rspamd_symcache_item_stat (struct rspamd_symcache_item *item);
+/**
+ * Returns if an item is enabled (for virutal it also means that parent should be enabled)
+ * @param item
+ * @return
+ */
+gboolean rspamd_symcache_item_is_enabled (struct rspamd_symcache_item *item);
+/**
+ * Returns parent for virtual symbols (or NULL)
+ * @param item
+ * @return
+ */
+struct rspamd_symcache_item * rspamd_symcache_item_get_parent (
+		struct rspamd_symcache_item *item);
+/**
+ * Returns direct deps for an element
+ * @param item
+ * @return array of struct rspamd_symcache_item *
+ */
+const GPtrArray* rspamd_symcache_item_get_deps (
+		struct rspamd_symcache_item *item);
+/**
+ * Returns direct reverse deps for an element
+ * @param item
+ * @return array of struct rspamd_symcache_item *
+ */
+const GPtrArray* rspamd_symcache_item_get_rdeps (
+		struct rspamd_symcache_item *item);
+
+
+/**
+ * Enable profiling for task (e.g. when a slow rule has been found)
+ * @param task
+ */
+void rspamd_symcache_enable_profile (struct rspamd_task *task);
+#ifdef  __cplusplus
+}
+#endif
+
 #endif

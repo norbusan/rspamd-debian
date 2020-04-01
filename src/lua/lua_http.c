@@ -15,7 +15,7 @@
  */
 #include "lua_common.h"
 #include "lua_thread_pool.h"
-#include "http_private.h"
+#include "libserver/http/http_private.h"
 #include "ref.h"
 #include "unix-std.h"
 #include "zlib.h"
@@ -67,10 +67,10 @@ struct lua_http_cbdata {
 	struct rspamd_async_session *session;
 	struct rspamd_symcache_item *item;
 	struct rspamd_http_message *msg;
-	struct event_base *ev_base;
+	struct ev_loop *event_loop;
 	struct rspamd_config *cfg;
 	struct rspamd_task *task;
-	struct timeval tv;
+	ev_tstamp timeout;
 	struct rspamd_cryptobox_keypair *local_kp;
 	struct rspamd_cryptobox_pubkey *peer_pk;
 	rspamd_inet_addr_t *addr;
@@ -86,10 +86,10 @@ struct lua_http_cbdata {
 	ref_entry_t ref;
 };
 
-static const int default_http_timeout = 5000;
+static const gdouble default_http_timeout = 5.0;
 
 static struct rspamd_dns_resolver *
-lua_http_global_resolver (struct event_base *ev_base)
+lua_http_global_resolver (struct ev_loop *ev_base)
 {
 	static struct rspamd_dns_resolver *global_resolver;
 
@@ -221,7 +221,7 @@ lua_http_finish_handler (struct rspamd_http_connection *conn,
 		struct rspamd_http_message *msg)
 {
 	struct lua_http_cbdata *cbd = (struct lua_http_cbdata *)conn->ud;
-	struct rspamd_http_header *h, *htmp;
+	struct rspamd_http_header *h;
 	const gchar *body;
 	gsize body_len;
 
@@ -275,7 +275,7 @@ lua_http_finish_handler (struct rspamd_http_connection *conn,
 	/* Headers */
 	lua_newtable (L);
 
-	HASH_ITER (hh, msg->headers, h, htmp) {
+	kh_foreach_value (msg->headers, h, {
 		/*
 		 * Lowercase header name, as Lua cannot search in caseless matter
 		 */
@@ -283,7 +283,7 @@ lua_http_finish_handler (struct rspamd_http_connection *conn,
 		lua_pushlstring (L, h->name.begin, h->name.len);
 		lua_pushlstring (L, h->value.begin, h->value.len);
 		lua_settable (L, -3);
-	}
+	});
 
 	if (cbd->item) {
 		/* Replace watcher to deal with nested calls */
@@ -313,7 +313,7 @@ lua_http_resume_handler (struct rspamd_http_connection *conn,
 	lua_State *L = cbd->thread->lua_state;
 	const gchar *body;
 	gsize body_len;
-	struct rspamd_http_header *h, *htmp;
+	struct rspamd_http_header *h;
 
 	if (err) {
 		lua_pushstring (L, err);
@@ -363,7 +363,7 @@ lua_http_resume_handler (struct rspamd_http_connection *conn,
 		lua_pushliteral (L, "headers");
 		lua_newtable (L);
 
-		HASH_ITER (hh, msg->headers, h, htmp) {
+		kh_foreach_value (msg->headers, h, {
 			/*
 			 * Lowercase header name, as Lua cannot search in caseless matter
 			 */
@@ -371,7 +371,7 @@ lua_http_resume_handler (struct rspamd_http_connection *conn,
 			lua_pushlstring (L, h->name.begin, h->name.len);
 			lua_pushlstring (L, h->value.begin, h->value.len);
 			lua_settable (L, -3);
-		}
+		});
 
 		lua_settable (L, -3);
 	}
@@ -391,7 +391,6 @@ lua_http_make_connection (struct lua_http_cbdata *cbd)
 
 	if (cbd->flags & RSPAMD_LUA_HTTP_FLAG_KEEP_ALIVE) {
 		cbd->fd = -1; /* FD is owned by keepalive connection */
-
 		cbd->conn = rspamd_http_connection_new_keepalive (
 				NULL, /* Default context */
 				NULL,
@@ -440,6 +439,13 @@ lua_http_make_connection (struct lua_http_cbdata *cbd)
 			cbd->flags |= RSPAMD_LUA_HTTP_FLAG_RESOLVED;
 		}
 
+		if (cbd->task) {
+			cbd->conn->log_tag = cbd->task->task_pool->tag.uid;
+		}
+		else if (cbd->cfg) {
+			cbd->conn->log_tag = cbd->cfg->cfg_pool->tag.uid;
+		}
+
 		if (cbd->item) {
 			rspamd_symcache_item_async_inc (cbd->task, cbd->item, M);
 		}
@@ -449,11 +455,9 @@ lua_http_make_connection (struct lua_http_cbdata *cbd)
 		/* Message is now owned by a connection object */
 		cbd->msg = NULL;
 
-		rspamd_http_connection_write_message (cbd->conn, msg,
+		return rspamd_http_connection_write_message (cbd->conn, msg,
 				cbd->host, cbd->mime_type, cbd,
-				&cbd->tv);
-
-		return TRUE;
+				cbd->timeout);
 	}
 
 	return FALSE;
@@ -463,6 +467,11 @@ static void
 lua_http_dns_handler (struct rdns_reply *reply, gpointer ud)
 {
 	struct lua_http_cbdata *cbd = (struct lua_http_cbdata *)ud;
+	struct rspamd_symcache_item *item;
+	struct rspamd_task *task;
+
+	task = cbd->task;
+	item = cbd->item;
 
 	if (reply->code != RDNS_RC_NOERROR) {
 		lua_http_push_error (cbd, "unable to resolve host");
@@ -493,8 +502,8 @@ lua_http_dns_handler (struct rdns_reply *reply, gpointer ud)
 		REF_RELEASE (cbd);
 	}
 
-	if (cbd->item) {
-		rspamd_symcache_item_async_dec_check (cbd->task, cbd->item, M);
+	if (item) {
+		rspamd_symcache_item_async_dec_check (task, item, M);
 	}
 }
 
@@ -562,7 +571,7 @@ static gint
 lua_http_request (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct event_base *ev_base;
+	struct ev_loop *ev_base;
 	struct rspamd_http_message *msg;
 	struct lua_http_cbdata *cbd;
 	struct rspamd_dns_resolver *resolver;
@@ -597,7 +606,7 @@ lua_http_request (lua_State *L)
 		cbref = luaL_ref (L, LUA_REGISTRYINDEX);
 
 		if (lua_gettop (L) >= 3 && rspamd_lua_check_udata_maybe (L, 3, "rspamd{ev_base}")) {
-			ev_base = *(struct event_base **)lua_touserdata (L, 3);
+			ev_base = *(struct ev_loop **)lua_touserdata (L, 3);
 		}
 		else {
 			ev_base = NULL;
@@ -643,7 +652,7 @@ lua_http_request (lua_State *L)
 
 		if (lua_type (L, -1) == LUA_TUSERDATA) {
 			task = lua_check_task (L, -1);
-			ev_base = task->ev_base;
+			ev_base = task->event_loop;
 			resolver = task->resolver;
 			session = task->s;
 			cfg = task->cfg;
@@ -654,7 +663,7 @@ lua_http_request (lua_State *L)
 			lua_pushstring (L, "ev_base");
 			lua_gettable (L, 1);
 			if (rspamd_lua_check_udata_maybe (L, -1, "rspamd{ev_base}")) {
-				ev_base = *(struct event_base **)lua_touserdata (L, -1);
+				ev_base = *(struct ev_loop **)lua_touserdata (L, -1);
 			}
 			else {
 				ev_base = NULL;
@@ -717,7 +726,7 @@ lua_http_request (lua_State *L)
 		lua_pushstring (L, "timeout");
 		lua_gettable (L, 1);
 		if (lua_type (L, -1) == LUA_TNUMBER) {
-			timeout = lua_tonumber (L, -1) * 1000.;
+			timeout = lua_tonumber (L, -1);
 		}
 		lua_pop (L, 1);
 
@@ -749,25 +758,27 @@ lua_http_request (lua_State *L)
 			}
 		}
 		else if (lua_type (L, -1) == LUA_TTABLE) {
-			body = rspamd_fstring_new ();
+			gsize total_len = 0, nelts = rspamd_lua_table_size (L, -1);
 
-			for (lua_pushnil (L); lua_next (L, -2); lua_pop (L, 1)) {
+			/* Calculate length and check types */
+			for (gsize i = 0; i < nelts; i ++) {
+				lua_rawgeti (L, -1, i + 1);
+
 				if (lua_type (L, -1) == LUA_TSTRING) {
-					lua_body = lua_tolstring (L, -1, &bodylen);
-					body = rspamd_fstring_append (body, lua_body, bodylen);
+#if LUA_VERSION_NUM >= 502
+					total_len += lua_rawlen (L, -1);
+#else
+					total_len += lua_objlen (L, -1);
+#endif
 				}
 				else if (lua_type (L, -1) == LUA_TUSERDATA) {
 					t = lua_check_text (L, -1);
 
 					if (t) {
-						body = rspamd_fstring_append (body, t->start, t->len);
+						total_len += t->len;
 					}
 					else {
 						rspamd_http_message_unref (msg);
-						if (body) {
-							rspamd_fstring_free (body);
-						}
-
 						if (mime_type) {
 							g_free (mime_type);
 						}
@@ -778,13 +789,44 @@ lua_http_request (lua_State *L)
 				}
 				else {
 					rspamd_http_message_unref (msg);
-					if (body) {
-						rspamd_fstring_free (body);
+					if (mime_type) {
+						g_free (mime_type);
 					}
 
 					return luaL_error (L, "invalid body argument type: %s",
 							lua_typename (L, lua_type (L, -1)));
 				}
+
+				lua_pop (L, 1);
+			}
+
+			/* Preallocate body */
+			if (total_len > 0) {
+				body = rspamd_fstring_sized_new (total_len);
+			}
+			else {
+				rspamd_http_message_unref (msg);
+				if (mime_type) {
+					g_free (mime_type);
+				}
+
+				return luaL_error (L, "empty body specified");
+			}
+
+			/* Fill elements */
+			for (gsize i = 0; i < nelts; i ++) {
+				lua_rawgeti (L, -1, i + 1);
+
+				if (lua_type (L, -1) == LUA_TSTRING) {
+					lua_body = lua_tolstring (L, -1, &bodylen);
+					body = rspamd_fstring_append (body, lua_body, bodylen);
+				}
+				else {
+					t = lua_check_text (L, -1);
+					body = rspamd_fstring_append (body, t->start, t->len);
+				}
+
+				lua_pop (L, 1);
 			}
 		}
 		else if (lua_type (L, -1) != LUA_TNONE && lua_type (L, -1) != LUA_TNIL) {
@@ -860,7 +902,7 @@ lua_http_request (lua_State *L)
 		lua_gettable (L, 1);
 
 		if (lua_type (L, -1) == LUA_TNUMBER) {
-			max_size = lua_tonumber (L, -1);
+			max_size = lua_tointeger (L, -1);
 		}
 
 		lua_pop (L, 1);
@@ -943,9 +985,9 @@ lua_http_request (lua_State *L)
 	cbd = g_malloc0 (sizeof (*cbd));
 	cbd->cbref = cbref;
 	cbd->msg = msg;
-	cbd->ev_base = ev_base;
+	cbd->event_loop = ev_base;
 	cbd->mime_type = mime_type;
-	msec_to_tv (timeout, &cbd->tv);
+	cbd->timeout = timeout;
 	cbd->fd = -1;
 	cbd->cfg = cfg;
 	cbd->peer_pk = peer_key;
@@ -984,7 +1026,8 @@ lua_http_request (lua_State *L)
 		cbd->session = session;
 	}
 
-	if (rspamd_parse_inet_address (&cbd->addr, msg->host->str, msg->host->len)) {
+	if (rspamd_parse_inet_address (&cbd->addr,
+			msg->host->str, msg->host->len, RSPAMD_INET_ADDRESS_PARSE_DEFAULT)) {
 		/* Host is numeric IP, no need to resolve */
 		gboolean ret;
 

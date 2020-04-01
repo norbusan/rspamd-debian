@@ -17,8 +17,9 @@
 #include "rspamd.h"
 #include "rspamd_control.h"
 #include "worker_util.h"
-#include "libutil/http_connection.h"
-#include "libutil/http_private.h"
+#include "libserver/http/http_connection.h"
+#include "libserver/http/http_private.h"
+#include "libutil/libev_helper.h"
 #include "unix-std.h"
 #include "utlist.h"
 
@@ -26,28 +27,26 @@
 #include <sys/resource.h>
 #endif
 
-static struct timeval io_timeout = {
-		.tv_sec = 30,
-		.tv_usec = 0
-};
-static struct timeval worker_io_timeout = {
-		.tv_sec = 0,
-		.tv_usec = 500000
-};
+static ev_tstamp io_timeout = 30.0;
+static ev_tstamp worker_io_timeout = 0.5;
 
 struct rspamd_control_session;
 
 struct rspamd_control_reply_elt {
 	struct rspamd_control_reply reply;
-	struct event io_ev;
-	struct rspamd_worker *wrk;
+	struct rspamd_io_ev ev;
+	struct ev_loop *event_loop;
+	GQuark wrk_type;
+	pid_t wrk_pid;
 	gpointer ud;
 	gint attached_fd;
+	GHashTable *pending_elts;
 	struct rspamd_control_reply_elt *prev, *next;
 };
 
 struct rspamd_control_session {
 	gint fd;
+	struct ev_loop *event_loop;
 	struct rspamd_main *rspamd_main;
 	struct rspamd_http_connection *conn;
 	struct rspamd_control_command cmd;
@@ -105,6 +104,19 @@ static const struct rspamd_control_cmd_match {
 		},
 };
 
+static void rspamd_control_ignore_io_handler (int fd, short what, void *ud);
+
+static void
+rspamd_control_stop_pending (struct rspamd_control_reply_elt *elt)
+{
+	GHashTable *htb;
+	/* It stops event and frees hash */
+	htb = elt->pending_elts;
+	g_hash_table_remove (elt->pending_elts, elt);
+	/* Release hash reference */
+	g_hash_table_unref (htb);
+}
+
 void
 rspamd_control_send_error (struct rspamd_control_session *session,
 		gint code, const gchar *error_msg, ...)
@@ -131,7 +143,7 @@ rspamd_control_send_error (struct rspamd_control_session *session,
 			NULL,
 			"application/json",
 			session,
-			&io_timeout);
+			io_timeout);
 }
 
 static void
@@ -154,7 +166,7 @@ rspamd_control_send_ucl (struct rspamd_control_session *session,
 			NULL,
 			"application/json",
 			session,
-			&io_timeout);
+			io_timeout);
 }
 
 static void
@@ -168,8 +180,7 @@ rspamd_control_connection_close (struct rspamd_control_session *session)
 			rspamd_inet_address_to_string (session->addr));
 
 	DL_FOREACH_SAFE (session->replies, elt, telt) {
-		event_del (&elt->io_ev);
-		g_free (elt);
+		rspamd_control_stop_pending (elt);
 	}
 
 	rspamd_inet_address_free (session->addr);
@@ -195,15 +206,15 @@ rspamd_control_write_reply (struct rspamd_control_session *session)
 		/* Skip incompatible worker for fuzzy_stat */
 		if ((session->cmd.type == RSPAMD_CONTROL_FUZZY_STAT ||
 			session->cmd.type == RSPAMD_CONTROL_FUZZY_SYNC) &&
-				elt->wrk->type != g_quark_from_static_string ("fuzzy")) {
+				elt->wrk_type != g_quark_from_static_string ("fuzzy")) {
 			continue;
 		}
 
-		rspamd_snprintf (tmpbuf, sizeof (tmpbuf), "%P", elt->wrk->pid);
+		rspamd_snprintf (tmpbuf, sizeof (tmpbuf), "%P", elt->wrk_pid);
 		cur = ucl_object_typed_new (UCL_OBJECT);
 
 		ucl_object_insert_key (cur, ucl_object_fromstring (g_quark_to_string (
-				elt->wrk->type)), "type", 0, false);
+				elt->wrk_type)), "type", 0, false);
 
 		switch (session->cmd.type) {
 		case RSPAMD_CONTROL_STAT:
@@ -342,7 +353,7 @@ rspamd_control_wrk_io (gint fd, short what, gpointer ud)
 		r = recvmsg (fd, &msg, 0);
 		if (r == -1) {
 			msg_err ("cannot read reply from the worker %P (%s): %s",
-					elt->wrk->pid, g_quark_to_string (elt->wrk->type),
+					elt->wrk_pid, g_quark_to_string (elt->wrk_type),
 					strerror (errno));
 		}
 		else if (r >= (gssize)sizeof (elt->reply)) {
@@ -354,11 +365,12 @@ rspamd_control_wrk_io (gint fd, short what, gpointer ud)
 	else {
 		/* Timeout waiting */
 		msg_warn ("timeout waiting reply from %P (%s)",
-				elt->wrk->pid, g_quark_to_string (elt->wrk->type));
+				elt->wrk_pid, g_quark_to_string (elt->wrk_type));
 	}
 
 	session->replies_remain --;
-	event_del (&elt->io_ev);
+	rspamd_ev_watcher_stop (session->event_loop,
+			&elt->ev);
 
 	if (session->replies_remain == 0) {
 		rspamd_control_write_reply (session);
@@ -383,11 +395,22 @@ rspamd_control_error_handler (struct rspamd_http_connection *conn, GError *err)
 	}
 }
 
+void
+rspamd_pending_control_free (gpointer p)
+{
+	struct rspamd_control_reply_elt *rep_elt = (struct rspamd_control_reply_elt *)p;
+
+	rspamd_ev_watcher_stop (rep_elt->event_loop, &rep_elt->ev);
+	g_free (rep_elt);
+}
+
 static struct rspamd_control_reply_elt *
 rspamd_control_broadcast_cmd (struct rspamd_main *rspamd_main,
-		struct rspamd_control_command *cmd,
-		gint attached_fd,
-		void (*handler) (int, short, void *), gpointer ud)
+							  struct rspamd_control_command *cmd,
+							  gint attached_fd,
+							  rspamd_ev_cb handler,
+							  gpointer ud,
+							  pid_t except_pid)
 {
 	GHashTableIter it;
 	struct rspamd_worker *wrk;
@@ -404,7 +427,17 @@ rspamd_control_broadcast_cmd (struct rspamd_main *rspamd_main,
 	while (g_hash_table_iter_next (&it, &k, &v)) {
 		wrk = v;
 
+		/* No control pipe */
 		if (wrk->control_pipe[0] == -1) {
+			continue;
+		}
+
+		if (except_pid != 0 && wrk->pid == except_pid) {
+			continue;
+		}
+
+		/* Worker is terminating, do not bother sending stuff */
+		if (wrk->state == rspamd_worker_state_terminating) {
 			continue;
 		}
 
@@ -430,16 +463,19 @@ rspamd_control_broadcast_cmd (struct rspamd_main *rspamd_main,
 		r = sendmsg (wrk->control_pipe[0], &msg, 0);
 
 		if (r == sizeof (*cmd)) {
-
 			rep_elt = g_malloc0 (sizeof (*rep_elt));
-			rep_elt->wrk = wrk;
+			rep_elt->wrk_pid = wrk->pid;
+			rep_elt->wrk_type = wrk->type;
+			rep_elt->event_loop = rspamd_main->event_loop;
 			rep_elt->ud = ud;
-			event_set (&rep_elt->io_ev, wrk->control_pipe[0],
-					EV_READ | EV_PERSIST, handler,
+			rep_elt->pending_elts = g_hash_table_ref (wrk->control_events_pending);
+			rspamd_ev_watcher_init (&rep_elt->ev,
+					wrk->control_pipe[0],
+					EV_READ, handler,
 					rep_elt);
-			event_base_set (rspamd_main->ev_base,
-					&rep_elt->io_ev);
-			event_add (&rep_elt->io_ev, &worker_io_timeout);
+			rspamd_ev_watcher_start (rspamd_main->event_loop,
+					&rep_elt->ev, worker_io_timeout);
+			g_hash_table_insert (wrk->control_events_pending, rep_elt, rep_elt);
 
 			DL_APPEND (res, rep_elt);
 		}
@@ -454,6 +490,15 @@ rspamd_control_broadcast_cmd (struct rspamd_main *rspamd_main,
 	}
 
 	return res;
+}
+
+void
+rspamd_control_broadcast_srv_cmd (struct rspamd_main *rspamd_main,
+								  struct rspamd_control_command *cmd,
+								  pid_t except_pid)
+{
+	rspamd_control_broadcast_cmd (rspamd_main, cmd, -1,
+			rspamd_control_ignore_io_handler, NULL, except_pid);
 }
 
 static gint
@@ -494,7 +539,7 @@ rspamd_control_finish_handler (struct rspamd_http_connection *conn,
 			/* Send command to all workers */
 			session->replies = rspamd_control_broadcast_cmd (
 					session->rspamd_main, &session->cmd, -1,
-					rspamd_control_wrk_io, session);
+					rspamd_control_wrk_io, session, 0);
 
 			DL_FOREACH (session->replies, cur) {
 				session->replies_remain ++;
@@ -526,14 +571,15 @@ rspamd_control_process_client_socket (struct rspamd_main *rspamd_main,
 			0);
 	session->rspamd_main = rspamd_main;
 	session->addr = addr;
+	session->event_loop = rspamd_main->event_loop;
 	rspamd_http_connection_read_message (session->conn, session,
-			&io_timeout);
+			io_timeout);
 }
 
 struct rspamd_worker_control_data {
-	struct event io_ev;
+	ev_io io_ev;
 	struct rspamd_worker *worker;
-	struct event_base *ev_base;
+	struct ev_loop *ev_base;
 	struct {
 		rspamd_worker_control_handler handler;
 		gpointer ud;
@@ -578,6 +624,7 @@ rspamd_control_default_cmd_handler (gint fd,
 	case RSPAMD_CONTROL_FUZZY_STAT:
 	case RSPAMD_CONTROL_FUZZY_SYNC:
 	case RSPAMD_CONTROL_LOG_PIPE:
+	case RSPAMD_CONTROL_CHILD_CHANGE:
 		break;
 	case RSPAMD_CONTROL_RERESOLVE:
 		if (cd->worker->srv->cfg) {
@@ -613,9 +660,10 @@ rspamd_control_default_cmd_handler (gint fd,
 }
 
 static void
-rspamd_control_default_worker_handler (gint fd, short what, gpointer ud)
+rspamd_control_default_worker_handler (EV_P_ ev_io *w, int revents)
 {
-	struct rspamd_worker_control_data *cd = ud;
+	struct rspamd_worker_control_data *cd =
+			(struct rspamd_worker_control_data *)w->data;
 	static struct rspamd_control_command cmd;
 	static struct msghdr msg;
 	static struct iovec iov;
@@ -631,15 +679,20 @@ rspamd_control_default_worker_handler (gint fd, short what, gpointer ud)
 	msg.msg_iov = &iov;
 	msg.msg_iovlen = 1;
 
-	r = recvmsg (fd, &msg, 0);
+	r = recvmsg (w->fd, &msg, 0);
 
 	if (r == -1) {
-		msg_err ("cannot read request from the control socket: %s",
-				strerror (errno));
-
 		if (errno != EAGAIN && errno != EINTR) {
-			event_del (&cd->io_ev);
-			close (fd);
+			if (errno != ECONNRESET) {
+				/*
+				 * In case of connection reset it means that main process
+				 * has died, so do not pollute logs
+				 */
+				msg_err ("cannot read request from the control socket: %s",
+						strerror (errno));
+			}
+			ev_io_stop (cd->ev_base, &cd->io_ev);
+			close (w->fd);
 		}
 	}
 	else if (r < (gint)sizeof (cmd)) {
@@ -647,8 +700,8 @@ rspamd_control_default_worker_handler (gint fd, short what, gpointer ud)
 				(gint)sizeof (cmd));
 
 		if (r == 0) {
-			event_del (&cd->io_ev);
-			close (fd);
+			ev_io_stop (cd->ev_base, &cd->io_ev);
+			close (w->fd);
 		}
  	}
 	else if ((gint)cmd.type >= 0 && cmd.type < RSPAMD_CONTROL_MAX) {
@@ -660,13 +713,13 @@ rspamd_control_default_worker_handler (gint fd, short what, gpointer ud)
 		if (cd->handlers[cmd.type].handler) {
 			cd->handlers[cmd.type].handler (cd->worker->srv,
 					cd->worker,
-					fd,
+					w->fd,
 					rfd,
 					&cmd,
 					cd->handlers[cmd.type].ud);
 		}
 		else {
-			rspamd_control_default_cmd_handler (fd, rfd, cd, &cmd);
+			rspamd_control_default_cmd_handler (w->fd, rfd, cd, &cmd);
 		}
 	}
 	else {
@@ -675,8 +728,8 @@ rspamd_control_default_worker_handler (gint fd, short what, gpointer ud)
 }
 
 void
-rspamd_control_worker_add_default_handler (struct rspamd_worker *worker,
-		struct event_base *ev_base)
+rspamd_control_worker_add_default_cmd_handlers (struct rspamd_worker *worker,
+												struct ev_loop *ev_base)
 {
 	struct rspamd_worker_control_data *cd;
 
@@ -684,10 +737,10 @@ rspamd_control_worker_add_default_handler (struct rspamd_worker *worker,
 	cd->worker = worker;
 	cd->ev_base = ev_base;
 
-	event_set (&cd->io_ev, worker->control_pipe[1], EV_READ | EV_PERSIST,
-			rspamd_control_default_worker_handler, cd);
-	event_base_set (ev_base, &cd->io_ev);
-	event_add (&cd->io_ev, NULL);
+	cd->io_ev.data = cd;
+	ev_io_init (&cd->io_ev, rspamd_control_default_worker_handler,
+			worker->control_pipe[1], EV_READ);
+	ev_io_start (ev_base, &cd->io_ev);
 
 	worker->control_data = cd;
 }
@@ -720,27 +773,28 @@ struct rspamd_srv_reply_data {
 };
 
 static void
-rspamd_control_hs_io_handler (gint fd, short what, gpointer ud)
+rspamd_control_ignore_io_handler (int fd, short what, void *ud)
 {
-	struct rspamd_control_reply_elt *elt = ud;
+	struct rspamd_control_reply_elt *elt =
+			(struct rspamd_control_reply_elt *)ud;
+
 	struct rspamd_control_reply rep;
 
 	/* At this point we just ignore replies from the workers */
 	(void)read (fd, &rep, sizeof (rep));
-	event_del (&elt->io_ev);
-	g_free (elt);
+	rspamd_control_stop_pending (elt);
 }
 
 static void
-rspamd_control_log_pipe_io_handler (gint fd, short what, gpointer ud)
+rspamd_control_log_pipe_io_handler (int fd, short what, void *ud)
 {
-	struct rspamd_control_reply_elt *elt = ud;
+	struct rspamd_control_reply_elt *elt =
+			(struct rspamd_control_reply_elt *)ud;
 	struct rspamd_control_reply rep;
 
 	/* At this point we just ignore replies from the workers */
 	(void) read (fd, &rep, sizeof (rep));
-	event_del (&elt->io_ev);
-	g_free (elt);
+	rspamd_control_stop_pending (elt);
 }
 
 static void
@@ -774,6 +828,7 @@ rspamd_control_handle_on_fork (struct rspamd_srv_command *cmd,
 		REF_RELEASE (child->cf);
 		g_hash_table_remove (srv->workers,
 				GSIZE_TO_POINTER (cmd->cmd.on_fork.cpid));
+		g_hash_table_unref (child->control_events_pending);
 		g_free (child);
 	}
 	else {
@@ -788,13 +843,16 @@ rspamd_control_handle_on_fork (struct rspamd_srv_command *cmd,
 		child->cf = parent->cf;
 		child->ppid = parent->pid;
 		REF_RETAIN (child->cf);
+		child->control_events_pending = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+				NULL, rspamd_pending_control_free);
 		g_hash_table_insert (srv->workers,
 				GSIZE_TO_POINTER (cmd->cmd.on_fork.cpid), child);
 	}
 }
 
+
 static void
-rspamd_srv_handler (gint fd, short what, gpointer ud)
+rspamd_srv_handler (EV_P_ ev_io *w, int revents)
 {
 	struct rspamd_worker *worker;
 	static struct rspamd_srv_command cmd;
@@ -809,8 +867,8 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 	struct rspamd_control_command wcmd;
 	gssize r;
 
-	if (what == EV_READ) {
-		worker = ud;
+	if (revents == EV_READ) {
+		worker = (struct rspamd_worker *)w->data;
 		srv = worker->srv;
 		iov.iov_base = &cmd;
 		iov.iov_len = sizeof (cmd);
@@ -820,7 +878,7 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 		msg.msg_iov = &iov;
 		msg.msg_iovlen = 1;
 
-		r = recvmsg (fd, &msg, 0);
+		r = recvmsg (w->fd, &msg, 0);
 
 		if (r == -1) {
 			msg_err ("cannot read from worker's srv pipe: %s",
@@ -831,7 +889,7 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 			 * Usually this means that a worker is dead, so do not try to read
 			 * anything
 			 */
-			event_del (&worker->srv_ev);
+			ev_io_stop (EV_A_ w);
 		}
 		else if (r != sizeof (cmd)) {
 			msg_err ("cannot read from worker's srv pipe incomplete command: %d",
@@ -875,6 +933,15 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 				}
 				break;
 			case RSPAMD_SRV_HYPERSCAN_LOADED:
+				/* Load RE cache to provide it for new forks */
+				if (rspamd_re_cache_is_hs_loaded (srv->cfg->re_cache) != RSPAMD_HYPERSCAN_LOADED_FULL ||
+						cmd.cmd.hs_loaded.forced) {
+					rspamd_re_cache_load_hyperscan (
+							srv->cfg->re_cache,
+							cmd.cmd.hs_loaded.cache_dir,
+							false);
+				}
+
 				/* Broadcast command to all workers */
 				memset (&wcmd, 0, sizeof (wcmd));
 				wcmd.type = RSPAMD_CONTROL_HYPERSCAN_LOADED;
@@ -883,7 +950,7 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 						sizeof (wcmd.cmd.hs_loaded.cache_dir));
 				wcmd.cmd.hs_loaded.forced = cmd.cmd.hs_loaded.forced;
 				rspamd_control_broadcast_cmd (srv, &wcmd, rfd,
-						rspamd_control_hs_io_handler, NULL);
+						rspamd_control_ignore_io_handler, NULL, worker->pid);
 				break;
 			case RSPAMD_SRV_MONITORED_CHANGE:
 				/* Broadcast command to all workers */
@@ -895,18 +962,22 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 				wcmd.cmd.monitored_change.alive = cmd.cmd.monitored_change.alive;
 				wcmd.cmd.monitored_change.sender = cmd.cmd.monitored_change.sender;
 				rspamd_control_broadcast_cmd (srv, &wcmd, rfd,
-						rspamd_control_hs_io_handler, NULL);
+						rspamd_control_ignore_io_handler, NULL, 0);
 				break;
 			case RSPAMD_SRV_LOG_PIPE:
 				memset (&wcmd, 0, sizeof (wcmd));
 				wcmd.type = RSPAMD_CONTROL_LOG_PIPE;
 				wcmd.cmd.log_pipe.type = cmd.cmd.log_pipe.type;
 				rspamd_control_broadcast_cmd (srv, &wcmd, rfd,
-						rspamd_control_log_pipe_io_handler, NULL);
+						rspamd_control_log_pipe_io_handler, NULL, 0);
 				break;
 			case RSPAMD_SRV_ON_FORK:
 				rdata->rep.reply.on_fork.status = 0;
 				rspamd_control_handle_on_fork (&cmd, srv);
+				break;
+			case RSPAMD_SRV_HEARTBEAT:
+				worker->hb.last_event = ev_time ();
+				rdata->rep.reply.heartbeat.status = 0;
 				break;
 			default:
 				msg_err ("unknown command type: %d", cmd.type);
@@ -919,17 +990,14 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 			}
 
 			/* Now plan write event and send data back */
-			event_del (&worker->srv_ev);
-			event_set (&worker->srv_ev,
-					worker->srv_pipe[0],
-					EV_WRITE,
-					rspamd_srv_handler,
-					rdata);
-			event_add (&worker->srv_ev, NULL);
+			w->data = rdata;
+			ev_io_stop (EV_A_ w);
+			ev_io_set (w, worker->srv_pipe[0], EV_WRITE);
+			ev_io_start (EV_A_ w);
 		}
 	}
-	else if (what == EV_WRITE) {
-		rdata = ud;
+	else if (revents == EV_WRITE) {
+		rdata = (struct rspamd_srv_reply_data *)w->data;
 		worker = rdata->worker;
 		worker->tmp_data = NULL; /* Avoid race */
 		srv = rdata->srv;
@@ -953,7 +1021,7 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 		msg.msg_iov = &iov;
 		msg.msg_iovlen = 1;
 
-		r = sendmsg (fd, &msg, 0);
+		r = sendmsg (w->fd, &msg, 0);
 
 		if (r == -1) {
 			msg_err ("cannot write to worker's srv pipe: %s",
@@ -961,28 +1029,24 @@ rspamd_srv_handler (gint fd, short what, gpointer ud)
 		}
 
 		g_free (rdata);
-		event_del (&worker->srv_ev);
-		event_set (&worker->srv_ev,
-				worker->srv_pipe[0],
-				EV_READ | EV_PERSIST,
-				rspamd_srv_handler,
-				worker);
-		event_add (&worker->srv_ev, NULL);
+		w->data = worker;
+		ev_io_stop (EV_A_ w);
+		ev_io_set (w, worker->srv_pipe[0], EV_READ);
+		ev_io_start (EV_A_ w);
 	}
 }
 
 void
 rspamd_srv_start_watching (struct rspamd_main *srv,
 		struct rspamd_worker *worker,
-		struct event_base *ev_base)
+		struct ev_loop *ev_base)
 {
 	g_assert (worker != NULL);
 
 	worker->tmp_data = NULL;
-	event_set (&worker->srv_ev, worker->srv_pipe[0], EV_READ | EV_PERSIST,
-			rspamd_srv_handler, worker);
-	event_base_set (ev_base, &worker->srv_ev);
-	event_add (&worker->srv_ev, NULL);
+	worker->srv_ev.data = worker;
+	ev_io_init (&worker->srv_ev, rspamd_srv_handler, worker->srv_pipe[0], EV_READ);
+	ev_io_start (ev_base, &worker->srv_ev);
 }
 
 struct rspamd_srv_request_data {
@@ -991,14 +1055,14 @@ struct rspamd_srv_request_data {
 	gint attached_fd;
 	struct rspamd_srv_reply rep;
 	rspamd_srv_reply_handler handler;
-	struct event io_ev;
+	ev_io io_ev;
 	gpointer ud;
 };
 
 static void
-rspamd_srv_request_handler (gint fd, short what, gpointer ud)
+rspamd_srv_request_handler (EV_P_ ev_io *w, int revents)
 {
-	struct rspamd_srv_request_data *rd = ud;
+	struct rspamd_srv_request_data *rd = (struct rspamd_srv_request_data *)w->data;
 	struct msghdr msg;
 	struct iovec iov;
 	guchar fdspace[CMSG_SPACE(sizeof (int))];
@@ -1006,7 +1070,7 @@ rspamd_srv_request_handler (gint fd, short what, gpointer ud)
 	gssize r;
 	gint rfd = -1;
 
-	if (what == EV_WRITE) {
+	if (revents == EV_WRITE) {
 		/* Send request to server */
 		memset (&msg, 0, sizeof (msg));
 
@@ -1027,17 +1091,16 @@ rspamd_srv_request_handler (gint fd, short what, gpointer ud)
 		msg.msg_iov = &iov;
 		msg.msg_iovlen = 1;
 
-		r = sendmsg (fd, &msg, 0);
+		r = sendmsg (w->fd, &msg, 0);
 
 		if (r == -1) {
 			msg_err ("cannot write to server pipe: %s", strerror (errno));
 			goto cleanup;
 		}
 
-		event_del (&rd->io_ev);
-		event_set (&rd->io_ev, rd->worker->srv_pipe[1], EV_READ,
-				rspamd_srv_request_handler, rd);
-		event_add (&rd->io_ev, NULL);
+		ev_io_stop (EV_A_ w);
+		ev_io_set (w, rd->worker->srv_pipe[1], EV_READ);
+		ev_io_start (EV_A_ w);
 	}
 	else {
 		iov.iov_base = &rd->rep;
@@ -1048,7 +1111,7 @@ rspamd_srv_request_handler (gint fd, short what, gpointer ud)
 		msg.msg_iov = &iov;
 		msg.msg_iovlen = 1;
 
-		r = recvmsg (fd, &msg, 0);
+		r = recvmsg (w->fd, &msg, 0);
 
 		if (r == -1) {
 			msg_err ("cannot read from server pipe: %s", strerror (errno));
@@ -1075,13 +1138,14 @@ cleanup:
 	if (rd->handler) {
 		rd->handler (rd->worker, &rd->rep, rfd, rd->ud);
 	}
-	event_del (&rd->io_ev);
+
+	ev_io_stop (EV_A_ w);
 	g_free (rd);
 }
 
 void
 rspamd_srv_send_command (struct rspamd_worker *worker,
-		struct event_base *ev_base,
+		struct ev_loop *ev_base,
 		struct rspamd_srv_command *cmd,
 		gint attached_fd,
 		rspamd_srv_reply_handler handler,
@@ -1102,8 +1166,94 @@ rspamd_srv_send_command (struct rspamd_worker *worker,
 	rd->rep.type = cmd->type;
 	rd->attached_fd = attached_fd;
 
-	event_set (&rd->io_ev, worker->srv_pipe[1], EV_WRITE,
-			rspamd_srv_request_handler, rd);
-	event_base_set (ev_base, &rd->io_ev);
-	event_add (&rd->io_ev, NULL);
+	rd->io_ev.data = rd;
+	ev_io_init (&rd->io_ev, rspamd_srv_request_handler,
+			rd->worker->srv_pipe[1], EV_WRITE);
+	ev_io_start (ev_base, &rd->io_ev);
+}
+
+enum rspamd_control_type
+rspamd_control_command_from_string (const gchar *str)
+{
+	enum rspamd_control_type ret = RSPAMD_CONTROL_MAX;
+
+	if (!str) {
+		return ret;
+	}
+
+	if (g_ascii_strcasecmp (str, "hyperscan_loaded") == 0) {
+		ret = RSPAMD_CONTROL_HYPERSCAN_LOADED;
+	}
+	else if (g_ascii_strcasecmp (str, "stat") == 0) {
+		ret = RSPAMD_CONTROL_STAT;
+	}
+	else if (g_ascii_strcasecmp (str, "reload") == 0) {
+		ret = RSPAMD_CONTROL_RELOAD;
+	}
+	else if (g_ascii_strcasecmp (str, "reresolve") == 0) {
+		ret = RSPAMD_CONTROL_RERESOLVE;
+	}
+	else if (g_ascii_strcasecmp (str, "recompile") == 0) {
+		ret = RSPAMD_CONTROL_RECOMPILE;
+	}
+	else if (g_ascii_strcasecmp (str, "log_pipe") == 0) {
+		ret = RSPAMD_CONTROL_LOG_PIPE;
+	}
+	else if (g_ascii_strcasecmp (str, "fuzzy_stat") == 0) {
+		ret = RSPAMD_CONTROL_FUZZY_STAT;
+	}
+	else if (g_ascii_strcasecmp (str, "fuzzy_sync") == 0) {
+		ret = RSPAMD_CONTROL_FUZZY_SYNC;
+	}
+	else if (g_ascii_strcasecmp (str, "monitored_change") == 0) {
+		ret = RSPAMD_CONTROL_MONITORED_CHANGE;
+	}
+	else if (g_ascii_strcasecmp (str, "child_change") == 0) {
+		ret = RSPAMD_CONTROL_CHILD_CHANGE;
+	}
+
+	return ret;
+}
+
+const gchar *
+rspamd_control_command_to_string (enum rspamd_control_type cmd)
+{
+	const gchar *reply = "unknown";
+
+	switch (cmd) {
+	case RSPAMD_CONTROL_STAT:
+		reply = "stat";
+		break;
+	case RSPAMD_CONTROL_RELOAD:
+		reply = "reload";
+		break;
+	case RSPAMD_CONTROL_RERESOLVE:
+		reply = "reresolve";
+		break;
+	case RSPAMD_CONTROL_RECOMPILE:
+		reply = "recompile";
+		break;
+	case RSPAMD_CONTROL_HYPERSCAN_LOADED:
+		reply = "hyperscan_loaded";
+		break;
+	case RSPAMD_CONTROL_LOG_PIPE:
+		reply = "log_pipe";
+		break;
+	case RSPAMD_CONTROL_FUZZY_STAT:
+		reply = "fuzzy_stat";
+		break;
+	case RSPAMD_CONTROL_FUZZY_SYNC:
+		reply = "fuzzy_sync";
+		break;
+	case RSPAMD_CONTROL_MONITORED_CHANGE:
+		reply = "monitored_change";
+		break;
+	case RSPAMD_CONTROL_CHILD_CHANGE:
+		reply = "child_change";
+		break;
+	default:
+		break;
+	}
+
+	return reply;
 }
