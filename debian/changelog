@@ -1,45 +1,28 @@
-rspamd (2.5-1) UNRELEASED; urgency=medium
+rspamd (2.5-1) unstable; urgency=medium
 
   [ Sebastien Badia ]
-  * d/control: switch to debhelper-compat and level 12
-  * d/control: Bump to Standards-Version 4.4.0 (no changes needed)
-  * New upstream version 2.5
+  * d/control:
+    + Switch to debhelper-compat and level 12
+    + Bump to Standards-Version 4.5.0 (no changes needed)
+  * New upstream version 2.5 (Closes: #948607)
 
   [ Christian Göttsche ]
   * d/NEWS: rename to canonical name and fix version
-  * d/control: set Rules-Requires-Root to no
+  * d/control:
+    + Set Rules-Requires-Root to no
+    + Update build dependencies
+    + Recommend redis-server
+    + Add ${perl:Depends} to package rspamd
   * d/salsa-ci.yml: add standard salsa-ci configuration
-  * d/gbp.conf: drop export-dir setting.
-    This should be set by users.
+  * d/gbp.conf: drop export-dir setting
   * d/watch: use official rspamd repository
-  * d/rules: fix HYPERSCAN logic blocking systemd service (Closes: #950320)
-  * d/control: update dependencies and bump to std-ver 4.4.1
-  * d/copyright: update
-  * d/maint-scripts: update
-  * d/rspamd.links: remove as we copy files in maint-scripts
-  * d/upstream/metadata: use official rspamd repository
-  * d/patches: add fix to pass CPPFLAGS
-  * d/rules: update
+  * d/rules:
+    + Fix HYPERSCAN logic blocking systemd service (Closes: #950320)
+    + Set asm flags to please blhc
+  * d/copyright: Update according new upstream
   * d/patches: add patch to add version to shared libraries
-  * d/rules: set asm flags to please blhc
-  * d/control: recommend redis-server
   * rework handling of already packaged js files
-  * debian: drop unused examples directory
-  * d/source/lintian-overrides: ignore contrib examples
-  * rework handling of already packaged fonts
   * d/tests: add configtest and rspamd_stats test
-  * debian: use shipped d3.min.js cause the one in Debian is ancient
-  * d/patches: add patch to drop ipv6 test by binding to random port
-  * d/patches: add upstream links
-  * debian: enable hyperscan for i386
-  * d/patches: enable lto/ipo
-  * debian: update libluajit-5.1-dev architectures and build-time logic
-  * d/patches: refresh and drop upstream applied ones
-  * d/control: add ${perl:Depends} to package rspamd
-  * d/control: bump to std-ver 4.5.0 - no further changes
-  * debian: remove humanize.js leftovers.
-    Upstream version 2.3 drops humanize.js
-  * d/patches: rebase on v2.4
 
  -- Sebastien Badia <sbadia@debian.org>  Wed, 01 Apr 2020 20:18:19 +0200
 
