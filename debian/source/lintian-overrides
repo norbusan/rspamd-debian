@@ -7,3 +7,5 @@ rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/nprog
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/visibility.min.js
 # Debian package libjs-d3 is ancient
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/d3.min.js
+# only the upstream debian/ directory and the version control .hgtags file are excluded
+rspamd source: repackaged-source-not-advertised
