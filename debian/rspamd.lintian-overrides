@@ -2,3 +2,5 @@ rspamd: non-standard-dir-perm var/lib/rspamd/ 0750 != 0755
 rspamd: non-standard-dir-perm var/log/rspamd/ 0750 != 0755
 # this directory will be filled in postinst
 rspamd: package-contains-empty-directory usr/share/rspamd/www/fonts/
+# this file does indeed describe the contents or purpose of the directory it is in
+rspamd: package-contains-documentation-outside-usr-share-doc usr/share/rspamd/www/README.md
