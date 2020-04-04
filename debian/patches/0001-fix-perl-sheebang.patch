@@ -5,11 +5,11 @@ Author: Sebastien Badia <sbadia@debian.org>
 Forwarded: not-needed
 Last-Update: 2018-08-26
 
---- rspamd-1.7.9.orig/utils/rspamd_stats.pl
-+++ rspamd-1.7.9/utils/rspamd_stats.pl
+--- a/utils/rspamd_stats.pl
++++ b/utils/rspamd_stats.pl
 @@ -1,4 +1,4 @@
 -#!/usr/bin/env perl
 +#!/usr/bin/perl
-
+ 
  use 5.010;
  use Data::Dumper;

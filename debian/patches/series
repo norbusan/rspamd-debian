@@ -1,4 +1,5 @@
-001_fix-perl-sheebang.patch
+0001-fix-perl-sheebang.patch
 0003-add-versions-to-shared-libraries.patch
 0004-drop-js-scripts-packaged-by-Debian.patch
 0006-do-not-install-fonts-packaged-by-Debian.patch
+0007-license-problem-convert-utf-code.patch

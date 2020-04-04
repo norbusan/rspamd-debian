@@ -9,3 +9,6 @@ rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/visib
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/d3.min.js
 # only the upstream debian/ directory and the version control .hgtags file are excluded
 rspamd source: repackaged-source-not-advertised
+# Fixed upstream https://github.com/rspamd/rspamd/issues/3317
+rspamd source: license-problem-convert-utf-code contrib/replxx/src/ConvertUTF.cpp
+rspamd source: license-problem-convert-utf-code debian/patches/0007-license-problem-convert-utf-code.patch

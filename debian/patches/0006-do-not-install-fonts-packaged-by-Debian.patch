@@ -6,11 +6,9 @@ Subject: do not install fonts packaged by Debian
  CMakeLists.txt | 4 +++-
  1 file changed, 3 insertions(+), 1 deletion(-)
 
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 2df9386..d47b4a5 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -717,7 +717,9 @@ INSTALL(PROGRAMS "utils/rspamd_stats.pl" RENAME rspamd_stats DESTINATION bin)
+@@ -717,7 +717,9 @@ INSTALL(PROGRAMS "utils/rspamd_stats.pl"
  
  # Install webui
  IF(INSTALL_WEBUI MATCHES "ON")

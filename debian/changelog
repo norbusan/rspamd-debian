@@ -5,6 +5,9 @@ rspamd (2.5-1) unstable; urgency=medium
     + Switch to debhelper-compat and level 12
     + Bump to Standards-Version 4.5.0 (no changes needed)
   * New upstream version 2.5 (Closes: #948607)
+  * d/patches:
+    + Import upstream patch for license problem with ConvertUTF
+    + Refresh patches and rename 001_fix-perl-sheeband
 
   [ Christian Göttsche ]
   * d/NEWS: rename to canonical name and fix version
