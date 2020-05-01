@@ -1,3 +1,10 @@
+rspamd (2.5-1~bpo10+1) buster-backports; urgency=medium
+
+  * Rebuild for buster-backports
+  * d/gbp: Added buster-backports
+
+ -- Sebastien Badia <sbadia@debian.org>  Fri, 01 May 2020 16:42:24 +0200
+
 rspamd (2.5-1) unstable; urgency=medium
 
   [ Sebastien Badia ]
