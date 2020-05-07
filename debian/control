@@ -6,7 +6,7 @@ Uploaders: Mikhail Gusarov <dottedmag@debian.org>,
            Jerome Lebleu <jerome@maroufle.fr>,
            Sergio Durigan Junior <sergiodj@debian.org>
 Build-Depends: cmake,
-               debhelper-compat (= 12),
+               debhelper-compat (= 13),
                libglib2.0-dev,
                libhyperscan-dev [amd64 i386],
                libicu-dev,
