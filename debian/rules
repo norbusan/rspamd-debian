@@ -20,6 +20,12 @@ else
   HYPERSCAN=OFF
 endif
 
+ifneq ($(filter amd64 arm64 armel armhf hppa i386 mips64el mipsel powerpcspe ppc64 ppc64el sh4, $(DEB_HOST_ARCH)),)
+  UNWIND=ON
+else
+  UNWIND=OFF
+endif
+
 %:
 	dh $@
 
@@ -41,7 +47,7 @@ override_dh_auto_configure:
 		-DENABLE_FULL_DEBUG=OFF \
 		-DENABLE_PCRE2=ON \
 		-DENABLE_LUAJIT=$(LUAJIT) \
-		-DENABLE_LIBUNWIND=ON \
+		-DENABLE_LIBUNWIND=$(UNWIND) \
 		-DENABLE_HYPERSCAN=$(HYPERSCAN) \
 		-DWANT_SYSTEMD_UNITS=ON
 

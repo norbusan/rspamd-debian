@@ -16,7 +16,7 @@ Build-Depends: cmake,
                libsodium-dev,
                libsqlite3-dev,
                libssl-dev (>= 1.0),
-               libunwind-dev,
+               libunwind-dev [amd64 arm64 armel armhf hppa i386 mips64el mipsel powerpcspe ppc64 ppc64el sh4],
                ragel,
                zlib1g-dev
 Standards-Version: 4.5.0
