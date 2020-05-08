@@ -49,7 +49,8 @@ override_dh_auto_configure:
 		-DENABLE_LUAJIT=$(LUAJIT) \
 		-DENABLE_LIBUNWIND=$(UNWIND) \
 		-DENABLE_HYPERSCAN=$(HYPERSCAN) \
-		-DWANT_SYSTEMD_UNITS=ON
+		-DWANT_SYSTEMD_UNITS=ON \
+		-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
 
 override_dh_makeshlibs:
 	dh_makeshlibs -Xlibrspamd-actrie -Xlibrspamd-ev -Xlibrspamd-kann -Xlibrspamd-replxx -Xlibrspamd-server
