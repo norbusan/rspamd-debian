@@ -1,3 +1,4 @@
+# NOTE: should be synced with debian/tests/webui-dependencies
 interest-noawait /usr/share/javascript/bootstrap/js/bootstrap.min.js
 interest-noawait /usr/share/javascript/jquery/jquery.min.js
 interest-noawait /usr/share/nodejs/jquery/dist/jquery.min.js
