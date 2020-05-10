@@ -3,7 +3,6 @@
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all reproducible=+fixfilepath
 DPKG_EXPORT_BUILDFLAGS = 1
 include /usr/share/dpkg/buildflags.mk
-export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
 # please blhc
 export ASMFLAGS = $(CPPFLAGS)
 
@@ -19,6 +18,12 @@ ifneq ($(filter amd64 i386, $(DEB_HOST_ARCH)),)
   HYPERSCAN=ON
 else
   HYPERSCAN=OFF
+endif
+
+ifneq ($(filter amd64 arm64 armel armhf hppa i386 mips64el mipsel powerpcspe ppc64 ppc64el sh4, $(DEB_HOST_ARCH)),)
+  UNWIND=ON
+else
+  UNWIND=OFF
 endif
 
 %:
@@ -42,9 +47,10 @@ override_dh_auto_configure:
 		-DENABLE_FULL_DEBUG=OFF \
 		-DENABLE_PCRE2=ON \
 		-DENABLE_LUAJIT=$(LUAJIT) \
-		-DENABLE_LIBUNWIND=ON \
+		-DENABLE_LIBUNWIND=$(UNWIND) \
 		-DENABLE_HYPERSCAN=$(HYPERSCAN) \
-		-DWANT_SYSTEMD_UNITS=ON
+		-DWANT_SYSTEMD_UNITS=ON \
+		-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
 
 override_dh_makeshlibs:
 	dh_makeshlibs -Xlibrspamd-actrie -Xlibrspamd-ev -Xlibrspamd-kann -Xlibrspamd-replxx -Xlibrspamd-server
@@ -57,6 +63,3 @@ override_dh_fixperms:
 	dh_fixperms
 	chmod 750 $(CURDIR)/debian/rspamd/var/lib/rspamd
 	chmod 750 $(CURDIR)/debian/rspamd/var/log/rspamd
-
-override_dh_missing:
-	dh_missing --fail-missing

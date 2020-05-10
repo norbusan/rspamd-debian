@@ -1,6 +1,9 @@
+# NOTE: should be synced with debian/tests/webui-dependencies
 interest-noawait /usr/share/javascript/bootstrap/js/bootstrap.min.js
 interest-noawait /usr/share/javascript/jquery/jquery.min.js
+interest-noawait /usr/share/nodejs/jquery/dist/jquery.min.js
 interest-noawait /usr/share/javascript/requirejs/require.js
 interest-noawait /usr/share/fonts-glyphicons/glyphicons-halflings-regular.ttf
+interest-noawait /usr/share/fonts/truetype/glyphicons/glyphicons-halflings-regular.ttf
 interest-noawait /usr/share/fonts-glyphicons/glyphicons-halflings-regular.woff
 interest-noawait /usr/share/fonts-glyphicons/glyphicons-halflings-regular.woff2
