@@ -3,4 +3,5 @@
 set -eu
 
 # test for perl dependencies
+echo "+ rspamd_stats --log /dev/null"
 rspamd_stats --log /dev/null

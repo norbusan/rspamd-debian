@@ -1,14 +1,20 @@
-#!/bin/bash
+#!/bin/sh
 
-set -x
+set -eu
 
 # refs: #914477
 sleep 15
 
+echo "+ systemctl status rspamd"
 systemctl status rspamd
+echo "+ systemctl is-enabled rspamd"
+systemctl is-enabled rspamd
+echo "+ systemctl is-active rspamd"
+systemctl is-active rspamd
 
 # refs: #914477
 sleep 5
 
 # TODO: more complicated tests ?
-curl -s http://127.0.0.1:11334
+echo "+ curl --no-progress-meter --retry 3 --retry-connrefused --retry-delay 2 http://127.0.0.1:11334"
+curl --no-progress-meter --retry 3 --retry-connrefused --retry-delay 2 http://127.0.0.1:11334

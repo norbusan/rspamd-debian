@@ -2,4 +2,10 @@
 
 set -eu
 
-rspamadm configtest -s -c /etc/rspamd/rspamd.conf
+# rspamadm configtest is flaky on arm64/ppc64el
+# see https://github.com/rspamd/rspamd/issues/3376
+# only run on amd64
+if [ "x$(dpkg --print-architecture)" = "xamd64" ]; then
+	echo "+ rspamadm configtest --strict --config /etc/rspamd/rspamd.conf"
+	rspamadm configtest --strict --config /etc/rspamd/rspamd.conf
+fi
