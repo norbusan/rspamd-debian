@@ -1,3 +1,20 @@
+rspamd (2.5-2) unstable; urgency=medium
+
+  [ Christian Göttsche ]
+  * d/control: switch to compat level 13.
+  * rspamd.triggers: activate on resolved paths for jquery and
+    glyphicons-halflings-regular.ttf.
+  * d/{control,rules}: use libunwind only on supported architectures
+  * d/rules:
+    + drop as-needed linker flag.
+    + enable CMAKE_BUILD_WITH_INSTALL_RPATH.
+      Make the build reproducible (Closes: #956120)
+  * d/tests:
+    + add test that we use existing and resolved paths in the dpkg triggers
+    + try to adjust flaky autopkgtest runs
+
+ -- Sebastien Badia <sbadia@debian.org>  Thu, 28 May 2020 11:06:51 +0200
+
 rspamd (2.5-1) unstable; urgency=medium
 
   [ Sebastien Badia ]
