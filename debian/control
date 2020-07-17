@@ -36,8 +36,8 @@ Depends: adduser,
          libjs-requirejs,
          lsb-base,
          ${misc:Depends},
-         ${shlibs:Depends},
-         ${perl:Depends}
+         ${perl:Depends},
+         ${shlibs:Depends}
 Recommends: redis-server
 Description: Rapid spam filtering system
  Rspamd is a rapid, modular and lightweight spam filter. It is designed to work
