@@ -1,3 +1,11 @@
+rspamd (2.5-3) unstable; urgency=medium
+
+  * d/patches:
+    + Fix ftbfs with gcc 10, Thanks Steve (Closes: #966475)
+    + Added forwarded tags (according new lintian checks)
+
+ -- Sebastien Badia <sbadia@debian.org>  Mon, 03 Aug 2020 16:56:40 +0200
+
 rspamd (2.5-2) unstable; urgency=medium
 
   [ Christian Göttsche ]
