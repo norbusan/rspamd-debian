@@ -1,6 +1,7 @@
 From: =?utf-8?q?Christian_G=C3=B6ttsche?= <cgzones@googlemail.com>
 Date: Tue, 14 Jan 2020 22:02:02 +0100
 Subject: add versions to shared libraries
+Forwarded: not-needed
 
 ---
  contrib/aho-corasick/CMakeLists.txt | 2 ++

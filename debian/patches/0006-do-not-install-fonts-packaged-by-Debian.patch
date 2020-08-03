@@ -1,6 +1,7 @@
 From: =?utf-8?q?Christian_G=C3=B6ttsche?= <cgzones@googlemail.com>
 Date: Wed, 15 Jan 2020 16:40:41 +0100
 Subject: do not install fonts packaged by Debian
+Forwarded: not-needed
 
 ---
  CMakeLists.txt | 4 +++-
