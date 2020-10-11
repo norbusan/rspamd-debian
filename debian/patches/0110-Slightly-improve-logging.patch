@@ -1,0 +1,79 @@
+From: Vsevolod Stakhov <vsevolod@highsecure.ru>
+Date: Thu, 8 Oct 2020 12:01:52 +0100
+Applied-Upstream: https://github.com/rspamd/rspamd/commit/da8eb274dcc06621f27154ce3aaaba55deaf812a
+Subject: Slightly improve logging
+
+---
+ src/libserver/spf.c | 25 ++++++++++++++++++++++---
+ 1 file changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/src/libserver/spf.c b/src/libserver/spf.c
+index 0532690..8242d94 100644
+--- a/src/libserver/spf.c
++++ b/src/libserver/spf.c
+@@ -1257,6 +1257,10 @@ parse_spf_a (struct spf_record *rec,
+ 
+ 		return TRUE;
+ 	}
++	else {
++		msg_info_spf ("unresolvable A element for %s: %s", addr->spf_string,
++				rec->sender_domain);
++	}
+ 
+ 	return FALSE;
+ 
+@@ -1293,15 +1297,18 @@ parse_spf_ptr (struct spf_record *rec,
+ 	rspamd_mempool_add_destructor (task->task_pool, free, ptr);
+ 	msg_debug_spf ("resolve ptr %s for %s", ptr, host);
+ 
+-	rec->ttl = 0;
+-	msg_debug_spf ("disable SPF caching as there is PTR expansion");
+-
+ 	if (rspamd_dns_resolver_request_task_forced (task,
+ 			spf_record_dns_callback, (void *) cb, RDNS_REQUEST_PTR, ptr)) {
+ 		rec->requests_inflight++;
++		rec->ttl = 0;
++		msg_debug_spf ("disable SPF caching as there is PTR expansion");
+ 
+ 		return TRUE;
+ 	}
++	else {
++		msg_info_spf ("unresolvable PTR element for %s: %s", addr->spf_string,
++				rec->sender_domain);
++	}
+ 
+ 	return FALSE;
+ }
+@@ -1539,6 +1546,10 @@ parse_spf_include (struct spf_record *rec, struct spf_addr *addr)
+ 
+ 		return TRUE;
+ 	}
++	else {
++		msg_info_spf ("unresolvable include element for %s: %s", addr->spf_string,
++				rec->sender_domain);
++	}
+ 
+ 
+ 	return FALSE;
+@@ -1597,6 +1608,10 @@ parse_spf_redirect (struct spf_record *rec,
+ 
+ 		return TRUE;
+ 	}
++	else {
++		msg_info_spf ("unresolvable redirect element for %s: %s", addr->spf_string,
++				rec->sender_domain);
++	}
+ 
+ 	return FALSE;
+ }
+@@ -1640,6 +1655,10 @@ parse_spf_exists (struct spf_record *rec, struct spf_addr *addr)
+ 
+ 		return TRUE;
+ 	}
++	else {
++		msg_info_spf ("unresolvable exists element for %s: %s", addr->spf_string,
++				rec->sender_domain);
++	}
+ 
+ 	return FALSE;
+ }

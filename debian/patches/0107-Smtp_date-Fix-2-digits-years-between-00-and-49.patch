@@ -1,0 +1,28 @@
+From: Vsevolod Stakhov <vsevolod@highsecure.ru>
+Date: Mon, 5 Oct 2020 19:52:37 +0100
+Applied-Upstream: https://github.com/rspamd/rspamd/commit/11d962e46a919a0ff78cc4b7d168825991f0e400
+Subject: Smtp_date: Fix 2 digits years between 00 and 49
+
+Suggested by: @citrin
+---
+ src/ragel/smtp_date.rl | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/ragel/smtp_date.rl b/src/ragel/smtp_date.rl
+index 90c34b9..e873e44 100644
+--- a/src/ragel/smtp_date.rl
++++ b/src/ragel/smtp_date.rl
+@@ -29,7 +29,12 @@
+       gulong n;
+       if (rspamd_strtoul (tmp, p - tmp, &n)) {
+         if (n < 1000) {
+-          tm.tm_year = n;
++          if (n < 50) {
++            tm.tm_year = n - 1900 + 2000;
++          }
++          else {
++            tm.tm_year = n;
++          }
+         }
+         else {
+           tm.tm_year = n - 1900;

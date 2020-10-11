@@ -1,0 +1,21 @@
+From: Vsevolod Stakhov <vsevolod@highsecure.ru>
+Date: Fri, 9 Oct 2020 15:06:26 +0100
+Applied-Upstream: https://github.com/rspamd/rspamd/commit/30996f906090b064d52644e8dca374b6f806c5a6
+Subject: Fix quit command processing
+
+---
+ src/libserver/milter.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/libserver/milter.c b/src/libserver/milter.c
+index 8cb7ed2..f70280a 100644
+--- a/src/libserver/milter.c
++++ b/src/libserver/milter.c
+@@ -692,6 +692,7 @@ rspamd_milter_process_command (struct rspamd_milter_session *session,
+ 			REF_RETAIN (session);
+ 			priv->fin_cb (priv->fd, session, priv->ud);
+ 			REF_RELEASE (session);
++			return FALSE;
+ 		}
+ 		break;
+ 	case RSPAMD_MILTER_CMD_RCPT:

@@ -1,0 +1,23 @@
+From: Vsevolod Stakhov <vsevolod@highsecure.ru>
+Date: Fri, 2 Oct 2020 16:39:47 +0100
+Applied-Upstream: https://github.com/rspamd/rspamd/commit/f38bb795084936908b640e6d8fbd9e2b5d577fcf
+Subject: Fix handling of skip/skip_process http flags
+
+---
+ src/libserver/protocol.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/libserver/protocol.c b/src/libserver/protocol.c
+index 9d12760..31b0308 100644
+--- a/src/libserver/protocol.c
++++ b/src/libserver/protocol.c
+@@ -374,7 +374,8 @@ rspamd_protocol_handle_flag (struct rspamd_task *task, const gchar *str,
+ 
+ 	CHECK_TASK_FLAG("pass_all", RSPAMD_TASK_FLAG_PASS_ALL);
+ 	CHECK_TASK_FLAG("no_log", RSPAMD_TASK_FLAG_NO_LOG);
+-	CHECK_TASK_FLAG("skip", RSPAMD_TASK_FLAG_NO_LOG);
++	CHECK_TASK_FLAG("skip", RSPAMD_TASK_FLAG_SKIP);
++	CHECK_TASK_FLAG("skip_process", RSPAMD_TASK_FLAG_SKIP_PROCESS);
+ 	CHECK_TASK_FLAG("no_stat", RSPAMD_TASK_FLAG_NO_STAT);
+ 	CHECK_TASK_FLAG("ssl", RSPAMD_TASK_FLAG_SSL);
+ 	CHECK_TASK_FLAG("profile", RSPAMD_TASK_FLAG_PROFILE);
