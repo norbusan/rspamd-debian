@@ -29,6 +29,7 @@ define(["jquery", "d3pie"],
         "use strict";
         // @ ms to date
         function msToTime(seconds) {
+            if (!Number.isFinite(seconds)) return "???";
             /* eslint-disable no-bitwise */
             var years = seconds / 31536000 >> 0; // 3600*24*365
             var months = seconds % 31536000 / 2628000 >> 0; // 3600*24*365/12
@@ -56,114 +57,181 @@ define(["jquery", "d3pie"],
         }
 
         function displayStatWidgets(checked_server) {
-            var widgets = $("#statWidgets");
-            $(widgets).empty().hide();
-
             var servers = JSON.parse(sessionStorage.getItem("Credentials"));
             var data = {};
-
             if (servers && servers[checked_server]) {
                 data = servers[checked_server].data;
             }
-            var stat_w = [];
 
+            var stat_w = [];
+            $("#statWidgets").empty().hide();
             $.each(data, function (i, item) {
-                var widget = "";
+                var widgetsOrder = ["scanned", "no action", "greylist", "add header", "rewrite subject", "reject", "learned"];
+
+                function widget(k, v, cls) {
+                    var c = (typeof cls === "undefined") ? "" : cls;
+                    var titleAtt = d3.format(",")(v) + " " + k;
+                    return '<div class="card stat-box d-inline-block text-center bg-light shadow-sm mr-3 px-3">' +
+                      '<div class="widget overflow-hidden p-2' + c + '" title="' + titleAtt +
+                      '"><strong class="d-block mt-2 mb-1 font-weight-bold">' +
+                    d3.format(".3~s")(v) + "</strong>" + k + "</div></div>";
+                }
+
                 if (i === "auth" || i === "error") return; // Skip to the next iteration
-                if (i === "version") {
-                    widget = "<div class=\"left\"><strong>" + item + "</strong>" +
-                    i + "</div>";
-                    $(widget).appendTo(widgets);
-                } else if (i === "uptime") {
-                    widget = "<div class=\"right\"><strong>" + msToTime(item) +
-                    "</strong>" + i + "</div>";
-                    $(widget).appendTo(widgets);
-                } else {
-                    var titleAtt = d3.format(",")(item) + " " + i;
-                    widget = "<li class=\"stat-box\"><div class=\"widget\" title=\"" + titleAtt + "\"><strong>" +
-                    d3.format(".3~s")(item) + "</strong>" + i + "</div></li>";
-                    if (i === "scanned") {
-                        stat_w[0] = widget;
-                    } else if (i === "clean") {
-                        stat_w[1] = widget;
-                    } else if (i === "greylist") {
-                        stat_w[2] = widget;
-                    } else if (i === "probable") {
-                        stat_w[3] = widget;
-                    } else if (i === "reject") {
-                        stat_w[4] = widget;
-                    } else if (i === "learned") {
-                        stat_w[5] = widget;
+                if (i === "uptime" || i === "version") {
+                    var cls = "border-right ";
+                    var val = item;
+                    if (i === "uptime") {
+                        cls = "";
+                        val = msToTime(item);
                     }
+                    $('<div class="' + cls + 'float-left px-3"><strong class="d-block mt-2 mb-1 font-weight-bold">' +
+                      val + "</strong>" + i + "</div>")
+                        .appendTo("#statWidgets");
+                } else if (i === "actions") {
+                    $.each(item, function (action, count) {
+                        stat_w[widgetsOrder.indexOf(action)] = widget(action, count);
+                    });
+                } else {
+                    stat_w[widgetsOrder.indexOf(i)] = widget(i, item, " text-capitalize");
                 }
             });
             $.each(stat_w, function (i, item) {
-                $(item).appendTo(widgets);
+                $(item).appendTo("#statWidgets");
             });
-            $("#statWidgets .left,#statWidgets .right").wrapAll("<li class=\"stat-box pull-right\"><div class=\"widget\"></div></li>");
-            $("#statWidgets").find("li.pull-right").appendTo("#statWidgets");
+            $("#statWidgets > div:not(.stat-box)")
+                .wrapAll('<div class="card stat-box text-center bg-light shadow-sm float-right">' +
+                  '<div class="widget overflow-hidden p-2 text-capitalize"></div></div>');
+            $("#statWidgets").find("div.float-right").appendTo("#statWidgets");
+            $("#statWidgets").show();
 
             $("#clusterTable tbody").empty();
             $("#selSrv").empty();
             $.each(servers, function (key, val) {
-                var glyph_status = "glyphicon glyphicon-remove-circle";
+                var row_class = "danger";
+                var glyph_status = "fas fa-times";
+                var version = "???";
+                var uptime = "???";
                 var short_id = "???";
-                if (!("config_id" in val.data)) {
-                    val.data.config_id = "";
-                }
                 if (val.status) {
-                    glyph_status = "glyphicon glyphicon-ok-circle";
-                    short_id = val.data.config_id.substring(0, 8);
+                    row_class = "success";
+                    glyph_status = "fas fa-check";
+                    if (Number.isFinite(val.data.uptime)) {
+                        uptime = msToTime(val.data.uptime);
+                    }
+                    if ("version" in val.data) {
+                        version = val.data.version;
+                    }
+                    if (key === "All SERVERS") {
+                        short_id = "";
+                    } else if ("config_id" in val.data) {
+                        short_id = val.data.config_id.substring(0, 8);
+                    }
                 }
 
-                $("#clusterTable tbody").append("<tr>" +
-                "<td class=\"col1\" title=\"Radio\"><input type=\"radio\" class=\"form-control radio\" name=\"clusterName\" value=\"" + key + "\"></td>" +
-                "<td class=\"col2\" title=\"SNAme\">" + key + "</td>" +
-                "<td class=\"col3\" title=\"SHost\">" + val.host + "</td>" +
-                "<td class=\"col4\" title=\"SStatus\"><span class=\"icon\"><i class=\"" + glyph_status + "\"></i></span></td>" +
-                "<td class=\"col5\" title=\"short_id\">" + short_id + "</td></tr>");
+                $("#clusterTable tbody").append('<tr class="' + row_class + '">' +
+                '<td class="align-middle"><input type="radio" class="form-check m-auto" name="clusterName" value="' + key + '"></td>' +
+                "<td>" + key + "</td>" +
+                "<td>" + val.host + "</td>" +
+                '<td class="text-center"><span class="icon"><i class="' + glyph_status + '"></i></span></td>' +
+                '<td class="text-right' +
+                  ((Number.isFinite(val.data.uptime) && val.data.uptime < 3600)
+                      ? ' warning" title="Has been restarted within the last hour"'
+                      : "") +
+                  '">' + uptime + "</td>" +
+                "<td>" + version + "</td>" +
+                "<td>" + short_id + "</td></tr>");
 
-                $("#selSrv").append($("<option value=\"" + key + "\">" + key + "</option>"));
+                $("#selSrv").append($('<option value="' + key + '">' + key + "</option>"));
 
                 if (checked_server === key) {
-                    $("#clusterTable tbody [value=\"" + key + "\"]").prop("checked", true);
-                    $("#selSrv [value=\"" + key + "\"]").prop("selected", true);
+                    $('#clusterTable tbody [value="' + key + '"]').prop("checked", true);
+                    $('#selSrv [value="' + key + '"]').prop("selected", true);
                 } else if (!val.status) {
-                    $("#clusterTable tbody [value=\"" + key + "\"]").prop("disabled", true);
-                    $("#selSrv [value=\"" + key + "\"]").prop("disabled", true);
+                    $('#clusterTable tbody [value="' + key + '"]').prop("disabled", true);
+                    $('#selSrv [value="' + key + '"]').prop("disabled", true);
                 }
             });
-            $(widgets).show();
+
+            function addStatfiles(server, statfiles) {
+                $.each(statfiles, function (i, statfile) {
+                    var cls = "";
+                    switch (statfile.symbol) {
+                        case "BAYES_SPAM":
+                            cls = "symbol-positive";
+                            break;
+                        case "BAYES_HAM":
+                            cls = "symbol-negative";
+                            break;
+                        default:
+                    }
+                    $("#bayesTable tbody").append("<tr>" +
+                      (i === 0 ? '<td rowspan="' + statfiles.length + '">' + server + "</td>" : "") +
+                      '<td class="' + cls + '">' + statfile.symbol + "</td>" +
+                      '<td class="' + cls + '">' + statfile.type + "</td>" +
+                      '<td class="text-right ' + cls + '">' + statfile.revision + "</td>" +
+                      '<td class="text-right ' + cls + '">' + statfile.users + "</td></tr>");
+                });
+            }
+
+            function addFuzzyStorage(server, storages) {
+                var i = 0;
+                $.each(storages, function (storage, hashes) {
+                    $("#fuzzyTable tbody").append("<tr>" +
+                      (i === 0 ? '<td rowspan="' + Object.keys(storages).length + '">' + server + "</td>" : "") +
+                      "<td>" + storage + "</td>" +
+                      '<td class="text-right">' + hashes + "</td></tr>");
+                    i++;
+                });
+            }
+
+            $("#bayesTable tbody, #fuzzyTable tbody").empty();
+            if (checked_server === "All SERVERS") {
+                $.each(servers, function (server, val) {
+                    if (server !== "All SERVERS") {
+                        addStatfiles(server, val.data.statfiles);
+                        addFuzzyStorage(server, val.data.fuzzy_hashes);
+                    }
+                });
+            } else {
+                addStatfiles(checked_server, data.statfiles);
+                addFuzzyStorage(checked_server, data.fuzzy_hashes);
+            }
         }
 
         function getChart(rspamd, pie, checked_server) {
             var creds = JSON.parse(sessionStorage.getItem("Credentials"));
             if (!creds || !creds[checked_server]) return null;
 
-            var data = creds[checked_server].data;
+            var data = creds[checked_server].data.actions;
             var new_data = [{
                 color: "#66CC00",
-                label: "Clean",
-                data: data.clean,
-                value: data.clean
+                label: "no action",
+                data: data["no action"],
+                value: data["no action"]
             }, {
                 color: "#BF8040",
-                label: "Temporarily rejected",
-                data: data.soft_reject,
-                value: data.soft_reject
+                label: "soft reject",
+                data: data["soft reject"],
+                value: data["soft reject"]
             }, {
                 color: "#FFAD00",
-                label: "Probable spam",
-                data: data.probable,
-                value: data.probable
+                label: "add header",
+                data: data["add header"],
+                value: data["add header"]
+            }, {
+                color: "#FF6600",
+                label: "rewrite subject",
+                data: data["rewrite subject"],
+                value: data["rewrite subject"]
             }, {
                 color: "#436EEE",
-                label: "Greylisted",
+                label: "greylist",
                 data: data.greylist,
                 value: data.greylist
             }, {
                 color: "#FF0000",
-                label: "Rejected",
+                label: "reject",
                 data: data.reject,
                 value: data.reject
             }];
@@ -173,53 +241,95 @@ define(["jquery", "d3pie"],
         // Public API
         var ui = {
             statWidgets: function (rspamd, graphs, checked_server) {
-                rspamd.query("auth", {
+                rspamd.query("stat", {
                     success: function (neighbours_status) {
                         var neighbours_sum = {
                             version: neighbours_status[0].data.version,
-                            auth: "ok",
                             uptime: 0,
-                            clean: 0,
-                            probable: 0,
-                            greylist: 0,
-                            reject: 0,
-                            soft_reject: 0,
                             scanned: 0,
                             learned: 0,
-                            config_id: ""
+                            actions: {
+                                "no action": 0,
+                                "add header": 0,
+                                "rewrite subject": 0,
+                                "greylist": 0,
+                                "reject": 0,
+                                "soft reject": 0,
+                            }
                         };
                         var status_count = 0;
+                        var promises = [];
+                        var to_Credentials = {
+                            "All SERVERS": {
+                                name: "All SERVERS",
+                                url: "",
+                                host: "",
+                                checked: true,
+                                status: true
+                            }
+                        };
+
+                        function process_node_stat(e) {
+                            var data = neighbours_status[e].data;
+                            for (var action in neighbours_sum.actions) {
+                                if ({}.hasOwnProperty.call(neighbours_sum.actions, action)) {
+                                    neighbours_sum.actions[action] += data.actions[action];
+                                }
+                            }
+                            ["learned", "scanned", "uptime"].forEach(function (p) {
+                                neighbours_sum[p] += data[p];
+                            });
+                            status_count++;
+                        }
+
+                        // Get config_id, version and uptime using /auth query for Rspamd 2.5 and earlier
+                        function get_legacy_stat(e) {
+                            var alerted = "alerted_stats_legacy_" + neighbours_status[e].name;
+                            promises.push($.ajax({
+                                url: neighbours_status[e].url + "auth",
+                                headers: {Password:rspamd.getPassword()},
+                                success: function (data) {
+                                    sessionStorage.removeItem(alerted);
+                                    ["config_id", "version", "uptime"].forEach(function (p) {
+                                        neighbours_status[e].data[p] = data[p];
+                                    });
+                                    process_node_stat(e);
+                                },
+                                error: function (jqXHR, textStatus, errorThrown) {
+                                    if (!(alerted in sessionStorage)) {
+                                        sessionStorage.setItem(alerted, true);
+                                        rspamd.alertMessage("alert-error", neighbours_status[e].name + " > " +
+                                          "Cannot receive legacy stats data" + (errorThrown ? ": " + errorThrown : ""));
+                                    }
+                                    process_node_stat(e);
+                                }
+                            }));
+                        }
+
                         for (var e in neighbours_status) {
-                            if (neighbours_status[e].status === true) {
-                            // Remove alert status
-                                localStorage.removeItem(e + "_alerted");
-                                neighbours_sum.clean += neighbours_status[e].data.clean;
-                                neighbours_sum.probable += neighbours_status[e].data.probable;
-                                neighbours_sum.greylist += neighbours_status[e].data.greylist;
-                                neighbours_sum.reject += neighbours_status[e].data.reject;
-                                neighbours_sum.soft_reject += neighbours_status[e].data.soft_reject;
-                                neighbours_sum.scanned += neighbours_status[e].data.scanned;
-                                neighbours_sum.learned += neighbours_status[e].data.learned;
-                                neighbours_sum.uptime += neighbours_status[e].data.uptime;
-                                status_count++;
+                            if ({}.hasOwnProperty.call(neighbours_status, e)) {
+                                to_Credentials[neighbours_status[e].name] = neighbours_status[e];
+                                if (neighbours_status[e].status === true) {
+                                    // Remove alert status
+                                    sessionStorage.removeItem("alerted_stats_" + neighbours_status[e].name);
+
+                                    if ({}.hasOwnProperty.call(neighbours_status[e].data, "version")) {
+                                        process_node_stat(e);
+                                    } else {
+                                        get_legacy_stat(e);
+                                    }
+                                }
                             }
                         }
-                        neighbours_sum.uptime = Math.floor(neighbours_sum.uptime / status_count);
-                        var to_Credentials = {};
-                        to_Credentials["All SERVERS"] = {
-                            name: "All SERVERS",
-                            url: "",
-                            host: "",
-                            checked: true,
-                            data: neighbours_sum,
-                            status: true
-                        };
-                        neighbours_status.forEach(function (elmt) {
-                            to_Credentials[elmt.name] = elmt;
-                        });
-                        sessionStorage.setItem("Credentials", JSON.stringify(to_Credentials));
-                        displayStatWidgets(checked_server);
-                        graphs.chart = getChart(rspamd, graphs.chart, checked_server);
+                        setTimeout(function () {
+                            $.when.apply($, promises).always(function () {
+                                neighbours_sum.uptime = Math.floor(neighbours_sum.uptime / status_count);
+                                to_Credentials["All SERVERS"].data = neighbours_sum;
+                                sessionStorage.setItem("Credentials", JSON.stringify(to_Credentials));
+                                displayStatWidgets(checked_server);
+                                graphs.chart = getChart(rspamd, graphs.chart, checked_server);
+                            });
+                        }, promises.length ? 100 : 0);
                     },
                     errorMessage: "Cannot receive stats data",
                     errorOnceId: "alerted_stats_",

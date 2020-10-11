@@ -282,11 +282,13 @@ LUA_FUNCTION_DEF (config, get_symbol_flags);
 LUA_FUNCTION_DEF (config, add_symbol_flags);
 
 /**
- * @method rspamd_config:register_re_selector(name, selector_str)
+ * @method rspamd_config:register_re_selector(name, selector_str, [delimiter, [flatten]])
  * Registers selector with the specific name to use in regular expressions in form
  * name=/re/$ or name=/re/{selector}
  * @param {string} name name of the selector
- * @param {selector_str} selector string
+ * @param {string} selector_str selector definition
+ * @param {string} delimiter delimiter to use when joining strings if flatten is false
+ * @param {bool} flatten if true then selector will return a table of captures instead of a single string
  * @return true if selector has been registered
  */
 LUA_FUNCTION_DEF (config, register_re_selector);
@@ -1812,18 +1814,24 @@ lua_parse_symbol_type (const gchar *str)
 				str = vec[i];
 
 				if (g_ascii_strcasecmp (str, "virtual") == 0) {
-					ret = SYMBOL_TYPE_VIRTUAL;
+					ret |= SYMBOL_TYPE_VIRTUAL;
+					ret &= ~SYMBOL_TYPE_NORMAL;
+					ret &= ~SYMBOL_TYPE_CALLBACK;
 				} else if (g_ascii_strcasecmp (str, "callback") == 0) {
-					ret = SYMBOL_TYPE_CALLBACK;
+					ret |= SYMBOL_TYPE_CALLBACK;
+					ret &= ~SYMBOL_TYPE_NORMAL;
+					ret &= ~SYMBOL_TYPE_VIRTUAL;
 				} else if (g_ascii_strcasecmp (str, "normal") == 0) {
-					ret = SYMBOL_TYPE_NORMAL;
+					ret |= SYMBOL_TYPE_NORMAL;
+					ret &= ~SYMBOL_TYPE_CALLBACK;
+					ret &= ~SYMBOL_TYPE_VIRTUAL;
 				} else if (g_ascii_strcasecmp (str, "prefilter") == 0) {
-					ret = SYMBOL_TYPE_PREFILTER | SYMBOL_TYPE_GHOST;
+					ret |= SYMBOL_TYPE_PREFILTER | SYMBOL_TYPE_GHOST;
 				} else if (g_ascii_strcasecmp (str, "postfilter") == 0) {
-					ret = SYMBOL_TYPE_POSTFILTER | SYMBOL_TYPE_GHOST;
+					ret |= SYMBOL_TYPE_POSTFILTER | SYMBOL_TYPE_GHOST;
 				} else if (g_ascii_strcasecmp (str, "idempotent") == 0) {
-					ret = SYMBOL_TYPE_POSTFILTER | SYMBOL_TYPE_GHOST |
-							SYMBOL_TYPE_IDEMPOTENT;
+					ret |= SYMBOL_TYPE_POSTFILTER | SYMBOL_TYPE_GHOST |
+							SYMBOL_TYPE_IDEMPOTENT | SYMBOL_TYPE_CALLBACK;
 				} else {
 					gint fl = 0;
 
@@ -2042,16 +2050,9 @@ lua_config_register_symbol (lua_State * L)
 				nshots = 1;
 			}
 
-			if (!isnan (score)) {
-				rspamd_config_add_symbol (cfg, name,
-						score, description, group, flags,
-						0, nshots);
-			}
-			else {
-				rspamd_config_add_symbol (cfg, name,
-						NAN, description, group, flags,
-						0, nshots);
-			}
+			rspamd_config_add_symbol (cfg, name,
+					score, description, group, flags,
+					0, nshots);
 
 			lua_pushstring (L, "groups");
 			lua_gettable (L, 2);
@@ -3023,7 +3024,7 @@ lua_config_register_regexp (lua_State *L)
 				}
 
 				cache_re = rspamd_re_cache_add (cfg->re_cache, re->re, type,
-						(gpointer) header_str, header_len);
+						(gpointer) header_str, header_len, -1);
 
 				/*
 				 * XXX: here are dragons!
@@ -3788,6 +3789,30 @@ lua_config_register_finish_script (lua_State *L)
 	return 0;
 }
 
+static inline bool
+rspamd_lua_config_check_settings_symbols_object (const ucl_object_t *obj)
+{
+	if (obj == NULL) {
+		/* Semantically valid */
+		return true;
+	}
+
+	if (ucl_object_type (obj) == UCL_OBJECT) {
+		/* Key-value mapping - should be okay */
+		return true;
+	}
+
+	if (ucl_object_type (obj) == UCL_ARRAY) {
+		/* Okay if empty */
+		if (obj->len == 0) {
+			return true;
+		}
+	}
+
+	/* Everything else not okay */
+	return false;
+}
+
 static gint
 lua_config_register_settings_id (lua_State *L)
 {
@@ -3801,7 +3826,7 @@ lua_config_register_settings_id (lua_State *L)
 
 		sym_enabled = ucl_object_lua_import (L, 3);
 
-		if (sym_enabled != NULL && ucl_object_type (sym_enabled) != UCL_OBJECT) {
+		if (!rspamd_lua_config_check_settings_symbols_object (sym_enabled)) {
 			ucl_object_unref (sym_enabled);
 
 			return luaL_error (L, "invalid symbols enabled");
@@ -3809,7 +3834,7 @@ lua_config_register_settings_id (lua_State *L)
 
 		sym_disabled = ucl_object_lua_import (L, 4);
 
-		if (sym_disabled != NULL && ucl_object_type (sym_disabled) != UCL_OBJECT) {
+		if (!rspamd_lua_config_check_settings_symbols_object (sym_disabled)) {
 			ucl_object_unref (sym_enabled);
 			ucl_object_unref (sym_disabled);
 
@@ -4338,12 +4363,17 @@ lua_config_register_re_selector (lua_State *L)
 	const gchar *name = luaL_checkstring (L, 2);
 	const gchar *selector_str = luaL_checkstring (L, 3);
 	const gchar *delimiter = "";
+	bool flatten = false;
 	gint top = lua_gettop (L);
 	bool res = false;
 
 	if (cfg && name && selector_str) {
 		if (lua_gettop (L) >= 4) {
 			delimiter = luaL_checkstring (L, 4);
+
+			if (lua_isboolean (L, 5)) {
+				flatten = lua_toboolean (L, 5);
+			}
 		}
 
 		if (luaL_dostring (L, "return require \"lua_selectors\"") != 0) {
@@ -4380,8 +4410,9 @@ lua_config_register_re_selector (lua_State *L)
 					*pcfg = cfg;
 					lua_pushstring (L, selector_str);
 					lua_pushstring (L, delimiter);
+					lua_pushboolean (L, flatten);
 
-					if ((ret = lua_pcall (L, 3, 1, err_idx)) != 0) {
+					if ((ret = lua_pcall (L, 4, 1, err_idx)) != 0) {
 						msg_err_config ("call to create_selector_closure lua "
 										"script failed (%d): %s", ret,
 										lua_tostring (L, -1));

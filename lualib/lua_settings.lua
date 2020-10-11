@@ -57,13 +57,14 @@ local function register_settings_cb()
       if s.symbols_enabled then
         -- Remove all symbols from set.symbols aside of explicit_disable symbols
         set.symbols = lua_util.list_to_hash(explicit_symbols)
+        seen_enabled = true
         for _,sym in ipairs(s.symbols_enabled) do
           enabled_symbols[sym] = true
           set.symbols[sym] = true
-          seen_enabled = true
         end
       end
       if s.groups_enabled then
+        seen_enabled = true
         for _,gr in ipairs(s.groups_enabled) do
           local syms = rspamd_config:get_group_symbols(gr)
 
@@ -71,7 +72,6 @@ local function register_settings_cb()
             for _,sym in ipairs(syms) do
               enabled_symbols[sym] = true
               set.symbols[sym] = true
-              seen_enabled = true
             end
           end
         end
@@ -79,20 +79,20 @@ local function register_settings_cb()
 
       -- Disabled map
       if s.symbols_disabled then
+        seen_disabled = true
         for _,sym in ipairs(s.symbols_disabled) do
           disabled_symbols[sym] = true
           set.symbols[sym] = false
-          seen_disabled = true
         end
       end
       if s.groups_disabled then
+        seen_disabled = true
         for _,gr in ipairs(s.groups_disabled) do
           local syms = rspamd_config:get_group_symbols(gr)
 
           if syms then
             for _,sym in ipairs(syms) do
               disabled_symbols[sym] = true
-              seen_disabled = true
               set.symbols[sym] = false
             end
           end

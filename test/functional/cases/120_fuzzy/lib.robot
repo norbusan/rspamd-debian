@@ -21,19 +21,19 @@ ${SETTINGS_FUZZY_CHECK}  ${EMPTY}
 
 *** Keywords ***
 Fuzzy Skip Add Test Base
-  Create File  ${TMPDIR}/skip_hash.map
   [Arguments]  ${message}
   Set Suite Variable  ${RSPAMD_FUZZY_ADD_${message}}  0
   ${result} =  Run Rspamc  -h  ${LOCAL_ADDR}:${PORT_CONTROLLER}  -w  10  -f
   ...  ${FLAG1_NUMBER}  fuzzy_add  ${message}
   Check Rspamc  ${result}
   Sync Fuzzy Storage
-  ${result} =  Scan Message With Rspamc  ${message}
+  Scan File  ${message}
   Create File  ${TMPDIR}/test.map
-  Should Contain  ${result.stdout}  R_TEST_FUZZY_DENIED
-  Append To File  ${TMPDIR}/skip_hash.map  670cfcba72a87bab689958a8af5c22593dc17c907836c7c26a74d1bb49add25adfa45a5f172e3af82c9c638e8eb5fc860c22c7e966e61a459165ef0b9e1acc89
-  ${result} =  Scan Message With Rspamc  ${message}
-  Check Rspamc  ${result}  R_TEST_FUZZY_DENIED  inverse=1
+  Expect Symbol  R_TEST_FUZZY_DENIED
+  Append To File  ${TMPDIR}/skip_hash.map.tmp  2d875d4737c59c4822fd01dadeba52a329de3933f766c6f167904c6a426bbfa7ea63a66bf807b25c5ee853baee58bfb18d3b423fcd13cfa7c3d77a840039a1ea
+  Hard Link  ${TMPDIR}/skip_hash.map.tmp  ${TMPDIR}/skip_hash.map
+  Scan File  ${message}
+  Do Not Expect Symbol  R_TEST_FUZZY_DENIED
 
 Fuzzy Add Test
   [Arguments]  ${message}
@@ -42,8 +42,8 @@ Fuzzy Add Test
   ...  ${FLAG1_NUMBER}  fuzzy_add  ${message}
   Check Rspamc  ${result}
   Sync Fuzzy Storage
-  ${result} =  Scan Message With Rspamc  ${message}
-  Check Rspamc  ${result}  ${FLAG1_SYMBOL}
+  Scan File  ${message}
+  Expect Symbol  ${FLAG1_SYMBOL}
   Set Suite Variable  ${RSPAMD_FUZZY_ADD_${message}}  1
 
 Fuzzy Delete Test
@@ -53,25 +53,23 @@ Fuzzy Delete Test
   ...  ${message}
   Check Rspamc  ${result}
   Sync Fuzzy Storage
-  ${result} =  Scan Message With Rspamc  ${message}
-  Follow Rspamd Log
-  Should Not Contain  ${result.stdout}  ${FLAG1_SYMBOL}
-  Should Be Equal As Integers  ${result.rc}  0
+  Scan File  ${message}
+  Do Not Expect Symbol  ${FLAG1_SYMBOL}
 
 Fuzzy Fuzzy Test
   [Arguments]  ${message}
   Run Keyword If  ${RSPAMD_FUZZY_ADD_${message}} != 1  Fail  "Fuzzy Add was not run"
   @{path_info} =  Path Splitter  ${message}
-  @{fuzzy_files} =  List Files In Directory  @{pathinfo}[0]  pattern=@{pathinfo}[1].fuzzy*  absolute=1
+  @{fuzzy_files} =  List Files In Directory  ${pathinfo}[0]  pattern=${pathinfo}[1].fuzzy*  absolute=1
   FOR  ${i}  IN  @{fuzzy_files}
-    ${result} =  Scan Message With Rspamc  ${i}
-    Check Rspamc  ${result}  ${FLAG1_SYMBOL}
+    Scan File  ${i}
+    Expect Symbol  ${FLAG1_SYMBOL}
   END
 
 Fuzzy Miss Test
   [Arguments]  ${message}
-  ${result} =  Scan Message With Rspamc  ${message}
-  Check Rspamc  ${result}  ${FLAG1_SYMBOL}  inverse=1
+  Scan File  ${message}
+  Do Not Expect Symbol  ${FLAG1_SYMBOL}
 
 Fuzzy Overwrite Test
   [Arguments]  ${message}
@@ -82,11 +80,9 @@ Fuzzy Overwrite Test
     Check Rspamc  ${result}
   END
   Sync Fuzzy Storage
-  ${result} =  Scan Message With Rspamc  ${message}
-  Follow Rspamd Log
-  Should Not Contain  ${result.stdout}  ${FLAG1_SYMBOL}
-  Should Contain  ${result.stdout}  ${FLAG2_SYMBOL}
-  Should Be Equal As Integers  ${result.rc}  0
+  Scan File  ${message}
+  Do Not Expect Symbol  ${FLAG1_SYMBOL}
+  Expect Symbol  ${FLAG2_SYMBOL}
 
 Fuzzy Setup Encrypted
   [Arguments]  ${algorithm}

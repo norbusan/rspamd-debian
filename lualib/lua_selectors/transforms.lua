@@ -16,8 +16,10 @@ limitations under the License.
 
 local fun = require 'fun'
 local lua_util = require "lua_util"
+local rspamd_util = require "rspamd_util"
 local ts = require("tableshape").types
 local logger = require 'rspamd_logger'
+local common = require "lua_selectors/common"
 local M = "selectors"
 
 local maps = require "lua_selectors/maps"
@@ -131,29 +133,14 @@ local transform_function = {
     ['types'] = {
       ['string'] = true
     },
-    ['map_type'] = 'hash',
+    ['map_type'] = 'string',
     ['process'] = function(inp, _, args)
-      local hash = require 'rspamd_cryptobox_hash'
-      local encoding = args[1] or 'hex'
-      local ht = args[2] or 'blake2'
-      local h = hash:create_specific(ht):update(inp)
-      local s
-
-      if encoding == 'hex' then
-        s = h:hex()
-      elseif encoding == 'base32' then
-        s = h:base32()
-      elseif encoding == 'base64' then
-        s = h:base64()
-      end
-
-      return s,'string'
+      return common.create_digest(inp, args),'string'
     end,
     ['description'] = [[Create a digest from a string.
-The first argument is encoding (`hex`, `base32`, `base64`),
+The first argument is encoding (`hex`, `base32` (and forms `bleach32`, `rbase32`), `base64`),
 the second argument is optional hash type (`blake2`, `sha256`, `sha1`, `sha512`, `md5`)]],
-    ['args_schema'] = {ts.one_of{'hex', 'base32', 'base64'}:is_optional(),
-                       ts.one_of{'blake2', 'sha256', 'sha1', 'sha512', 'md5'}:is_optional()}
+    ['args_schema'] = common.digest_schema()
   },
   -- Extracts substring
   ['substring'] = {
@@ -216,16 +203,24 @@ the second argument is optional hash type (`blake2`, `sha256`, `sha1`, `sha512`,
       local res = re:search(inp, false, true)
 
       if res then
-        if #res == 1 then
-          return res[1],'string'
+        -- Map all results in a single list
+        local flattened_table = {}
+        local function flatten_table(tbl)
+          for _, v in ipairs(tbl) do
+            if type(v) == 'table' then
+              flatten_table(v)
+            else
+              table.insert(flattened_table, v)
+            end
+          end
         end
-
-        return res,'string_list'
+        flatten_table(res)
+        return flattened_table,'string_list'
       end
 
       return nil
     end,
-    ['description'] = 'Regexp matching',
+    ['description'] = 'Regexp matching, returns all matches flattened in a single list',
     ['args_schema'] = {ts.string}
   },
   -- Returns a value if it exists in some map (or acts like a `filter` function)
@@ -409,9 +404,42 @@ Empty string comes the first argument or 'true', non-empty string comes nil]],
       end
     end,
     ['description'] = 'Applies mask to IP address.' ..
-        ' The first argument is the mask for IPv4 addresses, the second is the mask for IPv6 addresses.',
+      ' The first argument is the mask for IPv4 addresses, the second is the mask for IPv6 addresses.',
     ['args_schema'] = {(ts.number + ts.string / tonumber),
                        (ts.number + ts.string / tonumber):is_optional()}
+  },
+  -- Returns the string(s) with all non ascii chars replaced
+  ['to_ascii'] = {
+    ['types'] = {
+      ['string'] = true,
+      ['list'] = true,
+    },
+    ['map_type'] = 'string',
+    ['process'] = function(inp, _, args)
+      if type(inp) == 'table' then
+        return fun.map(
+          function(s)
+            return string.gsub(tostring(s), '[\128-\255]', args[1] or '?')
+          end, inp), 'string_list'
+      else
+        return string.gsub(tostring(inp), '[\128-\255]', '?'), 'string'
+      end
+    end,
+    ['description'] = 'Returns the string with all non-ascii bytes replaced with the character ' ..
+      'given as second argument or `?`',
+    ['args_schema'] = {ts.string:is_optional()}
+  },
+  -- Extracts tld from a hostname
+  ['get_tld'] = {
+    ['types'] = {
+      ['string'] = true
+    },
+    ['map_type'] = 'string',
+    ['process'] = function(inp, _, _)
+      return rspamd_util.get_tld(inp),'string'
+    end,
+    ['description'] = 'Extracts tld from a hostname represented as a string',
+    ['args_schema'] = {}
   },
 }
 

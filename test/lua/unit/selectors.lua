@@ -5,6 +5,7 @@ context("Selectors test", function()
   local lua_selectors = require "lua_selectors"
   local lua_maps = require "lua_maps"
   local test_helper = require "rspamd_test_helper"
+  local lua_util = require "lua_util"
   local cfg = rspamd_config
   local task
 
@@ -69,7 +70,7 @@ context("Selectors test", function()
 
     ["digest"] = {
                 selector = "digest",
-                expect = {"f46ccafe448fe4d7b46076938749695e"}
+                expect = {"1ac109c58a7d0f5f532100ac14e9f4d9"}
     },
 
     ["user"] = {
@@ -118,14 +119,43 @@ context("Selectors test", function()
     },
 
     ["to"] = {
-                selector = "to",
-                expect = {"nobody@example.com"}},
+      selector = "to",
+      expect = {"nobody@example.com"}},
 
     ["attachments"] = {
-                selector = "attachments",
-                expect = {{"ce112d07c52ae649f9646f3d0b5aaab5d4834836d771c032d1a75059d31fed84f38e00c0b205918f6d354934c2055d33d19d045f783a62561f467728ebcf0160",
-                          "ce112d07c52ae649f9646f3d0b5aaab5d4834836d771c032d1a75059d31fed84f38e00c0b205918f6d354934c2055d33d19d045f783a62561f467728ebcf0160"
-                          }}},
+      selector = "attachments",
+      expect = {{"ce112d07c52ae649f9646f3d0b5aaab5d4834836d771c032d1a75059d31fed84f38e00c0b205918f6d354934c2055d33d19d045f783a62561f467728ebcf0160",
+                 "ce112d07c52ae649f9646f3d0b5aaab5d4834836d771c032d1a75059d31fed84f38e00c0b205918f6d354934c2055d33d19d045f783a62561f467728ebcf0160"
+                }}
+    },
+
+    ["attachments blake2 base32"] = {
+      selector = "attachments('base32', 'blake2')",
+      expect = {{"qqr41dwakt3uwhucxmxsypjiifi8er3gzqhyc3r48fw1ij9dp8b8x8nyyscmoe6tpmp1r4eafezguezurazo87ecs48cw5bfm9udyob",
+                 "qqr41dwakt3uwhucxmxsypjiifi8er3gzqhyc3r48fw1ij9dp8b8x8nyyscmoe6tpmp1r4eafezguezurazo87ecs48cw5bfm9udyob"
+                }}
+    },
+
+    ["attachments blake2 base64"] = {
+      selector = "attachments('base64', 'blake2')",
+      expect = {{"zhEtB8Uq5kn5ZG89C1qqtdSDSDbXccAy0adQWdMf7YTzjgDAsgWRj201STTCBV0z0Z0EX3g6YlYfRnco688BYA==",
+                 "zhEtB8Uq5kn5ZG89C1qqtdSDSDbXccAy0adQWdMf7YTzjgDAsgWRj201STTCBV0z0Z0EX3g6YlYfRnco688BYA=="
+                }}
+    },
+
+    ["attachments blake2 rfc base32"] = {
+      selector = "attachments('rbase32', 'blake2')",
+      expect = {{"ZYIS2B6FFLTET6LEN46QWWVKWXKIGSBW25Y4AMWRU5IFTUY75WCPHDQAYCZALEMPNU2USNGCAVOTHUM5ARPXQOTCKYPUM5ZI5PHQCYA",
+                 "ZYIS2B6FFLTET6LEN46QWWVKWXKIGSBW25Y4AMWRU5IFTUY75WCPHDQAYCZALEMPNU2USNGCAVOTHUM5ARPXQOTCKYPUM5ZI5PHQCYA"
+                }}
+    },
+
+    ["attachments md5 rfc base32"] = {
+      selector = "attachments('rbase32', 'md5')",
+      expect = {{"LYXF2IMILRFFO4LLTDTM66MKEA",
+                 "LYXF2IMILRFFO4LLTDTM66MKEA"
+                }}
+    },
 
     ["attachments id"] = {
                 selector = "attachments.id",
@@ -155,7 +185,7 @@ context("Selectors test", function()
 
     ["urls"] = {
                 selector = "urls",
-                expect = {{"http://example.net"}}},
+                expect = {{"http://subdomain.example.net"}}},
 
     ["emails"] = {
                 selector = "emails",
@@ -163,11 +193,11 @@ context("Selectors test", function()
 
     ["specific_urls"] = {
       selector = "specific_urls({limit = 1})",
-      expect = {{"http://example.net"}}},
+      expect = {{"http://subdomain.example.net"}}},
 
     ["specific_urls + emails"] = {
       selector = "specific_urls({need_emails = true, limit = 2})",
-      expect = {{"test@example.net", "http://example.net"}}},
+      expect = {{"test@example.net", "http://subdomain.example.net"}}},
 
     ["specific_urls + emails limit"] = {
       selector = "specific_urls({need_emails = true, limit = 1})",
@@ -195,11 +225,14 @@ context("Selectors test", function()
 
     ["get_host"] = {
                 selector = "urls:get_host",
-                expect = {{"example.net"}}},
+                expect = {{"subdomain.example.net"}}},
 
-    ["get_tld"] = {
+    ["get_tld_method"] = {
                 selector = "urls:get_tld",
                 expect = {{"example.net"}}},
+    ["get_tld_transform"] = {
+      selector = "urls:get_host.get_tld",
+      expect = {{"example.net"}}},
 
     ["transformation regexp"] = {
                 selector = "urls:get_tld.regexp('\\.([\\w]+)$')",
@@ -313,13 +346,25 @@ context("Selectors test", function()
       selector = "header(X-Test, full).last",
       expect = {"3"}
     },
+    ["header lower digest substring"] = {
+      selector = "header('Subject').lower.digest('hex').substring(1, 16)",
+      expect = {"736ad5f50fc95d73"}
+    },
+    ["header gsub"] = {
+      selector = "header('Subject'):gsub('a', 'b')",
+      expect = {"Second, lower-cbsed hebder subject"}
+    },
+    ["header regexp first"] = {
+      selector = "header('Subject').regexp('.*').first",
+      expect = {"Second, lower-cased header subject"}
+    },
   }
 
-  for case_name, case in pairs(cases) do
+  for case_name, case in lua_util.spairs(cases) do
     test("case " .. case_name, function()
       local elts = check_selector(case.selector)
       assert_not_nil(elts)
-      assert_rspamd_table_eq({actual = elts, expect = case.expect})
+      assert_rspamd_table_eq_sorted({actual = elts, expect = case.expect})
     end)
   end
 end)
@@ -357,7 +402,7 @@ Hello world
 Content-Type: text/html; charset="utf-8"
 
 <html><body>
-<a href="http://example.net">http://example.net</a>
+<a href="http://subdomain.example.net">http://subdomain.example.net</a>
 <a href="mailto:test@example.net">mail me</a>
 </html>
 

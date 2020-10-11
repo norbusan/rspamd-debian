@@ -22,53 +22,29 @@
  THE SOFTWARE.
  */
 
-define(["jquery"],
-    function ($) {
+define(["jquery", "codejar", "linenumbers", "prism"],
+    function ($, CodeJar, withLineNumbers, Prism) {
         "use strict";
         var ui = {};
-
-        function loadActionsFromForm() {
-            var values = [];
-            var inputs = $("#actionsForm :input[data-id=\"action\"]");
-            // Rspamd order: [spam, rewrite_subject, probable_spam, greylist]
-            values[0] = parseFloat(inputs[3].value);
-            values[1] = parseFloat(inputs[2].value);
-            values[2] = parseFloat(inputs[1].value);
-            values[3] = parseFloat(inputs[0].value);
-
-            return JSON.stringify(values);
-        }
 
         ui.getActions = function getActions(rspamd, checked_server) {
             rspamd.query("actions", {
                 success: function (data) {
-                    $("#actionsBody").empty();
-                    $("#actionsForm").empty();
+                    $("#actionsFormField").empty();
                     var items = [];
                     $.each(data[0].data, function (i, item) {
-                        var idx = -1;
-                        var label = null;
-                        if (item.action === "greylist") {
-                            label = "Greylist";
-                            idx = 0;
-                        } else if (item.action === "add header") {
-                            label = "Probably Spam";
-                            idx = 1;
-                        } else if (item.action === "rewrite subject") {
-                            label = "Rewrite subject";
-                            idx = 2;
-                        } else if (item.action === "reject") {
-                            label = "Spam";
-                            idx = 3;
-                        }
+                        var actionsOrder = ["greylist", "add header", "rewrite subject", "reject"];
+                        var idx = actionsOrder.indexOf(item.action);
                         if (idx >= 0) {
                             items.push({
                                 idx: idx,
-                                html: "<div class=\"form-group\">" +
-                                "<label class=\"control-label col-sm-2\">" + label + "</label>" +
-                                "<div class=\"controls slider-controls col-sm-10\">" +
-                                "<input class=\"action-scores form-control\" data-id=\"action\" type=\"number\" value=\"" + item.value + "\">" +
-                                "</div>" +
+                                html:
+                                '<div class="form-group">' +
+                                    '<label class="col-form-label col-md-2 float-left">' + item.action + "</label>" +
+                                    '<div class="controls slider-controls col-md-10">' +
+                                        '<input class="action-scores form-control" data-id="action" type="number" value="' +
+                                          item.value + '">' +
+                                    "</div>" +
                                 "</div>"
                             });
                         }
@@ -78,65 +54,68 @@ define(["jquery"],
                         return a.idx - b.idx;
                     });
 
-                    $("#actionsBody").html("<form id=\"actionsForm\"><fieldset id=\"actionsFormField\">" +
-                    items.map(function (e) {
-                        return e.html;
-                    }).join("") +
-                    "<br><div class=\"form-group\">" +
-                    "<div class=\"btn-group\">" +
-                    "<button class=\"btn btn-primary\" type=\"button\" id=\"saveActionsBtn\">Save actions</button>" +
-                    "<button class=\"btn btn-primary\" type=\"button\" id=\"saveActionsClusterBtn\">Save cluster</button>" +
-                    "</div></div></fieldset></form>");
-                    if (rspamd.read_only) {
-                        $("#saveActionsClusterBtn").attr("disabled", true);
-                        $("#saveActionsBtn").attr("disabled", true);
-                        $("#actionsFormField").attr("disabled", true);
-                    }
-
-                    function saveActions(server) {
-                        var elts = loadActionsFromForm();
-                        // String to array for comparison
-                        var eltsArray = JSON.parse(loadActionsFromForm());
-                        if (eltsArray[0] < 0) {
-                            rspamd.alertMessage("alert-modal alert-error", "Spam can not be negative");
-                        } else if (eltsArray[1] < 0) {
-                            rspamd.alertMessage("alert-modal alert-error", "Rewrite subject can not be negative");
-                        } else if (eltsArray[2] < 0) {
-                            rspamd.alertMessage("alert-modal alert-error", "Probable spam can not be negative");
-                        } else if (eltsArray[3] < 0) {
-                            rspamd.alertMessage("alert-modal alert-error", "Greylist can not be negative");
-                        } else if (
-                            (eltsArray[2] === null || eltsArray[3] < eltsArray[2]) &&
-                        (eltsArray[1] === null || eltsArray[2] < eltsArray[1]) &&
-                        (eltsArray[0] === null || eltsArray[1] < eltsArray[0])
-                        ) {
-                            rspamd.query("saveactions", {
-                                method: "POST",
-                                params: {
-                                    data: elts,
-                                    dataType: "json"
-                                },
-                                server: server
-                            });
-                        } else {
-                            rspamd.alertMessage("alert-modal alert-error", "Incorrect order of metric actions threshold");
-                        }
-                    }
-
-                    $("#saveActionsBtn").on("click", function () {
-                        saveActions();
-                    });
-                    $("#saveActionsClusterBtn").on("click", function () {
-                        saveActions("All SERVERS");
-                    });
+                    $("#actionsFormField").html(
+                        items.map(function (e) {
+                            return e.html;
+                        }).join(""));
                 },
                 server: (checked_server === "All SERVERS") ? "local" : checked_server
             });
         };
 
+        ui.saveActions = function (rspamd, server) {
+            function descending(arr) {
+                var desc = true;
+                var filtered = arr.filter(function (el) {
+                    return el !== null;
+                });
+                for (var i = 0; i < filtered.length - 1; i++) {
+                    if (filtered[i + 1] >= filtered[i]) {
+                        desc = false;
+                        break;
+                    }
+                }
+                return desc;
+            }
+
+            var elts = (function () {
+                var values = [];
+                var inputs = $("#actionsForm :input[data-id=\"action\"]");
+                // Rspamd order: [spam, rewrite_subject, probable_spam, greylist]
+                values[0] = parseFloat(inputs[3].value);
+                values[1] = parseFloat(inputs[2].value);
+                values[2] = parseFloat(inputs[1].value);
+                values[3] = parseFloat(inputs[0].value);
+
+                return JSON.stringify(values);
+            }());
+            // String to array for comparison
+            var eltsArray = JSON.parse(elts);
+            if (eltsArray[0] < 0) {
+                rspamd.alertMessage("alert-modal alert-error", "Spam can not be negative");
+            } else if (eltsArray[1] < 0) {
+                rspamd.alertMessage("alert-modal alert-error", "Rewrite subject can not be negative");
+            } else if (eltsArray[2] < 0) {
+                rspamd.alertMessage("alert-modal alert-error", "Probable spam can not be negative");
+            } else if (eltsArray[3] < 0) {
+                rspamd.alertMessage("alert-modal alert-error", "Greylist can not be negative");
+            } else if (descending(eltsArray)) {
+                rspamd.query("saveactions", {
+                    method: "POST",
+                    params: {
+                        data: elts,
+                        dataType: "json"
+                    },
+                    server: server
+                });
+            } else {
+                rspamd.alertMessage("alert-modal alert-error", "Incorrect order of actions thresholds");
+            }
+        };
+
         ui.getMaps = function (rspamd, checked_server) {
             var $listmaps = $("#listMaps");
-            $listmaps.closest(".widget-box").hide();
+            $listmaps.closest(".card").hide();
             rspamd.query("maps", {
                 success: function (json) {
                     var data = json[0].data;
@@ -145,26 +124,42 @@ define(["jquery"],
                     var $tbody = $("<tbody>");
 
                     $.each(data, function (i, item) {
-                        var label = (item.editable === false || rspamd.read_only)
-                            ? "<span class=\"label label-default\">Read</span>"
-                            : "<span class=\"label label-default\">Read</span>&nbsp;<span class=\"label label-success\">Write</span>";
-                        var $tr = $("<tr>");
-                        $("<td class=\"col-md-2 maps-cell\">" + label + "</td>").appendTo($tr);
-                        var $span = $("<span class=\"map-link\" data-toggle=\"modal\" data-target=\"#modalDialog\">" + item.uri + "</span>").data("item", item);
+                        var $td = '<td><span class="badge badge-secondary">Read</span></td>';
+                        if (!(item.editable === false || rspamd.read_only)) {
+                            $td = $($td).append('&nbsp;<span class="badge badge-success">Write</span>');
+                        }
+                        var $tr = $("<tr>").append($td);
+
+                        var $span = $('<span class="map-link" data-toggle="modal" data-target="#modalDialog">' + item.uri + "</span>").data("item", item);
                         $span.wrap("<td>").parent().appendTo($tr);
                         $("<td>" + item.description + "</td>").appendTo($tr);
                         $tr.appendTo($tbody);
                     });
                     $tbody.appendTo($listmaps);
-                    $listmaps.closest(".widget-box").show();
+                    $listmaps.closest(".card").show();
                 },
                 server: (checked_server === "All SERVERS") ? "local" : checked_server
             });
         };
 
-        // @upload edited actions
         ui.setup = function (rspamd) {
-        // Modal form for maps
+            var jar = {};
+            // CodeJar requires ES6
+            var editor = window.CodeJar &&
+                // Required to restore cursor position
+                (typeof window.getSelection().setBaseAndExtent === "function")
+                ? {
+                    codejar: true,
+                    elt: "div",
+                    class: "editor language-clike",
+                }
+                // Fallback to textarea if the browser does not support ES6
+                : {
+                    elt: "textarea",
+                    class: "form-control map-textarea",
+                };
+
+            // Modal form for maps
             $(document).on("click", "[data-toggle=\"modal\"]", function () {
                 var checked_server = rspamd.getSelector("selSrv");
                 var item = $(this).data("item");
@@ -173,46 +168,56 @@ define(["jquery"],
                         Map: item.map
                     },
                     success: function (data) {
-                        var disabled = "";
+                        var readonly = "";
+                        var icon = "fa-edit";
                         var text = data[0].data;
                         if (item.editable === false || rspamd.read_only) {
-                            disabled = "disabled=\"disabled\"";
-                        }
-
-                        $("#" + item.map).remove();
-                        $("<form id=\"" + item.map + "\" class=\"form-horizontal form-map\" style=\"display:none\"" +
-                        " data-type=\"map\" action=\"savemap\" method=\"post\">" +
-                        "<textarea class=\"list-textarea\"" + disabled + ">" + text +
-                        "</textarea>" +
-                        "</form>").appendTo("#modalBody");
-
-                        $("#modalTitle").html(item.uri);
-                        $("#" + item.map).first().show();
-                        $("#modalDialog").modal({backdrop:true, keyboard:"show", show:true});
-                        if (item.editable === false) {
-                            $("#modalSave").hide();
-                            $("#modalSaveAll").hide();
+                            readonly = " readonly";
+                            icon = "fa-eye";
+                            $("#modalSaveGroup").hide();
                         } else {
-                            $("#modalSave").show();
-                            $("#modalSaveAll").show();
+                            $("#modalSaveGroup").show();
                         }
+                        $("#modalDialog .modal-header").find("[data-fa-i2svg]").addClass(icon);
+                        $("#modalTitle").html(item.uri);
+
+                        $("<" + editor.elt + ' id="editor" class="' + editor.class + '"' + readonly +
+                            ' data-id="' + item.map + '">' +
+                            text +
+                            "</" + editor.elt + ">").appendTo("#modalBody");
+
+                        if (editor.codejar) {
+                            jar = new CodeJar(
+                                document.querySelector("#editor"),
+                                withLineNumbers(Prism.highlightElement)
+                            );
+                        }
+
+                        $("#modalDialog").modal("show");
                     },
                     errorMessage: "Cannot receive maps data",
                     server: (checked_server === "All SERVERS") ? "local" : checked_server
                 });
                 return false;
             });
-            // close modal without saving
             $("#modalDialog").on("hidden.bs.modal", function () {
-                $("#modalBody form").remove();
+                if (editor.codejar) {
+                    jar.destroy();
+                    $(".codejar-wrap").remove();
+                } else {
+                    $("#editor").remove();
+                }
             });
-            // @save forms from modal
+
+            $("#saveActionsBtn").on("click", function () {
+                ui.saveActions(rspamd);
+            });
+            $("#saveActionsClusterBtn").on("click", function () {
+                ui.saveActions(rspamd, "All SERVERS");
+            });
+
             function saveMap(server) {
-                var form = $("#modalBody").children().filter(":visible");
-                var action = $(form).attr("action");
-                var id = $(form).attr("id");
-                var data = $("#" + id).find("textarea").val();
-                rspamd.query(action, {
+                rspamd.query("savemap", {
                     success: function () {
                         rspamd.alertMessage("alert-success", "Map data successfully saved");
                         $("#modalDialog").modal("hide");
@@ -220,10 +225,10 @@ define(["jquery"],
                     errorMessage: "Save map error",
                     method: "POST",
                     headers: {
-                        Map: id,
+                        Map: $("#editor").data("id"),
                     },
                     params: {
-                        data: data,
+                        data: editor.codejar ? jar.toString() : $("#editor").val(),
                         dataType: "text",
                     },
                     server: server

@@ -1127,6 +1127,40 @@ rspamd_map_schedule_periodic (struct rspamd_map *map, int how)
 			cbd, jittered_sec, map->name, reason);
 }
 
+static gint
+rspamd_map_af_to_weight (const rspamd_inet_addr_t *addr)
+{
+	int ret;
+
+	switch (rspamd_inet_address_get_af (addr)) {
+	case AF_UNIX:
+		ret = 2;
+		break;
+	case AF_INET:
+		ret = 1;
+		break;
+	default:
+		ret = 0;
+		break;
+	}
+
+	return ret;
+}
+
+static gint
+rspamd_map_dns_address_sort_func (gconstpointer a, gconstpointer b)
+{
+	const rspamd_inet_addr_t *ip1 = *(const rspamd_inet_addr_t **)a,
+			*ip2 = *(const rspamd_inet_addr_t **)b;
+	gint w1, w2;
+
+	w1 = rspamd_map_af_to_weight (ip1);
+	w2 = rspamd_map_af_to_weight (ip2);
+
+	/* Inverse order */
+	return w2 - w1;
+}
+
 static void
 rspamd_map_dns_callback (struct rdns_reply *reply, void *arg)
 {
@@ -1146,11 +1180,6 @@ rspamd_map_dns_callback (struct rdns_reply *reply, void *arg)
 	}
 
 	if (reply->code == RDNS_RC_NOERROR) {
-		/*
-		 * We just get the first address hoping that a resolver performs
-		 * round-robin rotation well
-		 */
-
 		DL_FOREACH (reply->entries, cur_rep) {
 			rspamd_inet_addr_t *addr;
 			addr = rspamd_inet_address_from_rnds (reply->entries);
@@ -1188,13 +1217,24 @@ rspamd_map_dns_callback (struct rdns_reply *reply, void *arg)
 	}
 
 	if (cbd->stage == http_map_http_conn && cbd->addrs->len > 0) {
-		guint selected_addr_idx;
+		rspamd_ptr_array_shuffle (cbd->addrs);
+		gint idx = 0;
+		/*
+		 * For the existing addr we can just select any address as we have
+		 * data available
+		 */
+		if (cbd->map->nelts > 0 && rspamd_random_double_fast () > 0.5) {
+			/* Already shuffled, use whatever is the first */
+			cbd->addr = (rspamd_inet_addr_t *) g_ptr_array_index (cbd->addrs, idx);
+		}
+		else {
+			/* Always prefer IPv4 as IPv6 is almost all the time broken */
+			g_ptr_array_sort (cbd->addrs, rspamd_map_dns_address_sort_func);
+			cbd->addr = (rspamd_inet_addr_t *) g_ptr_array_index (cbd->addrs, idx);
+		}
 
-		selected_addr_idx = rspamd_random_uint64_fast () % cbd->addrs->len;
-		cbd->addr = (rspamd_inet_addr_t *)g_ptr_array_index (cbd->addrs,
-				selected_addr_idx);
-
-		msg_debug_map ("open http connection to %s",
+retry:
+		msg_debug_map ("try open http connection to %s",
 				rspamd_inet_address_to_string_pretty (cbd->addr));
 		cbd->conn = rspamd_http_connection_new_client (NULL,
 				NULL,
@@ -1207,14 +1247,30 @@ rspamd_map_dns_callback (struct rdns_reply *reply, void *arg)
 			write_http_request (cbd);
 		}
 		else {
-			cbd->periodic->errored = TRUE;
-			msg_err_map ("error reading %s(%s): "
-						 "connection with http server terminated incorrectly: %s",
-					cbd->bk->uri,
-					cbd->addr ? rspamd_inet_address_to_string_pretty (cbd->addr) : "",
-					strerror (errno));
+			if (idx < cbd->addrs->len - 1) {
+				/* We can retry */
+				idx++;
+				rspamd_inet_addr_t *prev_addr = cbd->addr;
+				cbd->addr = (rspamd_inet_addr_t *) g_ptr_array_index (cbd->addrs, idx);
+				msg_info_map ("cannot connect to %s to get data for %s: %s, retry with %s (%d of %d)",
+						rspamd_inet_address_to_string_pretty (prev_addr),
+						cbd->bk->uri,
+						strerror (errno),
+						rspamd_inet_address_to_string_pretty (cbd->addr),
+						idx + 1, cbd->addrs->len);
+				goto retry;
+			}
+			else {
+				/* Nothing else left */
+				cbd->periodic->errored = TRUE;
+				msg_err_map ("error reading %s(%s): "
+							 "connection with http server terminated incorrectly: %s",
+						cbd->bk->uri,
+						cbd->addr ? rspamd_inet_address_to_string_pretty (cbd->addr) : "",
+						strerror (errno));
 
-			rspamd_map_process_periodic (cbd->periodic);
+				rspamd_map_process_periodic (cbd->periodic);
+			}
 		}
 	}
 
@@ -2582,7 +2638,7 @@ rspamd_map_calculate_hash (struct rspamd_map *map)
 	}
 
 	rspamd_cryptobox_hash_final (&st, cksum);
-	cksum_encoded = rspamd_encode_base32 (cksum, sizeof (cksum));
+	cksum_encoded = rspamd_encode_base32 (cksum, sizeof (cksum), RSPAMD_BASE32_DEFAULT);
 	rspamd_strlcpy (map->tag, cksum_encoded, sizeof (map->tag));
 	g_free (cksum_encoded);
 }

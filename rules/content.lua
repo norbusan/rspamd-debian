@@ -17,7 +17,7 @@ limitations under the License.
 local function process_pdf_specific(task, part, specific)
   local suspicious_factor = 0
   if specific.encrypted then
-    task:insert_result('PDF_ENCRYPTED', 1.0, part:get_filename())
+    task:insert_result('PDF_ENCRYPTED', 1.0, part:get_filename() or 'unknown')
     suspicious_factor = suspicious_factor + 0.1
     if specific.openaction then
       suspicious_factor = suspicious_factor + 0.5
@@ -25,17 +25,30 @@ local function process_pdf_specific(task, part, specific)
   end
 
   if specific.scripts then
-    task:insert_result('PDF_JAVASCRIPT', 1.0, part:get_filename())
+    task:insert_result('PDF_JAVASCRIPT', 1.0, part:get_filename() or 'unknown')
     suspicious_factor = suspicious_factor + 0.1
   end
 
   if specific.suspicious then
-    suspicious_factor = suspicious_factor + 0.7
+    suspicious_factor = suspicious_factor + specific.suspicious
   end
 
   if suspicious_factor > 0.5 then
     if suspicious_factor > 1.0 then suspicious_factor = 1.0 end
-    task:insert_result('PDF_SUSPICIOUS', suspicious_factor, part:get_filename())
+    task:insert_result('PDF_SUSPICIOUS', suspicious_factor, part:get_filename() or 'unknown')
+  end
+
+  if specific.long_trailer then
+    task:insert_result('PDF_LONG_TRAILER', 1.0, string.format('%s:%d',
+        part:get_filename() or 'unknown', specific.long_trailer))
+  end
+  if specific.many_objects then
+    task:insert_result('PDF_MANY_OBJECTS', 1.0, string.format('%s:%d',
+        part:get_filename() or 'unknown', specific.many_objects))
+  end
+  if specific.timeout_processing then
+    task:insert_result('PDF_TIMEOUT', 1.0, string.format('%s:%.3f',
+        part:get_filename() or 'unknown', specific.timeout_processing))
   end
 end
 
@@ -80,6 +93,24 @@ rspamd_config:register_symbol{
 rspamd_config:register_symbol{
   type = 'virtual',
   name = 'PDF_SUSPICIOUS',
+  parent = id,
+  groups = {"content", "pdf"},
+}
+rspamd_config:register_symbol{
+  type = 'virtual',
+  name = 'PDF_LONG_TRAILER',
+  parent = id,
+  groups = {"content", "pdf"},
+}
+rspamd_config:register_symbol{
+  type = 'virtual',
+  name = 'PDF_MANY_OBJECTS',
+  parent = id,
+  groups = {"content", "pdf"},
+}
+rspamd_config:register_symbol{
+  type = 'virtual',
+  name = 'PDF_TIMEOUT',
   parent = id,
   groups = {"content", "pdf"},
 }

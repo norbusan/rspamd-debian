@@ -23,8 +23,8 @@
 #include "mime_encoding.h"
 #include "message.h"
 #include "contrib/fastutf8/fastutf8.h"
+#include "contrib/google-ced/ced_c.h"
 #include <unicode/ucnv.h>
-#include <unicode/ucsdet.h>
 #if U_ICU_VERSION_MAJOR_NUM >= 44
 #include <unicode/unorm2.h>
 #endif
@@ -255,10 +255,24 @@ rspamd_mime_detect_charset (const rspamd_ftok_t *in, rspamd_mempool_t *pool)
 	gchar *ret = NULL, *h, *t;
 	struct rspamd_charset_substitution *s;
 	const gchar *cset;
+	rspamd_ftok_t utf8_tok;
 	UErrorCode uc_err = U_ZERO_ERROR;
 
 	if (sub_hash == NULL) {
 		rspamd_mime_encoding_substitute_init ();
+	}
+
+	/* Fast path */
+	RSPAMD_FTOK_ASSIGN (&utf8_tok, "utf-8");
+
+	if (rspamd_ftok_casecmp (in, &utf8_tok) == 0) {
+		return UTF8_CHARSET;
+	}
+
+	RSPAMD_FTOK_ASSIGN (&utf8_tok, "utf8");
+
+	if (rspamd_ftok_casecmp (in, &utf8_tok) == 0) {
+		return UTF8_CHARSET;
 	}
 
 	ret = rspamd_mempool_ftokdup (pool, in);
@@ -287,7 +301,7 @@ rspamd_mime_detect_charset (const rspamd_ftok_t *in, rspamd_mempool_t *pool)
 		ret = (char *)s->canon;
 	}
 
-	/* Just fucking stupid */
+	/* Try different aliases */
 	cset = ucnv_getCanonicalName (ret, "MIME", &uc_err);
 
 	if (cset == NULL) {
@@ -297,12 +311,12 @@ rspamd_mime_detect_charset (const rspamd_ftok_t *in, rspamd_mempool_t *pool)
 
 	if (cset == NULL) {
 		uc_err = U_ZERO_ERROR;
-		cset = ucnv_getCanonicalName (ret, "WINDOWS", &uc_err);
+		cset = ucnv_getCanonicalName (ret, "", &uc_err);
 	}
 
 	if (cset == NULL) {
 		uc_err = U_ZERO_ERROR;
-		cset = ucnv_getCanonicalName (ret, "JAVA", &uc_err);
+		cset = ucnv_getAlias (ret, 0, &uc_err);
 	}
 
 	return cset;
@@ -320,6 +334,21 @@ rspamd_mime_text_to_utf8 (rspamd_mempool_t *pool,
 	UErrorCode uc_err = U_ZERO_ERROR;
 	UConverter *utf8_converter;
 	struct rspamd_charset_converter *conv;
+	rspamd_ftok_t cset_tok;
+
+	/* Check if already utf8 */
+	RSPAMD_FTOK_FROM_STR (&cset_tok, in_enc);
+
+	if (rspamd_mime_charset_utf_check (&cset_tok, input, len,
+			FALSE)) {
+		d = rspamd_mempool_alloc (pool, len);
+		memcpy (d, input, len);
+		if (olen) {
+			*olen = len;
+		}
+
+		return d;
+	}
 
 	conv = rspamd_mime_get_converter_cached (in_enc, pool, TRUE, &uc_err);
 	utf8_converter = rspamd_get_utf8_converter ();
@@ -360,7 +389,7 @@ rspamd_mime_text_to_utf8 (rspamd_mempool_t *pool,
 		return NULL;
 	}
 
-	msg_info_pool ("converted from %s to UTF-8 inlen: %z, outlen: %d",
+	msg_debug_pool ("converted from %s to UTF-8 inlen: %z, outlen: %d",
 			in_enc, len, r);
 	g_free (tmp_buf);
 
@@ -431,8 +460,16 @@ rspamd_mime_text_part_utf8_convert (struct rspamd_task *task,
 		return FALSE;
 	}
 
-	msg_info_task ("converted from %s to UTF-8 inlen: %d, outlen: %d (%d UTF16 chars)",
-			charset, input->len, r, uc_len);
+	if (text_part->mime_part && text_part->mime_part->ct) {
+		msg_info_task ("converted text part from %s ('%T' announced) to UTF-8 inlen: %d, outlen: %d (%d UTF16 chars)",
+				charset, &text_part->mime_part->ct->charset, input->len, r, uc_len);
+	}
+	else {
+		msg_info_task ("converted text part from %s (no charset announced) to UTF-8 inlen: %d, "
+				 "outlen: %d (%d UTF16 chars)",
+				charset, input->len, r, uc_len);
+	}
+
 	text_part->utf_raw_content = rspamd_mempool_alloc (task->task_pool,
 			sizeof (*text_part->utf_raw_content) + sizeof (gpointer) * 4);
 	text_part->utf_raw_content->data = d;
@@ -561,38 +598,22 @@ rspamd_mime_charset_utf_enforce (gchar *in, gsize len)
 const char *
 rspamd_mime_charset_find_by_content (const gchar *in, gsize inlen)
 {
-	static UCharsetDetector *csd;
-	const UCharsetMatch **csm, *sel = NULL;
-	UErrorCode uc_err = U_ZERO_ERROR;
-	gint32 matches, i, max_conf = G_MININT32, conf;
-	gdouble mean = 0.0, stddev = 0.0;
-
-	if (csd == NULL) {
-		csd = ucsdet_open (&uc_err);
-
-		g_assert (csd != NULL);
-	}
+	int nconsumed;
+	bool is_reliable;
+	const gchar *ced_name;
 
 	if (rspamd_fast_utf8_validate (in, inlen) == 0) {
 		return UTF8_CHARSET;
 	}
 
-	ucsdet_setText (csd, in, inlen, &uc_err);
-	csm = ucsdet_detectAll (csd, &matches, &uc_err);
 
-	for (i = 0; i < matches; i ++) {
-		if ((conf = ucsdet_getConfidence (csm[i], &uc_err)) > max_conf) {
-			max_conf = conf;
-			sel = csm[i];
-		}
+	ced_name = ced_encoding_detect (in, inlen, NULL, NULL,
+			NULL, 0, CED_EMAIL_CORPUS,
+			false, &nconsumed, &is_reliable);
 
-		mean += (conf - mean) / (i + 1);
-		gdouble err = fabs (conf - mean);
-		stddev += (err - stddev) / (i + 1);
-	}
+	if (ced_name) {
 
-	if (sel && ((max_conf > 50) || (max_conf - mean > stddev * 1.25))) {
-		return ucsdet_getName (sel, &uc_err);
+		return ced_name;
 	}
 
 	return NULL;

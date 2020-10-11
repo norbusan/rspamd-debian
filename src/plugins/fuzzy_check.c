@@ -82,8 +82,10 @@ struct fuzzy_rule {
 	struct rspamd_cryptobox_keypair *local_key;
 	struct rspamd_cryptobox_pubkey *peer_key;
 	double max_score;
+	double weight_threshold;
 	gboolean read_only;
 	gboolean skip_unknown;
+	gboolean no_share;
 	gint learn_condition_cb;
 	struct rspamd_hash_map_helper *skip_map;
 	struct fuzzy_ctx *ctx;
@@ -185,6 +187,7 @@ static gint fuzzy_attach_controller (struct module_ctx *ctx,
 	GHashTable *commands);
 static gint fuzzy_lua_learn_handler (lua_State *L);
 static gint fuzzy_lua_unlearn_handler (lua_State *L);
+static gint fuzzy_lua_gen_hashes_handler (lua_State *L);
 
 module_t fuzzy_check_module = {
 		"fuzzy_check",
@@ -310,6 +313,7 @@ fuzzy_rule_new (const char *default_symbol, rspamd_mempool_t *pool)
 		(rspamd_mempool_destruct_t)g_hash_table_unref,
 		rule->mappings);
 	rule->read_only = FALSE;
+	rule->weight_threshold = NAN;
 
 	return rule;
 }
@@ -344,6 +348,14 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 	if (obj->type != UCL_OBJECT) {
 		msg_err_config ("invalid rule definition");
 		return -1;
+	}
+
+	if ((value = ucl_object_lookup_any (obj, "enabled", "enable", NULL)) != NULL) {
+		if (!ucl_object_toboolean (value)) {
+			msg_info_config ("fuzzy rule %s is disabled by configuration", name);
+
+			return 0;
+		}
 	}
 
 	rule = fuzzy_rule_new (fuzzy_module_ctx->default_symbol,
@@ -421,6 +433,10 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 
 	if ((value = ucl_object_lookup (obj, "skip_unknown")) != NULL) {
 		rule->skip_unknown = ucl_obj_toboolean (value);
+	}
+
+	if ((value = ucl_object_lookup (obj, "no_share")) != NULL) {
+		rule->no_share = ucl_obj_toboolean (value);
 	}
 
 	if ((value = ucl_object_lookup (obj, "algorithm")) != NULL) {
@@ -582,6 +598,10 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 				rule->algorithm_str);
 	}
 
+	if ((value = ucl_object_lookup (obj,  "weight_threshold")) != NULL) {
+		rule->weight_threshold = ucl_object_todouble (value);
+	}
+
 	/*
 	 * Process rule in Lua
 	 */
@@ -603,7 +623,7 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 		rule->lua_id = lua_tonumber (L, -1);
 	}
 
-	lua_settop (L, 0);
+	lua_settop (L, err_idx - 1);
 
 	rspamd_mempool_add_destructor (cfg->cfg_pool, fuzzy_free_rule,
 			rule);
@@ -1131,13 +1151,16 @@ fuzzy_check_module_config (struct rspamd_config *cfg)
 
 	if (lua_type (L, -1) == LUA_TTABLE) {
 		lua_pushstring (L, "fuzzy_check");
-		lua_createtable (L, 0, 2);
+		lua_createtable (L, 0, 3);
 		/* Set methods */
 		lua_pushstring (L, "unlearn");
 		lua_pushcfunction (L, fuzzy_lua_unlearn_handler);
 		lua_settable (L, -3);
 		lua_pushstring (L, "learn");
 		lua_pushcfunction (L, fuzzy_lua_learn_handler);
+		lua_settable (L, -3);
+		lua_pushstring (L, "gen_hashes");
+		lua_pushcfunction (L, fuzzy_lua_gen_hashes_handler);
 		lua_settable (L, -3);
 		/* Finish fuzzy_check key */
 		lua_settable (L, -3);
@@ -1341,6 +1364,8 @@ fuzzy_cmd_hash (struct fuzzy_rule *rule,
 struct rspamd_cached_shingles {
 	struct rspamd_shingle *sh;
 	guchar digest[rspamd_cryptobox_HASHBYTES];
+	guint additional_length;
+	guchar *additional_data;
 };
 
 
@@ -1405,9 +1430,13 @@ fuzzy_rule_check_mimepart (struct rspamd_task *task,
 						   gboolean *need_check,
 						   gboolean *fuzzy_check)
 {
+	lua_State *L = (lua_State *)task->cfg->lua_state;
+
+	gint old_top = lua_gettop (L);
+
 	if (rule->lua_id != -1 && rule->ctx->check_mime_part_ref != -1) {
 		gint err_idx, ret;
-		lua_State *L = (lua_State *)task->cfg->lua_state;
+
 		struct rspamd_task **ptask;
 		struct rspamd_mime_part **ppart;
 
@@ -1437,12 +1466,115 @@ fuzzy_rule_check_mimepart (struct rspamd_task *task,
 			*fuzzy_check = lua_toboolean (L, -1);
 		}
 
-		lua_settop (L, 0);
+		lua_settop (L, old_top);
 
 		return ret;
 	}
 
 	return FALSE;
+}
+
+#define MAX_FUZZY_DOMAIN 64
+
+static guint
+fuzzy_cmd_extension_length (struct rspamd_task *task,
+							struct fuzzy_rule *rule)
+{
+	guint total = 0;
+
+	if (rule->no_share) {
+		return 0;
+	}
+
+	/* From domain */
+	if (MESSAGE_FIELD (task, from_mime) && MESSAGE_FIELD (task, from_mime)->len > 0) {
+		struct rspamd_email_address *addr = g_ptr_array_index (MESSAGE_FIELD (task,
+				from_mime), 0);
+
+		if (addr->domain_len > 0) {
+			total += 2; /* 2 bytes: type + length */
+			total += MIN (MAX_FUZZY_DOMAIN, addr->domain_len);
+		}
+	}
+
+	if (task->from_addr && rspamd_inet_address_get_af (task->from_addr) == AF_INET) {
+		total += sizeof (struct in_addr) + 1;
+	}
+	else if (task->from_addr&& rspamd_inet_address_get_af (task->from_addr) == AF_INET6) {
+		total += sizeof (struct in6_addr) + 1;
+	}
+
+	return total;
+}
+
+static guint
+fuzzy_cmd_write_extensions (struct rspamd_task *task,
+							struct fuzzy_rule *rule,
+							guchar *dest,
+							gsize available)
+{
+	guint written = 0;
+
+	if (rule->no_share) {
+		return 0;
+	}
+
+	if (MESSAGE_FIELD (task, from_mime) && MESSAGE_FIELD (task, from_mime)->len > 0) {
+		struct rspamd_email_address *addr = g_ptr_array_index (MESSAGE_FIELD (task,
+				from_mime), 0);
+		guint to_write = MIN (MAX_FUZZY_DOMAIN, addr->domain_len) + 2;
+
+		if (to_write > 0 && to_write <= available) {
+			*dest++ = RSPAMD_FUZZY_EXT_SOURCE_DOMAIN;
+			*dest++ = to_write - 2;
+
+			if (addr->domain_len < MAX_FUZZY_DOMAIN) {
+				memcpy (dest, addr->domain, addr->domain_len);
+				dest += addr->domain_len;
+			}
+			else {
+				/* Trim from left */
+				memcpy (dest,
+						addr->domain + (addr->domain_len - MAX_FUZZY_DOMAIN),
+						MAX_FUZZY_DOMAIN);
+				dest += MAX_FUZZY_DOMAIN;
+			}
+
+			available -= to_write;
+			written += to_write;
+		}
+	}
+
+	if (task->from_addr && rspamd_inet_address_get_af (task->from_addr) == AF_INET) {
+		if (available >= sizeof (struct in_addr) + 1) {
+			guint klen;
+			guchar *inet_data = rspamd_inet_address_get_hash_key (task->from_addr, &klen);
+
+			*dest++ = RSPAMD_FUZZY_EXT_SOURCE_IP4;
+
+			memcpy (dest, inet_data, klen);
+			dest += klen;
+
+			available -= klen + 1;
+			written += klen + 1;
+		}
+	}
+	else if (task->from_addr && rspamd_inet_address_get_af (task->from_addr) == AF_INET6) {
+		if (available >= sizeof (struct in6_addr) + 1) {
+			guint klen;
+			guchar *inet_data = rspamd_inet_address_get_hash_key (task->from_addr, &klen);
+
+			*dest++ = RSPAMD_FUZZY_EXT_SOURCE_IP6;
+
+			memcpy (dest, inet_data, klen);
+			dest += klen;
+
+			available -= klen + 1;
+			written += klen + 1;
+		}
+	}
+
+	return written;
 }
 
 /*
@@ -1455,7 +1587,6 @@ fuzzy_cmd_from_text_part (struct rspamd_task *task,
 						  gint flag,
 						  guint32 weight,
 						  gboolean short_text,
-						  rspamd_mempool_t *pool,
 						  struct rspamd_mime_text_part *part,
 						  struct rspamd_mime_part *mp)
 {
@@ -1470,24 +1601,57 @@ fuzzy_cmd_from_text_part (struct rspamd_task *task,
 	rspamd_stat_token_t *word;
 	GArray *words;
 	struct fuzzy_cmd_io *io;
+	guint additional_length;
+	guchar *additional_data;
 
 	cached = fuzzy_cmd_get_cached (rule, task, mp);
 
+	/*
+	 * Important note:
+	 *
+	 * We assume that fuzzy io is a consistent memory layout to fit into
+	 * iov structure of size 1
+	 *
+	 * However, there are 4 possibilities:
+	 * 1) non encrypted, non shingle command - just one cmd
+	 * 2) encrypted, non shingle command - encryption hdr + cmd
+	 * 3) non encrypted, shingle command - cmd + shingle
+	 * 4) encrypted, shingle command - encryption hdr + cmd + shingle
+	 *
+	 * Extensions are always at the end, but since we also have caching (sigh, meh...)
+	 * then we have one piece that looks like cmd (+ shingle) + extensions
+	 * To encrypt it optionally we take this memory and prepend encryption header
+	 *
+	 * In case of cached version we do the same: allocate, copy from cached (including extra)
+	 * and optionally encrypt.
+	 *
+	 * However, there should be no extensions in case of unencrypted connection
+	 * (for sanity + privacy).
+	 */
 	if (cached) {
+		additional_length = cached->additional_length;
+		additional_data = cached->additional_data;
+
 		/* Copy cached */
 		if (short_text) {
-			enccmd = rspamd_mempool_alloc0 (pool, sizeof (*enccmd));
+			enccmd = rspamd_mempool_alloc0 (task->task_pool,
+					sizeof (*enccmd) + additional_length);
 			cmd = &enccmd->cmd;
 			memcpy (cmd->digest, cached->digest,
 					sizeof (cached->digest));
 			cmd->shingles_count = 0;
+			memcpy (((guchar *)enccmd) + sizeof (*enccmd), additional_data,
+					additional_length);
 		}
 		else if (cached->sh) {
-			encshcmd = rspamd_mempool_alloc0 (pool, sizeof (*encshcmd));
+			encshcmd = rspamd_mempool_alloc0 (task->task_pool,
+					additional_length + sizeof (*encshcmd));
 			shcmd = &encshcmd->cmd;
 			memcpy (&shcmd->sgl, cached->sh, sizeof (struct rspamd_shingle));
 			memcpy (shcmd->basic.digest, cached->digest,
 					sizeof (cached->digest));
+			memcpy (((guchar *)encshcmd) + sizeof (*encshcmd), additional_data,
+					additional_length);
 			shcmd->basic.shingles_count = RSPAMD_SHINGLE_SIZE;
 		}
 		else {
@@ -1495,10 +1659,24 @@ fuzzy_cmd_from_text_part (struct rspamd_task *task,
 		}
 	}
 	else {
-		cached = rspamd_mempool_alloc (pool, sizeof (*cached));
+		additional_length = fuzzy_cmd_extension_length (task, rule);
+		cached = rspamd_mempool_alloc0 (task->task_pool, sizeof (*cached) +
+				additional_length);
+		/*
+		 * Allocate extensions and never touch it except copying to avoid
+		 * occasional encryption
+		 */
+		cached->additional_length = additional_length;
+		cached->additional_data = ((guchar *)cached) + sizeof (*cached);
+
+		if (additional_length > 0) {
+			fuzzy_cmd_write_extensions (task, rule, cached->additional_data,
+					additional_length);
+		}
 
 		if (short_text) {
-			enccmd = rspamd_mempool_alloc0 (pool, sizeof (*encshcmd));
+			enccmd = rspamd_mempool_alloc0 (task->task_pool,
+					sizeof (*enccmd) + additional_length);
 			cmd = &enccmd->cmd;
 			rspamd_cryptobox_hash_init (&st, rule->hash_key->str,
 					rule->hash_key->len);
@@ -1515,16 +1693,20 @@ fuzzy_cmd_from_text_part (struct rspamd_task *task,
 			rspamd_cryptobox_hash_final (&st, cmd->digest);
 			memcpy (cached->digest, cmd->digest, sizeof (cached->digest));
 			cached->sh = NULL;
+
+			additional_data = ((guchar *)enccmd) + sizeof (*enccmd);
+			memcpy (additional_data, cached->additional_data, additional_length);
 		}
 		else {
-			encshcmd = rspamd_mempool_alloc0 (pool, sizeof (*encshcmd));
+			encshcmd = rspamd_mempool_alloc0 (task->task_pool,
+					sizeof (*encshcmd) + additional_length);
 			shcmd = &encshcmd->cmd;
 
 			/*
 			 * Generate hash from all words in the part
 			 */
 			rspamd_cryptobox_hash_init (&st, rule->hash_key->str, rule->hash_key->len);
-			words = fuzzy_preprocess_words (part, pool);
+			words = fuzzy_preprocess_words (part, task->task_pool);
 
 			for (i = 0; i < words->len; i ++) {
 				word = &g_array_index (words, rspamd_stat_token_t, i);
@@ -1538,21 +1720,26 @@ fuzzy_cmd_from_text_part (struct rspamd_task *task,
 
 			rspamd_cryptobox_hash_final (&st, shcmd->basic.digest);
 
-
-			msg_debug_pool ("loading shingles of type %s with key %*xs",
+			msg_debug_task ("loading shingles of type %s with key %*xs",
 					rule->algorithm_str,
 					16, rule->shingles_key->str);
 			sh = rspamd_shingles_from_text (words,
-					rule->shingles_key->str, pool,
+					rule->shingles_key->str, task->task_pool,
 					rspamd_shingles_default_filter, NULL,
 					rule->alg);
 			if (sh != NULL) {
 				memcpy (&shcmd->sgl, sh, sizeof (shcmd->sgl));
 				shcmd->basic.shingles_count = RSPAMD_SHINGLE_SIZE;
 			}
+			else {
+				/* No shingles, no check */
+				return NULL;
+			}
 
 			cached->sh = sh;
 			memcpy (cached->digest, shcmd->basic.digest, sizeof (cached->digest));
+			additional_data = ((guchar *)encshcmd) + sizeof (*encshcmd);
+			memcpy (additional_data, cached->additional_data, additional_length);
 		}
 
 		/*
@@ -1565,7 +1752,7 @@ fuzzy_cmd_from_text_part (struct rspamd_task *task,
 		fuzzy_cmd_set_cached (rule, task, mp, cached);
 	}
 
-	io = rspamd_mempool_alloc (pool, sizeof (*io));
+	io = rspamd_mempool_alloc (task->task_pool, sizeof (*io));
 	io->part = mp;
 
 	if (!short_text) {
@@ -1600,25 +1787,26 @@ fuzzy_cmd_from_text_part (struct rspamd_task *task,
 		/* Encrypt data */
 		if (!short_text) {
 			fuzzy_encrypt_cmd (rule, &encshcmd->hdr, (guchar *) shcmd,
-					sizeof (*shcmd));
+					sizeof (*shcmd) + additional_length);
 			io->io.iov_base = encshcmd;
-			io->io.iov_len = sizeof (*encshcmd);
+			io->io.iov_len = sizeof (*encshcmd) + additional_length;
 		}
 		else {
 			fuzzy_encrypt_cmd (rule, &enccmd->hdr, (guchar *)cmd,
-					sizeof (*cmd));
+					sizeof (*cmd) + additional_length);
 			io->io.iov_base = enccmd;
-			io->io.iov_len = sizeof (*enccmd);
+			io->io.iov_len = sizeof (*enccmd) + additional_length;
 		}
 	}
 	else {
+
 		if (!short_text) {
 			io->io.iov_base = shcmd;
-			io->io.iov_len = sizeof (*shcmd);
+			io->io.iov_len = sizeof (*shcmd) + additional_length;
 		}
 		else {
 			io->io.iov_base = cmd;
-			io->io.iov_len = sizeof (*cmd);
+			io->io.iov_len = sizeof (*cmd) + additional_length;
 		}
 	}
 
@@ -1729,20 +1917,28 @@ fuzzy_cmd_from_data_part (struct fuzzy_rule *rule,
 						  int c,
 						  gint flag,
 						  guint32 weight,
-						  rspamd_mempool_t *pool,
+						  struct rspamd_task *task,
 						  guchar digest[rspamd_cryptobox_HASHBYTES],
 						  struct rspamd_mime_part *mp)
 {
 	struct rspamd_fuzzy_cmd *cmd;
 	struct rspamd_fuzzy_encrypted_cmd *enccmd = NULL;
 	struct fuzzy_cmd_io *io;
+	guint additional_length;
+	guchar *additional_data;
+
+	additional_length = fuzzy_cmd_extension_length (task, rule);
 
 	if (rule->peer_key) {
-		enccmd = rspamd_mempool_alloc0 (pool, sizeof (*enccmd));
+		enccmd = rspamd_mempool_alloc0 (task->task_pool,
+				sizeof (*enccmd) + additional_length);
 		cmd = &enccmd->cmd;
+		additional_data = ((guchar *)enccmd) + sizeof (*enccmd);
 	}
 	else {
-		cmd = rspamd_mempool_alloc0 (pool, sizeof (*cmd));
+		cmd = rspamd_mempool_alloc0 (task->task_pool,
+				sizeof (*cmd) + additional_length);
+		additional_data = ((guchar *)cmd) + sizeof (*cmd);
 	}
 
 	cmd->cmd = c;
@@ -1755,21 +1951,27 @@ fuzzy_cmd_from_data_part (struct fuzzy_rule *rule,
 	cmd->tag = ottery_rand_uint32 ();
 	memcpy (cmd->digest, digest, sizeof (cmd->digest));
 
-	io = rspamd_mempool_alloc (pool, sizeof (*io));
+	io = rspamd_mempool_alloc (task->task_pool, sizeof (*io));
 	io->flags = 0;
 	io->tag = cmd->tag;
 	io->part = mp;
 	memcpy (&io->cmd, cmd, sizeof (io->cmd));
 
+	if (additional_length > 0) {
+		fuzzy_cmd_write_extensions (task, rule, additional_data,
+				additional_length);
+	}
+
 	if (rule->peer_key) {
 		g_assert (enccmd != NULL);
-		fuzzy_encrypt_cmd (rule, &enccmd->hdr, (guchar *) cmd, sizeof (*cmd));
+		fuzzy_encrypt_cmd (rule, &enccmd->hdr, (guchar *)cmd,
+				sizeof (*cmd) + additional_length);
 		io->io.iov_base = enccmd;
-		io->io.iov_len = sizeof (*enccmd);
+		io->io.iov_len = sizeof (*enccmd) + additional_length;
 	}
 	else {
 		io->io.iov_base = cmd;
-		io->io.iov_len = sizeof (*cmd);
+		io->io.iov_len = sizeof (*cmd) + additional_length;
 	}
 
 	return io;
@@ -2028,7 +2230,7 @@ fuzzy_insert_result (struct fuzzy_client_session *session,
 		rspamd_gmtime (rep->ts, &tm_split);
 		rspamd_snprintf (timebuf, sizeof (timebuf), "%02d.%02d.%4d %02d:%02d:%02d GMT",
 				tm_split.tm_mday,
-				tm_split.tm_mon,
+				tm_split.tm_mon + 1,
 				tm_split.tm_year + 1900,
 				tm_split.tm_hour, tm_split.tm_min, tm_split.tm_sec);
 
@@ -2170,7 +2372,8 @@ fuzzy_check_try_read (struct fuzzy_client_session *session)
 }
 
 static void
-fuzzy_insert_metric_results (struct rspamd_task *task, GPtrArray *results)
+fuzzy_insert_metric_results (struct rspamd_task *task, struct fuzzy_rule *rule,
+		GPtrArray *results)
 {
 	struct fuzzy_client_result *res;
 	guint i;
@@ -2247,8 +2450,22 @@ fuzzy_insert_metric_results (struct rspamd_task *task, GPtrArray *results)
 			}
 		}
 
-		rspamd_task_insert_result_single (task, res->symbol,
-				res->score * mult, res->option);
+		gdouble weight = res->score * mult;
+
+		if (!isnan (rule->weight_threshold)) {
+			if (weight >= rule->weight_threshold) {
+				rspamd_task_insert_result_single (task, res->symbol,
+						weight, res->option);
+			}
+			else {
+				msg_info_task ("%s is not added: weight=%.4f below threshold",
+						res->symbol, weight);
+			}
+		}
+		else {
+			rspamd_task_insert_result_single (task, res->symbol,
+					weight, res->option);
+		}
 	}
 }
 
@@ -2269,10 +2486,12 @@ fuzzy_check_session_is_completed (struct fuzzy_client_session *session)
 	}
 
 	if (nreplied == session->commands->len) {
-		fuzzy_insert_metric_results (session->task, session->results);
+		fuzzy_insert_metric_results (session->task, session->rule, session->results);
+
 		if (session->item) {
 			rspamd_symcache_item_async_dec_check (session->task, session->item, M);
 		}
+
 		rspamd_session_remove_event (session->task->s, fuzzy_io_fin, session);
 
 		return TRUE;
@@ -2624,7 +2843,8 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 				if (*(session->err) == NULL) {
 					g_set_error (session->err,
 						g_quark_from_static_string (M),
-						errno, "write socket error: %s", strerror (errno));
+						errno, "write socket error: %s",
+						strerror (errno));
 				}
 				ret = return_error;
 			}
@@ -2779,7 +2999,6 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 							flag,
 							value,
 							!fuzzy_check,
-							task->task_pool,
 							part,
 							mime_part);
 				}
@@ -2788,7 +3007,7 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 					image = mime_part->specific.img;
 
 					io = fuzzy_cmd_from_data_part (rule, c, flag, value,
-							task->task_pool,
+							task,
 							image->parent->digest,
 							mime_part);
 					io->flags |= FUZZY_CMD_FLAG_IMAGE;
@@ -2809,8 +3028,10 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 						lua_gettable (L, -2);
 
 						if (lua_type (L, -1) == LUA_TTABLE) {
+							gint tbl_pos = lua_gettop (L);
 
-							for (lua_pushnil (L); lua_next (L, 2); lua_pop (L, 1)) {
+							for (lua_pushnil (L); lua_next (L, tbl_pos);
+									lua_pop (L, 1)) {
 								const gchar *h = NULL;
 								gsize hlen = 0;
 
@@ -2831,7 +3052,7 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 								if (hlen == rspamd_cryptobox_HASHBYTES) {
 									io = fuzzy_cmd_from_data_part (rule, c,
 											flag, value,
-											task->task_pool,
+											task,
 											(guchar *)h,
 											mime_part);
 
@@ -2850,14 +3071,14 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 						 */
 						io = fuzzy_cmd_from_data_part (rule, c,
 								flag, value,
-								task->task_pool,
+								task,
 								mime_part->digest,
 								mime_part);
 					}
 				}
 				else {
 					io = fuzzy_cmd_from_data_part (rule, c, flag, value,
-							task->task_pool,
+							task,
 							mime_part->digest, mime_part);
 				}
 
@@ -3175,7 +3396,7 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 			}
 
 			/* Result + error function */
-			lua_settop (L, 0);
+			lua_settop (L, err_idx - 1);
 
 			if (skip) {
 				msg_info_task ("skip rule %s by condition callback",
@@ -3657,6 +3878,136 @@ fuzzy_lua_unlearn_handler (lua_State *L)
 		lua_pushboolean (L,
 				fuzzy_check_lua_process_learn (task, FUZZY_DEL, weight, flag,
 						send_flags));
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+fuzzy_lua_gen_hashes_handler (lua_State *L)
+{
+	struct rspamd_task *task = lua_check_task (L, 1);
+	guint flag = 0, weight = 1, send_flags = 0;
+	const gchar *symbol;
+	struct fuzzy_ctx *fuzzy_module_ctx = fuzzy_get_context (task->cfg);
+	struct fuzzy_rule *rule;
+	GPtrArray *commands;
+	gint cmd = FUZZY_WRITE;
+	gint i;
+
+	if (task) {
+		if (lua_type (L, 2) == LUA_TNUMBER) {
+			flag = lua_tonumber (L, 2);
+		}
+		else if (lua_type (L, 2) == LUA_TSTRING) {
+			struct fuzzy_rule *rule;
+			guint i;
+			GHashTableIter it;
+			gpointer k, v;
+			struct fuzzy_mapping *map;
+
+			symbol = lua_tostring (L, 2);
+
+			PTR_ARRAY_FOREACH (fuzzy_module_ctx->fuzzy_rules, i, rule) {
+				if (flag != 0) {
+					break;
+				}
+
+				g_hash_table_iter_init (&it, rule->mappings);
+
+				while (g_hash_table_iter_next (&it, &k, &v)) {
+					map = v;
+
+					if (g_ascii_strcasecmp (symbol, map->symbol) == 0) {
+						flag = map->fuzzy_flag;
+						break;
+					}
+				}
+			}
+		}
+
+		if (flag == 0) {
+			return luaL_error (L, "bad flag");
+		}
+
+		if (lua_type (L, 3) == LUA_TNUMBER) {
+			weight = lua_tonumber (L, 3);
+		}
+
+		/* Flags */
+		if (lua_type (L, 4) == LUA_TTABLE) {
+			const gchar *sf;
+
+			for (lua_pushnil (L); lua_next (L, -2); lua_pop (L, 1)) {
+				sf = lua_tostring (L, -1);
+
+				if (sf) {
+					if (g_ascii_strcasecmp (sf, "noimages") == 0) {
+						send_flags |= FUZZY_CHECK_FLAG_NOIMAGES;
+					}
+					else if (g_ascii_strcasecmp (sf, "noattachments") == 0) {
+						send_flags |= FUZZY_CHECK_FLAG_NOATTACHMENTS;
+					}
+					else if (g_ascii_strcasecmp (sf, "notext") == 0) {
+						send_flags |= FUZZY_CHECK_FLAG_NOTEXT;
+					}
+				}
+			}
+		}
+
+		/* Type */
+		if (lua_type (L, 5) == LUA_TSTRING) {
+			const gchar *cmd_name = lua_tostring (L, 5);
+
+			if (strcmp (cmd_name, "add") == 0 || strcmp (cmd_name, "write") == 0) {
+				cmd = FUZZY_WRITE;
+			}
+			else if (strcmp (cmd_name, "delete") == 0 || strcmp (cmd_name, "remove") == 0) {
+				cmd = FUZZY_DEL;
+			}
+			else {
+				return luaL_error (L, "invalid command: %s", cmd_name);
+			}
+		}
+
+		lua_createtable (L, 0, fuzzy_module_ctx->fuzzy_rules->len);
+
+		PTR_ARRAY_FOREACH (fuzzy_module_ctx->fuzzy_rules, i, rule) {
+			if (rule->read_only) {
+				continue;
+			}
+
+			/* Check for flag */
+			if (g_hash_table_lookup (rule->mappings,
+					GINT_TO_POINTER (flag)) == NULL) {
+				msg_info_task ("skip rule %s as it has no flag %d defined"
+							   " false", rule->name, flag);
+				continue;
+			}
+
+			commands = fuzzy_generate_commands (task, rule, FUZZY_WRITE, flag,
+					weight, send_flags);
+
+			if (commands != NULL) {
+				struct fuzzy_cmd_io *io;
+				gint j;
+
+				lua_pushstring (L, rule->name);
+				lua_createtable (L, commands->len, 0);
+
+				PTR_ARRAY_FOREACH (commands, j, io) {
+					lua_pushlstring (L, io->io.iov_base, io->io.iov_len);
+					lua_rawseti (L, -2, j + 1);
+				}
+
+				lua_settable (L, -3); /* ret[rule->name] = {raw_fuzzy1, ..., raw_fuzzyn} */
+
+				g_ptr_array_free (commands, TRUE);
+			}
+		}
 	}
 	else {
 		return luaL_error (L, "invalid arguments");

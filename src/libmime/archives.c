@@ -68,11 +68,11 @@ rspamd_archive_file_try_utf (struct rspamd_task *task,
 		UConverter *utf8_converter;
 
 		conv = rspamd_mime_get_converter_cached (charset, task->task_pool,
-				FALSE, &uc_err);
+				TRUE, &uc_err);
 		utf8_converter = rspamd_get_utf8_converter ();
 
 		if (conv == NULL) {
-			msg_err_task ("cannot open converter for %s: %s",
+			msg_info_task ("cannot open converter for %s: %s",
 					charset, u_errorName (uc_err));
 
 			return NULL;
@@ -82,7 +82,7 @@ rspamd_archive_file_try_utf (struct rspamd_task *task,
 		r = rspamd_converter_to_uchars (conv, tmp, inlen + 1,
 				in, inlen, &uc_err);
 		if (!U_SUCCESS (uc_err)) {
-			msg_err_task ("cannot convert data to unicode from %s: %s",
+			msg_info_task ("cannot convert data to unicode from %s: %s",
 					charset, u_errorName (uc_err));
 			g_free (tmp);
 
@@ -95,7 +95,7 @@ rspamd_archive_file_try_utf (struct rspamd_task *task,
 		r = ucnv_fromUChars (utf8_converter, res->str, dlen, tmp, r, &uc_err);
 
 		if (!U_SUCCESS (uc_err)) {
-			msg_err_task ("cannot convert data from unicode from %s: %s",
+			msg_info_task ("cannot convert data from unicode from %s: %s",
 					charset, u_errorName (uc_err));
 			g_free (tmp);
 			g_string_free (res, TRUE);
@@ -1750,7 +1750,13 @@ rspamd_archive_process_gzip (struct rspamd_task *task,
 					f->fname = rspamd_archive_file_try_utf (task, fname_start,
 							p - fname_start);
 
-					g_ptr_array_add (arch->files, f);
+					if (f->fname) {
+						g_ptr_array_add (arch->files, f);
+					}
+					else {
+						/* Invalid filename, skip */
+						g_free (f);
+					}
 
 					goto set;
 				}
@@ -1915,7 +1921,7 @@ rspamd_archives_process (struct rspamd_task *task)
 	const guchar rar_magic[] = {0x52, 0x61, 0x72, 0x21, 0x1A, 0x07};
 	const guchar zip_magic[] = {0x50, 0x4b, 0x03, 0x04};
 	const guchar sz_magic[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
-	const guchar gz_magic[] = {0x1F, 0x8B};
+	const guchar gz_magic[] = {0x1F, 0x8B, 0x08};
 
 	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, parts), i, part) {
 		if (part->part_type == RSPAMD_MIME_PART_UNDEFINED) {

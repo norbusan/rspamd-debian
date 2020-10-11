@@ -8,7 +8,7 @@
 CMAKE_MINIMUM_REQUIRED(VERSION 3.9 FATAL_ERROR)
 
 SET(RSPAMD_VERSION_MAJOR 2)
-SET(RSPAMD_VERSION_MINOR 5)
+SET(RSPAMD_VERSION_MINOR 6)
 
 # Keep two digits all the time
 SET(RSPAMD_VERSION_MAJOR_NUM ${RSPAMD_VERSION_MAJOR}0)
@@ -68,7 +68,6 @@ INCLUDE(CMakeParseArguments)
 INCLUDE(FindArch)
 INCLUDE(AsmOp)
 INCLUDE(FindRagel)
-INCLUDE(FindLua)
 INCLUDE(ProcessPackage)
 
 IF(NOT RAGEL_FOUND)
@@ -121,37 +120,65 @@ INCLUDE(OSDep)
 
 # Now find libraries and headers
 LIST(APPEND RSPAMD_REQUIRED_LIBRARIES "m")
+LIST(APPEND RSPAMD_REQUIRED_LIBRARIES "pthread")
+
 IF(ENABLE_LUAJIT MATCHES "ON")
-	#ProcessPackage(LUAJIT luajit)
-	SET(WITH_LUA 1)
-	FindLua(VERSION_MAJOR "5" VERSION_MINOR "1" ROOT "${LUA_ROOT}")
-	IF(NOT LUA_FOUND)
-		MESSAGE(FATAL_ERROR "Lua not found, lua support is required")
-	ELSE(NOT LUA_FOUND)
-		SET(WITH_LUA 1)
-		INCLUDE_DIRECTORIES("${LUA_INCLUDE_DIR}")
-	ENDIF(NOT LUA_FOUND)
+	ProcessPackage(LIBLUAJIT LIBRARY	"luajit"
+										"luajit-2.1"
+										"luajit2.1"
+										"luajit-2.0"
+										"luajit2.0"
+										"luajit-5.1"
+			INCLUDE luajit.h INCLUDE_SUFFIXES
+										"include/luajit-2.1"
+										"include/luajit-2.0"
+										"include/luajit"
+			ROOT ${LUA_ROOT}
+			MODULES luajit)
+	SET(WITH_LUAJIT 1)
 ELSE(ENABLE_LUAJIT MATCHES "ON")
-	FindLua(VERSION_MAJOR "5" VERSION_MINOR "3" ROOT "${LUA_ROOT}")
-	IF(NOT LUA_FOUND)
-		FindLua(VERSION_MAJOR "5" VERSION_MINOR "2" ROOT "${LUA_ROOT}")
-		IF(NOT LUA_FOUND)
-				FindLua(VERSION_MAJOR "5" VERSION_MINOR "1" ROOT "${LUA_ROOT}")
-		ENDIF(NOT LUA_FOUND)
-	ENDIF(NOT LUA_FOUND)
-	IF(NOT LUA_FOUND)
-			MESSAGE(FATAL_ERROR "Lua not found, lua support is required")
-	ELSE(NOT LUA_FOUND)
-			SET(WITH_LUA 1)
-			INCLUDE_DIRECTORIES("${LUA_INCLUDE_DIR}")
-	ENDIF(NOT LUA_FOUND)
+
+	ProcessPackage(LIBLUA LIBRARY	"lua"
+			"lua-5.3"
+			INCLUDE lua.h INCLUDE_SUFFIXES
+			"include/lua-5.3"
+			"include/lua5.3"
+			"include/lua53"
+			"include/lua"
+			ROOT ${LUA_ROOT}
+			MODULES lua53
+			OPTIONAL)
+
+	IF (NOT WITH_LIBLUA)
+		ProcessPackage(LIBLUA LIBRARY	"lua"
+				"lua-5.2"
+				INCLUDE lua.h INCLUDE_SUFFIXES
+				"include/lua-5.2"
+				"include/lua5.2"
+				"include/lua52"
+				"include/lua"
+				ROOT ${LUA_ROOT}
+				MODULES lua52
+				OPTIONAL)
+
+		IF (NOT WITH_LIBLUA)
+			ProcessPackage(LIBLUA LIBRARY	"lua"
+					"lua-5.1"
+					INCLUDE lua.h INCLUDE_SUFFIXES
+					"include/lua-5.1"
+					"include/lua5.1"
+					"include/lua51"
+					"include/lua"
+					ROOT ${LUA_ROOT}
+					MODULES lua51)
+		ENDIF()
+	ENDIF()
 ENDIF(ENABLE_LUAJIT MATCHES "ON")
 
 IF(ENABLE_JEMALLOC MATCHES "ON" AND NOT SANITIZE)
 	ProcessPackage(JEMALLOC LIBRARY jemalloc_pic jemalloc INCLUDE jemalloc.h INCLUDE_SUFFIXES include/jemalloc
 		ROOT ${JEMALLOC_ROOT_DIR})
 	SET(WITH_JEMALLOC "1")
-	LIST(APPEND RSPAMD_REQUIRED_LIBRARIES "-lpthread")
 ENDIF()
 
 IF(ENABLE_LIBUNWIND MATCHES "ON")
@@ -318,6 +345,7 @@ CHECK_SYMBOL_EXISTS(getaddrinfo "sys/types.h;sys/socket.h;netdb.h" HAVE_GETADDRI
 CHECK_SYMBOL_EXISTS(sched_yield "sched.h" HAVE_SCHED_YIELD)
 CHECK_SYMBOL_EXISTS(__get_cpuid "cpuid.h" HAVE_GET_CPUID)
 CHECK_SYMBOL_EXISTS(nftw "sys/types.h;ftw.h" HAVE_NFTW)
+CHECK_SYMBOL_EXISTS(memrchr "string.h" HAVE_MEMRCHR)
 IF(ENABLE_PCRE2 MATCHES "ON")
 	LIST(APPEND CMAKE_REQUIRED_INCLUDES "${PCRE_INCLUDE}")
 	CHECK_SYMBOL_EXISTS(PCRE2_CONFIG_JIT "pcre2.h" HAVE_PCRE_JIT)
@@ -407,7 +435,6 @@ TRY_RUN(_CAN_RUN _CAN_COMPILE
 	CMAKE_FLAGS CMAKE_C_FLAGS="-pthread")
 IF(_CAN_RUN EQUAL 1)
 	SET(HAVE_PTHREAD_PROCESS_SHARED 1 CACHE INTERNAL "")
-	LIST(APPEND RSPAMD_REQUIRED_LIBRARIES "-lpthread")
 ENDIF(_CAN_RUN EQUAL 1)
 IF(HAVE_PTHREAD_PROCESS_SHARED)
 	MESSAGE(STATUS "pthread_mutexattr_setpshared is supported")
@@ -479,6 +506,11 @@ IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	# on a build system. On the other hand, we know that linux has stupid
 	# but compatible shmem support, so we assume this macro as true
 	SET(HAVE_SANE_SHMEM 1)
+	CHECK_C_SOURCE_COMPILES ("#define _GNU_SOURCE
+						  #include <sys/socket.h>
+						  int main (int argc, char **argv) {
+							return ((int*)(&recvmmsg))[argc];
+						  }" HAVE_RECVMMSG)
 ELSE()
 	CHECK_C_SOURCE_RUNS("
 	#include <sys/mman.h>
@@ -597,6 +629,8 @@ ADD_SUBDIRECTORY(contrib/t1ha)
 ADD_SUBDIRECTORY(contrib/libev)
 ADD_SUBDIRECTORY(contrib/kann)
 ADD_SUBDIRECTORY(contrib/fastutf8)
+ADD_SUBDIRECTORY(contrib/google-ced)
+
 
 IF (NOT WITH_LUAJIT)
 	ADD_SUBDIRECTORY(contrib/lua-bit)
@@ -617,6 +651,7 @@ LIST(APPEND RSPAMD_REQUIRED_LIBRARIES rspamd-actrie)
 LIST(APPEND RSPAMD_REQUIRED_LIBRARIES rspamd-t1ha)
 LIST(APPEND RSPAMD_REQUIRED_LIBRARIES rspamd-ev)
 LIST(APPEND RSPAMD_REQUIRED_LIBRARIES rspamd-kann)
+LIST(APPEND RSPAMD_REQUIRED_LIBRARIES rspamd-ced)
 
 IF(ENABLE_CLANG_PLUGIN MATCHES "ON")
 	ADD_SUBDIRECTORY(clang-plugin)

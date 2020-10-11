@@ -38,7 +38,6 @@
 
 #define ZSTD_STATIC_LINKING_ONLY
 #include "contrib/zstd/zstd.h"
-#include "contrib/zstd/zdict.h"
 
 #ifdef HAVE_OPENSSL
 #include <openssl/rand.h>
@@ -54,6 +53,8 @@
 #include <sys/resource.h>
 #endif
 #include <math.h>
+
+#include "blas-config.h"
 
 #define DEFAULT_SCORE 10.0
 
@@ -221,6 +222,7 @@ rspamd_config_new (enum rspamd_config_init_flags flags)
 	cfg->cache_reload_time = 30.0;
 	cfg->max_lua_urls = 1024;
 	cfg->max_urls = cfg->max_lua_urls * 10;
+	cfg->max_recipients = 1024;
 	cfg->max_blas_threads = 1;
 	cfg->max_opts_len = 4096;
 
@@ -2761,7 +2763,7 @@ rspamd_open_zstd_dictionary (const char *path)
 		return NULL;
 	}
 
-	dict->id = ZDICT_getDictID (dict->dict, dict->size);
+	dict->id = -1;
 
 	if (dict->id == 0) {
 		g_free (dict);
@@ -2781,12 +2783,11 @@ rspamd_free_zstd_dictionary (struct zstd_dictionary *dict)
 	}
 }
 
-#ifdef HAVE_CBLAS
-#ifdef HAVE_CBLAS_H
-#include "cblas.h"
-#else
+#ifdef HAVE_OPENBLAS_SET_NUM_THREADS
 extern void openblas_set_num_threads(int num_threads);
 #endif
+#ifdef HAVE_BLI_THREAD_SET_NUM_THREADS
+extern void bli_thread_set_num_threads(int num_threads);
 #endif
 
 gboolean
@@ -2891,9 +2892,13 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 			ZSTD_freeCStream (ctx->out_zstream);
 			ctx->out_zstream = NULL;
 		}
-#ifdef HAVE_CBLAS
+#ifdef HAVE_OPENBLAS_SET_NUM_THREADS
 		openblas_set_num_threads (cfg->max_blas_threads);
 #endif
+#ifdef HAVE_BLI_THREAD_SET_NUM_THREADS
+		bli_thread_set_num_threads (cfg->max_blas_threads);
+#endif
+
 	}
 
 	return ret;

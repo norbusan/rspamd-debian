@@ -27,7 +27,7 @@
  * You can convert rspamd_text into string but it will copy data.
  */
 
-/**
+/***
  * @function rspamd_text.fromstring(str)
  * Creates rspamd_text from Lua string (copied to the text)
  * @param {string} str string to use
@@ -35,15 +35,22 @@
  */
 LUA_FUNCTION_DEF (text, fromstring);
 
-/**
+/***
  * @function rspamd_text.null()
  * Creates rspamd_text with NULL pointer for testing purposes
  * @param {string} str string to use
  * @return {rspamd_text} resulting text
  */
 LUA_FUNCTION_DEF (text, null);
+/***
+ * @function rspamd_text.randombytes(nbytes)
+ * Creates rspamd_text with random bytes inside (raw bytes)
+ * @param {number} nbytes number of random bytes generated
+ * @return {rspamd_text} random bytes text
+ */
+LUA_FUNCTION_DEF (text, randombytes);
 
-/**
+/***
  * @function rspamd_text.fromtable(tbl[, delim])
  * Same as `table.concat` but generates rspamd_text instead of the Lua string
  * @param {table} tbl table to use
@@ -85,6 +92,12 @@ LUA_FUNCTION_DEF (text, save_in_file);
  */
 LUA_FUNCTION_DEF (text, span);
 /***
+ * @method rspamd_text:sub(start[, len])
+ * Returns a substrin for lua_text similar to string.sub from Lua
+ * @return {rspamd_text} new rspamd_text with span (must be careful when using with owned texts...)
+ */
+LUA_FUNCTION_DEF (text, sub);
+/***
  * @method rspamd_text:lines([stringify])
  * Returns an iter over all lines as rspamd_text objects or as strings if `stringify` is true
  * @param {boolean} stringify stringify lines
@@ -107,11 +120,28 @@ LUA_FUNCTION_DEF (text, split);
  */
 LUA_FUNCTION_DEF (text, at);
 /***
+ * @method rspamd_text:memchr(chr, [reverse])
+ * Returns the first or the last position of the character `chr` in the text or
+ * -1 in case if a character has not been found. Indexes start from `1`
+ * @param {string/number} chr character or a character code to find
+ * @param {boolean} reverse last character if `true`
+ * @return {integer} position of the character or `-1`
+ */
+LUA_FUNCTION_DEF (text, memchr);
+/***
  * @method rspamd_text:bytes()
  * Converts text to an array of bytes
  * @return {table|integer} bytes in the array (as unsigned char)
  */
 LUA_FUNCTION_DEF (text, bytes);
+/***
+ * @method rspamd_text:lower([is_utf, [inplace]])
+ * Return a new text with lowercased characters, if is_utf is true then Rspamd applies utf8 lowercase
+ * @param {boolean} is_utf apply utf8 lowercase
+ * @param {boolean} inplace lowercase the original text
+ * @return rspamd_text} new rspamd_text (or the original text if inplace) with lowercased letters
+ */
+LUA_FUNCTION_DEF (text, lower);
 LUA_FUNCTION_DEF (text, take_ownership);
 /***
  * @method rspamd_text:exclude_chars(set_to_exclude, [always_copy])
@@ -144,8 +174,34 @@ LUA_FUNCTION_DEF (text, exclude_chars);
  * @return {tspamd_text} modified or copied text
  */
 LUA_FUNCTION_DEF (text, oneline);
+/***
+ * @method rspamd_text:base32([b32type])
+ * Returns a text encoded in base32 (new rspamd_text is allocated)
+ *
+ * @param {string} b32type base32 type (default, bleach, rfc)
+ * @return {tspamd_text} new text encoded in base32
+ */
+LUA_FUNCTION_DEF (text, base32);
+/***
+ * @method rspamd_text:base64([line_length, [nline, [fold]]])
+ * Returns a text encoded in base64 (new rspamd_text is allocated)
+ *
+ * @param {number} line_length return text splited with newlines up to this attribute
+ * @param {string} nline newline type: `cr`, `lf`, `crlf`
+ * @param {boolean} fold use folding when splitting into lines (false by default)
+ * @return {tspamd_text} new text encoded in base64
+ */
+LUA_FUNCTION_DEF (text, base64);
+/***
+ * @method rspamd_text:hex()
+ * Returns a text encoded in hex (new rspamd_text is allocated)
+ *
+ * @return {tspamd_text} new text encoded in hex
+ */
+LUA_FUNCTION_DEF (text, hex);
 LUA_FUNCTION_DEF (text, gc);
 LUA_FUNCTION_DEF (text, eq);
+LUA_FUNCTION_DEF (text, lt);
 
 static const struct luaL_reg textlib_f[] = {
 		LUA_INTERFACE_DEF (text, fromstring),
@@ -153,6 +209,7 @@ static const struct luaL_reg textlib_f[] = {
 		LUA_INTERFACE_DEF (text, fromtable),
 		{"from_table", lua_text_fromtable},
 		LUA_INTERFACE_DEF (text, null),
+		LUA_INTERFACE_DEF (text, randombytes),
 		{NULL, NULL}
 };
 
@@ -163,17 +220,24 @@ static const struct luaL_reg textlib_m[] = {
 		LUA_INTERFACE_DEF (text, take_ownership),
 		LUA_INTERFACE_DEF (text, save_in_file),
 		LUA_INTERFACE_DEF (text, span),
+		LUA_INTERFACE_DEF (text, sub),
 		LUA_INTERFACE_DEF (text, lines),
 		LUA_INTERFACE_DEF (text, split),
 		LUA_INTERFACE_DEF (text, at),
+		LUA_INTERFACE_DEF (text, memchr),
 		LUA_INTERFACE_DEF (text, bytes),
+		LUA_INTERFACE_DEF (text, lower),
 		LUA_INTERFACE_DEF (text, exclude_chars),
 		LUA_INTERFACE_DEF (text, oneline),
+		LUA_INTERFACE_DEF (text, base32),
+		LUA_INTERFACE_DEF (text, base64),
+		LUA_INTERFACE_DEF (text, hex),
 		{"write", lua_text_save_in_file},
 		{"__len", lua_text_len},
 		{"__tostring", lua_text_str},
 		{"__gc", lua_text_gc},
 		{"__eq", lua_text_eq},
+		{"__lt", lua_text_lt},
 		{NULL, NULL}
 };
 
@@ -198,7 +262,11 @@ lua_new_text (lua_State *L, const gchar *start, gsize len, gboolean own)
 
 		if (len > 0) {
 			storage = g_malloc (len);
-			memcpy (storage, start, len);
+
+			if (start != NULL) {
+				memcpy (storage, start, len);
+			}
+
 			t->start = storage;
 			t->flags = RSPAMD_TEXT_FLAG_OWN;
 		}
@@ -248,6 +316,20 @@ lua_text_null (lua_State *L)
 	LUA_TRACE_POINT;
 
 	lua_new_text (L, NULL, 0, false);
+
+	return 1;
+}
+
+static gint
+lua_text_randombytes (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	guint nbytes = luaL_checkinteger (L, 1);
+	struct rspamd_lua_text *out;
+
+	out = lua_new_text (L, NULL, nbytes, TRUE);
+	randombytes_buf ((char *)out->start, nbytes);
+	out->len = nbytes;
 
 	return 1;
 }
@@ -497,6 +579,68 @@ lua_text_span (lua_State *L)
 			return luaL_error (L, "invalid arguments: start offset %d "
 						 "is larger than text len %d", (int)start, (int)t->len);
 		}
+	}
+
+	return 1;
+}
+
+/* Helpers to behave exactly as Lua does */
+static inline gsize
+relative_pos_start (gint pos, gsize len)
+{
+	if (pos > 0) {
+		return pos;
+	}
+	else if (pos == 0) {
+		return 1;
+	}
+	else if (pos < -((gint) len)) {
+		return 1;
+	}
+
+	/* Negative pos inside str */
+	return len + ((gsize)pos) + 1;
+}
+
+static inline gsize
+relative_pos_end (gint pos, gsize len)
+{
+	if (pos > (gint)len) {
+		return len;
+	}
+	else if (pos >= 0) {
+		return (size_t) pos;
+	}
+	else if (pos < -((gint)len)) {
+		return 0;
+	}
+
+	return len + ((gsize)pos) + 1;
+}
+
+static gint
+lua_text_sub (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_text *t = lua_check_text (L, 1);
+
+	if (t) {
+		size_t start = relative_pos_start (luaL_checkinteger (L, 2),
+				t->len);
+		size_t end = relative_pos_end (luaL_optinteger (L, 3, -1),
+				t->len);
+
+
+		if (start <= end) {
+			lua_new_text (L, t->start + (start - 1),
+					(end - start) + 1, FALSE);
+		}
+		else {
+			lua_new_text (L, "", 0, TRUE);
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
 	}
 
 	return 1;
@@ -792,6 +936,61 @@ lua_text_at (lua_State *L)
 }
 
 static gint
+lua_text_memchr (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_text *t = lua_check_text (L, 1);
+	int c;
+	bool reverse = false;
+
+	if (lua_isnumber (L, 2)) {
+		c = lua_tonumber (L, 2);
+	}
+	else {
+		gsize l;
+		const gchar *str = lua_tolstring (L, 2, &l);
+
+		if (str) {
+			c = str[0];
+
+			if (l != 1) {
+				return luaL_error (L, "need exactly one character to search");
+			}
+		}
+		else {
+			return luaL_error (L, "invalid arguments");
+		}
+	}
+
+	if (t) {
+		void *f;
+
+		if (lua_isboolean (L, 3)) {
+			reverse = lua_toboolean (L, 3);
+		}
+
+		if (reverse) {
+			f = rspamd_memrchr (t->start, c, t->len);
+		}
+		else {
+			f = memchr (t->start, c, t->len);
+		}
+
+		if (f) {
+			lua_pushinteger (L, ((const char *)f) - t->start + 1);
+		}
+		else {
+			lua_pushinteger (L, -1);
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
 lua_text_bytes (lua_State *L)
 {
 	LUA_TRACE_POINT;
@@ -924,6 +1123,25 @@ lua_text_eq (lua_State *L)
 }
 
 static gint
+lua_text_lt (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_text *t1 = lua_check_text (L, 1),
+			*t2 = lua_check_text (L, 2);
+
+	if (t1 && t2) {
+		if (t1->len == t2->len) {
+			lua_pushboolean (L, memcmp (t1->start, t2->start, t1->len) < 0);
+		}
+		else {
+			lua_pushboolean (L, t1->len < t2->len);
+		}
+	}
+
+	return 1;
+}
+
+static gint
 lua_text_wipe (lua_State *L)
 {
 	LUA_TRACE_POINT;
@@ -943,6 +1161,105 @@ lua_text_wipe (lua_State *L)
 	}
 
 	return 0;
+}
+
+static gint
+lua_text_base32 (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_text *t = lua_check_text (L, 1), *out;
+	enum rspamd_base32_type btype = RSPAMD_BASE32_DEFAULT;
+
+	if (t != NULL) {
+		if (lua_type (L, 2) == LUA_TSTRING) {
+			btype = rspamd_base32_decode_type_from_str (lua_tostring (L, 2));
+
+			if (btype == RSPAMD_BASE32_INVALID) {
+				return luaL_error (L, "invalid b32 type: %s", lua_tostring (L, 2));
+			}
+		}
+
+		out = lua_new_text (L, NULL, t->len * 8 / 5 + 2, TRUE);
+		out->len = rspamd_encode_base32_buf (t->start, t->len, (gchar *)out->start,
+				out->len, btype);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_text_base64 (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_text *t = lua_check_text (L, 1), *out;
+	gsize line_len = 0;
+	gboolean fold = FALSE;
+
+	if (t != NULL) {
+		if (lua_type (L, 2) == LUA_TNUMBER) {
+			line_len = lua_tointeger (L, 2);
+
+			if (line_len <= 8) {
+				return luaL_error (L, "too small line length (at least 8 is required)");
+			}
+		}
+
+		enum rspamd_newlines_type how = RSPAMD_TASK_NEWLINES_CRLF;
+
+		if (lua_type (L, 3) == LUA_TSTRING) {
+			const gchar *how_str = lua_tostring (L, 3);
+
+			if (g_ascii_strcasecmp (how_str, "cr") == 0) {
+				how = RSPAMD_TASK_NEWLINES_CR;
+			}
+			else if (g_ascii_strcasecmp (how_str, "lf") == 0) {
+				how = RSPAMD_TASK_NEWLINES_LF;
+			}
+			else if (g_ascii_strcasecmp (how_str, "crlf") != 0) {
+				return luaL_error (L, "invalid newline style: %s", how_str);
+			}
+		}
+
+		if (lua_type (L, 4) == LUA_TBOOLEAN) {
+			fold = lua_toboolean (L, 4);
+		}
+
+		gsize sz_len;
+
+		out = lua_newuserdata (L, sizeof (*t));
+		out->flags = RSPAMD_TEXT_FLAG_OWN;
+		out->start = rspamd_encode_base64_common (t->start, t->len,
+				line_len, &sz_len, fold, how);
+		out->len = sz_len;
+		rspamd_lua_setclass (L, "rspamd{text}", -1);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_text_hex (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_text *t = lua_check_text (L, 1), *out;
+
+	if (t != NULL) {
+
+		out = lua_new_text (L, NULL, t->len * 2, TRUE);
+		out->len = rspamd_encode_hex_buf (t->start, t->len, (gchar *)out->start,
+				out->len);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
 }
 
 #define BITOP(a,b,op) \
@@ -1201,9 +1518,52 @@ lua_text_oneline (lua_State *L)
 }
 
 static gint
+lua_text_lower (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_text *t = lua_check_text (L, 1), *nt;
+	gboolean is_utf8 = FALSE, is_inplace = FALSE;
+
+	if (t != NULL) {
+		if (lua_isboolean (L, 2)) {
+			is_utf8 = lua_toboolean (L, 2);
+		}
+		if (lua_isboolean (L, 3)) {
+			is_inplace = lua_toboolean (L, 3);
+		}
+
+		if (is_inplace) {
+			nt = t;
+			lua_pushvalue (L, 1);
+		}
+		else {
+			nt = lua_new_text (L, t->start, t->len, TRUE);
+		}
+
+		if (!is_utf8) {
+			rspamd_str_lc ((gchar *) nt->start, nt->len);
+		}
+		else {
+			rspamd_str_lc_utf8 ((gchar *) nt->start, nt->len);
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+/* Used to distinguish lua text metatable */
+static const guint rspamd_lua_text_cookie = 0x2b21ef6fU;
+
+static gint
 lua_load_text (lua_State * L)
 {
 	lua_newtable (L);
+	lua_pushstring (L, "cookie");
+	lua_pushnumber (L, rspamd_lua_text_cookie);
+	lua_settable (L, -3);
 	luaL_register (L, NULL, textlib_f);
 
 	return 1;
@@ -1213,6 +1573,9 @@ void
 luaopen_text (lua_State *L)
 {
 	rspamd_lua_new_class (L, "rspamd{text}", textlib_m);
+	lua_pushstring (L, "cookie");
+	lua_pushnumber (L, rspamd_lua_text_cookie);
+	lua_settable (L, -3);
 	lua_pop (L, 1);
 
 	rspamd_lua_add_preload (L, "rspamd_text", lua_load_text);
