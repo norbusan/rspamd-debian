@@ -6,14 +6,21 @@ copy_js_font_files()
 {
   # Rspamd web interface doesn't support symlinks and directory traversal
   # copy javascript files from original Debian packages
+  RSPAMD_CSS_DIR=/usr/share/rspamd/www/css
   RSPAMD_JS_LIB_DIR=/usr/share/rspamd/www/js/lib
-  cp --remove-destination /usr/share/javascript/bootstrap/js/bootstrap.min.js $RSPAMD_JS_LIB_DIR/bootstrap.min.js
+  cp --remove-destination /usr/share/javascript/bootstrap4/js/bootstrap.bundle.min.js $RSPAMD_JS_LIB_DIR/bootstrap.bundle.min.js
+  cp --remove-destination /usr/share/javascript/bootstrap4/css/bootstrap.min.css $RSPAMD_CSS_DIR/bootstrap.min.css
   cp --remove-destination /usr/share/javascript/jquery/jquery.min.js $RSPAMD_JS_LIB_DIR/jquery.min.js
   cp --remove-destination /usr/share/javascript/requirejs/require.js $RSPAMD_JS_LIB_DIR/require.min.js
+
   # remove path of previous versions, if existent
   if [ -f $RSPAMD_JS_LIB_DIR/jquery-3.3.1.min.js ]; then
     rm $RSPAMD_JS_LIB_DIR/jquery-3.3.1.min.js
   fi
+  if [ -f $RSPAMD_JS_LIB_DIR/bootstrap.min.js ]; then
+    rm $RSPAMD_JS_LIB_DIR/bootstrap.min.js
+  fi
+
   # copy font files from original Debian package
   RSPAMD_FONT_DIR=/usr/share/rspamd/www/fonts
   cp --remove-destination /usr/share/fonts-glyphicons/glyphicons-halflings-regular.ttf $RSPAMD_FONT_DIR/glyphicons-halflings-regular.ttf

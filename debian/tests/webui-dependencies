@@ -33,7 +33,8 @@ test_file()
 
 echo "Start checking files..."
 
-test_file /usr/share/javascript/bootstrap/js/bootstrap.min.js
+test_file /usr/share/javascript/bootstrap4/js/bootstrap.bundle.min.js /usr/share/nodejs/bootstrap/dist/js/bootstrap.bundle.min.js
+test_file /usr/share/javascript/bootstrap4/css/bootstrap.min.css /usr/share/nodejs/bootstrap/dist/css/bootstrap.min.css
 test_file /usr/share/javascript/jquery/jquery.min.js /usr/share/nodejs/jquery/dist/jquery.min.js
 test_file /usr/share/javascript/requirejs/require.js
 test_file /usr/share/fonts-glyphicons/glyphicons-halflings-regular.ttf /usr/share/fonts/truetype/glyphicons/glyphicons-halflings-regular.ttf

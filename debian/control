@@ -31,7 +31,7 @@ Pre-Depends: ${misc:Pre-Depends}
 Depends: adduser,
          ca-certificates,
          fonts-glyphicons-halflings,
-         libjs-bootstrap,
+         libjs-bootstrap4,
          libjs-jquery,
          libjs-requirejs,
          lsb-base,
