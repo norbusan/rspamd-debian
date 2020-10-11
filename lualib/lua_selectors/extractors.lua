@@ -16,6 +16,7 @@ limitations under the License.
 
 local fun = require 'fun'
 local lua_util = require "lua_util"
+local common = require "lua_selectors/common"
 local ts = require("tableshape").types
 local E = {}
 
@@ -57,7 +58,12 @@ For example, `list('foo', 'bar')` returns a list {'foo', 'bar'}]],
   -- Get MIME from
   ['from'] = {
     ['get_value'] = function(task, args)
-      local from = task:get_from(args[1] or 0)
+      local from
+      if type(args) == 'table' then
+        from = task:get_from(args)
+      else
+        from = task:get_from(0)
+      end
       if ((from or E)[1] or E).addr then
         return from[1],'table'
       end
@@ -68,7 +74,12 @@ uses any type by default)]],
   },
   ['rcpts'] = {
     ['get_value'] = function(task, args)
-      local rcpts = task:get_recipients(args[1] or 0)
+      local rcpts
+      if type(args) == 'table' then
+        rcpts = task:get_recipients(args)
+      else
+        rcpts = task:get_recipients(0)
+      end
       if ((rcpts or E)[1] or E).addr then
         return rcpts,'table_list'
       end
@@ -131,34 +142,11 @@ uses any type by default)]],
   -- Get list of all attachments digests
   ['attachments'] = {
     ['get_value'] = function(task, args)
-
-      local s
       local parts = task:get_parts() or E
       local digests = {}
-
-      if #args > 0 then
-        local rspamd_cryptobox = require "rspamd_cryptobox_hash"
-        local encoding = args[1] or 'hex'
-        local ht = args[2] or 'blake2'
-
-        for _,p in ipairs(parts) do
-          if p:get_filename() then
-            local h = rspamd_cryptobox.create_specific(ht, p:get_content('raw_parsed'))
-            if encoding == 'hex' then
-              s = h:hex()
-            elseif encoding == 'base32' then
-              s = h:base32()
-            elseif encoding == 'base64' then
-              s = h:base64()
-            end
-            table.insert(digests, s)
-          end
-        end
-      else
-        for _,p in ipairs(parts) do
-          if p:get_filename() then
-            table.insert(digests, p:get_digest())
-          end
+      for i,p in ipairs(parts) do
+        if p:is_attachment() then
+          table.insert(digests, common.get_cached_or_raw_digest(task, i, p, args))
         end
       end
 
@@ -169,11 +157,9 @@ uses any type by default)]],
       return nil
     end,
     ['description'] = [[Get list of all attachments digests.
-The first optional argument is encoding (`hex`, `base32`, `base64`),
+The first optional argument is encoding (`hex`, `base32` (and forms `bleach32`, `rbase32`), `base64`),
 the second optional argument is optional hash type (`blake2`, `sha256`, `sha1`, `sha512`, `md5`)]],
-
-    ['args_schema'] = {ts.one_of{'hex', 'base32', 'base64'}:is_optional(),
-                       ts.one_of{'blake2', 'sha256', 'sha1', 'sha512', 'md5'}:is_optional()}
+    ['args_schema'] = common.digest_schema()
 
   },
   -- Get all attachments files
@@ -387,6 +373,58 @@ The first argument must be header name.]],
   - `full`: list of tables
   ]],
     ['args_schema'] = { ts.one_of { 'stem', 'raw', 'norm', 'full' }:is_optional()},
+  },
+  -- Get queue ID
+  ['queueid'] = {
+    ['get_value'] = function(task)
+      local queueid = task:get_queue_id()
+      if queueid then return queueid,'string' end
+      return nil
+    end,
+    ['description'] = [[Get queue ID]],
+  },
+  -- Get ID of the task being processed
+  ['uid'] = {
+    ['get_value'] = function(task)
+      local uid = task:get_uid()
+      if uid then return uid,'string' end
+      return nil
+    end,
+    ['description'] = [[Get ID of the task being processed]],
+  },
+  -- Get message ID of the task being processed
+  ['messageid'] = {
+    ['get_value'] = function(task)
+      local mid = task:get_message_id()
+      if mid then return mid,'string' end
+      return nil
+    end,
+    ['description'] = [[Get message ID]],
+  },
+  -- Get specific symbol
+  ['symbol'] = {
+    ['get_value'] = function(task, args)
+      local symbol = task:get_symbol(args[1], args[2])
+      if symbol then
+        return symbol[1],'table'
+      end
+    end,
+    ['description'] = 'Get specific symbol. The first argument must be the symbol name. ' ..
+      'The second argument is an optional shadow result name. ' ..
+      'Returns the symbol table. See task:get_symbol()',
+    ['args_schema'] = {ts.string, ts.string:is_optional()}
+  },
+  -- Get full scan result
+  ['scan_result'] = {
+    ['get_value'] = function(task, args)
+      local res = task:get_metric_result(args[1])
+      if res then
+        return res,'table'
+      end
+    end,
+    ['description'] = 'Get full scan result (either default or shadow if shadow result name is specified)' ..
+        'Returns the result table. See task:get_metric_result()',
+    ['args_schema'] = {ts.string:is_optional()}
   },
 }
 

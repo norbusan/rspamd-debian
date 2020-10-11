@@ -83,6 +83,7 @@ local settings = {
 local rspamd_logger = require "rspamd_logger"
 local rspamd_util = require "rspamd_util"
 local lua_redis = require "lua_redis"
+local lua_util = require "lua_util"
 local fun = require "fun"
 local hash = require "rspamd_cryptobox_hash"
 local rspamd_lua_utils = require "lua_util"
@@ -464,6 +465,11 @@ if opts then
     end
   end
 
+  local auth_and_local_conf = lua_util.config_check_local_or_authed(rspamd_config, N,
+      false, false)
+  settings.check_local = auth_and_local_conf[1]
+  settings.check_authed = auth_and_local_conf[2]
+
   if settings['greylist_min_score'] then
     settings['greylist_min_score'] = tonumber(settings['greylist_min_score'])
   else
@@ -497,11 +503,17 @@ if opts then
       callback = greylist_set,
       priority = 6,
     })
-    rspamd_config:register_symbol({
+    local id = rspamd_config:register_symbol({
       name = 'GREYLIST_CHECK',
       type = 'prefilter',
       callback = greylist_check,
       priority = 6,
+    })
+    rspamd_config:register_symbol({
+      name = settings.symbol,
+      type = 'virtual',
+      parent = id,
+      score = 0,
     })
   end
 end

@@ -58,13 +58,14 @@ static const gchar default_sign_headers[] = ""
 		"(o)to:(o)cc:(x)mime-version:(x)content-type:(x)content-transfer-encoding:"
 		"resent-to:resent-cc:resent-from:resent-sender:resent-message-id:"
 		"(x)in-reply-to:(x)references:list-id:list-help:list-owner:list-unsubscribe:"
-		"list-subscribe:list-post:(x)openpgp:(x)autocrypt";
+		"list-unsubscribe-post:list-subscribe:list-post:(x)openpgp:(x)autocrypt";
 static const gchar default_arc_sign_headers[] = ""
 		"(o)from:(x)sender:(o)reply-to:(o)subject:(x)date:(x)message-id:"
 		"(o)to:(o)cc:(x)mime-version:(x)content-type:(x)content-transfer-encoding:"
 		"resent-to:resent-cc:resent-from:resent-sender:resent-message-id:"
 		"(x)in-reply-to:(x)references:list-id:list-help:list-owner:list-unsubscribe:"
-		"list-subscribe:list-post:dkim-signature:(x)openpgp:(x)autocrypt";
+		"list-unsubscribe-post:list-subscribe:list-post:dkim-signature:(x)openpgp:"
+		"(x)autocrypt";
 
 struct dkim_ctx {
 	struct module_ctx ctx;
@@ -342,7 +343,7 @@ dkim_module_config (struct rspamd_config *cfg)
 	value = rspamd_config_get_module_opt (cfg, "dkim", "check_local");
 
 	if (value == NULL) {
-		rspamd_config_get_module_opt (cfg, "options", "check_local");
+		value = rspamd_config_get_module_opt (cfg, "options", "check_local");
 	}
 
 	if (value != NULL) {
@@ -352,10 +353,12 @@ dkim_module_config (struct rspamd_config *cfg)
 		dkim_module_ctx->check_local = FALSE;
 	}
 
-	value = rspamd_config_get_module_opt (cfg, "dkim", "check_authed");
+	value = rspamd_config_get_module_opt (cfg, "dkim",
+			"check_authed");
 
 	if (value == NULL) {
-		rspamd_config_get_module_opt (cfg, "options", "check_authed");
+		value = rspamd_config_get_module_opt (cfg, "options",
+				"check_authed");
 	}
 
 	if (value != NULL) {
@@ -1185,6 +1188,7 @@ dkim_symbol_callback (struct rspamd_task *task,
 
 			ctx = rspamd_create_dkim_context (rh_cur->decoded,
 					task->task_pool,
+					task->resolver,
 					dkim_module_ctx->time_jitter,
 					RSPAMD_DKIM_NORMAL,
 					&err);
@@ -1506,6 +1510,7 @@ lua_dkim_verify_handler (lua_State *L)
 
 		ctx = rspamd_create_dkim_context (sig,
 				task->task_pool,
+				task->resolver,
 				dkim_module_ctx->time_jitter,
 				type,
 				&err);

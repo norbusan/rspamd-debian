@@ -110,6 +110,12 @@ local configure_asn_module = function()
       options[k] = v
     end
   end
+
+  local auth_and_local_conf = lua_util.config_check_local_or_authed(rspamd_config, N,
+      false, true)
+  options.check_local = auth_and_local_conf[1]
+  options.check_authed = auth_and_local_conf[2]
+
   if options['provider_type'] == 'rspamd' then
     if not options['provider_info'] and options['provider_info']['ip4'] and
         options['provider_info']['ip6'] then
@@ -126,10 +132,10 @@ end
 if configure_asn_module() then
   local id = rspamd_config:register_symbol({
     name = 'ASN_CHECK',
-    type = 'prefilter,nostat',
+    type = 'prefilter',
     callback = asn_check,
     priority = 8,
-    flags = 'empty',
+    flags = 'empty,nostat',
   })
   if options['symbol'] then
     rspamd_config:register_symbol({
@@ -137,6 +143,7 @@ if configure_asn_module() then
       parent = id,
       type = 'virtual',
       flags = 'empty',
+      score = 0,
     })
   end
 else

@@ -36,8 +36,8 @@ HTTP empty response
   Check url  /empty  post  HTTP_DNS_ERROR  HTTP_ERROR  HTTP_CORO_DNS_ERROR  HTTP_CORO_ERROR  method_post  IO read error: unexpected EOF
 
 SSL Large HTTP request
-  ${result} =  Scan Message With Rspamc  ${MESSAGE}
-  Check Rspamc  ${result}  HTTP_SSL_LARGE
+  Scan File  ${MESSAGE}
+  Expect Symbol  HTTP_SSL_LARGE
 
 *** Keywords ***
 Lua Setup
@@ -68,5 +68,6 @@ Run Dummy Https
 Check url
   [Arguments]  ${url}  ${method}  @{expect_results}
   ${result} =  Scan Message With Rspamc  --header=url:${url}  --header=method:${method}  ${MESSAGE}
-  : FOR  ${expect}  IN  @{expect_results}
-  \  Check Rspamc  ${result}  ${expect}
+  FOR  ${expect}  IN  @{expect_results}
+    Check Rspamc  ${result}  ${expect}
+  END

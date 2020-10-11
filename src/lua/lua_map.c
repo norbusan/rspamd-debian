@@ -442,6 +442,10 @@ lua_map_fin (struct map_cb_data *data, void **target)
 		msg_err_map ("map has no callback set");
 	}
 	else if (cbdata->data != NULL && cbdata->data->len != 0) {
+
+		lua_pushcfunction (cbdata->L, &rspamd_lua_traceback);
+		int err_idx = lua_gettop (cbdata->L);
+
 		lua_rawgeti (cbdata->L, LUA_REGISTRYINDEX, cbdata->ref);
 
 		if (!cbdata->opaque) {
@@ -461,11 +465,15 @@ lua_map_fin (struct map_cb_data *data, void **target)
 		*pmap = cbdata->lua_map;
 		rspamd_lua_setclass (cbdata->L, "rspamd{map}", -1);
 
-		if (lua_pcall (cbdata->L, 2, 0, 0) != 0) {
-			msg_info_map ("call to %s failed: %s", "local function",
+		gint ret = lua_pcall (cbdata->L, 2, 0, err_idx);
+
+		if (ret != 0) {
+			msg_info_map ("call to %s failed (%d): %s", "map fin function",
+				ret,
 				lua_tostring (cbdata->L, -1));
-			lua_pop (cbdata->L, 1);
 		}
+
+		lua_settop (cbdata->L, err_idx - 1);
 	}
 
 	cbdata->data = rspamd_fstring_assign (cbdata->data, "", 0);
@@ -835,8 +843,6 @@ lua_map_get_key (lua_State * L)
 
 				if (!rspamd_parse_inet_address_ip (addr_str, len, addr->addr)) {
 					addr = NULL;
-					msg_warn ("invalid ip address: %*s, when checking map: %s",
-							(gint)len, addr_str, map->map->name);
 				}
 			}
 			else if (lua_type (L, 2) == LUA_TUSERDATA) {
@@ -1214,15 +1220,13 @@ lua_map_get_uri (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_lua_map *map = lua_check_map (L, 1);
-	const gchar *ret = "undefined";
 	struct rspamd_map_backend *bk;
-		guint i;
+	guint i;
 
 	if (map != NULL) {
 		for (i = 0; i < map->map->backends->len; i ++) {
 			bk = g_ptr_array_index (map->map->backends, i);
-			ret = bk->uri;
-			lua_pushstring (L, ret);
+			lua_pushstring (L, bk->uri);
 		}
 	}
 	else {

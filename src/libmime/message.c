@@ -93,10 +93,11 @@ rspamd_mime_part_extract_words (struct rspamd_task *task,
 				if (w->stemmed.len <= 3) {
 					short_len++;
 				}
-			}
 
-			if (w->flags & RSPAMD_STAT_TOKEN_FLAG_TEXT) {
-				part->nwords ++;
+				if (w->flags & RSPAMD_STAT_TOKEN_FLAG_TEXT &&
+					!(w->flags & RSPAMD_STAT_TOKEN_FLAG_SKIPPED)) {
+					part->nwords ++;
+				}
 			}
 
 			if (w->flags & (RSPAMD_STAT_TOKEN_FLAG_BROKEN_UNICODE|
@@ -758,7 +759,8 @@ rspamd_message_process_html_text_part (struct rspamd_task *task,
 			text_part->html,
 			text_part->utf_raw_content,
 			&text_part->exceptions,
-			MESSAGE_FIELD (task, urls));
+			MESSAGE_FIELD (task, urls),
+			text_part->mime_part->urls);
 
 	if (text_part->utf_content->len == 0) {
 		text_part->flags |= RSPAMD_MIME_TEXT_PART_FLAG_EMPTY;
@@ -847,7 +849,7 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 
 			rspamd_add_passthrough_result (task, action,
 					RSPAMD_PASSTHROUGH_CRITICAL,
-					score, "Gtube pattern", "GTUBE", 0);
+					score, "Gtube pattern", "GTUBE", 0, NULL);
 		}
 
 		rspamd_task_insert_result (task, GTUBE_SYMBOL, 0, NULL);
@@ -925,6 +927,7 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 	part->parsed_data.begin = start;
 	part->parsed_data.len = len;
 	part->part_number = MESSAGE_FIELD (task, parts)->len;
+	part->urls = g_ptr_array_new ();
 	part->raw_headers = rspamd_message_headers_new ();
 	part->headers_order = NULL;
 
@@ -1052,6 +1055,10 @@ rspamd_message_dtor (struct rspamd_message *msg)
 					LUA_REGISTRYINDEX,
 					p->specific.lua_specific.cbref);
 		}
+
+		if (p->urls) {
+			g_ptr_array_unref (p->urls);
+		}
 	}
 
 	PTR_ARRAY_FOREACH (msg->text_parts, i, tp) {
@@ -1121,26 +1128,22 @@ rspamd_message_parse (struct rspamd_task *task)
 	 * Exim somehow uses mailbox format for messages being scanned:
 	 * From xxx@xxx.com Fri May 13 19:08:48 2016
 	 *
-	 * So we check if a task has non-http format then we check for such a line
-	 * at the beginning to avoid errors
+	 * So we check if a task has this line to avoid possible issues
 	 */
-	if (task->cmd != CMD_CHECK_V2 || (task->protocol_flags &
-			RSPAMD_TASK_PROTOCOL_FLAG_LOCAL_CLIENT)) {
-		if (len > sizeof ("From ") - 1) {
-			if (memcmp (p, "From ", sizeof ("From ") - 1) == 0) {
-				/* Skip to CRLF */
-				msg_info_task ("mailbox input detected, enable workaround");
-				p += sizeof ("From ") - 1;
-				len -= sizeof ("From ") - 1;
+	if (len > sizeof ("From ") - 1) {
+		if (memcmp (p, "From ", sizeof ("From ") - 1) == 0) {
+			/* Skip to CRLF */
+			msg_info_task ("mailbox input detected, enable workaround");
+			p += sizeof ("From ") - 1;
+			len -= sizeof ("From ") - 1;
 
-				while (len > 0 && *p != '\n') {
-					p ++;
-					len --;
-				}
-				while (len > 0 && g_ascii_isspace (*p)) {
-					p ++;
-					len --;
-				}
+			while (len > 0 && *p != '\n') {
+				p ++;
+				len --;
+			}
+			while (len > 0 && g_ascii_isspace (*p)) {
+				p ++;
+				len --;
 			}
 		}
 	}
@@ -1464,6 +1467,10 @@ rspamd_message_process (struct rspamd_task *task)
 			lua_settop (L, funcs_top);
 		}
 
+		/* Try to detect image before checking for text */
+		rspamd_images_process_mime_part_maybe (task, part);
+
+		/* Still no content detected, try text heuristic */
 		if (part->part_type == RSPAMD_MIME_PART_UNDEFINED) {
 			rspamd_message_process_text_part_maybe (task, part);
 		}
@@ -1601,7 +1608,6 @@ rspamd_message_process (struct rspamd_task *task)
 		}
 	}
 
-	rspamd_images_process (task);
 	rspamd_images_link (task);
 
 	rspamd_tokenize_meta_words (task);

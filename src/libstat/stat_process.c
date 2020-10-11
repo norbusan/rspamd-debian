@@ -180,7 +180,7 @@ rspamd_stat_process_tokenize (struct rspamd_stat_ctx *st_ctx,
 	}
 
 	rspamd_cryptobox_hash_final (&hst, hout);
-	b32_hout = rspamd_encode_base32 (hout, sizeof (hout));
+	b32_hout = rspamd_encode_base32 (hout, sizeof (hout), RSPAMD_BASE32_DEFAULT);
 	/*
 	 * We need to strip it to 32 characters providing ~160 bits of
 	 * hash distribution
@@ -679,6 +679,16 @@ rspamd_stat_backends_learn (struct rspamd_stat_ctx *st_ctx,
 
 			if (bk_run == NULL) {
 				/* XXX: must be error */
+				if (task->result->passthrough_result) {
+					/* Passthrough email, cannot learn */
+					g_set_error (err, rspamd_stat_quark (), 500,
+							"Cannot learn statistics when passthrough "
+							"result has been set; not classified");
+
+					res = FALSE;
+					goto end;
+				}
+
 				msg_warn_task ("no runtime for backend %s; classifier %s; symbol %s",
 						st->backend->name, cl->cfg->name, st->stcf->symbol);
 				continue;
@@ -881,7 +891,7 @@ rspamd_stat_has_classifier_symbols (struct rspamd_task *task,
 		id = g_array_index (cl->statfiles_ids, gint, i);
 		st = g_ptr_array_index (st_ctx->statfiles, id);
 
-		if (rspamd_task_find_symbol_result (task, st->stcf->symbol)) {
+		if (rspamd_task_find_symbol_result (task, st->stcf->symbol, NULL)) {
 			if (is_spam == !!st->stcf->is_spam) {
 				msg_debug_bayes ("do not autolearn %s as symbol %s is already "
 						"added", is_spam ? "spam" : "ham", st->stcf->symbol);

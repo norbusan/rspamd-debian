@@ -61,15 +61,16 @@ local zip_patterns = {
 local txt_trie
 local txt_patterns = {
   html = {
-    {[[(?i)\s*<html]], 30},
-    {[[(?i)\s*<\!DOCTYPE HTML]], 30},
-    {[[(?i)\s*<xml]], 20},
-    {[[(?i)\s*<body]], 20},
-    {[[(?i)\s*<table]], 20},
-    {[[(?i)\s*<a]], 10},
-    {[[(?i)\s*<p]], 10},
-    {[[(?i)\s*<div]], 10},
-    {[[(?i)\s*<span]], 10},
+    {[[(?i)\s*<html\b]], 30},
+    {[[(?i)\s*<script\b]], 20}, -- Commonly used by spammers
+    {[[(?i)\s*<\!DOCTYPE HTML\b]], 30},
+    {[[(?i)\s*<xml\b]], 20},
+    {[[(?i)\s*<body\b]], 20},
+    {[[(?i)\s*<table\b]], 20},
+    {[[(?i)\s*<a\b]], 10},
+    {[[(?i)\s*<p\b]], 10},
+    {[[(?i)\s*<div\b]], 10},
+    {[[(?i)\s*<span\b]], 10},
   },
   csv = {
     {[[(?:[-a-zA-Z0-9_]+\s*,){2,}(?:[-a-zA-Z0-9_]+,?[ ]*[\r\n])]], 20}
@@ -147,7 +148,7 @@ end
 -- Call immediately on require
 compile_tries()
 
-local function detect_ole_format(input, log_obj)
+local function detect_ole_format(input, log_obj, _, part)
   local inplen = #input
   if inplen < 0x31 + 4 then
     lua_util.debugm(N, log_obj, "short length: %s", inplen)
@@ -183,32 +184,34 @@ local function detect_ole_format(input, log_obj)
     local dtype = input:at(offset + 66)
     lua_util.debugm(N, log_obj, "dtype: %s, offset: %s", dtype, offset)
 
-    if dtype == 5 then
-      -- Extract clsid
-      local matches = msoffice_trie_clsid:match(input:span(offset + 80, 16))
-      if matches then
-        for n,_ in pairs(matches) do
-          if msoffice_clsid_indexes[n] then
-            lua_util.debugm(N, log_obj, "found valid clsid for %s",
-                msoffice_clsid_indexes[n][1])
-            return true,msoffice_clsid_indexes[n][1]
+    if dtype then
+      if dtype == 5 then
+        -- Extract clsid
+        local matches = msoffice_trie_clsid:match(input:span(offset + 80, 16))
+        if matches then
+          for n,_ in pairs(matches) do
+            if msoffice_clsid_indexes[n] then
+              lua_util.debugm(N, log_obj, "found valid clsid for %s",
+                  msoffice_clsid_indexes[n][1])
+              return true,msoffice_clsid_indexes[n][1]
+            end
           end
         end
-      end
-      return true,nil
-    elseif dtype == 2 then
-      local matches = msoffice_trie:match(input:span(offset, 64))
-      if matches then
-        for n,_ in pairs(matches) do
-          if msoffice_patterns_indexes[n] then
-            return true,msoffice_patterns_indexes[n][1]
+        return true,nil
+      elseif dtype == 2 then
+        local matches = msoffice_trie:match(input:span(offset, 64))
+        if matches then
+          for n,_ in pairs(matches) do
+            if msoffice_patterns_indexes[n] then
+              return true,msoffice_patterns_indexes[n][1]
+            end
           end
         end
+        return true,nil
+      elseif dtype >= 0 and dtype < 5 then
+        -- Bad type
+        return true,nil
       end
-      return true,nil
-    elseif dtype >= 0 and dtype < 5 then
-      -- Bad type
-      return true,nil
     end
 
     return false,nil
@@ -245,7 +248,7 @@ local function process_top_detected(res)
   return nil
 end
 
-local function detect_archive_flaw(part, arch, log_obj)
+local function detect_archive_flaw(part, arch, log_obj, _)
   local arch_type = arch:get_type()
   local res = {
     docx = 0,
@@ -267,7 +270,7 @@ local function detect_archive_flaw(part, arch, log_obj)
 
   if arch_type == 'zip' then
     -- Find specific files/folders in zip file
-    local files = arch:get_files() or {}
+    local files = arch:get_files(100) or {}
     for _,file in ipairs(files) do
       if file == '[Content_Types].xml' then
         add_msoffice_confidence(10)
@@ -312,7 +315,7 @@ local function detect_archive_flaw(part, arch, log_obj)
   return arch_type:lower(),40
 end
 
-exports.mime_part_heuristic = function(part, log_obj)
+exports.mime_part_heuristic = function(part, log_obj, _)
   if part:is_archive() then
     local arch = part:get_archive()
     return detect_archive_flaw(part, arch, log_obj)
@@ -321,7 +324,7 @@ exports.mime_part_heuristic = function(part, log_obj)
   return nil
 end
 
-exports.text_part_heuristic = function(part, log_obj)
+exports.text_part_heuristic = function(part, log_obj, _)
   -- We get some span of data and check it
   local function is_span_text(span)
     local function rough_utf8_check(bytes, idx, remain)
@@ -377,7 +380,21 @@ exports.text_part_heuristic = function(part, log_obj)
     return true
   end
 
+  local parent = part:get_parent()
+
+  if parent then
+    local parent_type,parent_subtype = parent:get_type()
+
+    if parent_type == 'multipart' and parent_subtype == 'encrypted' then
+      -- Skip text heuristics for encrypted parts
+      lua_util.debugm(N, log_obj, "text part check: parent is encrypted, not a text part")
+
+      return false
+    end
+  end
+
   local content = part:get_content()
+  local mtype,msubtype = part:get_type()
   local clen = #content
   local is_text
 
@@ -418,9 +435,28 @@ exports.text_part_heuristic = function(part, log_obj)
         end
       end
 
+      if (mtype == 'text' or mtype == 'application') and (msubtype == 'html' or msubtype == 'xhtml+xml') then
+        return 'html',21
+      end
+
       return 'txt',40
     end
   end
+end
+
+exports.pdf_format_heuristic = function(input, log_obj, pos, part)
+  local weight = 10
+  local ext = string.match(part:get_filename() or '', '%.([^.]+)$')
+  -- If we found a pattern at the beginning
+  if pos <= 10 then
+    weight = weight + 30
+  end
+  -- If the announced extension is `pdf`
+  if ext and ext:lower() == 'pdf' then
+    weight = weight + 30
+  end
+
+  return 'pdf',weight
 end
 
 return exports

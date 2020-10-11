@@ -36,17 +36,11 @@
 #endif
 
 #include <signal.h>
-#ifdef HAVE_SYS_WAIT_H
-#include <sys/wait.h>
-#endif
 #ifdef HAVE_SYS_RESOURCE_H
 #include <sys/resource.h>
 #endif
 #ifdef HAVE_LIBUTIL_H
 #include <libutil.h>
-#endif
-#ifdef HAVE_STROPS_H
-#include <stropts.h>
 #endif
 
 #ifdef HAVE_OPENSSL
@@ -373,7 +367,7 @@ rspamd_fork_delayed_cb (EV_P_ ev_timer *w, int revents)
 	rspamd_fork_worker (waiting_worker->rspamd_main, waiting_worker->cf,
 			waiting_worker->oldindex,
 			waiting_worker->rspamd_main->event_loop,
-			rspamd_cld_handler);
+			rspamd_cld_handler, listen_sockets);
 	REF_RELEASE (waiting_worker->cf);
 	g_free (waiting_worker);
 }
@@ -402,6 +396,7 @@ create_listen_socket (GPtrArray *addrs, guint cnt,
 	GList *result = NULL;
 	gint fd;
 	guint i;
+	static const int listen_opts = RSPAMD_INET_ADDRESS_LISTEN_ASYNC;
 	struct rspamd_worker_listen_socket *ls;
 
 	g_ptr_array_sort (addrs, rspamd_inet_address_compare_ptr);
@@ -412,7 +407,8 @@ create_listen_socket (GPtrArray *addrs, guint cnt,
 		 */
 		if (listen_type & RSPAMD_WORKER_SOCKET_TCP) {
 			fd = rspamd_inet_address_listen (g_ptr_array_index (addrs, i),
-					SOCK_STREAM, TRUE);
+					SOCK_STREAM,
+					listen_opts, -1);
 			if (fd != -1) {
 				ls = g_malloc0 (sizeof (*ls));
 				ls->addr = rspamd_inet_address_copy (g_ptr_array_index (addrs, i));
@@ -423,7 +419,8 @@ create_listen_socket (GPtrArray *addrs, guint cnt,
 		}
 		if (listen_type & RSPAMD_WORKER_SOCKET_UDP) {
 			fd = rspamd_inet_address_listen (g_ptr_array_index (addrs, i),
-					SOCK_DGRAM, TRUE);
+					SOCK_DGRAM,
+					listen_opts | RSPAMD_INET_ADDRESS_LISTEN_REUSEPORT, -1);
 			if (fd != -1) {
 				ls = g_malloc0 (sizeof (*ls));
 				ls->addr = rspamd_inet_address_copy (g_ptr_array_index (addrs, i));
@@ -517,6 +514,7 @@ systemd_get_socket (struct rspamd_main *rspamd_main, const gchar *fdname)
 			ls = g_malloc0 (sizeof (*ls));
 			ls->addr = rspamd_inet_address_from_sa (&addr_storage.sa, slen);
 			ls->fd = sock;
+			ls->is_systemd = true;
 
 			slen = sizeof (stype);
 			if (getsockopt (sock, SOL_SOCKET, SO_TYPE, &stype, &slen) != -1) {
@@ -612,15 +610,17 @@ spawn_worker_type (struct rspamd_main *rspamd_main, struct ev_loop *event_loop,
 					"cannot spawn more than 1 %s worker, so spawn one",
 					cf->worker->name);
 		}
-		rspamd_fork_worker (rspamd_main, cf, 0, event_loop, rspamd_cld_handler);
+		rspamd_fork_worker (rspamd_main, cf, 0, event_loop, rspamd_cld_handler,
+				listen_sockets);
 	}
 	else if (cf->worker->flags & RSPAMD_WORKER_THREADED) {
-		rspamd_fork_worker (rspamd_main, cf, 0, event_loop, rspamd_cld_handler);
+		rspamd_fork_worker (rspamd_main, cf, 0, event_loop, rspamd_cld_handler,
+				listen_sockets);
 	}
 	else {
 		for (i = 0; i < cf->count; i++) {
 			rspamd_fork_worker (rspamd_main, cf, i, event_loop,
-					rspamd_cld_handler);
+					rspamd_cld_handler, listen_sockets);
 		}
 	}
 }
@@ -765,15 +765,28 @@ kill_old_workers (gpointer key, gpointer value, gpointer unused)
 
 	rspamd_main = w->srv;
 
-	if (w->state == rspamd_worker_state_running) {
+	if (w->state == rspamd_worker_state_wanna_die) {
 		w->state = rspamd_worker_state_terminating;
 		kill (w->pid, SIGUSR2);
 		ev_io_stop (rspamd_main->event_loop, &w->srv_ev);
 		g_hash_table_remove_all (w->control_events_pending);
 		msg_info_main ("send signal to worker %P", w->pid);
 	}
-	else {
+	else if (w->state != rspamd_worker_state_running) {
 		msg_info_main ("do not send signal to worker %P, already sent", w->pid);
+	}
+}
+
+static void
+mark_old_workers (gpointer key, gpointer value, gpointer unused)
+{
+	struct rspamd_worker *w = value;
+	struct rspamd_main *rspamd_main;
+
+	rspamd_main = w->srv;
+
+	if (w->state == rspamd_worker_state_running) {
+		w->state = rspamd_worker_state_wanna_die;
 	}
 }
 
@@ -1113,13 +1126,15 @@ rspamd_hup_handler (struct ev_loop *loop, ev_signal *w, int revents)
 		g_hash_table_foreach (rspamd_main->workers, stop_srv_ev, rspamd_main);
 
 		if (reread_config (rspamd_main)) {
-			msg_info_main ("kill old workers");
-			g_hash_table_foreach (rspamd_main->workers, kill_old_workers, NULL);
-
 			rspamd_check_core_limits (rspamd_main);
+			/* Mark old workers */
+			g_hash_table_foreach (rspamd_main->workers, mark_old_workers, NULL);
 			msg_info_main ("spawn workers with a new config");
 			spawn_workers (rspamd_main, rspamd_main->event_loop);
 			msg_info_main ("workers spawning has been finished");
+			/* Kill marked */
+			msg_info_main ("kill old workers");
+			g_hash_table_foreach (rspamd_main->workers, kill_old_workers, NULL);
 		}
 		else {
 			/* Reattach old workers */
@@ -1435,7 +1450,7 @@ main (gint argc, gchar **argv, gchar **env)
 		}
 		else {
 			control_fd = rspamd_inet_address_listen (control_addr, SOCK_STREAM,
-					TRUE);
+					RSPAMD_INET_ADDRESS_LISTEN_ASYNC, -1);
 			if (control_fd == -1) {
 				msg_err_main ("cannot open control socket at path: %s",
 						rspamd_main->cfg->control_socket_path);

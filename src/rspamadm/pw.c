@@ -134,8 +134,8 @@ rspamadm_pw_encrypt (char *password)
 			salt, pbkdf->salt_len, key, pbkdf->key_len, pbkdf->complexity,
 			pbkdf->type);
 
-	encoded_salt = rspamd_encode_base32 (salt, pbkdf->salt_len);
-	encoded_key = rspamd_encode_base32 (key, pbkdf->key_len);
+	encoded_salt = rspamd_encode_base32 (salt, pbkdf->salt_len, RSPAMD_BASE32_DEFAULT);
+	encoded_key = rspamd_encode_base32 (key, pbkdf->key_len, RSPAMD_BASE32_DEFAULT);
 
 	result = g_string_new ("");
 	rspamd_printf_gstring (result, "$%d$%s$%s", pbkdf->id, encoded_salt,
@@ -257,7 +257,7 @@ rspamadm_pw_check (void)
 	if (salt != NULL && hash != NULL) {
 
 		/* decode salt */
-		salt_decoded = rspamd_decode_base32 (salt, salt_len, &salt_len);
+		salt_decoded = rspamd_decode_base32 (salt, salt_len, &salt_len, RSPAMD_BASE32_DEFAULT);
 
 		if (salt_decoded == NULL || salt_len != pbkdf->salt_len) {
 			/* We have some unknown salt here */
@@ -266,7 +266,7 @@ rspamadm_pw_check (void)
 			exit (EXIT_FAILURE);
 		}
 
-		key_decoded = rspamd_decode_base32 (hash, key_len, &key_len);
+		key_decoded = rspamd_decode_base32 (hash, key_len, &key_len, RSPAMD_BASE32_DEFAULT);
 
 		if (key_decoded == NULL || key_len != pbkdf->key_len) {
 			/* We have some unknown salt here */

@@ -7,6 +7,7 @@
 #include <float.h>
 #include <math.h>
 #include "kautodiff.h"
+#include "blas-config.h"
 
 typedef struct {
 	uint64_t s[2];
@@ -617,28 +618,28 @@ static kad_node_t *kad_load1(FILE *fp, kad_node_t **node)
 {
 	kad_node_t *p;
 	p = (kad_node_t*)calloc(1, sizeof(kad_node_t));
-	fread(&p->ext_label, 4, 1, fp);
-	fread(&p->ext_flag, 4, 1, fp);
-	fread(&p->flag, 1, 1, fp);
-	fread(&p->n_child, 4, 1, fp);
+	(void) !fread(&p->ext_label, 4, 1, fp);
+	(void) !fread(&p->ext_flag, 4, 1, fp);
+	(void) !fread(&p->flag, 1, 1, fp);
+	(void) !fread(&p->n_child, 4, 1, fp);
 	if (p->n_child) {
 		int32_t j, k;
 		p->child = (kad_node_t**)calloc(p->n_child, sizeof(kad_node_t*));
-		fread(&p->op, 2, 1, fp);
+		(void) !fread(&p->op, 2, 1, fp);
 		for (j = 0; j < p->n_child; ++j) {
-			fread(&k, 4, 1, fp);
+			(void) !fread(&k, 4, 1, fp);
 			p->child[j] = node? node[k] : 0;
 		}
-		fread(&k, 4, 1, fp);
+		(void) !fread(&k, 4, 1, fp);
 		if (k >= 0) p->pre = node[k];
-		fread(&p->ptr_size, 4, 1, fp);
+		(void) !fread(&p->ptr_size, 4, 1, fp);
 		if (p->ptr_size > 0) {
 			p->ptr = malloc(p->ptr_size);
-			fread(p->ptr, p->ptr_size, 1, fp);
+			(void) !fread(p->ptr, p->ptr_size, 1, fp);
 		}
 	} else {
-		fread(&p->n_d, 1, 1, fp);
-		if (p->n_d) fread(p->d, 4, p->n_d, fp);
+		(void) !fread(&p->n_d, 1, 1, fp);
+		if (p->n_d) (void) !fread(p->d, 4, p->n_d, fp);
 	}
 	return p;
 }
@@ -657,7 +658,7 @@ kad_node_t **kad_load(FILE *fp, int *_n_node)
 {
 	int32_t i, n_node;
 	kad_node_t **node;
-	fread(&n_node, 4, 1, fp);
+	(void) !fread(&n_node, 4, 1, fp);
 	node = (kad_node_t**)malloc(n_node * sizeof(kad_node_t*));
 	for (i = 0; i < n_node; ++i) {
 		kad_node_t *p;
@@ -897,13 +898,21 @@ void kad_vec_mul_sum(int n, float *a, const float *b, const float *c)
 	for (i = 0; i < n; ++i) a[i] += b[i] * c[i];
 }
 
-void kad_saxpy(int n, float a, const float *x, float *y) { kad_saxpy_inlined(n, a, x, y); }
-
+/* This is actually lapack not cblas, but this definition is used */
 #ifdef HAVE_CBLAS
+#ifndef __APPLE__
+/* As gfortran mangles names */
+#define ssyev ssyev_
+#endif
+extern void ssyev(const char* jobz, const char* uplo, int* n, float* a, int* lda, float* w, float* work, int* lwork, int* info);
+#endif
+
+#ifdef HAVE_CBLAS_SGEMM
+
 #ifdef HAVE_CBLAS_H
 #include "cblas.h"
 #else
-/* Poor man approach */
+/* Poor man approach, thanks for that Apple */
 enum CBLAS_ORDER {CblasRowMajor=101, CblasColMajor=102 };
 enum CBLAS_TRANSPOSE {CblasNoTrans=111, CblasTrans=112 };
 extern void cblas_sgemm(const enum CBLAS_ORDER Order,
@@ -914,6 +923,7 @@ extern void cblas_sgemm(const enum CBLAS_ORDER Order,
                  const float *B, const int ldb, const float  beta,
                  float *C, const int ldc);
 #endif
+
 void kad_sgemm_simple(int trans_A, int trans_B, int M, int N, int K, const float *A, const float *B, float *C)
 {
 	cblas_sgemm(CblasRowMajor, trans_A? CblasTrans : CblasNoTrans, trans_B? CblasTrans : CblasNoTrans, M, N, K, 1.0f, A, trans_A? M : K, B, trans_B? K : N, 1.0f, C, N);
@@ -946,6 +956,45 @@ void kad_sgemm_simple(int trans_A, int trans_B, int M, int N, int K, const float
 	} else abort(); /* not implemented for (trans_A && trans_B) */
 }
 #endif
+
+#ifdef HAVE_CBLAS_SAXPY
+#ifndef HAVE_CBLAS_H
+extern void cblas_saxpy(const int __N,
+    const float __alpha, const float *__X, const int __incX, float *__Y, const int __incY);
+#endif
+
+void kad_saxpy(int n, float a, const float *x, float *y) { cblas_saxpy(n, a, x, 1, y, 1); }
+#else
+void kad_saxpy(int n, float a, const float *x, float *y) { kad_saxpy_inlined(n, a, x, y); }
+#endif
+
+bool kad_ssyev_simple(int N, float *A, float *eigenvals)
+{
+#ifndef HAVE_CBLAS
+	return false;
+#else
+	int n = N, lda = N, info, lwork;
+	float wkopt;
+	float *work;
+
+	/* Query and allocate the optimal workspace */
+	lwork = -1;
+	ssyev ("Vectors", "Upper", &n, A, &lda, eigenvals, &wkopt, &lwork, &info);
+	lwork = wkopt;
+	work = (float*) g_malloc(lwork * sizeof(double));
+	ssyev ("Vectors", "Upper", &n, A, &lda, eigenvals, work, &lwork, &info);
+	/* Check for convergence */
+	if (info > 0) {
+		g_free (work);
+
+		return false;
+	}
+
+	g_free (work);
+
+	return true;
+#endif
+}
 
 /***************************
  * Random number generator *
