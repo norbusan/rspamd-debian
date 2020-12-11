@@ -16,5 +16,5 @@ systemctl is-active rspamd
 sleep 5
 
 # TODO: more complicated tests ?
-echo "+ curl --no-progress-meter --retry 3 --retry-connrefused --retry-delay 2 http://127.0.0.1:11334"
-curl --no-progress-meter --retry 3 --retry-connrefused --retry-delay 2 http://127.0.0.1:11334
+echo "+ curl --stderr - --no-progress-meter --retry 3 --retry-connrefused --retry-delay 2 http://127.0.0.1:11334"
+curl --stderr - --no-progress-meter --retry 3 --retry-connrefused --retry-delay 2 http://127.0.0.1:11334
