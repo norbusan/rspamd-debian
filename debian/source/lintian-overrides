@@ -9,12 +9,6 @@ rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/linen
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/nprogress.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/solid.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/visibility.min.js
-# these javascript files are deleted with this patch
-rspamd source: source-is-missing .pc/0004-drop-js-scripts-packaged-by-Debian.patch/interface/js/lib/bootstrap.bundle.min.js
-rspamd source: source-is-missing .pc/0004-drop-js-scripts-packaged-by-Debian.patch/interface/js/lib/jquery-3.5.1.min.js
-rspamd source: source-contains-prebuilt-javascript-object .pc/0004-drop-js-scripts-packaged-by-Debian.patch/interface/js/lib/bootstrap.bundle.min.js
-rspamd source: source-contains-prebuilt-javascript-object .pc/0004-drop-js-scripts-packaged-by-Debian.patch/interface/js/lib/jquery-3.5.1.min.js
-rspamd source: source-contains-prebuilt-javascript-object .pc/0004-drop-js-scripts-packaged-by-Debian.patch/interface/js/lib/require.min.js
 # these javascript source files contain very long lines
 rspamd source: source-is-missing debian/missing-sources/fontawesome.js line length is 518 characters (>512)
 rspamd source: source-is-missing debian/missing-sources/solid.js line length is 733 characters (>512)
