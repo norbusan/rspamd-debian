@@ -129,7 +129,6 @@ static redisAsyncContext *redisAsyncInitialize(redisContext *c) {
 
     ac->onConnect = NULL;
     ac->onDisconnect = NULL;
-    ac->disconnectCbdata = NULL;
 
     ac->replies.head = NULL;
     ac->replies.tail = NULL;
@@ -216,10 +215,9 @@ int redisAsyncSetConnectCallback(redisAsyncContext *ac, redisConnectCallback *fn
     return REDIS_ERR;
 }
 
-int redisAsyncSetDisconnectCallback(redisAsyncContext *ac, redisDisconnectCallback *fn, void *cbdata) {
+int redisAsyncSetDisconnectCallback(redisAsyncContext *ac, redisDisconnectCallback *fn) {
     if (ac->onDisconnect == NULL) {
         ac->onDisconnect = fn;
-        ac->disconnectCbdata = cbdata;
         return REDIS_OK;
     }
     return REDIS_ERR;
@@ -308,10 +306,10 @@ static void __redisAsyncFree(redisAsyncContext *ac) {
      * this context, the status will always be REDIS_OK. */
     if (ac->onDisconnect && (c->flags & REDIS_CONNECTED)) {
         if (c->flags & REDIS_FREEING) {
-            ac->onDisconnect(ac,REDIS_OK,ac->disconnectCbdata);
+            ac->onDisconnect(ac,REDIS_OK);
         } else {
             c->flags |= REDIS_FREEING;
-            ac->onDisconnect(ac,(ac->err == 0) ? REDIS_OK : REDIS_ERR,ac->disconnectCbdata);
+            ac->onDisconnect(ac,(ac->err == 0) ? REDIS_OK : REDIS_ERR);
         }
     }
 
@@ -613,7 +611,7 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
     cstr += pvariant;
     clen -= pvariant;
 
-    if (hasnext && clen >= 11 && strncasecmp(cstr,"subscribe\r\n",11) == 0) {
+    if (hasnext && clen >= 9 && strncasecmp(cstr,"subscribe\r\n",9) == 0) {
         c->flags |= REDIS_SUBSCRIBED;
 
         /* Add every channel/pattern to the list of subscription callbacks. */
@@ -626,7 +624,7 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
 
             if (ret == 0) sdsfree(sname);
         }
-    } else if (clen >= 13 && strncasecmp(cstr,"unsubscribe\r\n",13) == 0) {
+    } else if (clen >= 11 && strncasecmp(cstr,"unsubscribe\r\n",11) == 0) {
         /* It is only useful to call (P)UNSUBSCRIBE when the context is
          * subscribed to one or more channels or patterns. */
         if (!(c->flags & REDIS_SUBSCRIBED)) return REDIS_ERR;
@@ -634,7 +632,7 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
         /* (P)UNSUBSCRIBE does not have its own response: every channel or
          * pattern that is unsubscribed will receive a message. This means we
          * should not append a callback function for this command. */
-     } else if(clen >= 9 && strncasecmp(cstr,"monitor\r\n",9) == 0) {
+     } else if(clen >= 7 && strncasecmp(cstr,"monitor\r\n",7) == 0) {
          /* Set monitor flag and push callback */
          c->flags |= REDIS_MONITORING;
          __redisPushCallback(&ac->replies,&cb);

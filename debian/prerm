@@ -6,11 +6,15 @@ case "$1" in
     remove|upgrade|deconfigure)
       # Rspamd web interface doesn't support symlinks and directory traversal
       # remove copied javascript files
-      rm -f /usr/share/rspamd/www/js/lib/bootstrap.min.js
+      rm -f /usr/share/rspamd/www/js/lib/bootstrap.bundle.min.js
+      rm -f /usr/share/rspamd/www/css/bootstrap.min.css
       rm -f /usr/share/rspamd/www/js/lib/jquery.min.js
-      # path of previous versions
-      rm -f /usr/share/rspamd/www/js/lib/jquery-3.3.1.min.js
       rm -f /usr/share/rspamd/www/js/lib/require.min.js
+
+      # path of previous versions
+      rm -f /usr/share/rspamd/www/js/lib/bootstrap.min.js
+      rm -f /usr/share/rspamd/www/js/lib/jquery-3.3.1.min.js
+
       # remove copied font files
       rm -f /usr/share/rspamd/www/fonts/glyphicons-halflings-regular.ttf
       rm -f /usr/share/rspamd/www/fonts/glyphicons-halflings-regular.woff

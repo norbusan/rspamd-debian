@@ -1725,8 +1725,9 @@ rspamc_process_input (struct ev_loop *ev_base, struct rspamc_command *cmd,
 		}
 	}
 	else {
-		rspamd_fprintf (stderr, "cannot connect to %s\n", connect_str);
-		exit (EXIT_FAILURE);
+		rspamd_fprintf (stderr, "cannot connect to %s: %s\n", connect_str,
+				strerror (errno));
+		exit (-errno);
 	}
 
 	g_free (hostbuf);
@@ -1932,7 +1933,7 @@ main (gint argc, gchar **argv, gchar **env)
 		}
 	}
 
-	rspamd_init_libs ();
+	struct rspamd_external_libs_ctx *libs = rspamd_init_libs ();
 	event_loop = ev_loop_new (EVBACKEND_ALL);
 
 	struct rspamd_http_context_cfg http_config;
@@ -2085,6 +2086,8 @@ main (gint argc, gchar **argv, gchar **env)
 	for (i = 0; i < npatterns; i ++) {
 		g_pattern_spec_free (exclude_compiled[i]);
 	}
+
+	rspamd_deinit_libs (libs);
 
 	/* Mix retcode (return from Rspamd side) and ret (return from subprocess) */
 	return ret | retcode;

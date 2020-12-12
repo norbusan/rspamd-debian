@@ -64,6 +64,7 @@
 
 #include "zlib.h"
 #include "contrib/uthash/utlist.h"
+#include "blas-config.h"
 
 /* Check log messages intensity once per minute */
 #define CHECK_TIME 60
@@ -442,23 +443,21 @@ rspamd_socket (const gchar *credits, guint16 port,
 }
 
 gboolean
-rspamd_socketpair (gint pair[2], gboolean is_stream)
+rspamd_socketpair (gint pair[2], gint af)
 {
-	gint r, serrno;
+	gint r = -1, serrno;
 
-	if (!is_stream) {
 #ifdef HAVE_SOCK_SEQPACKET
+	if (af == SOCK_SEQPACKET) {
 		r = socketpair (AF_LOCAL, SOCK_SEQPACKET, 0, pair);
 
 		if (r == -1) {
 			r = socketpair (AF_LOCAL, SOCK_DGRAM, 0, pair);
 		}
-#else
-		r = socketpair (AF_LOCAL, SOCK_DGRAM, 0, pair);
-#endif
 	}
-	else {
-		r = socketpair (AF_LOCAL, SOCK_STREAM, 0, pair);
+#endif
+	if (r == -1) {
+		r = socketpair (AF_LOCAL, af, 0, pair);
 	}
 
 	if (r == -1) {
@@ -1705,23 +1704,24 @@ void rspamd_gerror_free_maybe (gpointer p)
 	}
 }
 
-
-
-#ifdef HAVE_CBLAS
-#ifdef HAVE_CBLAS_H
-#include "cblas.h"
-#else
-extern void openblas_set_num_threads(int num_threads);
-#endif
 /*
  * Openblas creates threads that are not supported by
  * jemalloc allocator (aside of being bloody stupid). So this hack
  * is intended to set number of threads to one by default.
  * FIXME: is it legit to do so in ctor?
  */
-RSPAMD_CONSTRUCTOR (openblas_stupidity_fix_ctor)
+#ifdef HAVE_OPENBLAS_SET_NUM_THREADS
+extern void openblas_set_num_threads(int num_threads);
+RSPAMD_CONSTRUCTOR (openblas_thread_fix_ctor)
 {
 	openblas_set_num_threads (1);
+}
+#endif
+#ifdef HAVE_BLI_THREAD_SET_NUM_THREADS
+extern void bli_thread_set_num_threads(int num_threads);
+RSPAMD_CONSTRUCTOR (blis_thread_fix_ctor)
+{
+	bli_thread_set_num_threads (1);
 }
 #endif
 
@@ -2434,4 +2434,21 @@ rspamd_set_counter_ema (struct rspamd_counter_data *cd,
 	cd->number ++;
 
 	return cd->mean;
+}
+
+void
+rspamd_ptr_array_shuffle (GPtrArray *ar)
+{
+	if (ar->len < 2) {
+		return;
+	}
+
+	guint n = ar->len;
+
+	for (guint i = 0; i < n - 1; i++) {
+		guint j = i + rspamd_random_uint64_fast () % (n - i);
+		gpointer t = g_ptr_array_index (ar, j);
+		g_ptr_array_index (ar, j) = g_ptr_array_index (ar, i);
+		g_ptr_array_index (ar, i) = t;
+	}
 }

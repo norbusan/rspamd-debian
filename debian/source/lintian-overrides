@@ -1,13 +1,31 @@
 # upstream imports minified versions dirctly from original sources; also these are not packages by Debian
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/codejar.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/d3evolution.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/d3pie.min.js
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/fontawesome.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/footable.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/jquery.stickytabs.min.js
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/linenumbers.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/nprogress.min.js
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/solid.min.js
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/visibility.min.js
+# these javascript files are deleted with this patch
+rspamd source: source-is-missing .pc/0004-drop-js-scripts-packaged-by-Debian.patch/interface/js/lib/bootstrap.bundle.min.js
+rspamd source: source-is-missing .pc/0004-drop-js-scripts-packaged-by-Debian.patch/interface/js/lib/jquery-3.5.1.min.js
+rspamd source: source-contains-prebuilt-javascript-object .pc/0004-drop-js-scripts-packaged-by-Debian.patch/interface/js/lib/bootstrap.bundle.min.js
+rspamd source: source-contains-prebuilt-javascript-object .pc/0004-drop-js-scripts-packaged-by-Debian.patch/interface/js/lib/jquery-3.5.1.min.js
+rspamd source: source-contains-prebuilt-javascript-object .pc/0004-drop-js-scripts-packaged-by-Debian.patch/interface/js/lib/require.min.js
+# these javascript source files contain very long lines
+rspamd source: source-is-missing debian/missing-sources/fontawesome.js line length is 518 characters (>512)
+rspamd source: source-is-missing debian/missing-sources/solid.js line length is 733 characters (>512)
+rspamd source: source-contains-prebuilt-javascript-object debian/missing-sources/fontawesome.js line length is 518 characters (>512)
+rspamd source: source-contains-prebuilt-javascript-object debian/missing-sources/solid.js line length is 733 characters (>512)
+rspamd source: very-long-line-length-in-source-file debian/missing-sources/fontawesome.js line length is 522 characters (>512)
+rspamd source: very-long-line-length-in-source-file debian/missing-sources/solid.js line length is 737 characters (>512)
+rspamd source: very-long-line-length-in-source-file interface/js/lib/prism.js line length is 7092 characters (>512)
 # Debian package libjs-d3 is ancient
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/d3.min.js
+# The Debian package node-prismjs depends on nodejs; installing nodejs binaries just for a single js file is bad
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/prism.js line length is 7092 characters (>512)
 # only the upstream debian/ directory and the version control .hgtags file are excluded
 rspamd source: repackaged-source-not-advertised
-# Fixed upstream https://github.com/rspamd/rspamd/issues/3317
-rspamd source: license-problem-convert-utf-code debian/patches/0007-license-problem-convert-utf-code.patch

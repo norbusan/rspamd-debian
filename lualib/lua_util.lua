@@ -97,6 +97,26 @@ exports.rspamd_str_trim = rspamd_str_trim
 exports.str_trim = rspamd_str_trim
 
 --[[[
+-- @function lua_util.str_startswith(text, prefix)
+-- @param {string} text
+-- @param {string} prefix
+-- @return {boolean} true if text starts with the specified prefix, false otherwise
+--]]
+exports.str_startswith = function(s, prefix)
+  return s:sub(1, prefix:len()) == prefix
+end
+
+--[[[
+-- @function lua_util.str_endswith(text, suffix)
+-- @param {string} text
+-- @param {string} suffix
+-- @return {boolean} true if text ends with the specified suffix, false otherwise
+--]]
+exports.str_endswith = function(s, suffix)
+  return s:sub(-suffix:len()) == suffix
+end
+
+--[[[
 -- @function lua_util.round(number, decimalPlaces)
 -- Round number to fixed number of decimal points
 -- @param {number} number number to round
@@ -672,9 +692,10 @@ exports.filter_specific_urls = function (urls, params)
     if params.prefix then
       cache_key = params.prefix
     else
-      cache_key = string.format('sp_urls_%d%s%s', params.limit,
+      cache_key = string.format('sp_urls_%d%s%s%s', params.limit,
           tostring(params.need_emails or false),
-          tostring(params.need_images or false))
+          tostring(params.need_images or false),
+          tostring(params.need_content or false))
     end
     local cached = params.task:cache_get(cache_key)
 
@@ -879,6 +900,7 @@ end
 - - prefix <string> cache prefix (default = nil)
 - - ignore_redirected <bool> (default = false)
 - - need_images <bool> (default = false)
+- - need_content <bool> (default = false)
 -- }
 -- Apply heuristic in extracting of urls from task, this function
 -- tries its best to extract specific number of urls from a task based on
@@ -891,6 +913,7 @@ exports.extract_specific_urls = function(params_or_task, lim, need_emails, filte
     esld_limit = 9999,
     need_emails = false,
     need_images = false,
+    need_content = false,
     filter = nil,
     prefix = nil,
     ignore_ip = false,
@@ -914,8 +937,32 @@ exports.extract_specific_urls = function(params_or_task, lim, need_emails, filte
   for k,v in pairs(default_params) do
     if type(params[k]) == 'nil' and v ~= nil then params[k] = v end
   end
+  local url_params = {
+    emails = params.need_emails,
+    images = params.need_images,
+    content = params.need_content,
+  }
 
-  local urls = params.task:get_urls(params.need_emails, params.need_images)
+  -- Shortcut for cached stuff
+  if params.task and not params.no_cache then
+    local cache_key
+    if params.prefix then
+      cache_key = params.prefix
+    else
+      cache_key = string.format('sp_urls_%d%s%s%s', params.limit,
+          tostring(params.need_emails or false),
+          tostring(params.need_images or false),
+          tostring(params.need_content or false))
+    end
+    local cached = params.task:cache_get(cache_key)
+
+    if cached then
+      return cached
+    end
+  end
+
+  -- No cache version
+  local urls = params.task:get_urls(url_params)
 
   return exports.filter_specific_urls(urls, params)
 end
@@ -935,7 +982,9 @@ local function deepcopy(orig)
     for orig_key, orig_value in next, orig, nil do
       copy[deepcopy(orig_key)] = deepcopy(orig_value)
     end
-    setmetatable(copy, deepcopy(getmetatable(orig)))
+    if getmetatable(orig) then
+      setmetatable(copy, deepcopy(getmetatable(orig)))
+    end
   else -- number, string, boolean, etc
     copy = orig
   end
@@ -943,6 +992,25 @@ local function deepcopy(orig)
 end
 
 exports.deepcopy = deepcopy
+
+--[[[
+-- @function lua_util.deepsort(table)
+-- params: {
+- - table
+-- }
+-- Performs recursive in-place sort of a table
+--]]
+local function deepsort(tbl, sort_func)
+  local orig_type = type(tbl)
+  if orig_type == 'table' then
+    table.sort(tbl, sort_func)
+    for _, orig_value in next, tbl, nil do
+      deepsort(orig_value)
+    end
+  end
+end
+
+exports.deepsort = deepsort
 
 --[[[
 -- @function lua_util.shallowcopy(tbl)

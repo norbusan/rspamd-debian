@@ -1,3 +1,16 @@
+rspamd (2.6-0.1) UNRELEASED; urgency=medium
+
+  * Non-maintainer upload.
+  * New upstream version 2.6
+  * Work on Lintian issues
+  * Refresh patches
+  * d/salsa-ci.yml: fail on Lintian warnings
+  * debian: run wrap-and-sort
+  * d/rspamd.lintian-overrides: do not use spelling mistake in comment
+  * d/source/lintian-overrides: drop unused override
+
+ -- Christian Göttsche <cgzones@googlemail.com>  Sun, 11 Oct 2020 16:51:39 +0200
+ 
 rspamd (2.5-4) unstable; urgency=medium
 
   [ Christian Göttsche ]

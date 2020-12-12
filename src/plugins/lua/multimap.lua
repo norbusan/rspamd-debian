@@ -877,7 +877,7 @@ local function multimap_callback(task, rule)
 
       for _,p in fun.iter(fun.filter(filter_parts, parts)) do
         if filter_archive(p) then
-          local fnames = p:get_archive():get_files()
+          local fnames = p:get_archive():get_files(1000)
 
           for _,fn in ipairs(fnames) do
             match_filename(rule, fn)
@@ -1260,10 +1260,15 @@ if opts and type(opts) == 'table' then
         rspamd_config:register_symbol({
           type = 'virtual',
           name = s,
-          parent = id
+          parent = id,
+          score = 0, -- Default score
         })
         rule['symbols_set'][s] = 1
       end, rule['symbols'])
+    end
+    if not rule.score then
+      rspamd_logger.infox(rspamd_config, 'set default score 0 for multimap rule %s', rule.symbol)
+      rule.score = 0
     end
     if rule['score'] then
       -- Register metric symbol
@@ -1275,11 +1280,13 @@ if opts and type(opts) == 'table' then
     end
   end, fun.filter(function(r) return not r['prefilter'] end, rules))
 
-  fun.each(function(r)
+  -- prefilter symbils
+  fun.each(function(rule)
     rspamd_config:register_symbol({
       type = 'prefilter',
-      name = r['symbol'],
-      callback = gen_multimap_callback(r),
+      name = rule['symbol'],
+      score = rule.score or 0,
+      callback = gen_multimap_callback(rule),
     })
   end, fun.filter(function(r) return r['prefilter'] end, rules))
 

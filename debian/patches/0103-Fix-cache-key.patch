@@ -1,0 +1,31 @@
+From: Andrew Lewis <nerf@judo.za.org>
+Date: Thu, 1 Oct 2020 19:11:59 +0200
+Applied-Upstream: https://github.com/rspamd/rspamd/commit/b2d42ef071ad43773d68e9b9da3d3c1f741362a2
+Subject: Fix cache key
+
+---
+ lualib/lua_util.lua | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/lualib/lua_util.lua b/lualib/lua_util.lua
+index 7c925c1..cb4becb 100644
+--- a/lualib/lua_util.lua
++++ b/lualib/lua_util.lua
+@@ -949,10 +949,16 @@ exports.extract_specific_urls = function(params_or_task, lim, need_emails, filte
+     if params.prefix then
+       cache_key = params.prefix
+     else
+-      cache_key = string.format('sp_urls_%d%s%s%s', params.limit,
++      local cache_key_suffix
++      if params.flags then
++        cache_key_suffix = table.concat(params.flags) .. (params.flags_mode or '')
++      else
++        cache_key_suffix = string.format('%s%s%s',
+           tostring(params.need_emails or false),
+           tostring(params.need_images or false),
+           tostring(params.need_content or false))
++      end
++      cache_key = string.format('sp_urls_%d%s', params.limit, cache_key_suffix)
+     end
+     local cached = params.task:cache_get(cache_key)
+ 

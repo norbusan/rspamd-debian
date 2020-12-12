@@ -155,7 +155,7 @@ rspamd_http_parse_key (rspamd_ftok_t *data, struct rspamd_http_connection *conn,
 		eq_pos = memchr (data->begin, '=', data->len);
 		if (eq_pos != NULL) {
 			decoded_id = rspamd_decode_base32 (data->begin, eq_pos - data->begin,
-					&id_len);
+					&id_len, RSPAMD_BASE32_DEFAULT);
 
 			if (decoded_id != NULL && id_len >= RSPAMD_KEYPAIR_SHORT_ID_LEN) {
 				pk = rspamd_pubkey_from_base32 (eq_pos + 1,
@@ -2342,6 +2342,14 @@ rspamd_http_connection_set_key (struct rspamd_http_connection *conn,
 
 	g_assert (key != NULL);
 	priv->local_key = rspamd_keypair_ref (key);
+}
+
+void
+rspamd_http_connection_own_socket (struct rspamd_http_connection *conn)
+{
+	struct rspamd_http_connection_private *priv = conn->priv;
+
+	priv->flags |= RSPAMD_HTTP_CONN_OWN_SOCKET;
 }
 
 const struct rspamd_cryptobox_pubkey*

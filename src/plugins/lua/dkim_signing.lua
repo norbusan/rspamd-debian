@@ -33,6 +33,8 @@ local settings = {
   allow_username_mismatch = false,
   allow_pubkey_mismatch = true,
   sign_authenticated = true,
+  allowed_ids = nil,
+  forbidden_ids = nil,
   check_pubkey = false,
   domain = {},
   path = string.format('%s/%s/%s', rspamd_paths['DBDIR'], 'dkim', '$domain.$selector.key'),
@@ -51,7 +53,7 @@ local N = 'dkim_signing'
 local redis_params
 local sign_func = rspamd_plugins.dkim.sign
 
-local function insert_sign_results(task, ret, hdr)
+local function insert_sign_results(task, ret, hdr, dkim_params)
   if settings.use_milter_headers then
     task:set_milter_reply({
       add_headers = {
@@ -60,7 +62,8 @@ local function insert_sign_results(task, ret, hdr)
     })
   end
   if ret then
-    task:insert_result(settings.symbol, 1.0)
+    task:insert_result(settings.symbol, 1.0, string.format('%s:s=%s',
+        dkim_params.domain, dkim_params.selector))
   end
 end
 
@@ -78,22 +81,22 @@ local function do_sign(task, p)
           p.pubkey = results[1]
           p.strict_pubkey_check = not settings.allow_pubkey_mismatch
         elseif not settings.allow_pubkey_mismatch then
-          rspamd_logger.errx('public key for domain %s/%s is not found: %s, skip signing',
+          rspamd_logger.infox(task, 'public key for domain %s/%s is not found: %s, skip signing',
               p.domain, p.selector, err)
           return
         else
-          rspamd_logger.infox('public key for domain %s/%s is not found: %s',
+          rspamd_logger.infox(task, 'public key for domain %s/%s is not found: %s',
               p.domain, p.selector, err)
         end
 
         local sret, hdr = sign_func(task, p)
-        insert_sign_results(task, sret, hdr)
+        insert_sign_results(task, sret, hdr, p)
       end,
       forced = true
     })
   else
     local sret, hdr = sign_func(task, p)
-    insert_sign_results(task, sret, hdr)
+    insert_sign_results(task, sret, hdr, p)
   end
 end
 
@@ -160,13 +163,20 @@ if settings.use_redis then
   settings.redis_params = redis_params
 end
 
-
-rspamd_config:register_symbol({
+local sym_reg_tbl = {
   name = settings['symbol'],
   callback = dkim_signing_cb,
   groups = {"policies", "dkim"},
   score = 0.0,
-})
+}
 
+if type(settings.allowed_ids) == 'table' then
+  sym_reg_tbl.allowed_ids = settings.allowed_ids
+end
+if type(settings.forbidden_ids) == 'table' then
+  sym_reg_tbl.forbidden_ids = settings.forbidden_ids
+end
+
+rspamd_config:register_symbol(sym_reg_tbl)
 -- Add dependency on DKIM checks
 rspamd_config:register_dependency(settings['symbol'], 'DKIM_CHECK')

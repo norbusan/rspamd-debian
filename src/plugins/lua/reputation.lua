@@ -1168,9 +1168,14 @@ local function parse_rule(name, tbl)
   end)
 
   -- We now generate symbol for checking
+  local rule_type = 'normal'
+  if rule.selector.config.split_symbols then
+    rule_type = 'callback'
+  end
+
   local id = rspamd_config:register_symbol{
     name = rule.symbol,
-    type = 'normal',
+    type = rule_type,
     callback = callback_gen(reputation_filter_cb, rule),
   }
 
@@ -1197,7 +1202,8 @@ local function parse_rule(name, tbl)
     -- Also register a postfilter
     rspamd_config:register_symbol{
       name = rule.symbol .. '_POST',
-      type = 'postfilter,nostat',
+      type = 'postfilter',
+      flags = 'nostat',
       callback = callback_gen(reputation_postfilter_cb, rule),
     }
   end

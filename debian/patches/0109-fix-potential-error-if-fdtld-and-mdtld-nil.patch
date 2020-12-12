@@ -1,0 +1,22 @@
+From: Lionel <lionel.prat9@gmail.com>
+Date: Tue, 6 Oct 2020 19:12:31 +0200
+Applied-Upstream: https://github.com/rspamd/rspamd/commit/ecbf70a7ee51f643f10125dbede445a44a703c0c
+Subject: fix potential error if fdtld and mdtld == nil
+
+---
+ rules/mid.lua | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/rules/mid.lua b/rules/mid.lua
+index b74ff13..f7dfb1e 100644
+--- a/rules/mid.lua
++++ b/rules/mid.lua
+@@ -44,7 +44,7 @@ local function mid_check_func(task)
+     -- can be found in the Message-ID
+     if (mid:lower():find(from[1].addr:lower(),1,true)) then
+       task:insert_result('MID_CONTAINS_FROM', 1.0)
+-    elseif (md and fd == md:lower()) then
++    elseif (mdtld ~= nil and fdtld ~= nil and mdtld:lower() == fdtld) then
+       task:insert_result('MID_RHS_MATCH_FROM', 1.0)
+     end
+   end

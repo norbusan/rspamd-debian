@@ -256,7 +256,7 @@ rspamd_multipattern_create (enum rspamd_multipattern_flags flags)
 	struct rspamd_multipattern *mp;
 
 	/* Align due to blake2b state */
-	posix_memalign((void **)&mp, _Alignof (struct rspamd_multipattern),
+	(void) !posix_memalign((void **)&mp, _Alignof (struct rspamd_multipattern),
 			sizeof (*mp));
 	g_assert (mp != NULL);
 	memset (mp, 0, sizeof (*mp));
@@ -285,7 +285,7 @@ rspamd_multipattern_create_sized (guint npatterns,
 	struct rspamd_multipattern *mp;
 
 	/* Align due to blake2b state */
-	posix_memalign((void **)&mp, _Alignof (struct rspamd_multipattern), sizeof (*mp));
+	(void) !posix_memalign((void **)&mp, _Alignof (struct rspamd_multipattern), sizeof (*mp));
 	g_assert (mp != NULL);
 	memset (mp, 0, sizeof (*mp));
 	mp->flags = flags;
@@ -535,10 +535,14 @@ rspamd_multipattern_compile (struct rspamd_multipattern *mp, GError **err)
 
 			for (guint i = 0; i < mp->cnt; i ++) {
 				const ac_trie_pat_t *pat;
+				const gchar *pat_flags = NULL;
+
+				if (mp->flags & RSPAMD_MULTIPATTERN_UTF8) {
+					pat_flags = "u";
+				}
 
 				pat = &g_array_index (mp->pats, ac_trie_pat_t, i);
-
-				re = rspamd_regexp_new (pat->ptr, NULL, err);
+				re = rspamd_regexp_new (pat->ptr, pat_flags, err);
 
 				if (re == NULL) {
 					return FALSE;

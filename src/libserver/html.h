@@ -42,6 +42,7 @@ enum html_component_type {
 	RSPAMD_HTML_COMPONENT_WIDTH,
 	RSPAMD_HTML_COMPONENT_HEIGHT,
 	RSPAMD_HTML_COMPONENT_SIZE,
+	RSPAMD_HTML_COMPONENT_REL,
 };
 
 struct html_tag_component {
@@ -104,6 +105,7 @@ struct html_block {
 #define FL_IGNORE       (1 << 27)
 #define FL_BLOCK        (1 << 28)
 #define FL_HREF         (1 << 29)
+#define FL_IMAGE        (1 << 30)
 
 struct html_tag {
 	gint id;
@@ -143,7 +145,8 @@ GByteArray *rspamd_html_process_part (rspamd_mempool_t *pool,
 GByteArray *rspamd_html_process_part_full (rspamd_mempool_t *pool,
 										   struct html_content *hc,
 										   GByteArray *in, GList **exceptions,
-										   khash_t (rspamd_url_hash) *url_set);
+										   khash_t (rspamd_url_hash) *url_set,
+										   GPtrArray *part_urls);
 
 /*
  * Returns true if a specified tag has been seen in a part
@@ -172,9 +175,6 @@ gint rspamd_html_tag_by_name (const gchar *name);
  * @param comp
  * @return
  */
-struct rspamd_url *rspamd_html_process_url (rspamd_mempool_t *pool,
-											const gchar *start, guint len,
-											struct html_tag_component *comp);
 
 #ifdef  __cplusplus
 }

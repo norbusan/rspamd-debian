@@ -18,6 +18,10 @@ limitations under the License.
 
 local fun = require "fun"
 local bit = require "bit"
+local lua_util = require "lua_util"
+local rspamd_util = require "rspamd_util"
+local N = "bitcoin"
+
 local off = 0
 local base58_dec = fun.tomap(fun.map(
     function(c)
@@ -96,93 +100,132 @@ local function verify_beach32_cksum(hrp, elts)
   return polymod(hrpExpand(hrp), elts) == 1
 end
 
-local function is_segwit_bech32_address(word)
-  local has_upper, has_lower, has_invalid
 
-  if #word > 90 then return false end
-
-  fun.each(function(ch)
-    if ch < 33 or ch > 126 then
-      has_invalid = true
-    elseif ch >= 97 and ch <= 122 then
-      has_lower = true
-    elseif ch >= 65 and ch <= 90 then
-      has_upper = true;
-    end
-  end, fun.map(string.byte, fun.iter(word)))
-
-  if has_invalid or (has_lower and has_upper) then
-    return false
-  end
-
-  word = word:lower()
-  local last_one_pos = word:find('1[^1]*$')
-  if not last_one_pos or (last_one_pos < 1 or last_one_pos + 7 > #word) then
-    return false
-  end
-  local hrp = word:sub(1, last_one_pos - 1)
+local function gen_bleach32_table(input)
   local d = {}
-  local charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
-  for i=last_one_pos + 1,#word do
-    local c = word:sub(i, i)
-    local pos = charset:find(c)
+  local i = 1
+  local res = true
+  local charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
 
-    if not pos then
-      return false
+  fun.each(function(byte)
+    if res then
+      local pos = charset:find(byte, 1, true)
+      if not pos then
+        res = false
+      else
+        d[i] = pos - 1
+        i = i + 1
+      end
     end
-    d[#d + 1] = pos - 1
-  end
+  end, fun.iter(input))
 
-  return verify_beach32_cksum(hrp, d)
+  return res and d or nil
 end
 
+local function is_segwit_bech32_address(task, word)
+  local semicolon_pos = string.find(word, ':')
+  local address_part = word
+  if semicolon_pos then
+    address_part = string.sub(word, semicolon_pos + 1)
+  end
 
-rspamd_config:register_symbol{
-  name = 'BITCOIN_ADDR',
+  local prefix = address_part:sub(1, 3)
+
+  if prefix == 'bc1' or prefix:sub(1, 1) == '1' or prefix:sub(1, 1) == '3' then
+    -- Strip beach32 prefix in bitcoin
+    address_part = address_part:lower()
+    local last_one_pos = address_part:find('1[^1]*$')
+    if not last_one_pos or (last_one_pos < 1 or last_one_pos + 7 > #address_part) then
+      return false
+    end
+    local hrp = address_part:sub(1, last_one_pos - 1)
+    local addr = address_part:sub(last_one_pos + 1, -1)
+    local decoded = gen_bleach32_table(addr)
+
+    if decoded then
+      return verify_beach32_cksum(hrp, decoded)
+    end
+  else
+    -- Bitcoin cash address
+    -- https://www.bitcoincash.org/spec/cashaddr.html
+    local decoded = gen_bleach32_table(address_part)
+    lua_util.debugm(N, task, 'check %s, %s decoded', word, decoded)
+
+    if decoded and #decoded > 8 then
+      if semicolon_pos then
+        prefix = word:sub(1, semicolon_pos - 1)
+      else
+        prefix = 'bitcoincash'
+      end
+
+      local polymod_tbl = {}
+      fun.each(function(byte)
+        local b = bit.band(string.byte(byte), 0x1f)
+        table.insert(polymod_tbl, b)
+      end, fun.iter(prefix))
+
+      -- For semicolon
+      table.insert(polymod_tbl, 0)
+
+      fun.each(function(byte) table.insert(polymod_tbl, byte) end, decoded)
+      lua_util.debugm(N, task, 'final polymod table: %s', polymod_tbl)
+
+      return rspamd_util.btc_polymod(polymod_tbl)
+    end
+  end
+end
+
+local normal_wallet_re = [[/\b[13LM][1-9A-Za-z]{25,34}\b/AL{sa_body}]]
+local btc_bleach_re = [[/\b(?:[a-zA-Z]\w+:)?[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{14,}\b/AL{sa_body}]]
+
+config.regexp['BITCOIN_ADDR'] = {
   description = 'Message has a valid bitcoin wallet address',
-  callback = function(task)
-    local rspamd_re = require "rspamd_regexp"
-
-    local btc_wallet_re = rspamd_re.create_cached('^[13LM][1-9A-Za-z]{25,34}$')
-    local segwit_wallet_re = rspamd_re.create_cached('^[b][c]1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{14,74}$', 'i')
-    local words_matched = {}
-    local segwit_words_matched = {}
-    local valid_wallets = {}
-
-    for _,part in ipairs(task:get_text_parts() or {}) do
-      local pw = part:filter_words(btc_wallet_re, 'raw', 3)
-
-      if pw and #pw > 0 then
-        for _,w in ipairs(pw) do
-          words_matched[#words_matched + 1] = w
-        end
+  re = string.format('(%s) || (%s)', normal_wallet_re, btc_bleach_re),
+  re_conditions = {
+    [normal_wallet_re] = function(task, txt, s, e)
+      if e - s <= 2 then
+        return false
       end
 
-      pw = part:filter_words(segwit_wallet_re, 'raw', 3)
-      if pw and #pw > 0 then
-        for _,w in ipairs(pw) do
-          segwit_words_matched[#segwit_words_matched + 1] = w
-        end
-      end
-    end
-
-    for _,word in ipairs(words_matched) do
+      local word = lua_util.str_trim(txt:sub(s + 1, e))
       local valid = is_traditional_btc_address(word)
-      if valid then
-        valid_wallets[#valid_wallets + 1] = word
-      end
-    end
-    for _,word in ipairs(segwit_words_matched) do
-      local valid = is_segwit_bech32_address(word)
-      if valid then
-        valid_wallets[#valid_wallets + 1] = word
-      end
-    end
 
-    if #valid_wallets > 0 then
-      return true,1.0,valid_wallets
-    end
-  end,
+      if valid then
+        -- To save option
+        task:insert_result('BITCOIN_ADDR', 1.0, word)
+        lua_util.debugm(N, task, 'found valid traditional bitcoin addr in the word: %s',
+            word)
+        return true
+      else
+        lua_util.debugm(N, task, 'found invalid bitcoin addr in the word: %s',
+            word)
+
+        return false
+      end
+    end,
+    [btc_bleach_re] = function(task, txt, s, e)
+      if e - s <= 2 then
+        return false
+      end
+
+      local word = tostring(lua_util.str_trim(txt:sub(s + 1, e)))
+      local valid = is_segwit_bech32_address(task, word)
+
+      if valid then
+        -- To save option
+        task:insert_result('BITCOIN_ADDR', 1.0, word)
+        lua_util.debugm(N, task, 'found valid bleach bitcoin addr in the word: %s',
+            word)
+        return true
+      else
+        lua_util.debugm(N, task, 'found invalid bitcoin addr in the word: %s',
+            word)
+
+        return false
+      end
+    end,
+  },
   score = 0.0,
-  group = 'scams'
+  one_shot = true,
+  group = 'scams',
 }

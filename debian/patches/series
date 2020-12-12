@@ -2,5 +2,15 @@
 0003-add-versions-to-shared-libraries.patch
 0004-drop-js-scripts-packaged-by-Debian.patch
 0006-do-not-install-fonts-packaged-by-Debian.patch
-0007-license-problem-convert-utf-code.patch
-0008-gcc10-ftbfs.patch
+0101-Add-sanity-checks-for-actions-thresholds.patch
+0102-Avoid-error-messages-on-connect.patch
+0103-Fix-cache-key.patch
+0104-Fix-handling-of-skip-skip_process-http-flags.patch
+0105-Fix-Status-tab-display-for-scanned-0.patch
+0106-Fix-smtp-date-syntax-definition.patch
+0107-Smtp_date-Fix-2-digits-years-between-00-and-49.patch
+0108-Ratelimit-Add-implicit-score.patch
+0109-fix-potential-error-if-fdtld-and-mdtld-nil.patch
+0110-Slightly-improve-logging.patch
+0111-Use-dup-fd-in-milter-handler-to-avoid-races-with-the.patch
+0112-Fix-quit-command-processing.patch
