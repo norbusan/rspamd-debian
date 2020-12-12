@@ -1,3 +1,18 @@
+rspamd (2.6-1) unstable; urgency=medium
+
+  [ Christian Göttsche ]
+  * New upstream version 2.6
+  * Work on Lintian issues
+  * Refresh patches
+  * d/salsa-ci.yml: fail on Lintian warnings
+  * debian: run wrap-and-sort
+  * d/rspamd.lintian-overrides: do not use spelling mistake in comment
+
+  [ Sebastien Badia ]
+  * d/source/lintian-overrides: drop unused override
+
+ -- Sebastien Badia <sbadia@debian.org>  Sat, 12 Dec 2020 15:54:28 +0100
+
 rspamd (2.5-4) unstable; urgency=medium
 
   [ Christian Göttsche ]
