@@ -2241,6 +2241,12 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				RSPAMD_CL_FLAG_INT_32,
 				"Maximum count of URLs to process to avoid DoS (default: 10240)");
 		rspamd_rcl_add_default_handler (sub,
+				"max_recipients",
+				rspamd_rcl_parse_struct_integer,
+				G_STRUCT_OFFSET (struct rspamd_config, max_recipients),
+				RSPAMD_CL_FLAG_INT_32,
+				"Maximum count of recipients to process to avoid DoS (default: 1024)");
+		rspamd_rcl_add_default_handler (sub,
 				"max_blas_threads",
 				rspamd_rcl_parse_struct_integer,
 				G_STRUCT_OFFSET (struct rspamd_config, max_blas_threads),
@@ -3256,6 +3262,8 @@ rspamd_rcl_parse_struct_string_list (rspamd_mempool_t *pool,
 
 	ucl_object_iterate_free (iter);
 
+#if 0
+	/* WTF: why don't we allow empty list here?? */
 	if (*target == NULL) {
 		g_set_error (err,
 				CFG_RCL_ERROR,
@@ -3266,6 +3274,7 @@ rspamd_rcl_parse_struct_string_list (rspamd_mempool_t *pool,
 				obj->len);
 		return FALSE;
 	}
+#endif
 
 	if (!is_hash && *target != NULL) {
 		*target = g_list_reverse (*target);
@@ -3392,7 +3401,7 @@ rspamd_rcl_parse_struct_mime_addr (rspamd_mempool_t *pool,
 		if (ucl_object_type (cur) == UCL_STRING) {
 			val = ucl_object_tostring (obj);
 			tmp_addr = rspamd_email_address_from_mime (pool, val,
-					strlen (val), tmp_addr);
+					strlen (val), tmp_addr, -1);
 		}
 		else {
 			g_set_error (err,
@@ -3783,7 +3792,7 @@ rspamd_config_calculate_cksum (struct rspamd_config *cfg)
 	ucl_object_emit_full (cfg->rcl_obj, UCL_EMIT_MSGPACK,
 			&f, cfg->config_comments);
 	rspamd_cryptobox_hash_final (&hs, cksumbuf);
-	cfg->checksum = rspamd_encode_base32 (cksumbuf, sizeof (cksumbuf));
+	cfg->checksum = rspamd_encode_base32 (cksumbuf, sizeof (cksumbuf), RSPAMD_BASE32_DEFAULT);
 	/* Also change the tag of cfg pool to be equal to the checksum */
 	rspamd_strlcpy (cfg->cfg_pool->tag.uid, cfg->checksum,
 			MIN (sizeof (cfg->cfg_pool->tag.uid), strlen (cfg->checksum)));

@@ -23,7 +23,7 @@ rspamd_config.FWD_GOOGLE = {
     if not (task:has_from(1) and task:has_recipients(1)) then
       return false
     end
-    local envfrom = task:get_from(1)
+    local envfrom = task:get_from{'smtp', 'orig'}
     local envrcpts = task:get_recipients(1)
     -- Forwarding will only be to a single recipient
     if #envrcpts > 1 then return false end
@@ -119,7 +119,7 @@ rspamd_config.FORWARDED = {
       return addr
     end
 
-    if not task:has_recipients(1) then return false end
+    if not task:has_recipients(1) or not task:has_recipients(2) then return false end
     local envrcpts = task:get_recipients(1)
     -- Forwarding will only be for single recipient messages
     if #envrcpts > 1 then return false end

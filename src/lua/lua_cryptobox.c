@@ -37,8 +37,9 @@
 
 #include <stdalign.h>
 
+
 enum lua_cryptobox_hash_type {
-	LUA_CRYPTOBOX_HASH_BLAKE2,
+	LUA_CRYPTOBOX_HASH_BLAKE2 = 0,
 	LUA_CRYPTOBOX_HASH_SSL,
 	LUA_CRYPTOBOX_HASH_XXHASH64,
 	LUA_CRYPTOBOX_HASH_XXHASH32,
@@ -53,8 +54,11 @@ struct rspamd_lua_cryptobox_hash {
 		rspamd_cryptobox_fast_hash_state_t *fh;
 	} content;
 
-	unsigned type:7;
-	unsigned is_finished:1;
+	unsigned char out[rspamd_cryptobox_HASHBYTES];
+
+	uint8_t type;
+	uint8_t out_len;
+	uint8_t is_finished;
 
 	ref_entry_t ref;
 };
@@ -99,6 +103,12 @@ LUA_FUNCTION_DEF (cryptobox, encrypt_cookie);
 LUA_FUNCTION_DEF (cryptobox, decrypt_cookie);
 LUA_FUNCTION_DEF (cryptobox, pbkdf);
 LUA_FUNCTION_DEF (cryptobox, gen_dkim_keypair);
+
+/* Secretbox API: uses libsodium secretbox and blake2b for key derivation */
+LUA_FUNCTION_DEF (cryptobox_secretbox, create);
+LUA_FUNCTION_DEF (cryptobox_secretbox, encrypt);
+LUA_FUNCTION_DEF (cryptobox_secretbox, decrypt);
+LUA_FUNCTION_DEF (cryptobox_secretbox, gc);
 
 static const struct luaL_reg cryptoboxlib_f[] = {
 	LUA_INTERFACE_DEF (cryptobox, verify_memory),
@@ -184,6 +194,22 @@ static const struct luaL_reg cryptoboxhashlib_m[] = {
 };
 
 
+static const struct luaL_reg cryptoboxsecretboxlib_f[] = {
+	LUA_INTERFACE_DEF (cryptobox_secretbox, create),
+	{NULL, NULL},
+};
+
+static const struct luaL_reg cryptoboxsecretboxlib_m[] = {
+	LUA_INTERFACE_DEF (cryptobox_secretbox, encrypt),
+	LUA_INTERFACE_DEF (cryptobox_secretbox, decrypt),
+	{"__gc", lua_cryptobox_secretbox_gc},
+	{NULL, NULL},
+};
+
+struct rspamd_lua_cryptobox_secretbox {
+	guchar sk[crypto_secretbox_KEYBYTES];
+};
+
 static struct rspamd_cryptobox_pubkey *
 lua_check_cryptobox_pubkey (lua_State * L, int pos)
 {
@@ -218,6 +244,15 @@ lua_check_cryptobox_hash (lua_State * L, int pos)
 
 	luaL_argcheck (L, ud != NULL, 1, "'cryptobox_hash' expected");
 	return ud ? *((struct rspamd_lua_cryptobox_hash **)ud) : NULL;
+}
+
+static struct rspamd_lua_cryptobox_secretbox *
+lua_check_cryptobox_secretbox (lua_State * L, int pos)
+{
+	void *ud = rspamd_lua_check_udata (L, pos, "rspamd{cryptobox_secretbox}");
+
+	luaL_argcheck (L, ud != NULL, 1, "'cryptobox_secretbox' expected");
+	return ud ? *((struct rspamd_lua_cryptobox_secretbox **)ud) : NULL;
 }
 
 /***
@@ -298,7 +333,7 @@ lua_cryptobox_pubkey_load (lua_State *L)
 
 /***
  * @function rspamd_cryptobox_pubkey.create(data[, type[, alg]])
- * Loads public key from base32 encoded file
+ * Loads public key from base32 encoded string
  * @param {base32 string} base32 string with the key
  * @param {string} type optional 'sign' or 'kex' for signing and encryption
  * @param {string} alg optional 'default' or 'nist' for curve25519/nistp256 keys
@@ -827,8 +862,9 @@ lua_cryptobox_signature_hex (lua_State *L)
 }
 
 /***
- * @method cryptobox_signature:base32()
+ * @method cryptobox_signature:base32([b32type='default'])
  * Return base32 encoded signature string
+ * @param {string} b32type base32 type (default, bleach, rfc)
  * @return {string} raw value of signature
  */
 static gint
@@ -837,9 +873,18 @@ lua_cryptobox_signature_base32 (lua_State *L)
 	LUA_TRACE_POINT;
 	rspamd_fstring_t *sig = lua_check_cryptobox_sign (L, 1);
 	gchar *encoded;
+	enum rspamd_base32_type btype = RSPAMD_BASE32_DEFAULT;
+
+	if (lua_type (L, 2) == LUA_TSTRING) {
+		btype = rspamd_base32_decode_type_from_str (lua_tostring (L, 2));
+
+		if (btype == RSPAMD_BASE32_INVALID) {
+			return luaL_error (L, "invalid b32 type: %s", lua_tostring (L, 2));
+		}
+	}
 
 	if (sig) {
-		encoded = rspamd_encode_base32 (sig->str, sig->len);
+		encoded = rspamd_encode_base32 (sig->str, sig->len, btype);
 		lua_pushstring (L, encoded);
 		g_free (encoded);
 	}
@@ -953,8 +998,23 @@ lua_cryptobox_hash_dtor (struct rspamd_lua_cryptobox_hash *h)
 	g_free (h);
 }
 
+static inline void
+rspamd_lua_hash_init_default (struct rspamd_lua_cryptobox_hash *h,
+		const gchar *key, gsize keylen)
+{
+	h->type = LUA_CRYPTOBOX_HASH_BLAKE2;
+	if (posix_memalign ((void **)&h->content.h,
+			_Alignof (rspamd_cryptobox_hash_state_t),
+			sizeof (*h->content.h)) != 0) {
+		g_assert_not_reached ();
+	}
+
+	rspamd_cryptobox_hash_init (h->content.h, key, keylen);
+	h->out_len = rspamd_cryptobox_HASHBYTES;
+}
+
 static struct rspamd_lua_cryptobox_hash *
-rspamd_lua_hash_create (const gchar *type)
+rspamd_lua_hash_create (const gchar *type, const gchar *key, gsize keylen)
 {
 	struct rspamd_lua_cryptobox_hash *h;
 
@@ -965,6 +1025,7 @@ rspamd_lua_hash_create (const gchar *type)
 		if (g_ascii_strcasecmp (type, "md5") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_SSL;
 			h->content.c = EVP_MD_CTX_create ();
+			h->out_len = EVP_MD_size (EVP_md5 ());
 			/* Should never ever be used for crypto/security purposes! */
 #ifdef EVP_MD_CTX_FLAG_NON_FIPS_ALLOW
 			EVP_MD_CTX_set_flags (h->content.c, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
@@ -975,6 +1036,7 @@ rspamd_lua_hash_create (const gchar *type)
 					g_ascii_strcasecmp (type, "sha") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_SSL;
 			h->content.c = EVP_MD_CTX_create ();
+			h->out_len = EVP_MD_size (EVP_sha1 ());
 			/* Should never ever be used for crypto/security purposes! */
 #ifdef EVP_MD_CTX_FLAG_NON_FIPS_ALLOW
 			EVP_MD_CTX_set_flags (h->content.c, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
@@ -984,48 +1046,51 @@ rspamd_lua_hash_create (const gchar *type)
 		else if (g_ascii_strcasecmp (type, "sha256") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_SSL;
 			h->content.c = EVP_MD_CTX_create ();
+			h->out_len = EVP_MD_size (EVP_sha256 ());
 			EVP_DigestInit (h->content.c, EVP_sha256 ());
 		}
 		else if (g_ascii_strcasecmp (type, "sha512") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_SSL;
 			h->content.c = EVP_MD_CTX_create ();
+			h->out_len = EVP_MD_size (EVP_sha512 ());
 			EVP_DigestInit (h->content.c, EVP_sha512 ());
 		}
 		else if (g_ascii_strcasecmp (type, "sha384") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_SSL;
 			h->content.c = EVP_MD_CTX_create ();
+			h->out_len = EVP_MD_size (EVP_sha384 ());
 			EVP_DigestInit (h->content.c, EVP_sha384 ());
-		}
-		else if (g_ascii_strcasecmp (type, "blake2") == 0) {
-			h->type = LUA_CRYPTOBOX_HASH_BLAKE2;
-			posix_memalign ((void **)&h->content.h, _Alignof (rspamd_cryptobox_hash_state_t),
-					sizeof (*h->content.h));
-			g_assert (h->content.h != NULL);
-			rspamd_cryptobox_hash_init (h->content.h, NULL, 0);
 		}
 		else if (g_ascii_strcasecmp (type, "xxh64") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_XXHASH64;
 			h->content.fh = g_malloc0 (sizeof (*h->content.fh));
 			rspamd_cryptobox_fast_hash_init_specific (h->content.fh,
 					RSPAMD_CRYPTOBOX_XXHASH64, 0);
+			h->out_len = sizeof (guint64);
 		}
 		else if (g_ascii_strcasecmp (type, "xxh32") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_XXHASH32;
 			h->content.fh = g_malloc0 (sizeof (*h->content.fh));
 			rspamd_cryptobox_fast_hash_init_specific (h->content.fh,
 					RSPAMD_CRYPTOBOX_XXHASH32, 0);
+			h->out_len = sizeof (guint32);
 		}
 		else if (g_ascii_strcasecmp (type, "mum") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_MUM;
 			h->content.fh = g_malloc0 (sizeof (*h->content.fh));
 			rspamd_cryptobox_fast_hash_init_specific (h->content.fh,
 					RSPAMD_CRYPTOBOX_MUMHASH, 0);
+			h->out_len = sizeof (guint64);
 		}
 		else if (g_ascii_strcasecmp (type, "t1ha") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_T1HA;
 			h->content.fh = g_malloc0 (sizeof (*h->content.fh));
 			rspamd_cryptobox_fast_hash_init_specific (h->content.fh,
 					RSPAMD_CRYPTOBOX_T1HA, 0);
+			h->out_len = sizeof (guint64);
+		}
+		else if (g_ascii_strcasecmp (type, "blake2") == 0) {
+			rspamd_lua_hash_init_default (h, key, keylen);
 		}
 		else {
 			g_free (h);
@@ -1034,11 +1099,8 @@ rspamd_lua_hash_create (const gchar *type)
 		}
 	}
 	else {
-		h->type = LUA_CRYPTOBOX_HASH_BLAKE2;
-		posix_memalign ((void **)&h->content.h, _Alignof (rspamd_cryptobox_hash_state_t),
-				sizeof (*h->content.h));
-		g_assert (h->content.h != NULL);
-		rspamd_cryptobox_hash_init (h->content.h, NULL, 0);
+		/* Default hash type */
+		rspamd_lua_hash_init_default (h, key, keylen);
 	}
 
 	return h;
@@ -1059,7 +1121,7 @@ lua_cryptobox_hash_create (lua_State *L)
 	struct rspamd_lua_text *t;
 	gsize len = 0;
 
-	h = rspamd_lua_hash_create (NULL);
+	h = rspamd_lua_hash_create (NULL, NULL, 0);
 
 	if (lua_type (L, 1) == LUA_TSTRING) {
 		s = lua_tolstring (L, 1, &len);
@@ -1106,7 +1168,7 @@ lua_cryptobox_hash_create_specific (lua_State *L)
 		return luaL_error (L, "invalid arguments");
 	}
 
-	h = rspamd_lua_hash_create (type);
+	h = rspamd_lua_hash_create (type, NULL, 0);
 
 	if (h == NULL) {
 		return luaL_error (L, "invalid hash type: %s", type);
@@ -1156,8 +1218,7 @@ lua_cryptobox_hash_create_keyed (lua_State *L)
 	key = luaL_checklstring (L, 1, &keylen);
 
 	if (key != NULL) {
-		h = rspamd_lua_hash_create (NULL);
-		rspamd_cryptobox_hash_init (h->content.h, key, keylen);
+		h = rspamd_lua_hash_create (NULL, key, keylen);
 
 		if (lua_type (L, 2) == LUA_TSTRING) {
 			s = lua_tolstring (L, 2, &len);
@@ -1174,7 +1235,7 @@ lua_cryptobox_hash_create_keyed (lua_State *L)
 		}
 
 		if (s) {
-			rspamd_cryptobox_hash_update (h, s, len);
+			rspamd_cryptobox_hash_update (h->content.h, s, len);
 		}
 
 		ph = lua_newuserdata (L, sizeof (void *));
@@ -1227,8 +1288,13 @@ lua_cryptobox_hash_update (lua_State *L)
 		len = nlen;
 	}
 
-	if (h && !h->is_finished && data) {
-		rspamd_lua_hash_update (h, data, len);
+	if (h && data) {
+		if (!h->is_finished) {
+			rspamd_lua_hash_update (h, data, len);
+		}
+		else {
+			return luaL_error (L, "hash is already finalized");
+		}
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
@@ -1295,27 +1361,29 @@ lua_cryptobox_hash_reset (lua_State *L)
 }
 
 static void
-lua_cryptobox_hash_finish (struct rspamd_lua_cryptobox_hash *h,
-		guchar out[rspamd_cryptobox_HASHBYTES], guint *dlen)
+lua_cryptobox_hash_finish (struct rspamd_lua_cryptobox_hash *h)
 {
 	guint64 ll;
+	guchar out[rspamd_cryptobox_HASHBYTES];
+	guint ssl_outlen = sizeof (out);
 
 	switch (h->type) {
 	case LUA_CRYPTOBOX_HASH_BLAKE2:
-		*dlen = rspamd_cryptobox_HASHBYTES;
 		rspamd_cryptobox_hash_final (h->content.h, out);
+		memcpy (h->out, out, sizeof (out));
 		break;
 	case LUA_CRYPTOBOX_HASH_SSL:
-
-		EVP_DigestFinal_ex (h->content.c, out, dlen);
+		EVP_DigestFinal_ex (h->content.c, out, &ssl_outlen);
+		h->out_len = ssl_outlen;
+		g_assert (ssl_outlen <= sizeof (h->out));
+		memcpy (h->out, out, ssl_outlen);
 		break;
 	case LUA_CRYPTOBOX_HASH_XXHASH64:
 	case LUA_CRYPTOBOX_HASH_XXHASH32:
 	case LUA_CRYPTOBOX_HASH_MUM:
 	case LUA_CRYPTOBOX_HASH_T1HA:
 		ll = rspamd_cryptobox_fast_hash_final (h->content.fh);
-		memcpy (out, &ll, sizeof (ll));
-		*dlen = sizeof (ll);
+		memcpy (h->out, &ll, sizeof (ll));
 		break;
 	default:
 		g_assert_not_reached ();
@@ -1334,15 +1402,17 @@ lua_cryptobox_hash_hex (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_lua_cryptobox_hash *h = lua_check_cryptobox_hash (L, 1);
-	guchar out[rspamd_cryptobox_HASHBYTES],
-		out_hex[rspamd_cryptobox_HASHBYTES * 2 + 1], *r;
+	guchar out_hex[rspamd_cryptobox_HASHBYTES * 2 + 1], *r;
 	guint dlen;
 
-	if (h && !h->is_finished) {
-		memset (out_hex, 0, sizeof (out_hex));
+	if (h) {
+		if (!h->is_finished) {
+			lua_cryptobox_hash_finish (h);
+		}
 
-		lua_cryptobox_hash_finish (h, out, &dlen);
-		r = out;
+		memset (out_hex, 0, sizeof (out_hex));
+		r = h->out;
+		dlen = h->out_len;
 
 		if (lua_isnumber (L, 2)) {
 			guint lim = lua_tonumber (L, 2);
@@ -1355,7 +1425,6 @@ lua_cryptobox_hash_hex (lua_State *L)
 
 		rspamd_encode_hex_buf (r, dlen, out_hex, sizeof (out_hex));
 		lua_pushstring (L, out_hex);
-
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
@@ -1365,8 +1434,9 @@ lua_cryptobox_hash_hex (lua_State *L)
 }
 
 /***
- * @method cryptobox_hash:base32()
- * Finalizes hash and return it as zbase32 string
+ * @method cryptobox_hash:base32([b32type])
+ * Finalizes hash and return it as zbase32 (by default) string
+ * @param {string} b32type base32 type (default, bleach, rfc)
  * @return {string} base32 value of hash
  */
 static gint
@@ -1374,14 +1444,27 @@ lua_cryptobox_hash_base32 (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_lua_cryptobox_hash *h = lua_check_cryptobox_hash (L, 1);
-	guchar out[rspamd_cryptobox_HASHBYTES],
-		out_b32[rspamd_cryptobox_HASHBYTES * 2], *r;
+	guchar out_b32[rspamd_cryptobox_HASHBYTES * 2], *r;
 	guint dlen;
 
-	if (h && !h->is_finished) {
+	if (h) {
+		enum rspamd_base32_type btype = RSPAMD_BASE32_DEFAULT;
+
+		if (lua_type (L, 2) == LUA_TSTRING) {
+			btype = rspamd_base32_decode_type_from_str (lua_tostring (L, 2));
+
+			if (btype == RSPAMD_BASE32_INVALID) {
+				return luaL_error (L, "invalid b32 type: %s", lua_tostring (L, 2));
+			}
+		}
+
+		if (!h->is_finished) {
+			lua_cryptobox_hash_finish (h);
+		}
+
 		memset (out_b32, 0, sizeof (out_b32));
-		lua_cryptobox_hash_finish (h, out, &dlen);
-		r = out;
+		r = h->out;
+		dlen = h->out_len;
 
 		if (lua_isnumber (L, 2)) {
 			guint lim = lua_tonumber (L, 2);
@@ -1392,9 +1475,8 @@ lua_cryptobox_hash_base32 (lua_State *L)
 			}
 		}
 
-		rspamd_encode_base32_buf (r, dlen, out_b32, sizeof (out_b32));
+		rspamd_encode_base32_buf (r, dlen, out_b32, sizeof (out_b32), btype);
 		lua_pushstring (L, out_b32);
-		h->is_finished = TRUE;
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
@@ -1413,13 +1495,17 @@ lua_cryptobox_hash_base64 (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_lua_cryptobox_hash *h = lua_check_cryptobox_hash (L, 1);
-	guchar out[rspamd_cryptobox_HASHBYTES], *b64, *r;
+	guchar *b64, *r;
 	gsize len;
 	guint dlen;
 
-	if (h && !h->is_finished) {
-		lua_cryptobox_hash_finish (h, out, &dlen);
-		r = out;
+	if (h) {
+		if (!h->is_finished) {
+			lua_cryptobox_hash_finish (h);
+		}
+
+		r = h->out;
+		dlen = h->out_len;
 
 		if (lua_isnumber (L, 2)) {
 			guint lim = lua_tonumber (L, 2);
@@ -1433,7 +1519,6 @@ lua_cryptobox_hash_base64 (lua_State *L)
 		b64 = rspamd_encode_base64 (r, dlen, 0, &len);
 		lua_pushlstring (L, b64, len);
 		g_free (b64);
-		h->is_finished = TRUE;
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
@@ -1452,12 +1537,16 @@ lua_cryptobox_hash_bin (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_lua_cryptobox_hash *h = lua_check_cryptobox_hash (L, 1);
-	guchar out[rspamd_cryptobox_HASHBYTES], *r;
+	guchar *r;
 	guint dlen;
 
-	if (h && !h->is_finished) {
-		lua_cryptobox_hash_finish (h, out, &dlen);
-		r = out;
+	if (h) {
+		if (!h->is_finished) {
+			lua_cryptobox_hash_finish (h);
+		}
+
+		r = h->out;
+		dlen = h->out_len;
 
 		if (lua_isnumber (L, 2)) {
 			guint lim = lua_tonumber (L, 2);
@@ -2247,8 +2336,8 @@ lua_cryptobox_pbkdf (lua_State *L)
 			salt, pbkdf->salt_len, key, pbkdf->key_len, pbkdf->complexity,
 			pbkdf->type);
 
-	encoded_salt = rspamd_encode_base32 (salt, pbkdf->salt_len);
-	encoded_key = rspamd_encode_base32 (key, pbkdf->key_len);
+	encoded_salt = rspamd_encode_base32 (salt, pbkdf->salt_len, RSPAMD_BASE32_DEFAULT);
+	encoded_key = rspamd_encode_base32 (key, pbkdf->key_len, RSPAMD_BASE32_DEFAULT);
 
 	result = g_string_new ("");
 	rspamd_printf_gstring (result, "$%d$%s$%s", pbkdf->id, encoded_salt,
@@ -2417,6 +2506,262 @@ lua_cryptobox_gen_dkim_keypair (lua_State *L)
 	return 2;
 }
 
+/*
+ * Secretbox API
+ */
+/* Ensure that KDF output is suitable for crypto_secretbox_KEYBYTES */
+#ifdef crypto_generichash_BYTES_MIN
+G_STATIC_ASSERT(crypto_secretbox_KEYBYTES >= crypto_generichash_BYTES_MIN);
+#endif
+
+/***
+ * @function rspamd_cryptobox_secretbox.create(secret_string, [params])
+ * Generates a secretbox state by expanding secret string
+ * @param {string/text} secret_string secret string (should have high enough entropy)
+ * @param {table} params optional parameters - NYI
+ * @return {rspamd_cryptobox_secretbox} opaque object with the key expanded
+ */
+static gint
+lua_cryptobox_secretbox_create (lua_State *L)
+{
+	const gchar *in;
+	gsize inlen;
+
+
+	if (lua_isstring (L, 1)) {
+		in = lua_tolstring (L, 1, &inlen);
+	}
+	else if (lua_isuserdata (L, 1)) {
+		struct rspamd_lua_text *t = lua_check_text (L, 1);
+
+		if (!t) {
+			return luaL_error (L, "invalid arguments; userdata is not text");
+		}
+
+		in = t->start;
+		inlen = t->len;
+	}
+	else {
+		return luaL_error (L, "invalid arguments; userdata or string are expected");
+	}
+
+	if (in == NULL || inlen == 0) {
+		return luaL_error (L, "invalid arguments; non empty secret expected");
+	}
+
+	struct rspamd_lua_cryptobox_secretbox *sbox, **psbox;
+
+	sbox = g_malloc0 (sizeof (*sbox));
+	crypto_generichash (sbox->sk, sizeof (sbox->sk), in, inlen, NULL, 0);
+	psbox = lua_newuserdata (L, sizeof (*psbox));
+	*psbox = sbox;
+	rspamd_lua_setclass (L, "rspamd{cryptobox_secretbox}", -1);
+
+	return 1;
+}
+
+
+static gint
+lua_cryptobox_secretbox_gc (lua_State *L)
+{
+	struct rspamd_lua_cryptobox_secretbox *sbox =
+			lua_check_cryptobox_secretbox (L, 1);
+
+	if (sbox != NULL) {
+		sodium_memzero (sbox->sk, sizeof (sbox->sk));
+		g_free (sbox);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 0;
+}
+
+/***
+ * @method rspamd_cryptobox_secretbox:encrypt(input, [nonce])
+ * Encrypts data using secretbox. MAC is prepended to the message
+ * @param {string/text} input input to encrypt
+ * @param {string/text} nonce optional nonce (must be 1 - 192 bits length)
+ * @param {table} params optional parameters - NYI
+ * @return {rspamd_text},{rspamd_text} output with mac + nonce or just output if nonce is there
+ */
+static gint
+lua_cryptobox_secretbox_encrypt (lua_State *L)
+{
+	const gchar *in, *nonce;
+	gsize inlen, nlen;
+	struct rspamd_lua_cryptobox_secretbox *sbox =
+			lua_check_cryptobox_secretbox (L, 1);
+	struct rspamd_lua_text *out;
+
+	if (sbox == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	if (lua_isstring (L, 2)) {
+		in = lua_tolstring (L, 2, &inlen);
+	}
+	else if (lua_isuserdata (L, 2)) {
+		struct rspamd_lua_text *t = lua_check_text (L, 2);
+
+		if (!t) {
+			return luaL_error (L, "invalid arguments; userdata is not text");
+		}
+
+		in = t->start;
+		inlen = t->len;
+	}
+	else {
+		return luaL_error (L, "invalid arguments; userdata or string are expected");
+	}
+
+	/* Nonce part */
+	if (!lua_isnoneornil (L, 3)) {
+		if (lua_isstring (L, 3)) {
+			nonce = lua_tolstring (L, 3, &nlen);
+		}
+		else if (lua_isuserdata (L, 3)) {
+			struct rspamd_lua_text *t = lua_check_text (L, 3);
+
+			if (!t) {
+				return luaL_error (L, "invalid arguments; userdata is not text");
+			}
+
+			nonce = t->start;
+			nlen = t->len;
+		}
+		else {
+			return luaL_error (L, "invalid arguments; userdata or string are expected");
+		}
+
+		if (nlen < 1 || nlen > crypto_secretbox_NONCEBYTES) {
+			return luaL_error (L, "bad nonce");
+		}
+
+		guchar real_nonce[crypto_secretbox_NONCEBYTES];
+
+		memset (real_nonce, 0, sizeof (real_nonce));
+		memcpy (real_nonce, nonce, nlen);
+
+		out = lua_new_text (L, NULL, inlen + crypto_secretbox_MACBYTES,
+				TRUE);
+		crypto_secretbox_easy ((guchar *)out->start, in, inlen,
+				nonce, sbox->sk);
+
+		return 1;
+	}
+	else {
+		/* Random nonce */
+		struct rspamd_lua_text *random_nonce;
+
+		out = lua_new_text (L, NULL, inlen + crypto_secretbox_MACBYTES,
+				TRUE);
+		random_nonce = lua_new_text (L, NULL, crypto_secretbox_NONCEBYTES, TRUE);
+
+		randombytes_buf ((guchar *)random_nonce->start, random_nonce->len);
+		crypto_secretbox_easy ((guchar *)out->start, in, inlen,
+				random_nonce->start, sbox->sk);
+
+		return 2; /* output + random nonce */
+	}
+}
+
+/***
+ * @method rspamd_cryptobox_secretbox:decrypt(input, nonce)
+ * Decrypts data using secretbox
+ * @param {string/text} nonce nonce used to encrypt
+ * @param {string/text} input input to decrypt
+ * @param {table} params optional parameters - NYI
+ * @return {boolean},{rspamd_text} decryption result + decrypted text
+ */
+static gint
+lua_cryptobox_secretbox_decrypt (lua_State *L)
+{
+	const gchar *in, *nonce;
+	gsize inlen, nlen;
+	struct rspamd_lua_cryptobox_secretbox *sbox =
+			lua_check_cryptobox_secretbox (L, 1);
+	struct rspamd_lua_text *out;
+
+	if (sbox == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	/* Input argument */
+	if (lua_isstring (L, 2)) {
+		in = lua_tolstring (L, 2, &inlen);
+	}
+	else if (lua_isuserdata (L, 2)) {
+		struct rspamd_lua_text *t = lua_check_text (L, 2);
+
+		if (!t) {
+			return luaL_error (L, "invalid arguments; userdata is not text");
+		}
+
+		in = t->start;
+		inlen = t->len;
+	}
+	else {
+		return luaL_error (L, "invalid arguments; userdata or string are expected");
+	}
+
+	/* Nonce argument */
+	if (lua_isstring (L, 3)) {
+		nonce = lua_tolstring (L, 3, &nlen);
+	}
+	else if (lua_isuserdata (L, 3)) {
+		struct rspamd_lua_text *t = lua_check_text (L, 3);
+
+		if (!t) {
+			return luaL_error (L, "invalid arguments; userdata is not text");
+		}
+
+		nonce = t->start;
+		nlen = t->len;
+	}
+	else {
+		return luaL_error (L, "invalid arguments; userdata or string are expected");
+	}
+
+
+	if (nlen < 1 || nlen > crypto_secretbox_NONCEBYTES) {
+		lua_pushboolean (L, false);
+		lua_pushstring (L, "invalid nonce");
+		return 2;
+	}
+
+	if (inlen < crypto_secretbox_MACBYTES) {
+		lua_pushboolean (L, false);
+		lua_pushstring (L, "too short");
+		return 2;
+	}
+
+	guchar real_nonce[crypto_secretbox_NONCEBYTES];
+
+	memset (real_nonce, 0, sizeof (real_nonce));
+	memcpy (real_nonce, nonce, nlen);
+
+	out = lua_new_text (L, NULL, inlen - crypto_secretbox_MACBYTES,
+			TRUE);
+	gint text_pos = lua_gettop (L);
+
+	if (crypto_secretbox_open_easy ((guchar *)out->start, in, inlen,
+			nonce, sbox->sk) == 0) {
+		lua_pushboolean (L, true);
+		lua_pushvalue (L, text_pos); /* Prevent gc by copying in stack */
+	}
+	else {
+		lua_pushboolean (L, false);
+		lua_pushstring (L, "authentication error");
+	}
+
+	/* This causes gc method if decryption has failed */
+	lua_remove (L, text_pos);
+
+	return 2;
+}
+
 static gint
 lua_load_pubkey (lua_State * L)
 {
@@ -2454,6 +2799,15 @@ lua_load_hash (lua_State * L)
 }
 
 static gint
+lua_load_cryptobox_secretbox (lua_State * L)
+{
+	lua_newtable (L);
+	luaL_register (L, NULL, cryptoboxsecretboxlib_f);
+
+	return 1;
+}
+
+static gint
 lua_load_cryptobox (lua_State * L)
 {
 	lua_newtable (L);
@@ -2480,6 +2834,12 @@ luaopen_cryptobox (lua_State * L)
 	rspamd_lua_new_class (L, "rspamd{cryptobox_hash}", cryptoboxhashlib_m);
 	lua_pop (L, 1);
 	rspamd_lua_add_preload (L, "rspamd_cryptobox_hash", lua_load_hash);
+
+	rspamd_lua_new_class (L, "rspamd{cryptobox_secretbox}",
+			cryptoboxsecretboxlib_m);
+	lua_pop (L, 1);
+	rspamd_lua_add_preload (L, "rspamd_cryptobox_secretbox",
+			lua_load_cryptobox_secretbox);
 
 	rspamd_lua_add_preload (L, "rspamd_cryptobox", lua_load_cryptobox);
 

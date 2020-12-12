@@ -46,8 +46,8 @@ local settings = {
   timeout = 5.0,
   bayes_spam_symbols = {'BAYES_SPAM'},
   bayes_ham_symbols = {'BAYES_HAM'},
-  ann_spam_symbols = {'NEURAL_SPAM'},
-  ann_ham_symbols = {'NEURAL_HAM'},
+  ann_symbols_spam = {'NEURAL_SPAM'},
+  ann_symbols_ham = {'NEURAL_HAM'},
   fuzzy_symbols = {'FUZZY_DENIED'},
   whitelist_symbols = {'WHITELIST_DKIM', 'WHITELIST_SPF_DKIM', 'WHITELIST_DMARC'},
   dkim_allow_symbols = {'R_DKIM_ALLOW'},
@@ -97,7 +97,7 @@ local settings = {
 
 --- @language SQL
 local clickhouse_schema = {[[
-CREATE TABLE rspamd
+CREATE TABLE IF NOT EXISTS rspamd
 (
     Date Date COMMENT 'Date (used for partitioning)',
     TS DateTime COMMENT 'Date and time of the request start (UTC)',
@@ -155,8 +155,8 @@ CREATE TABLE rspamd
 PARTITION BY toMonday(Date)
 ORDER BY TS
 ]],
-[[CREATE TABLE rspamd_version ( Version UInt32) ENGINE = TinyLog]],
-[[INSERT INTO rspamd_version (Version) Values (${SCHEMA_VERSION})]],
+[[CREATE TABLE IF NOT EXISTS rspamd_version ( Version UInt32) ENGINE = TinyLog]],
+{[[INSERT INTO rspamd_version (Version) Values (${SCHEMA_VERSION})]], true},
 }
 
 -- This describes SQL queries to migrate between versions
@@ -210,7 +210,7 @@ local migrations = {
   [4] = {
     [[ALTER TABLE rspamd
       MODIFY COLUMN Action Enum8('reject' = 0, 'rewrite subject' = 1, 'add header' = 2, 'greylist' = 3, 'no action' = 4, 'soft reject' = 5, 'custom' = 6) DEFAULT 'no action',
-      ADD IF NOT EXISTS COLUMN CustomAction String AFTER Action
+      ADD COLUMN IF NOT EXISTS CustomAction String AFTER Action
     ]],
     -- New version
     [[INSERT INTO rspamd_version (Version) Values (5)]],
@@ -633,9 +633,9 @@ local function clickhouse_collect(task)
   end
 
   local nurls = 0
-  if task:has_urls(true) then
-    nurls = #task:get_urls(true)
-  end
+  local task_urls = task:get_urls(false) or {}
+
+  nurls = #task_urls
 
   local timestamp = math.floor(task:get_date({
     format = 'connect',
@@ -726,14 +726,11 @@ local function clickhouse_collect(task)
   local attachments_ctypes = {}
   local attachments_lengths = {}
   local attachments_digests = {}
-  for _,part in ipairs(task:get_parts()) do
-    local fname = part:get_filename()
-
-    if fname then
-      table.insert(attachments_fnames, fname)
-      local type, subtype = part:get_type()
-      table.insert(attachments_ctypes, string.format("%s/%s",
-          type, subtype))
+  for _, part in ipairs(task:get_parts()) do
+    if part:is_attachment() then
+      table.insert(attachments_fnames, part:get_filename() or '')
+      local mime_type, mime_subtype = part:get_type()
+      table.insert(attachments_ctypes, string.format("%s/%s", mime_type, mime_subtype))
       table.insert(attachments_lengths, part:get_length())
       table.insert(attachments_digests, string.sub(part:get_digest(), 1, 16))
     end
@@ -757,26 +754,21 @@ local function clickhouse_collect(task)
 
   -- Urls step
   local urls_urls = {}
-  if task:has_urls(false) then
 
-    for _,u in ipairs(task:get_urls(false)) do
-      if settings['full_urls'] then
-        urls_urls[u:get_text()] = u
-      else
-        urls_urls[u:get_host()] = u
-      end
+  for _,u in ipairs(task_urls) do
+    if settings['full_urls'] then
+      urls_urls[u:get_text()] = u
+    else
+      urls_urls[u:get_host()] = u
     end
-
-    -- Get tlds
-    table.insert(row, flatten_urls(function(_, u)
-      return u:get_tld() or u:get_host()
-    end, urls_urls))
-    -- Get hosts/full urls
-    table.insert(row, flatten_urls(function(k, _) return k end, urls_urls))
-  else
-    table.insert(row, {})
-    table.insert(row, {})
   end
+
+  -- Get tlds
+  table.insert(row, flatten_urls(function(_, u)
+    return u:get_tld() or u:get_host()
+  end, urls_urls))
+  -- Get hosts/full urls
+  table.insert(row, flatten_urls(function(k, _) return k end, urls_urls))
 
   -- Emails step
   if task:has_urls(true) then
@@ -869,15 +861,15 @@ local function clickhouse_collect(task)
       used_memory, settings.limits.max_memory)
 end
 
-local function do_remove_partition(ev_base, cfg, table_name, partition_id)
-  lua_util.debugm(N, rspamd_config, "removing partition %s.%s", table_name, partition_id)
+local function do_remove_partition(ev_base, cfg, table_name, partition)
+  lua_util.debugm(N, rspamd_config, "removing partition %s.%s", table_name, partition)
   local upstream = settings.upstream:get_upstream_round_robin()
-  local remove_partition_sql = "ALTER TABLE ${table_name} ${remove_method} PARTITION '${partition_id}'"
+  local remove_partition_sql = "ALTER TABLE ${table_name} ${remove_method} PARTITION '${partition}'"
   local remove_method = (settings.retention.method == 'drop') and 'DROP' or 'DETACH'
   local sql_params = {
     ['table_name']     = table_name,
     ['remove_method']  = remove_method,
-    ['partition_id']   = partition_id
+    ['partition']   = partition
   }
 
   local sql = lua_util.template(remove_partition_sql, sql_params)
@@ -892,13 +884,13 @@ local function do_remove_partition(ev_base, cfg, table_name, partition_id)
   if err then
     rspamd_logger.errx(rspamd_config,
       "cannot detach partition %s:%s from server %s: %s",
-      table_name, partition_id,
+      table_name, partition,
       settings['server'], err)
     return
   end
 
   rspamd_logger.infox(rspamd_config,
-      'detached partition %s:%s on server %s', table_name, partition_id,
+      'detached partition %s:%s on server %s', table_name, partition,
       settings['server'])
 
 end
@@ -1015,8 +1007,10 @@ local function clickhouse_remove_old_partitions(cfg, ev_base)
   end
 
   local upstream = settings.upstream:get_upstream_round_robin()
-  local partition_to_remove_sql = "SELECT distinct partition, table FROM system.parts WHERE " ..
-      "table in ('${tables}') and max_date <= toDate(now() - interval ${month} month);"
+  local partition_to_remove_sql = "SELECT partition, table " ..
+      "FROM system.parts WHERE table IN ('${tables}') " ..
+      "GROUP BY partition, table " ..
+      "HAVING max(max_date) < toDate(now() - interval ${month} month)"
 
   local table_names = {'rspamd'}
   local tables = table.concat(table_names, "', '")
@@ -1046,7 +1040,7 @@ local function clickhouse_remove_old_partitions(cfg, ev_base)
   return settings.retention.period
 end
 
-local function upload_clickhouse_schema(upstream, ev_base, cfg)
+local function upload_clickhouse_schema(upstream, ev_base, cfg, initial)
   local ch_params = {
     ev_base = ev_base,
     config = cfg,
@@ -1054,8 +1048,8 @@ local function upload_clickhouse_schema(upstream, ev_base, cfg)
 
   local errored = false
 
-  -- Apply schema sequentially
-  fun.each(function(v)
+  -- Upload a single element of the schema
+  local function upload_schema_elt(v)
     if errored then
       rspamd_logger.errx(rspamd_config, "cannot upload schema '%s' on clickhouse server %s: due to previous errors",
           v, upstream:get_addr():to_string(true))
@@ -1066,17 +1060,40 @@ local function upload_clickhouse_schema(upstream, ev_base, cfg)
 
     if err then
       rspamd_logger.errx(rspamd_config, "cannot upload schema '%s' on clickhouse server %s: %s",
-        sql, upstream:get_addr():to_string(true), err)
+          sql, upstream:get_addr():to_string(true), err)
       errored = true
       return
     end
     rspamd_logger.debugm(N, rspamd_config, 'uploaded clickhouse schema element %s to %s: %s',
         v, upstream:get_addr():to_string(true), reply)
-  end,
-      -- Also template schema version
-      fun.map(function(v)
-        return lua_util.template(v, {SCHEMA_VERSION = tostring(schema_version)})
-      end, fun.chain(clickhouse_schema, settings.schema_additions)))
+  end
+
+  -- Process element and return nil if statement should be skipped
+  local function preprocess_schema_elt(v)
+    if type(v) == 'string' then
+      return lua_util.template(v, {SCHEMA_VERSION = tostring(schema_version)})
+    elseif type(v) == 'table' then
+      -- Pair of statement + boolean
+      if initial == v[2] then
+        return lua_util.template(v[1], {SCHEMA_VERSION = tostring(schema_version)})
+      else
+        rspamd_logger.debugm(N, rspamd_config, 'skip clickhouse schema element %s: schema already exists',
+            v)
+      end
+    end
+
+    return nil
+  end
+
+  -- Apply schema elements sequentially, users additions are concatenated to the tail
+  fun.each(upload_schema_elt,
+    -- Also template schema version
+    fun.filter(function(v) return v ~= nil end,
+      fun.map(preprocess_schema_elt,
+        fun.chain(clickhouse_schema, settings.schema_additions)
+      )
+    )
+  )
 end
 
 local function maybe_apply_migrations(upstream, ev_base, cfg, version)
@@ -1147,7 +1164,7 @@ local function add_extra_columns(upstream, ev_base, cfg)
       local sql = string.format('ALTER TABLE rspamd ADD COLUMN IF NOT EXISTS `%s` %s AFTER `%s`',
           col.name, col.type, prev_column)
       if col.comment then
-        sql = sql .. string.format(", COMMENT COLUMN `%s` '%s'", col.name, col.comment)
+        sql = sql .. string.format(", COMMENT COLUMN IF EXISTS `%s` '%s'", col.name, col.comment)
       end
 
       local ret = lua_clickhouse.generic(upstream, settings, ch_params, sql,
@@ -1190,12 +1207,13 @@ local function check_rspamd_table(upstream, ev_base, cfg)
   if rows[1] and rows[1].result then
     if tonumber(rows[1].result) == 1 then
       -- Apply migration
-      rspamd_logger.infox(rspamd_config, 'table rspamd exists, apply migration')
+      upload_clickhouse_schema(upstream, ev_base, cfg, false)
+      rspamd_logger.infox(rspamd_config, 'table rspamd exists, check if we need to apply migrations')
       maybe_apply_migrations(upstream, ev_base, cfg, 1)
     else
       -- Upload schema
       rspamd_logger.infox(rspamd_config, 'table rspamd does not exists, upload full schema')
-      upload_clickhouse_schema(upstream, ev_base, cfg)
+      upload_clickhouse_schema(upstream, ev_base, cfg, true)
     end
   else
     rspamd_logger.errx(rspamd_config,
@@ -1237,6 +1255,7 @@ local function check_clickhouse_upstream(upstream, ev_base, cfg)
         upstream:get_addr():to_string(true), err)
     end
   else
+    upload_clickhouse_schema(upstream, ev_base, cfg, false)
     local version = tonumber(rows[1].v)
     maybe_apply_migrations(upstream, ev_base, cfg, version)
   end
@@ -1325,43 +1344,55 @@ if opts then
     if settings.extra_columns then
       -- Check sanity and create selector closures
       local lua_selectors = require "lua_selectors"
+      local columns_transformed = {}
+      local need_sort = false
+      -- Select traverse function depending on what we have
+      local iter_func = settings.extra_columns[1] and ipairs or pairs
 
-      for col_name,col_data in pairs(settings.extra_columns) do
+      for col_name,col_data in iter_func(settings.extra_columns) do
+        -- Array based extra columns
+        if col_data.name then col_name = col_data.name end
         if not col_data.selector or not col_data.type then
           rspamd_logger.errx(rspamd_config, 'cannot add clickhouse extra row %s: no type or no selector',
               col_name)
         else
+          local is_array = false
+
+          if col_data.type:lower():match('^array') then
+            is_array = true
+          end
+
           local selector = lua_selectors.create_selector_closure(rspamd_config,
-              col_data.selector, col_data.delimiter or '', false)
+              col_data.selector, col_data.delimiter or '', is_array)
 
           if not selector then
             rspamd_logger.errx(rspamd_config, 'cannot add clickhouse extra row %s: bad selector: %s',
                 col_name, col_data.selector)
-            -- Remove column
-            settings.extra_columns[col_name] = nil
           else
             if not col_data.default_value then
-              if col_data.type:lower():match('^array') then
+              if is_array then
                 col_data.default_value = {}
               else
                 col_data.default_value = ''
               end
             end
             col_data.real_selector = selector
+            if not col_data.name then
+              col_data.name = col_name
+              need_sort = true
+            end
+            table.insert(columns_transformed, col_data)
           end
         end
       end
 
       -- Convert extra columns from a map to an array sorted by column name to
       -- preserve strict order when doing altering
-      local extra_cols = {}
-      for col_name,col_data in pairs(settings.extra_columns) do
-        local nelt = lua_util.shallowcopy(col_data)
-        nelt.name = col_name
-        extra_cols[#extra_cols + 1] = nelt
+      if need_sort then
+        rspamd_logger.infox(rspamd_config, 'sort extra columns as they are not configured as an array')
+        table.sort(columns_transformed, function(c1, c2) return c1.name < c2.name end)
       end
-      table.sort(extra_cols, function(c1, c2) return c1.name < c2.name end)
-      settings.extra_columns = extra_cols
+      settings.extra_columns = columns_transformed
     end
 
     rspamd_config:register_symbol({

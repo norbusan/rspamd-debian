@@ -111,7 +111,8 @@ rspamd_task_new (struct rspamd_worker *worker,
 	new_task->request_headers = kh_init (rspamd_req_headers_hash);
 	new_task->sock = -1;
 	new_task->flags |= (RSPAMD_TASK_FLAG_MIME);
-	new_task->result = rspamd_create_metric_result (new_task);
+	/* Default results chain */
+	rspamd_create_metric_result (new_task, NULL, -1);
 
 	new_task->queue_id = "undef";
 	new_task->messages = ucl_object_typed_new (UCL_OBJECT);
@@ -201,6 +202,10 @@ rspamd_task_free (struct rspamd_task *task)
 
 		if (task->from_envelope) {
 			rspamd_email_address_free (task->from_envelope);
+		}
+
+		if (task->from_envelope_orig) {
+			rspamd_email_address_free (task->from_envelope_orig);
 		}
 
 		if (task->meta_words) {
@@ -722,7 +727,6 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 		}
 		break;
 
-	case RSPAMD_TASK_STAGE_PRE_FILTERS_EMPTY:
 	case RSPAMD_TASK_STAGE_PRE_FILTERS:
 	case RSPAMD_TASK_STAGE_FILTERS:
 		all_done = rspamd_symcache_process_symbols (task, task->cfg->cache, st);
@@ -747,7 +751,7 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 		break;
 
 	case RSPAMD_TASK_STAGE_COMPOSITES:
-		rspamd_make_composites (task);
+		rspamd_composites_process_task (task);
 		break;
 
 	case RSPAMD_TASK_STAGE_POST_FILTERS:
@@ -806,7 +810,7 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 		break;
 	case RSPAMD_TASK_STAGE_COMPOSITES_POST:
 		/* Second run of composites processing before idempotent filters */
-		rspamd_make_composites (task);
+		rspamd_composites_process_task (task);
 		break;
 
 	case RSPAMD_TASK_STAGE_IDEMPOTENT:
@@ -1076,7 +1080,7 @@ rspamd_task_log_metric_res (struct rspamd_task *task,
 	khiter_t k;
 
 	mres = task->result;
-	act = rspamd_check_action_metric (task, NULL);
+	act = rspamd_check_action_metric (task, NULL, NULL);
 
 	if (mres != NULL) {
 		switch (lf->type) {
@@ -1875,7 +1879,7 @@ rspamd_task_timeout (EV_P_ ev_timer *w, int revents)
 		if (task->cfg->soft_reject_on_timeout) {
 			struct rspamd_action *action, *soft_reject;
 
-			action = rspamd_check_action_metric (task, NULL);
+			action = rspamd_check_action_metric (task, NULL, NULL);
 
 			if (action->action_type != METRIC_ACTION_REJECT) {
 				soft_reject = rspamd_config_get_action_by_type (task->cfg,
@@ -1886,7 +1890,7 @@ rspamd_task_timeout (EV_P_ ev_timer *w, int revents)
 						NAN,
 						"timeout processing message",
 						"task timeout",
-						0);
+						0, NULL);
 			}
 		}
 
@@ -1904,7 +1908,7 @@ rspamd_task_timeout (EV_P_ ev_timer *w, int revents)
 		if (task->cfg->soft_reject_on_timeout) {
 			struct rspamd_action *action, *soft_reject;
 
-			action = rspamd_check_action_metric (task, NULL);
+			action = rspamd_check_action_metric (task, NULL, NULL);
 
 			if (action->action_type != METRIC_ACTION_REJECT) {
 				soft_reject = rspamd_config_get_action_by_type (task->cfg,
@@ -1915,7 +1919,7 @@ rspamd_task_timeout (EV_P_ ev_timer *w, int revents)
 						NAN,
 						"timeout post-processing message",
 						"task timeout",
-						0);
+						0, NULL);
 			}
 		}
 

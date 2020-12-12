@@ -27,7 +27,6 @@
 #include "libmime/message.h"
 #include "rspamd.h"
 #include "libstat/stat_api.h"
-#include "libstat/tokenizers/tokenizers.h"
 #include "libmime/lang_detection.h"
 
 #include "unicode/utf8.h"
@@ -586,7 +585,7 @@ rspamd_chartable_process_word_ascii (struct rspamd_task *task,
 	return badness;
 }
 
-static void
+static gboolean
 rspamd_chartable_process_part (struct rspamd_task *task,
 							   struct rspamd_mime_text_part *part,
 							   struct chartable_ctx *chartable_module_ctx,
@@ -598,7 +597,7 @@ rspamd_chartable_process_part (struct rspamd_task *task,
 
 	if (part == NULL || part->utf_words == NULL ||
 			part->utf_words->len == 0) {
-		return;
+		return FALSE;
 	}
 
 	for (i = 0; i < part->utf_words->len; i++) {
@@ -626,15 +625,17 @@ rspamd_chartable_process_part (struct rspamd_task *task,
 
 	cur_score /= (gdouble)part->nwords;
 
-	if (cur_score > 2.0) {
-		cur_score = 2.0;
+	if (cur_score > 1.0) {
+		cur_score = 1.0;
 	}
 
 	if (cur_score > chartable_module_ctx->threshold) {
 		rspamd_task_insert_result (task, chartable_module_ctx->symbol,
 				cur_score, NULL);
-
+		return TRUE;
 	}
+
+	return FALSE;
 }
 
 static void
@@ -646,8 +647,9 @@ chartable_symbol_callback (struct rspamd_task *task,
 	struct rspamd_mime_text_part *part;
 	struct chartable_ctx *chartable_module_ctx = chartable_get_context (task->cfg);
 	const gchar *language = NULL;
-	gboolean ignore_diacritics = FALSE;
+	gboolean ignore_diacritics = FALSE, seen_violated_part = FALSE;
 
+	/* Check if we have parts with diacritic symbols language */
 	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, text_parts), i, part) {
 		if (part->languages && part->languages->len > 0) {
 			struct rspamd_lang_detector_res *lang =
@@ -661,8 +663,15 @@ chartable_symbol_callback (struct rspamd_task *task,
 			}
 		}
 
-		rspamd_chartable_process_part (task, part, chartable_module_ctx,
-				ignore_diacritics);
+		if (rspamd_chartable_process_part (task, part, chartable_module_ctx,
+				ignore_diacritics)) {
+			seen_violated_part = TRUE;
+		}
+	}
+
+	if (MESSAGE_FIELD (task, text_parts)->len == 0) {
+		/* No text parts, assume that we should ignore diacritics checks for metatokens */
+		ignore_diacritics = TRUE;
 	}
 
 	if (task->meta_words != NULL) {
@@ -678,11 +687,18 @@ chartable_symbol_callback (struct rspamd_task *task,
 
 		cur_score /= (gdouble)arlen;
 
-		if (cur_score > 2.0) {
-			cur_score = 2.0;
+		if (cur_score > 1.0) {
+			cur_score = 1.0;
 		}
 
 		if (cur_score > chartable_module_ctx->threshold) {
+			if (!seen_violated_part) {
+				/* Further penalise */
+				if (cur_score > 0.25) {
+					cur_score = 0.25;
+				}
+			}
+
 			rspamd_task_insert_result (task, chartable_module_ctx->symbol,
 					cur_score, "subject");
 

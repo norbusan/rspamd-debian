@@ -34,13 +34,39 @@ local logger = require 'rspamd_logger'
 local fun = require 'fun'
 local lua_util = require "lua_util"
 local M = "selectors"
+local rspamd_text = require "rspamd_text"
+local unpack_function = table.unpack or unpack
 local E = {}
 
 local extractors = require "lua_selectors/extractors"
 local transform_function = require "lua_selectors/transforms"
 
+local text_cookie = rspamd_text.cookie
+
 local function pure_type(ltype)
   return ltype:match('^(.*)_list$')
+end
+
+local function implicit_tostring(t, ud_or_table)
+  if t == 'table' then
+    -- Table (very special)
+    if ud_or_table.value then
+      return ud_or_table.value,'string'
+    elseif ud_or_table.addr then
+      return ud_or_table.addr,'string'
+    end
+
+    return logger.slog("%s", ud_or_table),'string'
+  elseif t == 'userdata' then
+    if t.cookie and t.cookie == text_cookie then
+      -- Preserve opaque
+      return ud_or_table,'string'
+    else
+      return tostring(ud_or_table),'string'
+    end
+  else
+    return tostring(ud_or_table),'string'
+  end
 end
 
 local function process_selector(task, sel)
@@ -56,21 +82,6 @@ local function process_selector(task, sel)
     return pure_type(t)
   end
 
-  local function implicit_tostring(t, ud_or_table)
-    if t == 'table' then
-      -- Table (very special)
-      if ud_or_table.value then
-        return ud_or_table.value,'string'
-      elseif ud_or_table.addr then
-        return ud_or_table.addr,'string'
-      end
-
-      return logger.slog("%s", ud_or_table),'string'
-    else
-      return tostring(ud_or_table),'string'
-    end
-  end
-
   local input,etype = sel.selector.get_value(task, sel.selector.args)
 
   if not input then
@@ -82,54 +93,50 @@ local function process_selector(task, sel)
       sel.selector.name, etype)
 
   local pipe = sel.processor_pipe or E
+  local first_elt = pipe[1]
 
-  if etype:match('^userdata') or etype:match('^table') then
-    -- Apply userdata conversion first
-    local first_elt = pipe[1]
+  if first_elt and first_elt.method then
+    -- Explicit conversion
+    local meth = first_elt
 
-    if first_elt and first_elt.method then
-      -- Explicit conversion
-      local meth = first_elt
-
-      if meth.types[etype] then
-        lua_util.debugm(M, task, 'apply method `%s` to %s',
-            meth.name, etype)
-        input,etype = meth.process(input, etype)
-      else
-        local pt = pure_type(etype)
-
-        if meth.types[pt] then
-          lua_util.debugm(M, task, 'map method `%s` to list of %s',
-              meth.name, pt)
-          -- Map method to a list of inputs, excluding empty elements
-          input = fun.filter(function(map_elt) return map_elt end,
-              fun.map(function(list_elt)
-                local ret, _ = meth.process(list_elt, pt)
-                return ret
-              end, input))
-          etype = 'string_list'
-        end
-      end
-      -- Remove method from the pipeline
-      pipe = fun.drop_n(1, pipe)
+    if meth.types[etype] then
+      lua_util.debugm(M, task, 'apply method `%s` to %s',
+          meth.name, etype)
+      input,etype = meth.process(input, etype, meth.args)
     else
-      -- Implicit conversion
-
       local pt = pure_type(etype)
 
-      if not pt then
-        lua_util.debugm(M, task, 'apply implicit conversion %s->string', etype)
-        input = implicit_tostring(etype, input)
-        etype = 'string'
-      else
-        lua_util.debugm(M, task, 'apply implicit map %s->string', pt)
+      if meth.types[pt] then
+        lua_util.debugm(M, task, 'map method `%s` to list of %s',
+            meth.name, pt)
+        -- Map method to a list of inputs, excluding empty elements
         input = fun.filter(function(map_elt) return map_elt end,
             fun.map(function(list_elt)
-              local ret = implicit_tostring(pt, list_elt)
+              local ret, _ = meth.process(list_elt, pt)
               return ret
             end, input))
         etype = 'string_list'
       end
+    end
+    -- Remove method from the pipeline
+    pipe = fun.drop_n(1, pipe)
+  elseif etype:match('^userdata') or etype:match('^table') then
+    -- Implicit conversion
+
+    local pt = pure_type(etype)
+
+    if not pt then
+      lua_util.debugm(M, task, 'apply implicit conversion %s->string', etype)
+      input = implicit_tostring(etype, input)
+      etype = 'string'
+    else
+      lua_util.debugm(M, task, 'apply implicit map %s->string', pt)
+      input = fun.filter(function(map_elt) return map_elt end,
+          fun.map(function(list_elt)
+            local ret = implicit_tostring(pt, list_elt)
+            return ret
+          end, input))
+      etype = 'string_list'
     end
   end
 
@@ -327,14 +334,24 @@ exports.parse_selector = function(cfg, str)
           types = {
             userdata = true,
             table = true,
+            string = true,
           },
           map_type = 'string',
           process = function(inp, t, args)
-            if t == 'userdata' then
-              return inp[method_name](inp, args),'string'
-            else
-              -- Table
+            if t == 'table' then
               return inp[method_name],'string'
+            else
+              -- We call method unpacking arguments and dropping all but the first result returned
+              local ret = (inp[method_name](inp, unpack_function(args or E)))
+              local ret_type = type(ret)
+              -- Now apply types heuristic
+              if ret_type == 'string' then
+                return ret,'string'
+              elseif ret_type == 'table' then
+                return ret,'string_list'
+              else
+                return implicit_tostring(ret_type, ret)
+              end
             end
           end,
         }
@@ -486,7 +503,7 @@ exports.flatten_selectors = function(selectors)
 end
 
 --[[[
--- @function lua_selectors.create_closure(cfg, selector_str, delimiter='')
+-- @function lua_selectors.create_closure(cfg, selector_str, delimiter='', flatten=false)
 --]]
 exports.create_selector_closure = function(cfg, selector_str, delimiter, flatten)
   local selector = exports.parse_selector(cfg, selector_str)

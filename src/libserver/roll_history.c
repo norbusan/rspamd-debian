@@ -160,12 +160,12 @@ rspamd_roll_history_update (struct roll_history *history,
 	}
 	else {
 		row->score = metric_res->score;
-		action = rspamd_check_action_metric (task, NULL);
+		action = rspamd_check_action_metric (task, NULL, NULL);
 		row->action = action->action_type;
 		row->required_score = rspamd_task_get_required_score (task, metric_res);
 		cbdata.pos = row->symbols;
 		cbdata.remain = sizeof (row->symbols);
-		rspamd_task_symbol_result_foreach (task,
+		rspamd_task_symbol_result_foreach (task, NULL,
 				roll_history_symbols_callback,
 				&cbdata);
 		if (cbdata.remain > 0) {

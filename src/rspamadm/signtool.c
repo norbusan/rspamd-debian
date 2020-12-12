@@ -344,7 +344,13 @@ rspamadm_sign_file (const gchar *fname, struct rspamd_cryptobox_keypair *kp)
 	}
 
 	rspamd_snprintf (sigpath, sizeof (sigpath), "%s%s", fname, suffix);
-	g_assert (write (fd_sig, sig, rspamd_cryptobox_signature_bytes (mode)) != -1);
+
+	if (write (fd_sig, sig, rspamd_cryptobox_signature_bytes (mode)) == -1) {
+		rspamd_fprintf (stderr, "cannot write signature to %s: %s\n", sigpath,
+				strerror (errno));
+		exit (errno);
+	}
+
 	close (fd_sig);
 	munmap (map, st.st_size);
 
@@ -592,8 +598,13 @@ rspamadm_signtool (gint argc, gchar **argv, const struct rspamadm_command *cmd)
 
 		kp = rspamd_keypair_from_ucl (top);
 
-		if (kp == NULL || rspamd_keypair_type (kp) != RSPAMD_KEYPAIR_SIGN) {
-			rspamd_fprintf (stderr, "invalid or unsuitable for signing key\n");
+		if (kp == NULL) {
+			rspamd_fprintf (stderr, "invalid signing key\n");
+			exit (EXIT_FAILURE);
+		}
+
+		if (rspamd_keypair_type (kp) != RSPAMD_KEYPAIR_SIGN) {
+			rspamd_fprintf (stderr, "unsuitable for signing key\n");
 			exit (EXIT_FAILURE);
 		}
 

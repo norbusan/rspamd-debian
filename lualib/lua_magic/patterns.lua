@@ -26,19 +26,16 @@ local patterns = {
     -- These are alternatives
     matches = {
       {
-        string = [[^%PDF-\d]],
-        position = 6, -- must be end of the match, as that's how hyperscan works (or use relative_position)
+        string = [[%PDF-[12]\.\d]],
+        position = {'<=', 1024},
         weight = 60,
+        heuristic = heuristics.pdf_format_heuristic
       },
       {
-        string = [[^\012%PDF-\d]],
-        position = 7,
+        string = [[%FDF-[12]\.\d]],
+        position = {'<=', 1024},
         weight = 60,
-      },
-      {
-        string = [[^%FDF-\d]],
-        position = 6,
-        weight = 60,
+        heuristic = heuristics.pdf_format_heuristic
       },
     },
   },
@@ -101,13 +98,13 @@ local patterns = {
       {
         string = [[MZ]],
         relative_position = 0,
-        weight = 10,
+        weight = 15,
       },
       -- PE part
       {
         string = [[PE\x{00}\x{00}]],
         position = {'>=', 0x3c + 4},
-        weight = 40,
+        weight = 15,
       }
     }
   },
@@ -254,6 +251,26 @@ local patterns = {
         string = [[\x{01}CD001\x{01}]],
         position = {'>=', 0x8000 + 7}, -- first 32k is unused
         weight = 60,
+      },
+    }
+  },
+  egg = {
+    -- ALZip egg
+    matches = {
+      {
+        string = [[EGGA]],
+        weight = 60,
+        relative_position = 0,
+      },
+    }
+  },
+  alz = {
+    -- ALZip alz
+    matches = {
+      {
+        string = [[ALZ\x{01}]],
+        weight = 60,
+        relative_position = 0,
       },
     }
   },

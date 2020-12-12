@@ -933,26 +933,297 @@ rspamd_main_heartbeat_start (struct rspamd_worker *wrk, struct ev_loop *event_lo
 	ev_timer_start (event_loop, &wrk->hb.heartbeat_ev);
 }
 
+static bool
+rspamd_maybe_reuseport_socket (struct rspamd_worker_listen_socket *ls)
+{
+	gint nfd = -1;
+
+	if (ls->is_systemd) {
+		/* No need to reuseport */
+		return true;
+	}
+
+	if (ls->fd != -1 && rspamd_inet_address_get_af (ls->addr) == AF_UNIX) {
+		/* Just try listen */
+
+		if (listen (ls->fd, -1) == -1) {
+			return false;
+		}
+
+		return true;
+	}
+
+#if defined(SO_REUSEPORT) && defined(SO_REUSEADDR) && defined(LINUX)
+
+	if (ls->type == RSPAMD_WORKER_SOCKET_UDP) {
+		nfd = rspamd_inet_address_listen (ls->addr,
+				(ls->type == RSPAMD_WORKER_SOCKET_UDP ? SOCK_DGRAM : SOCK_STREAM),
+				RSPAMD_INET_ADDRESS_LISTEN_ASYNC|RSPAMD_INET_ADDRESS_LISTEN_REUSEPORT,
+				-1);
+
+		if (nfd == -1) {
+			msg_warn ("cannot create reuseport listen socket for %d: %s",
+					ls->fd, strerror (errno));
+			nfd = ls->fd;
+		}
+		else {
+			if (ls->fd != -1) {
+				close (ls->fd);
+			}
+			ls->fd = nfd;
+			nfd = -1;
+		}
+	}
+	else {
+		/*
+		 * Reuseport is broken with the current architecture, so it is easier not
+		 * to use it at all
+		 */
+		nfd = ls->fd;
+	}
+#else
+	nfd = ls->fd;
+#endif
+
+#if 0
+	/* This needed merely if we have reuseport for tcp, but for now it is disabled */
+	/* This means that we have an fd with no listening enabled */
+	if (nfd != -1) {
+		if (ls->type == RSPAMD_WORKER_SOCKET_TCP) {
+			if (listen (nfd, -1) == -1) {
+				return false;
+			}
+		}
+	}
+#endif
+
+	return true;
+}
+
+/**
+ * Handles worker after fork returned zero
+ * @param wrk
+ * @param rspamd_main
+ * @param cf
+ * @param listen_sockets
+ */
+static void __attribute__((noreturn))
+rspamd_handle_child_fork (struct rspamd_worker *wrk,
+						  struct rspamd_main *rspamd_main,
+						  struct rspamd_worker_conf *cf,
+						  GHashTable *listen_sockets)
+{
+	gint rc;
+	struct rlimit rlim;
+
+	/* Update pid for logging */
+	rspamd_log_on_fork (cf->type, rspamd_main->cfg, rspamd_main->logger);
+	wrk->pid = getpid ();
+
+	/* Init PRNG after fork */
+	rc = ottery_init (rspamd_main->cfg->libs_ctx->ottery_cfg);
+	if (rc != OTTERY_ERR_NONE) {
+		msg_err_main ("cannot initialize PRNG: %d", rc);
+		abort ();
+	}
+
+	rspamd_random_seed_fast ();
+#ifdef HAVE_EVUTIL_RNG_INIT
+	evutil_secure_rng_init ();
+#endif
+
+	/*
+	 * Libev stores all signals in a global table, so
+	 * previous handlers must be explicitly detached and forgotten
+	 * before starting a new loop
+	 */
+	ev_signal_stop (rspamd_main->event_loop, &rspamd_main->int_ev);
+	ev_signal_stop (rspamd_main->event_loop, &rspamd_main->term_ev);
+	ev_signal_stop (rspamd_main->event_loop, &rspamd_main->hup_ev);
+	ev_signal_stop (rspamd_main->event_loop, &rspamd_main->usr1_ev);
+	/* Remove the inherited event base */
+	ev_loop_destroy (rspamd_main->event_loop);
+	rspamd_main->event_loop = NULL;
+
+	/* Close unused sockets */
+	GHashTableIter it;
+	gpointer k, v;
+
+
+	g_hash_table_iter_init (&it, listen_sockets);
+
+	/*
+	 * Close listen sockets of not our process (inherited from other forks)
+	 */
+	while (g_hash_table_iter_next (&it, &k, &v)) {
+		GList *elt = (GList *)v;
+		GList *our = cf->listen_socks;
+
+		if (g_list_position (our, elt) == -1) {
+			GList *cur = elt;
+
+			while (cur) {
+				struct rspamd_worker_listen_socket *ls =
+						(struct rspamd_worker_listen_socket *)cur->data;
+
+				if (ls->fd != -1 && close (ls->fd) == -1) {
+					msg_err ("cannot close fd %d (addr = %s): %s",
+							ls->fd,
+							rspamd_inet_address_to_string_pretty (ls->addr),
+							strerror (errno));
+				}
+
+				ls->fd = -1;
+
+				cur = g_list_next (cur);
+			}
+		}
+	}
+
+	/* Reuseport before dropping privs */
+	GList *cur = cf->listen_socks;
+
+	while (cur) {
+		struct rspamd_worker_listen_socket *ls =
+				(struct rspamd_worker_listen_socket *)cur->data;
+
+		if (!rspamd_maybe_reuseport_socket (ls)) {
+			msg_err ("cannot listen on socket %s: %s",
+					rspamd_inet_address_to_string_pretty (ls->addr),
+					strerror (errno));
+		}
+
+		cur = g_list_next (cur);
+	}
+
+	/* Drop privileges */
+	rspamd_worker_drop_priv (rspamd_main);
+	/* Set limits */
+	rspamd_worker_set_limits (rspamd_main, cf);
+	/* Re-set stack limit */
+	getrlimit (RLIMIT_STACK, &rlim);
+	rlim.rlim_cur = 100 * 1024 * 1024;
+	rlim.rlim_max = rlim.rlim_cur;
+	setrlimit (RLIMIT_STACK, &rlim);
+
+	if (cf->bind_conf) {
+		setproctitle ("%s process (%s)", cf->worker->name,
+				cf->bind_conf->bind_line);
+	}
+	else {
+		setproctitle ("%s process", cf->worker->name);
+	}
+
+	if (rspamd_main->pfh) {
+		rspamd_pidfile_close (rspamd_main->pfh);
+	}
+
+	if (rspamd_main->cfg->log_silent_workers) {
+		rspamd_log_set_log_level (rspamd_main->logger, G_LOG_LEVEL_MESSAGE);
+	}
+
+	wrk->start_time = rspamd_get_calendar_ticks ();
+
+	if (cf->bind_conf) {
+		GString *listen_conf_stringified = g_string_new (NULL);
+		struct rspamd_worker_bind_conf *cur_conf;
+
+		LL_FOREACH (cf->bind_conf, cur_conf) {
+			if (cur_conf->next) {
+				rspamd_printf_gstring (listen_conf_stringified, "%s, ",
+						cur_conf->bind_line);
+			}
+			else {
+				rspamd_printf_gstring (listen_conf_stringified, "%s",
+						cur_conf->bind_line);
+			}
+		}
+
+		msg_info_main ("starting %s process %P (%d); listen on: %v",
+				cf->worker->name,
+				getpid (), wrk->index, listen_conf_stringified);
+		g_string_free (listen_conf_stringified, TRUE);
+	}
+	else {
+		msg_info_main ("starting %s process %P (%d); no listen",
+				cf->worker->name,
+				getpid (), wrk->index);
+	}
+	/* Close parent part of socketpair */
+	close (wrk->control_pipe[0]);
+	close (wrk->srv_pipe[0]);
+	rspamd_socket_nonblocking (wrk->control_pipe[1]);
+	rspamd_socket_nonblocking (wrk->srv_pipe[1]);
+	rspamd_main->cfg->cur_worker = wrk;
+	/* Execute worker (this function should not return normally!) */
+	cf->worker->worker_start_func (wrk);
+	/* To distinguish from normal termination */
+	exit (EXIT_FAILURE);
+}
+
+static void
+rspamd_handle_main_fork (struct rspamd_worker *wrk,
+						 struct rspamd_main *rspamd_main,
+						 struct rspamd_worker_conf *cf,
+						 struct ev_loop *ev_base)
+{
+	/* Close worker part of socketpair */
+	close (wrk->control_pipe[1]);
+	close (wrk->srv_pipe[1]);
+
+	rspamd_socket_nonblocking (wrk->control_pipe[0]);
+	rspamd_socket_nonblocking (wrk->srv_pipe[0]);
+	rspamd_srv_start_watching (rspamd_main, wrk, ev_base);
+	/* Child event */
+	wrk->cld_ev.data = wrk;
+	ev_child_init (&wrk->cld_ev, rspamd_worker_on_term, wrk->pid, 0);
+	ev_child_start (rspamd_main->event_loop, &wrk->cld_ev);
+	/* Heartbeats */
+	rspamd_main_heartbeat_start (wrk, rspamd_main->event_loop);
+	/* Insert worker into worker's table, pid is index */
+	g_hash_table_insert (rspamd_main->workers,
+			GSIZE_TO_POINTER (wrk->pid), wrk);
+
+#if defined(SO_REUSEPORT) && defined(SO_REUSEADDR) && defined(LINUX)
+	/*
+	 * Close listen sockets in the main process once a child is handling them,
+	 * if we have reuseport
+	 */
+	GList *cur = cf->listen_socks;
+
+	while (cur) {
+		struct rspamd_worker_listen_socket *ls =
+				(struct rspamd_worker_listen_socket *)cur->data;
+
+		if (ls->fd != -1 && ls->type == RSPAMD_WORKER_SOCKET_UDP) {
+			close (ls->fd);
+			ls->fd = -1;
+		}
+
+		cur = g_list_next (cur);
+	}
+#endif
+}
+
 struct rspamd_worker *
 rspamd_fork_worker (struct rspamd_main *rspamd_main,
 					struct rspamd_worker_conf *cf,
 					guint index,
 					struct ev_loop *ev_base,
-					rspamd_worker_term_cb term_handler)
+					rspamd_worker_term_cb term_handler,
+					GHashTable *listen_sockets)
 {
 	struct rspamd_worker *wrk;
-	gint rc;
-	struct rlimit rlim;
 
 	/* Starting worker process */
 	wrk = (struct rspamd_worker *) g_malloc0 (sizeof (struct rspamd_worker));
 
-	if (!rspamd_socketpair (wrk->control_pipe, 0)) {
+	if (!rspamd_socketpair (wrk->control_pipe, SOCK_DGRAM)) {
 		msg_err ("socketpair failure: %s", strerror (errno));
 		rspamd_hard_terminate (rspamd_main);
 	}
 
-	if (!rspamd_socketpair (wrk->srv_pipe, 0)) {
+	if (!rspamd_socketpair (wrk->srv_pipe, SOCK_DGRAM)) {
 		msg_err ("socketpair failure: %s", strerror (errno));
 		rspamd_hard_terminate (rspamd_main);
 	}
@@ -984,81 +1255,7 @@ rspamd_fork_worker (struct rspamd_main *rspamd_main,
 
 	switch (wrk->pid) {
 	case 0:
-		/* Update pid for logging */
-		rspamd_log_on_fork (cf->type, rspamd_main->cfg, rspamd_main->logger);
-		wrk->pid = getpid ();
-
-		/* Init PRNG after fork */
-		rc = ottery_init (rspamd_main->cfg->libs_ctx->ottery_cfg);
-		if (rc != OTTERY_ERR_NONE) {
-			msg_err_main ("cannot initialize PRNG: %d", rc);
-			abort ();
-		}
-
-		rspamd_random_seed_fast ();
-#ifdef HAVE_EVUTIL_RNG_INIT
-		evutil_secure_rng_init ();
-#endif
-
-		/*
-		 * Libev stores all signals in a global table, so
-		 * previous handlers must be explicitly detached and forgotten
-		 * before starting a new loop
-		 */
-		ev_signal_stop (rspamd_main->event_loop, &rspamd_main->int_ev);
-		ev_signal_stop (rspamd_main->event_loop, &rspamd_main->term_ev);
-		ev_signal_stop (rspamd_main->event_loop, &rspamd_main->hup_ev);
-		ev_signal_stop (rspamd_main->event_loop, &rspamd_main->usr1_ev);
-		/* Remove the inherited event base */
-		ev_loop_destroy (rspamd_main->event_loop);
-		rspamd_main->event_loop = NULL;
-		/* Drop privileges */
-		rspamd_worker_drop_priv (rspamd_main);
-		/* Set limits */
-		rspamd_worker_set_limits (rspamd_main, cf);
-		/* Re-set stack limit */
-		getrlimit (RLIMIT_STACK, &rlim);
-		rlim.rlim_cur = 100 * 1024 * 1024;
-		rlim.rlim_max = rlim.rlim_cur;
-		setrlimit (RLIMIT_STACK, &rlim);
-
-		if (cf->bind_conf) {
-			setproctitle ("%s process (%s)", cf->worker->name,
-					cf->bind_conf->bind_line);
-		}
-		else {
-			setproctitle ("%s process", cf->worker->name);
-		}
-
-		if (rspamd_main->pfh) {
-			rspamd_pidfile_close (rspamd_main->pfh);
-		}
-
-		if (rspamd_main->cfg->log_silent_workers) {
-			rspamd_log_set_log_level (rspamd_main->logger, G_LOG_LEVEL_MESSAGE);
-		}
-
-		wrk->start_time = rspamd_get_calendar_ticks ();
-
-		if (cf->bind_conf) {
-			msg_info_main ("starting %s process %P (%d); listen on: %s",
-					cf->worker->name,
-					getpid (), index, cf->bind_conf->bind_line);
-		}
-		else {
-			msg_info_main ("starting %s process %P (%d)", cf->worker->name,
-					getpid (), index);
-		}
-		/* Close parent part of socketpair */
-		close (wrk->control_pipe[0]);
-		close (wrk->srv_pipe[0]);
-		rspamd_socket_nonblocking (wrk->control_pipe[1]);
-		rspamd_socket_nonblocking (wrk->srv_pipe[1]);
-		rspamd_main->cfg->cur_worker = wrk;
-		/* Execute worker (this function should not return normally!) */
-		cf->worker->worker_start_func (wrk);
-		/* To distinguish from normal termination */
-		exit (EXIT_FAILURE);
+		rspamd_handle_child_fork (wrk, rspamd_main, cf, listen_sockets);
 		break;
 	case -1:
 		msg_err_main ("cannot fork main process: %s", strerror (errno));
@@ -1070,19 +1267,7 @@ rspamd_fork_worker (struct rspamd_main *rspamd_main,
 		rspamd_hard_terminate (rspamd_main);
 		break;
 	default:
-		/* Close worker part of socketpair */
-		close (wrk->control_pipe[1]);
-		close (wrk->srv_pipe[1]);
-		rspamd_socket_nonblocking (wrk->control_pipe[0]);
-		rspamd_socket_nonblocking (wrk->srv_pipe[0]);
-		rspamd_srv_start_watching (rspamd_main, wrk, ev_base);
-		wrk->cld_ev.data = wrk;
-		ev_child_init (&wrk->cld_ev, rspamd_worker_on_term, wrk->pid, 0);
-		ev_child_start (rspamd_main->event_loop, &wrk->cld_ev);
-		rspamd_main_heartbeat_start (wrk, rspamd_main->event_loop);
-		/* Insert worker into worker's table, pid is index */
-		g_hash_table_insert (rspamd_main->workers,
-				GSIZE_TO_POINTER (wrk->pid), wrk);
+		rspamd_handle_main_fork (wrk, rspamd_main, cf, ev_base);
 		break;
 	}
 
@@ -1432,7 +1617,12 @@ rspamd_set_crash_handler (struct rspamd_main *rspamd_main)
 	stack_t ss;
 	memset (&ss, 0, sizeof ss);
 
-	/* Allocate special stack, NOT freed at the end so far */
+	/*
+	 * Allocate special stack, NOT freed at the end so far
+	 * It also cannot be on stack as this memory is used when
+	 * stack corruption is detected. Leak sanitizer blames about it but
+	 * I don't know any good ways to stop this behaviour.
+	 */
 	ss.ss_size = MAX (SIGSTKSZ, 8192 * 4);
 	ss.ss_sp = g_malloc0 (ss.ss_size);
 	sigaltstack (&ss, NULL);

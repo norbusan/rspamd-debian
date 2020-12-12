@@ -23,7 +23,6 @@ local rspamd_trie = require "rspamd_trie"
 local rspamd_util = require "rspamd_util"
 local rspamd_text = require "rspamd_text"
 local rspamd_url = require "rspamd_url"
-local rspamd_logger = require "rspamd_logger"
 local bit = require "bit"
 local N = "lua_content"
 local lua_util = require "lua_util"
@@ -114,8 +113,12 @@ local config = {
   url_extraction = true,
   enabled = true,
   js_fuzzy = true, -- Generate fuzzy hashes from PDF javascripts
-  min_js_fuzzy = 32, -- Minimum size of js to be considered as a fuzzy
+  min_js_fuzzy = 256, -- Minimum size of js to be considered as a fuzzy
   openaction_fuzzy_only = false, -- Generate fuzzy from all scripts
+  max_pdf_objects = 10000, -- Maximum number of objects to be considered
+  max_pdf_trailer = 10 * 1024 * 1024, -- Maximum trailer size (to avoid abuse)
+  max_pdf_trailer_lines = 100, -- Maximum number of lines in pdf trailer
+  pdf_process_timeout = 1.0, -- Timeout in seconds for processing
 }
 
 -- Used to process patterns found in PDF
@@ -368,7 +371,7 @@ local function maybe_dereference_object(elt, pdf, task)
       -- No recursion!
       return pdf.ref[ref]
     else
-      lua_util.debugm(N, task, 'cannot dereference %s:%s -> %s',
+      lua_util.debugm(N, task, 'cannot dereference %s:%s -> %s, no object',
           elt[2], elt[3], obj_ref(elt[2], elt[3]))
       return nil
     end
@@ -387,13 +390,23 @@ local function apply_pdf_filter(input, filt)
 end
 
 -- Conditionally apply a pipeline of stream filters and return uncompressed data
-local function maybe_apply_filter(dict, data)
+local function maybe_apply_filter(dict, data, pdf, task)
   local uncompressed = data
 
   if dict.Filter then
     local filt = dict.Filter
     if type(filt) == 'string' then
       filt = {filt}
+    end
+
+    if dict.DecodeParms then
+      local decode_params = maybe_dereference_object(dict.DecodeParms, pdf, task)
+
+      if type(decode_params) == 'table' then
+        if decode_params.Predictor then
+          return nil,'predictor exists'
+        end
+      end
     end
 
     for _,f in ipairs(filt) do
@@ -403,18 +416,22 @@ local function maybe_apply_filter(dict, data)
     end
   end
 
-  return uncompressed
+  return uncompressed,nil
 end
 
 -- Conditionally extract stream data from object and attach it as obj.uncompressed
 local function maybe_extract_object_stream(obj, pdf, task)
+  if pdf.encrypted then
+    -- TODO add decryption some day
+    return nil
+  end
   local dict = obj.dict
-  if dict.Length then
+  if dict.Length and type(obj.stream) == 'table' then
     local len = math.min(obj.stream.len,
         tonumber(maybe_dereference_object(dict.Length, pdf, task)) or 0)
     local real_stream = obj.stream.data:span(1, len)
 
-    local uncompressed = maybe_apply_filter(dict, real_stream)
+    local uncompressed,filter_err = maybe_apply_filter(dict, real_stream, pdf, task)
 
     if uncompressed then
       obj.uncompressed = uncompressed
@@ -422,8 +439,8 @@ local function maybe_extract_object_stream(obj, pdf, task)
           obj.major, obj.minor, len, uncompressed:len())
       return obj.uncompressed
     else
-      lua_util.debugm(N, task, 'cannot extract object %s:%s; len = %s; filter = %s',
-          obj.major, obj.minor, len, dict.Filter)
+      lua_util.debugm(N, task, 'cannot extract object %s:%s; len = %s; filter = %s: %s',
+          obj.major, obj.minor, len, dict.Filter, filter_err)
     end
   end
 end
@@ -443,7 +460,12 @@ local function parse_object_grammar(obj, task, pdf)
 
     if ret then
       if obj.stream then
-        obj.dict = obj_or_err
+        if type(obj_or_err) == 'table' then
+          obj.dict = obj_or_err
+        else
+          obj.dict = {}
+        end
+
         lua_util.debugm(N, task, 'stream object %s:%s is parsed to: %s',
             obj.major, obj.minor, obj_or_err)
       else
@@ -455,6 +477,8 @@ local function parse_object_grammar(obj, task, pdf)
               obj.major, obj.minor, obj_or_err)
           pdf.ref[obj_ref(obj.major, obj.minor)] = obj
         else
+          lua_util.debugm(N, task, 'direct object %s:%s is parsed to raw data: %s',
+              obj.major, obj.minor, obj_or_err)
           pdf.ref[obj_ref(obj.major, obj.minor)] = obj_or_err
           obj.dict = {}
           obj.uncompressed = obj_or_err
@@ -472,6 +496,7 @@ end
 
 -- Extracts font data and process /ToUnicode mappings
 -- NYI in fact as cmap is ridiculously stupid and complicated
+--[[
 local function process_font(task, pdf, font, fname)
   local dict = font
   if font.dict then
@@ -488,6 +513,7 @@ local function process_font(task, pdf, font, fname)
     end
   end
 end
+--]]
 
 -- Forward declaration
 local process_dict
@@ -517,7 +543,7 @@ local function process_javascript(task, pdf, js)
 
   local njs = {
     data = js,
-    hash = rspamd_util.encode_base32(bin_hash),
+    hash = hash:hex(),
     bin_hash = bin_hash,
   }
   pdf.scripts[bin_hash] = njs
@@ -607,6 +633,17 @@ local function process_catalog(task, pdf, obj)
   end
 end
 
+local function process_xref(task, pdf, obj)
+  if obj.dict then
+    if obj.dict.Encrypt then
+      local encrypt = maybe_dereference_object(obj.dict.Encrypt, pdf, task)
+      lua_util.debugm(N, task, 'found encrypt: %s in xref object %s:%s',
+          encrypt, obj.major, obj.minor)
+      pdf.encrypted = true
+    end
+  end
+end
+
 process_dict = function(task, pdf, obj, dict)
   if not obj.type and type(dict) == 'table' then
     if dict.Type and type(dict.Type) == 'string' then
@@ -652,14 +689,16 @@ process_dict = function(task, pdf, obj, dict)
 
     local resources = dict.Resources
     if resources and type(resources) == 'table' then
-      obj.resources = maybe_dereference_object(resources, pdf, task)
+      local res_ref = maybe_dereference_object(resources, pdf, task)
 
-      if type(obj.resources) ~= 'table' then
-        rspamd_logger.infox(task, 'cannot parse resources from pdf: %s returned by grammar',
-            obj.resources)
+      if type(res_ref) ~= 'table' then
+        lua_util.debugm(N, task, 'cannot parse resources from pdf: %s',
+            resources)
         obj.resources = {}
-      elseif obj.resources.dict then
-        obj.resources = obj.resources.dict
+      elseif res_ref.dict then
+        obj.resources = res_ref.dict
+      else
+        obj.resources = {}
       end
     else
       -- Fucking pdf: we need to inherit from parent
@@ -679,9 +718,11 @@ process_dict = function(task, pdf, obj, dict)
       obj.resources = resources
     end
 
-    local fonts = obj.resources.Font
 
-    if fonts and type(fonts) == 'table' then
+
+--[[Disabled fonts extraction
+     local fonts = obj.resources.Font
+     if fonts and type(fonts) == 'table' then
       obj.fonts = {}
       for k,v in pairs(fonts) do
         obj.fonts[k] = maybe_dereference_object(v, pdf, task)
@@ -697,6 +738,7 @@ process_dict = function(task, pdf, obj, dict)
         end
       end
     end
+]]
 
     lua_util.debugm(N, task, 'found resources for object %s:%s (%s): %s',
         obj.major, obj.minor, obj.type, obj.resources)
@@ -705,6 +747,9 @@ process_dict = function(task, pdf, obj, dict)
       process_action(task, pdf, obj)
     elseif obj.type == 'Catalog' then
       process_catalog(task, pdf, obj)
+    elseif obj.type == 'XRef' then
+      -- XRef stream instead of trailer from PDF 1.5 (thanks Adobe)
+      process_xref(task, pdf, obj)
     elseif obj.type == 'Javascript' then
       local js = maybe_dereference_object(obj.dict.JS, pdf, task)
 
@@ -786,7 +831,19 @@ end
 
 -- PDF 1.5 ObjStmt
 local function extract_pdf_compound_objects(task, pdf)
-  for _,obj in ipairs(pdf.objects or {}) do
+  for i,obj in ipairs(pdf.objects or {}) do
+    if i > 0 and i % 100 == 0 then
+      local now = rspamd_util.get_ticks()
+
+      if now >= pdf.end_timestamp then
+        pdf.timeout_processing = now - pdf.start_timestamp
+
+        lua_util.debugm(N, task, 'pdf: timeout processing compound objects after spending %s seconds, ' ..
+            '%s elements processed',
+            pdf.timeout_processing, i)
+        break
+      end
+    end
     if obj.stream and obj.dict and type(obj.dict) == 'table' then
       local t = obj.dict.Type
       if t and t == 'ObjStm' then
@@ -817,14 +874,21 @@ end
 -- set of objects
 local function extract_outer_objects(task, input, pdf)
   local start_pos, end_pos = 1, 1
+  local max_start_pos, max_end_pos
   local obj_count = 0
-  while start_pos <= #pdf.start_objects and end_pos <= #pdf.end_objects do
+
+  max_start_pos = math.min(config.max_pdf_objects, #pdf.start_objects)
+  max_end_pos = math.min(config.max_pdf_objects, #pdf.end_objects)
+  lua_util.debugm(N, task, "pdf: extract objects from %s start positions and %s end positions",
+      max_start_pos, max_end_pos)
+
+  while start_pos <= max_start_pos and end_pos <= max_end_pos do
     local first = pdf.start_objects[start_pos]
     local last = pdf.end_objects[end_pos]
 
     -- 7 is length of `endobj\n`
-    if first + 7 < last then
-      local len = last - first - 7
+    if first + 6 < last then
+      local len = last - first - 6
 
       -- Also get the starting span and try to match it versus obj re to get numbers
       local obj_line_potential = first - 32
@@ -870,9 +934,13 @@ end
 local function attach_pdf_streams(task, input, pdf)
   if pdf.start_streams and pdf.end_streams then
     local start_pos, end_pos = 1, 1
+    local max_start_pos, max_end_pos
+
+    max_start_pos = math.min(config.max_pdf_objects, #pdf.start_streams)
+    max_end_pos = math.min(config.max_pdf_objects, #pdf.end_streams)
 
     for _,obj in ipairs(pdf.objects) do
-      while start_pos <= #pdf.start_streams and end_pos <= #pdf.end_streams do
+      while start_pos <= max_start_pos and end_pos <= max_end_pos do
         local first = pdf.start_streams[start_pos]
         local last = pdf.end_streams[end_pos]
         last = last - 10 -- Exclude endstream\n pattern
@@ -930,17 +998,52 @@ local function postprocess_pdf_objects(task, input, pdf)
   -- Now we have objects and we need to attach streams that are in bounds
   attach_pdf_streams(task, input, pdf)
   -- Parse grammar for outer objects
-  for _,obj in ipairs(pdf.objects) do
+  for i,obj in ipairs(pdf.objects) do
+    if i > 0 and i % 100 == 0 then
+      local now = rspamd_util.get_ticks()
+
+      if now >= pdf.end_timestamp then
+        pdf.timeout_processing = now - pdf.start_timestamp
+
+        lua_util.debugm(N, task, 'pdf: timeout processing grammars after spending %s seconds, ' ..
+            '%s elements processed',
+            pdf.timeout_processing, i)
+        break
+      end
+    end
     if obj.ref then
       parse_object_grammar(obj, task, pdf)
+
+      -- Special early handling
+      if obj.dict and obj.dict.Type and obj.dict.Type == 'XRef' then
+        process_xref(task, pdf, obj)
+      end
     end
   end
-  extract_pdf_compound_objects(task, pdf)
+
+  if not pdf.timeout_processing then
+    extract_pdf_compound_objects(task, pdf)
+  else
+    -- ENOTIME
+    return
+  end
 
   -- Now we might probably have all objects being processed
-  for _,obj in ipairs(pdf.objects) do
+  for i,obj in ipairs(pdf.objects) do
     if obj.dict then
       -- Types processing
+      if i > 0 and i % 100 == 0 then
+        local now = rspamd_util.get_ticks()
+
+        if now >= pdf.end_timestamp then
+          pdf.timeout_processing = now - pdf.start_timestamp
+
+          lua_util.debugm(N, task, 'pdf: timeout processing dicts after spending %s seconds, ' ..
+              '%s elements processed',
+              pdf.timeout_processing, i)
+          break
+        end
+      end
       process_dict(task, pdf, obj, obj.dict)
     end
   end
@@ -1034,7 +1137,7 @@ local function search_text(task, pdf)
 end
 
 -- This function searches objects for `/URI` key and parses it's content
-local function search_urls(task, pdf)
+local function search_urls(task, pdf, mpart)
   local function recursive_object_traverse(obj, dict, rec)
     if rec > 10 then
       lua_util.debugm(N, task, 'object %s:%s recurses too much',
@@ -1048,12 +1151,12 @@ local function search_urls(task, pdf)
       elseif k == 'URI' then
         v = maybe_dereference_object(v, pdf, task)
         if type(v) == 'string' then
-          local url =  rspamd_url.create(task:get_mempool(), v)
+          local url =  rspamd_url.create(task:get_mempool(), v, {'content'})
 
           if url then
             lua_util.debugm(N, task, 'found url %s in object %s:%s',
                 v, obj.major, obj.minor)
-            task:inject_url(url)
+            task:inject_url(url, mpart)
           end
         end
       end
@@ -1067,7 +1170,7 @@ local function search_urls(task, pdf)
   end
 end
 
-local function process_pdf(input, _, task)
+local function process_pdf(input, mpart, task)
 
   if not config.enabled then
     -- Skip processing
@@ -1077,10 +1180,16 @@ local function process_pdf(input, _, task)
   local matches = pdf_trie:match(input)
 
   if matches then
-    local pdf_output = {
+    local start_ts = rspamd_util.get_ticks()
+    -- Temp object used to share data between pdf extraction methods
+    local pdf_object = {
       tag = 'pdf',
       extract_text = extract_text_data,
+      start_timestamp = start_ts,
+      end_timestamp = start_ts + config.pdf_process_timeout,
     }
+    -- Output object that excludes all internal stuff
+    local pdf_output = lua_util.shallowcopy(pdf_object)
     local grouped_processors = {}
     for npat,matched_positions in pairs(matches) do
       local index = pdf_indexes[npat]
@@ -1105,38 +1214,43 @@ local function process_pdf(input, _, task)
       lua_util.debugm(N, task, "pdf: process group %s with %s matches",
           name, #processor.offsets)
       table.sort(processor.offsets, function(e1, e2) return e1[1] < e2[1] end)
-      processor.processor_func(input, task, processor.offsets, pdf_output)
+      processor.processor_func(input, task, processor.offsets, pdf_object, pdf_output)
     end
 
     pdf_output.flags = {}
 
-    if pdf_output.start_objects and pdf_output.end_objects then
-      -- Postprocess objects
-      postprocess_pdf_objects(task, input, pdf_output)
-      if config.text_extraction then
-        search_text(task, pdf_output)
-      end
-      if config.url_extraction then
-        search_urls(task, pdf_output)
+    if pdf_object.start_objects and pdf_object.end_objects then
+      if #pdf_object.start_objects > config.max_pdf_objects then
+        pdf_output.many_objects = #pdf_object.start_objects
+        -- Trim
       end
 
-      if config.js_fuzzy and pdf_output.scripts then
+      -- Postprocess objects
+      postprocess_pdf_objects(task, input, pdf_object)
+      if config.text_extraction then
+        search_text(task, pdf_object, pdf_output)
+      end
+      if config.url_extraction then
+        search_urls(task, pdf_object, mpart, pdf_output)
+      end
+
+      if config.js_fuzzy and pdf_object.scripts then
         pdf_output.fuzzy_hashes = {}
         if config.openaction_fuzzy_only then
           -- OpenAction only
-          if pdf_output.openaction and pdf_output.openaction.bin_hash then
-            if config.min_js_fuzzy and #pdf_output.openaction.data >= config.min_js_fuzzy then
+          if pdf_object.openaction and pdf_object.openaction.bin_hash then
+            if config.min_js_fuzzy and #pdf_object.openaction.data >= config.min_js_fuzzy then
               lua_util.debugm(N, task, "pdf: add fuzzy hash from openaction: %s",
-                  pdf_output.openaction.hash)
-              table.insert(pdf_output.fuzzy_hashes, pdf_output.openaction.bin_hash)
+                  pdf_object.openaction.hash)
+              table.insert(pdf_output.fuzzy_hashes, pdf_object.openaction.bin_hash)
             else
               lua_util.debugm(N, task, "pdf: skip fuzzy hash from Javascript: %s, too short: %s",
-                  pdf_output.openaction.hash, #pdf_output.openaction.data)
+                  pdf_object.openaction.hash, #pdf_object.openaction.data)
             end
           end
         else
           -- All hashes
-          for h,sc in pairs(pdf_output.scripts) do
+          for h,sc in pairs(pdf_object.scripts) do
             if config.min_js_fuzzy and #sc.data >= config.min_js_fuzzy then
               lua_util.debugm(N, task, "pdf: add fuzzy hash from Javascript: %s",
                   sc.hash)
@@ -1153,53 +1267,121 @@ local function process_pdf(input, _, task)
       pdf_output.flags.no_objects = true
     end
 
+    -- Propagate from object to output
+    if pdf_object.encrypted then
+      pdf_output.encrypted = true
+    end
+    if pdf_object.scripts then
+      pdf_output.scripts = true
+    end
+
     return pdf_output
   end
 end
 
 -- Processes the PDF trailer
-processors.trailer = function(input, task, positions, output)
+processors.trailer = function(input, task, positions, pdf_object, pdf_output)
   local last_pos = positions[#positions]
 
+  lua_util.debugm(N, task, 'pdf: process trailer at position %s (%s total length)',
+      last_pos, #input)
+
+  if last_pos[1] > config.max_pdf_trailer then
+    pdf_output.long_trailer = #input - last_pos[1]
+    return
+  end
+
   local last_span = input:span(last_pos[1])
+  local lines_checked = 0
   for line in last_span:lines(true) do
     if line:find('/Encrypt ') then
       lua_util.debugm(N, task, "pdf: found encrypted line in trailer: %s",
           line)
-      output.encrypted = true
+      pdf_output.encrypted = true
+      pdf_object.encrypted = true
+      break
+    end
+    lines_checked = lines_checked + 1
+
+    if lines_checked > config.max_pdf_trailer_lines then
+      lua_util.debugm(N, task, "pdf: trailer has too many lines, stop checking")
+      pdf_output.long_trailer = #input - last_pos[1]
+      break
     end
   end
 end
 
-processors.suspicious = function(_, task, _, output)
-  lua_util.debugm(N, task, "pdf: found a suspicious pattern")
-  output.suspicious = true
+processors.suspicious = function(input, task, positions, pdf_object, pdf_output)
+  local suspicious_factor = 0.0
+  local nexec = 0
+  local nencoded = 0
+  local close_encoded = 0
+  local last_encoded
+  for _,match in ipairs(positions) do
+    if match[2] == 1 then
+      -- netsh
+      suspicious_factor = suspicious_factor + 0.5
+    elseif match[2] == 2 then
+      nexec = nexec + 1
+    else
+      nencoded = nencoded + 1
+
+      if last_encoded then
+        if match[1] - last_encoded < 8 then
+          -- likely consecutive encoded chars, increase factor
+          close_encoded = close_encoded + 1
+        end
+      end
+      last_encoded = match[1]
+    end
+  end
+
+  if nencoded > 10 then
+    suspicious_factor = suspicious_factor + nencoded / 10
+  end
+  if nexec > 1 then
+    suspicious_factor = suspicious_factor + nexec / 2.0
+  end
+  if close_encoded > 4 and nencoded - close_encoded < 5 then
+    -- Too many close encoded comparing to the total number of encoded characters
+    suspicious_factor = suspicious_factor + 0.5
+  end
+
+  lua_util.debugm(N, task, 'pdf: found a suspicious patterns: %s exec, %s encoded (%s close), ' ..
+      '%s final factor',
+      nexec, nencoded, close_encoded, suspicious_factor)
+
+  if suspicious_factor > 1.0 then
+    suspicious_factor = 1.0
+  end
+
+  pdf_output.suspicious = suspicious_factor
 end
 
-local function generic_table_inserter(positions, output, output_key)
-  if not output[output_key] then
-    output[output_key] = {}
+local function generic_table_inserter(positions, pdf_object, output_key)
+  if not pdf_object[output_key] then
+    pdf_object[output_key] = {}
   end
-  local shift = #output[output_key]
+  local shift = #pdf_object[output_key]
   for i,pos in ipairs(positions) do
-    output[output_key][i + shift] = pos[1]
+    pdf_object[output_key][i + shift] = pos[1]
   end
 end
 
-processors.start_object = function(_, task, positions, output)
-  generic_table_inserter(positions, output, 'start_objects')
+processors.start_object = function(_, task, positions, pdf_object)
+  generic_table_inserter(positions, pdf_object, 'start_objects')
 end
 
-processors.end_object = function(_, task, positions, output)
-  generic_table_inserter(positions, output, 'end_objects')
+processors.end_object = function(_, task, positions, pdf_object)
+  generic_table_inserter(positions, pdf_object, 'end_objects')
 end
 
-processors.start_stream = function(_, task, positions, output)
-  generic_table_inserter(positions, output, 'start_streams')
+processors.start_stream = function(_, task, positions, pdf_object)
+  generic_table_inserter(positions, pdf_object, 'start_streams')
 end
 
-processors.end_stream = function(_, task, positions, output)
-  generic_table_inserter(positions, output, 'end_streams')
+processors.end_stream = function(_, task, positions, pdf_object)
+  generic_table_inserter(positions, pdf_object, 'end_streams')
 end
 
 exports.process = process_pdf

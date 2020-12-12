@@ -93,6 +93,7 @@ rspamd_cryptobox_cpuid (gint cpu[4], gint info)
 static sig_atomic_t ok = 0;
 static jmp_buf j;
 
+__attribute__((noreturn))
 static void
 rspamd_cryptobox_ill_handler (int signo)
 {
@@ -466,7 +467,7 @@ rspamd_cryptobox_sign (guchar *sig, unsigned long long *siglen_p,
 		enum rspamd_cryptobox_mode mode)
 {
 	if (G_LIKELY (mode == RSPAMD_CRYPTOBOX_MODE_25519)) {
-		crypto_sign (sig, siglen_p, m, mlen, sk);
+		crypto_sign_detached (sig, siglen_p, m, mlen, sk);
 	}
 	else {
 #ifndef HAVE_USABLE_OPENSSL
@@ -1434,27 +1435,19 @@ rspamd_cryptobox_mac_bytes (enum rspamd_cryptobox_mode mode)
 }
 
 void
-rspamd_cryptobox_hash_init (void *p, const guchar *key, gsize keylen)
+rspamd_cryptobox_hash_init (rspamd_cryptobox_hash_state_t *p, const guchar *key, gsize keylen)
 {
-	if (key != NULL && keylen > 0) {
-		crypto_generichash_blake2b_state *st = cryptobox_align_ptr (p,
-				_Alignof(crypto_generichash_blake2b_state));
-		crypto_generichash_blake2b_init (st, key, keylen,
-				crypto_generichash_blake2b_BYTES_MAX);
-	}
-	else {
-		crypto_generichash_blake2b_state *st = cryptobox_align_ptr (p,
-				_Alignof(crypto_generichash_blake2b_state));
-		crypto_generichash_blake2b_init (st, key, keylen,
-				crypto_generichash_blake2b_BYTES_MAX);
-	}
+	crypto_generichash_blake2b_state *st = cryptobox_align_ptr (p,
+			_Alignof(crypto_generichash_blake2b_state));
+	crypto_generichash_blake2b_init (st, key, keylen,
+			crypto_generichash_blake2b_BYTES_MAX);
 }
 
 /**
  * Update hash with data portion
  */
 void
-rspamd_cryptobox_hash_update (void *p, const guchar *data, gsize len)
+rspamd_cryptobox_hash_update (rspamd_cryptobox_hash_state_t *p, const guchar *data, gsize len)
 {
 	crypto_generichash_blake2b_state *st = cryptobox_align_ptr (p,
 			_Alignof(crypto_generichash_blake2b_state));
@@ -1465,7 +1458,7 @@ rspamd_cryptobox_hash_update (void *p, const guchar *data, gsize len)
  * Output hash to the buffer of rspamd_cryptobox_HASHBYTES length
  */
 void
-rspamd_cryptobox_hash_final (void *p, guchar *out)
+rspamd_cryptobox_hash_final (rspamd_cryptobox_hash_state_t *p, guchar *out)
 {
 	crypto_generichash_blake2b_state *st = cryptobox_align_ptr (p,
 			_Alignof(crypto_generichash_blake2b_state));

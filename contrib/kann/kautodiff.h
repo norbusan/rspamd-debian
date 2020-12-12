@@ -102,7 +102,7 @@ void kad_delete(int n, kad_node_t **a); /* deallocate a compiled/linearized grap
 
 /**
  * Compute the value at a node
- * 
+ *
  * @param n       number of nodes
  * @param a       list of nodes
  * @param from    compute the value at this node, 0<=from<n
@@ -242,5 +242,15 @@ static inline int kad_len(const kad_node_t *p) /* calculate the size of p->x */
 	for (i = 0; i < p->n_d; ++i) n *= p->d[i];
 	return n;
 }
+
+/* Additions by Rspamd */
+void kad_sgemm_simple (int trans_A, int trans_B, int M, int N, int K, const float *A, const float *B, float *C);
+/**
+ * Calculate eigenvectors and eigenvalues
+ * @param N dimensions of A (must be NxN)
+ * @param A input matrix (part of it will be destroyed, so copy if needed), on finish the first `nwork` columns will have eigenvectors
+ * @param eigenvals eigenvalues, must be N elements vector
+ */
+bool kad_ssyev_simple (int N, float *A, float *eigenvals);
 
 #endif

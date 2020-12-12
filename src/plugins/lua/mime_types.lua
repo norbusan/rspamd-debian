@@ -35,6 +35,7 @@ local settings = {
   symbol_good = 'MIME_GOOD',
   symbol_attachment = 'MIME_BAD_ATTACHMENT',
   symbol_encrypted_archive = 'MIME_ENCRYPTED_ARCHIVE',
+  symbol_exe_in_gen_split_rar = 'MIME_EXE_IN_GEN_SPLIT_RAR',
   symbol_archive_in_archive = 'MIME_ARCHIVE_IN_ARCHIVE',
   symbol_double_extension = 'MIME_DOUBLE_BAD_EXTENSION',
   symbol_bad_extension = 'MIME_BAD_EXTENSION',
@@ -211,7 +212,7 @@ local function check_mime_type(task)
     return ext[1],ext[2],parts
   end
 
-  local function check_filename(fname, ct, is_archive, part, detected_ext)
+  local function check_filename(fname, ct, is_archive, part, detected_ext, nfiles)
 
     local has_bad_unicode, char, ch_pos = rspamd_util.has_obscured_unicode(fname)
     if has_bad_unicode then
@@ -247,7 +248,7 @@ local function check_mime_type(task)
     if detected_ext and ((not ext) or ext ~= detected_ext) then
       -- Try to find extension by real content type
       check_filename('detected.' .. detected_ext, detected.ct,
-          false, part, nil)
+          false, part, nil, 1)
     end
 
     if not ext then return end
@@ -257,7 +258,7 @@ local function check_mime_type(task)
       if #parts > 2 then
         -- We need to ensure that next-to-last extension is an extension,
         -- so we check for its length and if it is not a number or date
-        if #ext2 <= 4 and not string.match(ext2, '^%d+[%]%)]?$') then
+        if #ext2 > 0 and #ext2 <= 4 and not string.match(ext2, '^%d+[%]%)]?$') then
 
           -- Use the greatest badness multiplier
           if not badness_mult or
@@ -284,7 +285,7 @@ local function check_mime_type(task)
     -- Process settings
     local extra_table = {}
     local extra_archive_table = {}
-    local user_settings = task:get_settings()
+    local user_settings = task:cache_get('settings')
     if user_settings and user_settings.plugins then
       user_settings = user_settings.plugins.mime_types
     end
@@ -315,7 +316,7 @@ local function check_mime_type(task)
 
     local function check_tables(e)
       if is_archive then
-        return extra_archive_table[e] or settings.bad_archive_extensions[e] or
+        return extra_archive_table[e] or (nfiles < 2 and settings.bad_archive_extensions[e]) or
             extra_table[e] or settings.bad_extensions[e]
       end
 
@@ -395,7 +396,7 @@ local function check_mime_type(task)
         local detected_ext = p:get_detected_ext()
 
         if filename then
-          check_filename(filename, ct, false, p, detected_ext)
+          check_filename(filename, ct, false, p, detected_ext, 1)
         end
 
         if p:is_archive() then
@@ -434,7 +435,13 @@ local function check_mime_type(task)
           end
 
           if check then
-            local fl = arch:get_files_full()
+            local is_gen_split_rar = false
+            if filename then
+              local ext = gen_extension(filename)
+              is_gen_split_rar = ext and (string.match(ext, '^%d%d%d$')) and (arch:get_type() == 'rar')
+            end
+
+            local fl = arch:get_files_full(1000)
 
             local nfiles = #fl
 
@@ -447,8 +454,12 @@ local function check_mime_type(task)
               end
 
               if f['name'] then
-                check_filename(f['name'], nil,
-                    true, p, nil)
+                if is_gen_split_rar and (gen_extension(f['name']) or '') == 'exe' then
+                  task:insert_result(settings['symbol_exe_in_gen_split_rar'], 1.0, f['name'])
+                else
+                  check_filename(f['name'], nil,
+                      true, p, nil, nfiles)
+                end
               end
             end
 
@@ -457,12 +468,12 @@ local function check_mime_type(task)
               -- the same as double extension of the file
               local _,ext2 = gen_extension(filename)
 
-              if ext2 then
+              if ext2 and #ext2 > 0 then
                 local enc_ext = gen_extension(fl[1].name)
 
                 if enc_ext
                     and settings['bad_extensions'][enc_ext]
-                    and not string.match(ext2, '^%d+$')
+                    and not tonumber(ext2)
                     and enc_ext ~= ext2 then
                   task:insert_result(settings['symbol_double_extension'], 2.0,
                       string.format("%s!=%s", ext2, enc_ext))
@@ -573,7 +584,8 @@ if opts then
     local id = rspamd_config:register_symbol({
       name = 'MIME_TYPES_CALLBACK',
       callback = check_mime_type,
-      type = 'callback,nostat',
+      type = 'callback',
+      flags = 'nostat',
       group = 'mime_types',
     })
 
@@ -610,6 +622,12 @@ if opts then
     })
     rspamd_config:register_symbol({
       type = 'virtual',
+      name = settings['symbol_exe_in_gen_split_rar'],
+      parent = id,
+      group = 'mime_types',
+    })
+    rspamd_config:register_symbol({
+      type = 'virtual',
       name = settings['symbol_archive_in_archive'],
       parent = id,
       group = 'mime_types',
@@ -633,10 +651,11 @@ if opts then
       group = 'mime_types',
     })
     rspamd_config:register_symbol({
-      type = 'virtual,nostat',
+      type = 'virtual',
       name = 'MIME_TRACE',
       parent = id,
       group = 'mime_types',
+      flags = 'nostat',
       score = 0,
     })
   else

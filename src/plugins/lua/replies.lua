@@ -23,6 +23,7 @@ local rspamd_logger = require 'rspamd_logger'
 local hash = require 'rspamd_cryptobox_hash'
 local lua_util = require 'lua_util'
 local lua_redis = require 'lua_redis'
+local fun = require "fun"
 
 -- A plugin that implements replies check using redis
 
@@ -64,28 +65,35 @@ local function make_key(goop, sz, prefix)
 end
 
 local function replies_check(task)
+  local in_reply_to
   local function check_recipient(stored_rcpt)
-    local real_rcpt = task:get_principal_recipient()
+    local rcpts = task:get_recipients('mime')
 
-    if real_rcpt then
-      local real_rcpt_h = make_key(real_rcpt:lower(), 8)
-      if real_rcpt_h == stored_rcpt then
+    if rcpts then
+      local filter_predicate = function(input_rcpt)
+        local real_rcpt_h = make_key(input_rcpt:lower(), 8)
+
+        return real_rcpt_h == stored_rcpt
+      end
+
+      if fun.any(filter_predicate, fun.map(function(rcpt) return rcpt.addr or '' end, rcpts)) then
+        lua_util.debugm(N, task, 'reply to %s validated', in_reply_to)
         return true
       end
 
-      rspamd_logger.infox(task, 'ignoring reply as recipient %s is not matching hash %s',
-          real_rcpt, stored_rcpt)
+      rspamd_logger.infox(task, 'ignoring reply to %s as no recipients are matching hash %s',
+          in_reply_to, stored_rcpt)
     else
-      rspamd_logger.infox(task, 'ignoring reply as recipient cannot be detected for hash %s',
-          stored_rcpt)
+      rspamd_logger.infox(task, 'ignoring reply to %s as recipient cannot be detected for hash %s',
+          in_reply_to, stored_rcpt)
     end
 
     return false
   end
 
-  local function redis_get_cb(err, data)
+  local function redis_get_cb(err, data, addr)
     if err ~= nil then
-      rspamd_logger.errx(task, 'redis_get_cb received error: %1', err)
+      rspamd_logger.errx(task, 'redis_get_cb error when reading data from %s: %s', addr:get_addr(), err)
       return
     end
     if data and type(data) == 'string' and check_recipient(data) then
@@ -104,12 +112,12 @@ local function replies_check(task)
     end
   end
   -- If in-reply-to header not present return
-  local irt = task:get_header_raw('in-reply-to')
-  if irt == nil then
+  in_reply_to = task:get_header_raw('in-reply-to')
+  if not in_reply_to then
     return
   end
   -- Create hash of in-reply-to and query redis
-  local key = make_key(irt, settings.key_size, settings.key_prefix)
+  local key = make_key(in_reply_to, settings.key_size, settings.key_prefix)
 
   local ret = lua_redis.redis_make_request(task,
     redis_params, -- connect params
@@ -126,9 +134,9 @@ local function replies_check(task)
 end
 
 local function replies_set(task)
-  local function redis_set_cb(err)
+  local function redis_set_cb(err, _, addr)
     if err ~=nil then
-      rspamd_logger.errx(task, 'redis_set_cb received error: %1', err)
+      rspamd_logger.errx(task, 'redis_set_cb error when writing data to %s: %s', addr:get_addr(), err)
     end
   end
   -- If sender is unauthenticated return
@@ -142,24 +150,25 @@ local function replies_set(task)
   end
   -- If no message-id present return
   local msg_id = task:get_header_raw('message-id')
-  if msg_id == nil then
+  if msg_id == nil or msg_id:len() <= 2 then
     return
   end
   -- Create hash of message-id and store to redis
   local key = make_key(msg_id, settings.key_size, settings.key_prefix)
-  lua_util.debugm(N, task, 'storing message-id for replies check')
 
-  local value = task:get_reply_sender()
+  local sender = task:get_reply_sender()
 
-  if value then
-    value = make_key(value:lower(), 8)
+  if sender then
+    local sender_hash = make_key(sender:lower(), 8)
+    lua_util.debugm(N, task, 'storing id: %s (%s), reply-to: %s (%s) for replies check',
+                      msg_id, key, sender, sender_hash)
     local ret = lua_redis.redis_make_request(task,
         redis_params, -- connect params
         key, -- hash key
         true, -- is write
         redis_set_cb, --callback
-        'SETEX', -- command
-        {key, tostring(math.floor(settings['expire'])), value:lower()} -- arguments
+        'PSETEX', -- command
+        {key, tostring(math.floor(settings['expire'] * 1000)), sender_hash} -- arguments
     )
     if not ret then
       rspamd_logger.errx(task, "redis request wasn't scheduled")
@@ -273,8 +282,9 @@ if opts then
 
       local id = rspamd_config:register_symbol({
         name = 'REPLIES_CHECK',
-        type = 'prefilter,nostat',
+        type = 'prefilter',
         callback = replies_check_cookie,
+        flags = 'nostat',
         priority = 10,
         group = "replies"
       })
@@ -296,9 +306,10 @@ if opts then
     })
     local id = rspamd_config:register_symbol({
       name = 'REPLIES_CHECK',
-      type = 'prefilter,nostat',
+      type = 'prefilter',
+      flags = 'nostat',
       callback = replies_check,
-      priority = 10,
+      priority = 9,
       group = "replies"
     })
     rspamd_config:register_symbol({
