@@ -10,6 +10,7 @@ rspamd (2.6-1) unstable; urgency=medium
 
   [ Sebastien Badia ]
   * d/source/lintian-overrides: drop unused override
+  * d/control: Bump Standards-Versions to 4.5.1 (no changes)
 
  -- Sebastien Badia <sbadia@debian.org>  Sat, 12 Dec 2020 15:54:28 +0100
 
