@@ -101,7 +101,7 @@ rspamd_str_lc (gchar *str, guint size)
 gint
 rspamd_lc_cmp (const gchar *s, const gchar *d, gsize l)
 {
-	guint fp, i;
+	gsize fp, i;
 	guchar c1, c2, c3, c4;
 	union {
 		guchar c[4];
@@ -1891,12 +1891,15 @@ rspamd_substring_search (const gchar *in, gsize inlen,
 
 			return (-1);
 		}
+		else if (G_UNLIKELY (srchlen == 0)) {
+			return 0;
+		}
 
 		return rspamd_substring_search_common (in, inlen, srch, srchlen,
 				rspamd_substring_cmp_func);
 	}
 	else if (inlen == srchlen) {
-		return rspamd_lc_cmp (srch, in, srchlen) == 0;
+		return (rspamd_lc_cmp (srch, in, srchlen) == 0 ? 0 : -1);
 	}
 	else {
 		return (-1);
@@ -2338,13 +2341,17 @@ decode:
 			if      (c >= '0' && c <= '9') { ret = c - '0'; }
 			else if (c >= 'A' && c <= 'F') { ret = c - 'A' + 10; }
 			else if (c >= 'a' && c <= 'f') { ret = c - 'a' + 10; }
-			else if (c == '\r' || c == '\n') {
-				/* Soft line break */
-				while (remain > 0 && (*p == '\r' || *p == '\n')) {
-					remain --;
+			else if (c == '\r') {
+				/* Eat one more endline */
+				if (remain > 0 && *p == '\n') {
 					p ++;
+					remain --;
 				}
 
+				continue;
+			}
+			else if (c == '\n') {
+				/* Soft line break */
 				continue;
 			}
 			else {

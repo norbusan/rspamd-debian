@@ -236,8 +236,10 @@ local function make_grammar()
     FUNCTION = l.Ct(atom * spc * (obrace * l.V("ARG_LIST") * ebrace)^0),
     METHOD = l.Ct(atom / function(e) return '__' .. e end * spc * (obrace * l.V("ARG_LIST") * ebrace)^0),
     ARG_LIST = l.Ct((l.V("ARG") * comma^0)^0),
-    ARG = l.Cf(tbl_obrace * l.V("NAMED_ARG") * tbl_ebrace, rawset) + argument,
-    NAMED_ARG = (l.Ct("") * l.Cg(argument * eqsign * argument * comma^0)^0),
+    ARG = l.Cf(tbl_obrace * l.V("NAMED_ARG") * tbl_ebrace, rawset) + argument + l.V("LIST_ARGS"),
+    NAMED_ARG = (l.Ct("") * l.Cg(argument * eqsign * (argument + l.V("LIST_ARGS")) * comma^0)^0),
+    LIST_ARGS = l.Ct(tbl_obrace * l.V("LIST_ARG") * tbl_ebrace),
+    LIST_ARG = l.Cg(argument * comma^0)^0,
   }
 end
 
@@ -338,20 +340,24 @@ exports.parse_selector = function(cfg, str)
           },
           map_type = 'string',
           process = function(inp, t, args)
+            local ret
             if t == 'table' then
-              return inp[method_name],'string'
+              -- Plain table field
+              ret = inp[method_name]
             else
               -- We call method unpacking arguments and dropping all but the first result returned
-              local ret = (inp[method_name](inp, unpack_function(args or E)))
-              local ret_type = type(ret)
-              -- Now apply types heuristic
-              if ret_type == 'string' then
-                return ret,'string'
-              elseif ret_type == 'table' then
-                return ret,'string_list'
-              else
-                return implicit_tostring(ret_type, ret)
-              end
+              ret = (inp[method_name](inp, unpack_function(args or E)))
+            end
+
+            local ret_type = type(ret)
+            -- Now apply types heuristic
+            if ret_type == 'string' then
+              return ret,'string'
+            elseif ret_type == 'table' then
+              -- TODO: we need to ensure that 1) table is numeric 2) table has merely strings
+              return ret,'string_list'
+            else
+              return implicit_tostring(ret_type, ret)
             end
           end,
         }
@@ -450,12 +456,24 @@ exports.combine_selectors = function(_, selectors, delimiter)
 
   if not selectors then return nil end
 
-  local all_strings = fun.all(function(s) return type(s) == 'string' end, selectors)
+  local have_tables, have_userdata
 
-  if all_strings then
-    return table.concat(selectors, delimiter)
+  for _,s in ipairs(selectors) do
+    if type(s) == 'table' then
+      have_tables = true
+    elseif type(s) == 'userdata' then
+      have_userdata = true
+    end
+  end
+
+  if not have_tables then
+    if not have_userdata then
+      return table.concat(selectors, delimiter)
+    else
+      return rspamd_text.fromtable(selectors, delimiter)
+    end
   else
-    -- We need to do a spill on each table selector
+    -- We need to do a spill on each table selector and make a cortezian product
     -- e.g. s:tbl:s -> s:telt1:s + s:telt2:s ...
     local tbl = {}
     local res = {}
@@ -466,6 +484,7 @@ exports.combine_selectors = function(_, selectors, delimiter)
       elseif type(s) == 'userdata' then
         rawset(tbl, i, fun.duplicate(tostring(s)))
       else
+        -- Raw table
         rawset(tbl, i, s)
       end
     end

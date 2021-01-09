@@ -142,7 +142,10 @@ struct fuzzy_client_session {
 struct fuzzy_learn_session {
 	GPtrArray *commands;
 	gint *saved;
-	GError **err;
+	struct {
+		const gchar *error_message;
+		gint error_code;
+	} err;
 	struct rspamd_http_connection_entry *http_entry;
 	struct rspamd_async_session *session;
 	struct upstream *server;
@@ -181,7 +184,7 @@ static void fuzzy_symbol_callback (struct rspamd_task *task,
 /* Initialization */
 gint fuzzy_check_module_init (struct rspamd_config *cfg,
 	struct module_ctx **ctx);
-gint fuzzy_check_module_config (struct rspamd_config *cfg);
+gint fuzzy_check_module_config (struct rspamd_config *cfg, bool valdate);
 gint fuzzy_check_module_reconfig (struct rspamd_config *cfg);
 static gint fuzzy_attach_controller (struct module_ctx *ctx,
 	GHashTable *commands);
@@ -940,7 +943,7 @@ fuzzy_check_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 }
 
 gint
-fuzzy_check_module_config (struct rspamd_config *cfg)
+fuzzy_check_module_config (struct rspamd_config *cfg, bool validate)
 {
 	const ucl_object_t *value, *cur, *elt;
 	ucl_object_iter_t it;
@@ -969,7 +972,8 @@ fuzzy_check_module_config (struct rspamd_config *cfg)
 							"table and not %s",
 					lua_typename (L, lua_type (L, -1)));
 			fuzzy_module_ctx->enabled = FALSE;
-		} else {
+		}
+		else {
 			lua_pushstring (L, "process_rule");
 			lua_gettable (L, -2);
 
@@ -1067,7 +1071,7 @@ fuzzy_check_module_config (struct rspamd_config *cfg)
 		rspamd_config_radix_from_ucl (cfg, value, "Fuzzy whitelist",
 				&fuzzy_module_ctx->whitelist,
 				NULL,
-				NULL);
+				NULL, "fuzzy ip whitelist");
 	}
 	else {
 		fuzzy_module_ctx->whitelist = NULL;
@@ -1205,7 +1209,7 @@ fuzzy_check_module_reconfig (struct rspamd_config *cfg)
 				fuzzy_module_ctx->process_rule_ref);
 	}
 
-	return fuzzy_check_module_config (cfg);
+	return fuzzy_check_module_config (cfg, false);
 }
 
 /* Finalize IO */
@@ -2399,7 +2403,7 @@ fuzzy_insert_metric_results (struct rspamd_task *task, struct fuzzy_rule *rule,
 
 	if (task->message) {
 		PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, text_parts), i, tp) {
-			if (!IS_PART_EMPTY (tp) && tp->utf_words != NULL && tp->utf_words->len > 0) {
+			if (!IS_TEXT_PART_EMPTY (tp) && tp->utf_words != NULL && tp->utf_words->len > 0) {
 				seen_text_part = TRUE;
 
 				if (tp->utf_stripped_text.magic == UTEXT_MAGIC) {
@@ -2723,11 +2727,9 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 
 			msg_info_task ("cannot process fuzzy hash for message: %s",
 					strerror (errno));
-			if (*(session->err) == NULL) {
-				g_set_error (session->err,
-						g_quark_from_static_string (M),
-						errno, "read socket error: %s", strerror (errno));
-			}
+			session->err.error_message = "read socket error";
+			session->err.error_code = errno;
+
 			ret = return_error;
 		}
 		else {
@@ -2792,11 +2794,8 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 								symbol,
 								rep->v1.flag);
 
-						if (*(session->err) == NULL) {
-							g_set_error (session->err,
-									g_quark_from_static_string (M),
-									rep->v1.value, "fuzzy hash is skipped");
-						}
+						session->err.error_message = "fuzzy hash is skipped";
+						session->err.error_code = rep->v1.value;
 					}
 					else {
 						msg_info_task (
@@ -2811,11 +2810,8 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 								rep->v1.flag,
 								rep->v1.value);
 
-						if (*(session->err) == NULL) {
-							g_set_error (session->err,
-									g_quark_from_static_string (M),
-									rep->v1.value, "process fuzzy error");
-						}
+						session->err.error_message = "process fuzzy error";
+						session->err.error_code = rep->v1.value;
 					}
 
 					ret = return_finished;
@@ -2840,12 +2836,8 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 	else if (what & EV_WRITE) {
 			/* Send commands to storage */
 			if (!fuzzy_cmd_vector_to_wire (fd, session->commands)) {
-				if (*(session->err) == NULL) {
-					g_set_error (session->err,
-						g_quark_from_static_string (M),
-						errno, "write socket error: %s",
-						strerror (errno));
-				}
+				session->err.error_message = "write socket error";
+				session->err.error_code = errno;
 				ret = return_error;
 			}
 		}
@@ -2907,13 +2899,11 @@ cleanup:
 	 * Therefore, we cleanup sessions earlier and actually this code is wrong.
 	 */
 
-	if (*(session->err) != NULL) {
+	if (session->err.error_code != 0) {
 		if (session->http_entry) {
 			rspamd_controller_send_error (session->http_entry,
-					(*session->err)->code, (*session->err)->message);
+					session->err.error_code, session->err.error_message);
 		}
-
-		g_error_free (*session->err);
 	}
 	else {
 		rspamd_upstream_ok (session->server);
@@ -3237,8 +3227,7 @@ register_fuzzy_controller_call (struct rspamd_http_connection_entry *entry,
 	struct fuzzy_rule *rule,
 	struct rspamd_task *task,
 	GPtrArray *commands,
-	gint *saved,
-	GError **err)
+	gint *saved)
 {
 	struct fuzzy_learn_session *s;
 	struct upstream *selected;
@@ -3273,7 +3262,6 @@ register_fuzzy_controller_call (struct rspamd_http_connection_entry *entry,
 			s->server = selected;
 			s->saved = saved;
 			s->fd = sock;
-			s->err = err;
 			s->rule = rule;
 			s->event_loop = task->event_loop;
 			/* We ref connection to avoid freeing before we process fuzzy rule */
@@ -3306,7 +3294,6 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 	gboolean processed = FALSE, skip = FALSE;
 	gint res = 0;
 	guint i;
-	GError **err;
 	GPtrArray *commands;
 	lua_State *L;
 	gint r, *saved, rules = 0, err_idx;
@@ -3317,7 +3304,6 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 			session->lang_det, conn_ent->rt->event_loop, FALSE);
 	task->cfg = ctx->cfg;
 	saved = rspamd_mempool_alloc0 (session->pool, sizeof (gint));
-	err = rspamd_mempool_alloc0 (session->pool, sizeof (GError *));
 	fuzzy_module_ctx = fuzzy_get_context (ctx->cfg);
 
 	if (!is_hash) {
@@ -3434,8 +3420,7 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 						rule,
 						task,
 						commands,
-						saved,
-						err);
+						saved);
 				rspamd_mempool_add_destructor (task->task_pool,
 						rspamd_ptr_array_free_hard, commands);
 				g_ptr_array_free (args, TRUE);
@@ -3455,8 +3440,7 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 						rule,
 						task,
 						commands,
-						saved,
-						err);
+						saved);
 				rspamd_mempool_add_destructor (task->task_pool,
 						rspamd_ptr_array_free_hard, commands);
 			}
@@ -3605,8 +3589,7 @@ static inline gint
 fuzzy_check_send_lua_learn (struct fuzzy_rule *rule,
 	struct rspamd_task *task,
 	GPtrArray *commands,
-	gint *saved,
-	GError **err)
+	gint *saved)
 {
 	struct fuzzy_learn_session *s;
 	struct upstream *selected;
@@ -3634,7 +3617,6 @@ fuzzy_check_send_lua_learn (struct fuzzy_rule *rule,
 				s->server = selected;
 				s->saved = saved;
 				s->fd = sock;
-				s->err = err;
 				s->rule = rule;
 				s->session = task->s;
 				s->event_loop = task->event_loop;
@@ -3668,13 +3650,11 @@ fuzzy_check_lua_process_learn (struct rspamd_task *task,
 	struct fuzzy_rule *rule;
 	gboolean processed = FALSE, res = TRUE;
 	guint i;
-	GError **err;
 	GPtrArray *commands;
 	gint *saved, rules = 0;
 	struct fuzzy_ctx *fuzzy_module_ctx = fuzzy_get_context (task->cfg);
 
 	saved = rspamd_mempool_alloc0 (task->task_pool, sizeof (gint));
-	err = rspamd_mempool_alloc0 (task->task_pool, sizeof (GError *));
 
 	PTR_ARRAY_FOREACH (fuzzy_module_ctx->fuzzy_rules, i, rule) {
 		if (!res) {
@@ -3700,7 +3680,7 @@ fuzzy_check_lua_process_learn (struct rspamd_task *task,
 
 		if (commands != NULL) {
 			res = fuzzy_check_send_lua_learn (rule, task, commands,
-					saved, err);
+					saved);
 			rspamd_mempool_add_destructor (task->task_pool,
 					rspamd_ptr_array_free_hard, commands);
 		}

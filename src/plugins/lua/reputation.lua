@@ -248,7 +248,7 @@ local dkim_selector = {
   dependencies = {"DKIM_TRACE"},
   filter = dkim_reputation_filter, -- used to get scores
   postfilter = dkim_reputation_postfilter, -- used to adjust DKIM scores
-  idempotent = dkim_reputation_idempotent -- used to set scores
+  idempotent = dkim_reputation_idempotent, -- used to set scores
 }
 
 -- URL Selector functions
@@ -378,6 +378,12 @@ local function ip_reputation_filter(task, rule)
 
   local cfg = rule.selector.config
 
+  if ip:get_version() == 4 and cfg.ipv4_mask then
+    ip = ip:apply_mask(cfg.ipv4_mask)
+  elseif cfg.ipv6_mask then
+    ip = ip:apply_mask(cfg.ipv6_mask)
+  end
+
   local pool = task:get_mempool()
   local asn = pool:get_variable("asn")
   local country = pool:get_variable("country")
@@ -469,11 +475,17 @@ end
 local function ip_reputation_idempotent(task, rule)
   if not rule.backend.set_token then return end -- Read only backend
   local ip = task:get_from_ip()
+  local cfg = rule.selector.config
 
   if not ip or not ip:is_valid() then return end
+
   if lua_util.is_rspamc_or_controller(task) then return end
 
-  local cfg = rule.selector.config
+  if ip:get_version() == 4 and cfg.ipv4_mask then
+    ip = ip:apply_mask(cfg.ipv4_mask)
+  elseif cfg.ipv6_mask then
+    ip = ip:apply_mask(cfg.ipv6_mask)
+  end
 
   local pool = task:get_mempool()
   local asn = pool:get_variable("asn")
@@ -519,11 +531,13 @@ local ip_selector = {
     score_divisor = 1,
     outbound = false,
     inbound = true,
+    ipv4_mask = 32, -- Mask bits for ipv4
+    ipv6_mask = 64, -- Mask bits for ipv6
   },
   --dependencies = {"ASN"}, -- ASN is a prefilter now...
   init = ip_reputation_init,
   filter = ip_reputation_filter, -- used to get scores
-  idempotent = ip_reputation_idempotent -- used to set scores
+  idempotent = ip_reputation_idempotent, -- used to set scores
 }
 
 -- SPF Selector functions
@@ -584,7 +598,7 @@ local spf_selector = {
   },
   dependencies = {"R_SPF_ALLOW"},
   filter = spf_reputation_filter, -- used to get scores
-  idempotent = spf_reputation_idempotent -- used to set scores
+  idempotent = spf_reputation_idempotent, -- used to set scores
 }
 
 -- Generic selector based on lua_selectors framework
@@ -680,7 +694,7 @@ local generic_selector = {
     inbound = ts.boolean,
     selector = ts.string,
     delimiter = ts.string,
-    whitelist = ts.string:is_optional(),
+    whitelist = ts.one_of(lua_maps.map_schema, lua_maps_exprs.schema):is_optional(),
   },
   config = {
     lower_bound = 10, -- minimum number of messages to be scored
@@ -1122,8 +1136,36 @@ local function parse_rule(name, tbl)
   rule.config = lua_util.override_defaults(rule.config, tbl)
 
   if rule.config.whitelist then
-    rule.config.whitelist_map = lua_maps_exprs.create(rspamd_config,
-        rule.config.whitelist, N)
+    if lua_maps_exprs.schema(rule.config.whitelist) then
+      rule.config.whitelist_map = lua_maps_exprs.create(rspamd_config,
+          rule.config.whitelist, N)
+    elseif lua_maps.map_schema(rule.config.whitelist) then
+      local map = lua_maps.map_add_from_ucl(rule.config.whitelist,
+          'radix',
+          sel_type .. ' reputation whitelist')
+
+      if not map then
+        rspamd_logger.errx(rspamd_config, "cannot parse whitelist map config for %s: (%s)",
+            sel_type,
+            rule.config.whitelist)
+        return
+      end
+
+      rule.config.whitelist_map = {
+        process = function(_, task)
+          -- Hack: we assume that it is an ip whitelist :(
+          local ip = task:get_from_ip()
+
+          if ip and map:get_key(ip) then return true end
+          return false
+        end
+      }
+    else
+      rspamd_logger.errx(rspamd_config, "cannot parse whitelist map config for %s: (%s)",
+          sel_type,
+          rule.config.whitelist)
+      return
+    end
   end
 
   local symbol = rule.selector.config.symbol or name

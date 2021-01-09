@@ -53,6 +53,7 @@ struct rspamd_symbol_result {
 
 #define RSPAMD_PASSTHROUGH_LEAST (1u << 0u)
 #define RSPAMD_PASSTHROUGH_NO_SMTP_MESSAGE (1u << 1u)
+#define RSPAMD_PASSTHROUGH_PROCESS_ALL (1u << 2u)
 
 struct rspamd_passthrough_result {
 	struct rspamd_action *action;
@@ -88,6 +89,8 @@ struct rspamd_scan_result {
 	guint nactions;
 	guint npositive;
 	guint nnegative;
+	guint nresults; /**< all results: positive, negative, passthrough etc */
+	guint nresults_postfilters; /**< how many results are there before postfilters stage */
 	struct rspamd_scan_result *prev, *next;           /**< double linked list of results */
 };
 

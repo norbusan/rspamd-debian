@@ -395,7 +395,7 @@ local function check_settings(task)
 end
 
 -- Process settings based on their priority
-local function process_settings_table(tbl, allow_ids, mempool)
+local function process_settings_table(tbl, allow_ids, mempool, is_static)
   local get_priority = function(elt)
     local pri_tonum = function(p)
       if p then
@@ -962,28 +962,33 @@ local function process_settings_table(tbl, allow_ids, mempool)
       end
 
       if elt['id'] then
-        out.id = lua_settings.register_settings_id(elt.id, out)
+        -- We are here from a postload script
+        out.id = lua_settings.register_settings_id(elt.id, out, true)
         lua_util.debugm(N, rspamd_config,
             'added settings id to "%s": %s -> %s',
             name, elt.id, out.id)
       end
 
-      if elt.apply and elt.apply.symbols then
-        -- Register virtual symbols
-        for k,v in pairs(elt.apply.symbols) do
-          local rtb = {
-            type = 'virtual',
-            parent = module_sym_id,
-          }
-          if type(k) == 'number' and type(v) == 'string' then
-            rtb.name = v
-          elseif type(k) == 'string' then
-            rtb.name = k
+      if not is_static then
+        -- If we apply that from map
+        -- In fact, it is useless and evil but who cares...
+        if elt.apply and elt.apply.symbols then
+          -- Register virtual symbols
+          for k,v in pairs(elt.apply.symbols) do
+            local rtb = {
+              type = 'virtual',
+              parent = module_sym_id,
+            }
+            if type(k) == 'number' and type(v) == 'string' then
+              rtb.name = v
+            elseif type(k) == 'string' then
+              rtb.name = k
+            end
+            if out.id then
+              rtb.allowed_ids = tostring(elt.id)
+            end
+            rspamd_config:register_symbol(rtb)
           end
-          if out.id then
-            rtb.allowed_ids = tostring(elt.id)
-          end
-          rspamd_config:register_symbol(rtb)
         end
       end
     else
@@ -1029,6 +1034,7 @@ local function process_settings_table(tbl, allow_ids, mempool)
   end
 
   settings_initialized = true
+  lua_settings.load_all_settings(true)
   rspamd_logger.infox(rspamd_config, 'loaded %1 elements of settings', nrules)
 
   return true
@@ -1180,7 +1186,38 @@ if set_section and set_section[1] and type(set_section[1]) == "string" then
   end
 elseif set_section and type(set_section) == "table" then
   settings_map_pool = rspamd_mempool.create()
-  process_settings_table(set_section, true, settings_map_pool)
+  -- We need to check this table and register static symbols first
+  -- Postponed settings init is needed to ensure that all symbols have been
+  -- registered BEFORE settings plugin. Otherwise, we can have inconsistent settings expressions
+  fun.each(function(_, elt)
+    if elt.apply and elt.apply.symbols then
+      -- Register virtual symbols
+      for k,v in pairs(elt.apply.symbols) do
+        local rtb = {
+          type = 'virtual',
+          parent = module_sym_id,
+        }
+        if type(k) == 'number' and type(v) == 'string' then
+          rtb.name = v
+        elseif type(k) == 'string' then
+          rtb.name = k
+        end
+        rspamd_config:register_symbol(rtb)
+      end
+    end
+  end,
+      -- Include only settings, exclude all maps
+      fun.filter(
+          function(_, elt)
+            if type(elt) == "table" then
+              return true
+            end
+            return false
+          end, set_section)
+  )
+  rspamd_config:add_post_init(function ()
+    process_settings_table(set_section, true, settings_map_pool, true)
+  end, 100)
 end
 
 rspamd_config:add_config_unload(function()

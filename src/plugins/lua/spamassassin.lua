@@ -189,6 +189,7 @@ end
 
 local function is_pcre_only(name)
   if pcre_only_regexps[name] then
+    rspamd_logger.infox(rspamd_config, 'mark re %s as PCRE only', name)
     return true
   end
   return false
@@ -585,7 +586,7 @@ local function maybe_parse_sa_function(line)
         end
 
         for _,h in ipairs(hdrs_check) do
-          if task:get_header(h) then
+          if task:has_header(h) then
             return 1
           end
         end
@@ -797,6 +798,10 @@ local function process_sa_conf(f)
         else
           cur_rule['re']:set_max_hits(1)
           handle_header_def(words[3], cur_rule)
+        end
+
+        if cur_rule['unset'] then
+          cur_rule['ordinary'] = false
         end
 
         if words[1] == 'mimeheader' then
@@ -1239,7 +1244,8 @@ local function post_process()
           lua_util.debugm(N, rspamd_config, 'replace %1 -> %2', r, nexpr)
           rspamd_config:replace_regexp({
             old_re = rule['re'],
-            new_re = nre
+            new_re = nre,
+            pcre_only = is_pcre_only(rule['symbol']),
           })
           rule['re'] = nre
           rule['re_expr'] = nexpr
@@ -1490,7 +1496,7 @@ local function post_process()
           return sopt ~= k
         end
 
-        if not already_processed then
+        if not (already_processed and already_processed[res_name or 'default']) then
           -- Execute symbol
           local function exec_symbol(cur_res)
             local res,trace = expression:process_traced(gen_process_atom_cb(cur_res, task))
@@ -1664,16 +1670,18 @@ end
 local has_rules = false
 
 if type(section) == "table" then
+  if type(section.pcre_only) == 'table' then
+    pcre_only_regexps = lua_util.list_to_hash(section.pcre_only)
+  end
+  if type(section.alpha) == 'number' then
+    meta_score_alpha = section.alpha
+  end
+  if type(section.match_limit) == 'number' then
+    match_limit = section.match_limit
+  end
+
   for k, fn in pairs(section) do
-    if k == 'alpha' and type(fn) == 'number' then
-      meta_score_alpha = fn
-    elseif k == 'match_limit' and type(fn) == 'number' then
-      match_limit = fn
-    elseif k == 'pcre_only' and type(fn) == 'table' then
-      for _,s in ipairs(fn) do
-        pcre_only_regexps[s] = 1
-      end
-    else
+    if k ~= 'pcre_only' and k ~= 'alpha' and k ~= 'match_limit' then
       if type(fn) == 'table' then
         for _, elt in ipairs(fn) do
           local files = util.glob(elt)

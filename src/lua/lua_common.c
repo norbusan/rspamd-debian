@@ -980,13 +980,11 @@ rspamd_lua_init (bool wipe_mem)
 	luaopen_kann (L);
 	luaopen_spf (L);
 	luaopen_tensor (L);
+	luaopen_parsers (L);
 #ifndef WITH_LUAJIT
 	rspamd_lua_add_preload (L, "bit", luaopen_bit);
 	lua_settop (L, 0);
 #endif
-
-	rspamd_lua_new_class (L, "rspamd{ev_base}", NULL);
-	lua_pop (L, 1);
 
 	rspamd_lua_new_class (L, "rspamd{session}", NULL);
 	lua_pop (L, 1);
@@ -2161,8 +2159,8 @@ rspamd_lua_run_config_post_init (lua_State *L, struct rspamd_config *cfg)
 		rspamd_lua_setclass (L, "rspamd{config}", -1);
 
 		if (lua_pcall (L, 1, 0, err_idx) != 0) {
-			msg_err_config ("cannot run config post init script: %s",
-					lua_tostring (L, -1));
+			msg_err_config ("cannot run config post init script: %s; priority = %d",
+					lua_tostring (L, -1), sc->priority);
 		}
 
 		lua_settop (L, err_idx - 1);

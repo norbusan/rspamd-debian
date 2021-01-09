@@ -15,10 +15,47 @@ limitations under the License.
 ]]--
 
 local fun = require 'fun'
+local meta_functions = require "lua_meta"
 local lua_util = require "lua_util"
 local common = require "lua_selectors/common"
 local ts = require("tableshape").types
 local E = {}
+
+local url_flags_ts = ts.array_of(ts.one_of{
+    'content',
+    'has_port',
+    'has_user',
+    'host_encoded',
+    'html_displayed',
+    'idn',
+    'image',
+    'missing_slahes', -- sic
+    'no_tld',
+    'numeric',
+    'obscured',
+    'path_encoded',
+    'phished',
+    'query',
+    'query_encoded',
+    'redirected',
+    'schema_encoded',
+    'schemaless',
+    'subject',
+    'text',
+    'unnormalised',
+    'url_displayed',
+    'zw_spaces',
+    }):is_optional()
+
+local function gen_exclude_flags_filter(exclude_flags)
+  return function(u)
+    local got_flags = u:get_flags()
+    for _, flag in ipairs(exclude_flags) do
+      if got_flags[flag] then return false end
+    end
+    return true
+  end
+end
 
 local extractors = {
   -- Plain id function
@@ -241,7 +278,10 @@ The optional second argument accepts list of flags:
   ['received'] = {
     ['get_value'] = function(task, args)
       local rh = task:get_received_headers()
-      if args[1] and rh then
+      if not rh[1] then
+        return nil
+      end
+      if args[1] then
         return fun.map(function(r) return r[args[1]] end, rh), 'string_list'
       end
 
@@ -255,7 +295,10 @@ e.g. `by_hostname`]],
   ['urls'] = {
     ['get_value'] = function(task, args)
       local urls = task:get_urls()
-      if args[1] and urls then
+      if not urls[1] then
+        return nil
+      end
+      if args[1] then
         return fun.map(function(r) return r[args[1]](r) end, urls), 'string_list'
       end
       return urls,'userdata_list'
@@ -270,14 +313,24 @@ e.g. `get_tld`]],
       local params = args[1] or {}
       params.task = task
       params.no_cache = true
+      if params.exclude_flags then
+        params.filter = gen_exclude_flags_filter(params.exclude_flags)
+      end
       local urls = lua_util.extract_specific_urls(params)
+      if not urls[1] then
+        return nil
+      end
       return urls,'userdata_list'
     end,
     ['description'] = [[Get most specific urls. Arguments are equal to the Lua API function]],
     ['args_schema'] = {ts.shape{
       limit = ts.number + ts.string / tonumber,
       esld_limit = (ts.number + ts.string / tonumber):is_optional(),
+      exclude_flags = url_flags_ts,
+      flags = url_flags_ts,
+      flags_mode = ts.one_of{'explicit'}:is_optional(),
       prefix = ts.string:is_optional(),
+      need_content = (ts.boolean + ts.string / lua_util.toboolean):is_optional(),
       need_emails = (ts.boolean + ts.string / lua_util.toboolean):is_optional(),
       need_images = (ts.boolean + ts.string / lua_util.toboolean):is_optional(),
       ignore_redirected = (ts.boolean + ts.string / lua_util.toboolean):is_optional(),
@@ -287,7 +340,10 @@ e.g. `get_tld`]],
   ['emails'] = {
     ['get_value'] = function(task, args)
       local urls = task:get_emails()
-      if args[1] and urls then
+      if not urls[1] then
+        return nil
+      end
+      if args[1] then
         return fun.map(function(r) return r[args[1]](r) end, urls), 'string_list'
       end
       return urls,'userdata_list'
@@ -307,12 +363,31 @@ e.g. `get_user`]],
 the second argument is optional and defines the type (string by default)]],
     ['args_schema'] = {ts.string, ts.string:is_optional()}
   },
+  -- Get value of specific key from task cache
+  ['task_cache'] = {
+    ['get_value'] = function(task, args)
+      local val = task:cache_get(args[1])
+      if not val then
+        return
+      end
+      if type(val) == 'table' then
+        if not val[1] then
+          return
+        end
+        return val, 'string_list'
+      end
+      return val, 'string'
+    end,
+    ['description'] = [[Get value of specific key from task cache. The first argument must be
+the key name]],
+    ['args_schema'] = {ts.string}
+  },
   -- Get specific HTTP request header. The first argument must be header name.
   ['request_header'] = {
     ['get_value'] = function(task, args)
       local hdr = task:get_request_header(args[1])
       if hdr then
-        return tostring(hdr),'string'
+        return hdr,'string'
       end
 
       return nil
@@ -425,6 +500,21 @@ The first argument must be header name.]],
     ['description'] = 'Get full scan result (either default or shadow if shadow result name is specified)' ..
         'Returns the result table. See task:get_metric_result()',
     ['args_schema'] = {ts.string:is_optional()}
+  },
+  -- Get list of metatokens as strings
+  ['metatokens'] = {
+    ['get_value'] = function(task)
+      local tokens = meta_functions.gen_metatokens(task)
+      if not tokens[1] then
+        return nil
+      end
+      local res = {}
+      for _, t in ipairs(tokens) do
+        table.insert(res, tostring(t))
+      end
+      return res, 'string_list'
+    end,
+    ['description'] = 'Get metatokens for a message as strings',
   },
 }
 

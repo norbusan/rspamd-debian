@@ -27,6 +27,8 @@ context("Selectors test", function()
     task:process_message()
     task:get_mempool():set_variable("int_var", 1)
     task:get_mempool():set_variable("str_var", "str 1")
+    task:cache_set('cachevar1', 'hello\x00world')
+    task:cache_set('cachevar2', {'hello', 'world'})
     if not res then
       assert_true(false, "failed to load message")
     end
@@ -169,17 +171,17 @@ context("Selectors test", function()
                 selector = "helo",
                 expect = {"hello mail"}},
 
-    ["received by hostname"] = {
-                selector = "received:by_hostname",
+    ["received ip"] = {
+                selector = "received:by_hostname.filter_string_nils",
                 expect = {{"server1.chat-met-vreemden.nl", "server2.chat-met-vreemden.nl"}}},
 
     ["received by hostname last"] = {
-      selector = "received:by_hostname.last",
+      selector = "received:by_hostname.filter_string_nils.last",
       expect = {"server2.chat-met-vreemden.nl"}
     },
 
     ["received by hostname first"] = {
-      selector = "received:by_hostname.first",
+      selector = "received:by_hostname.filter_string_nils.first",
       expect = {"server1.chat-met-vreemden.nl"}
     },
 
@@ -219,9 +221,9 @@ context("Selectors test", function()
                 selector = "time",
                 expect = {"1537364211"}},
 
-    ["request_header"] = {
-                selector = "request_header(hdr1)",
-                expect = {"value1"}},
+--    ["request_header"] = {
+--                selector = "request_header(hdr1)",
+--                expect = {"value1"}},
 
     ["get_host"] = {
                 selector = "urls:get_host",
@@ -357,6 +359,15 @@ context("Selectors test", function()
     ["header regexp first"] = {
       selector = "header('Subject').regexp('.*').first",
       expect = {"Second, lower-cased header subject"}
+    },
+
+    ["task cache string"] = {
+      selector = "task_cache('cachevar1')",
+      expect = {"hello\x00world"}
+    },
+    ["task cache table"] = {
+      selector = "task_cache('cachevar2')",
+      expect = {{"hello", "world"}}
     },
   }
 

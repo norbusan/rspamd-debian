@@ -59,6 +59,14 @@ LUA_FUNCTION_DEF (text, randombytes);
  */
 LUA_FUNCTION_DEF (text, fromtable);
 /***
+ * @method rspamd_text:byte(pos[, pos2])
+ * Returns a byte at the position `pos` or bytes from `pos` to `pos2` if specified
+ * @param {integer} pos index
+ * @param {integer} pos2 index
+ * @return {integer} byte at the position `pos` or varargs of bytes
+ */
+LUA_FUNCTION_DEF (text, byte);
+/***
  * @method rspamd_text:len()
  * Returns length of a string
  * @return {number} length of string in **bytes**
@@ -139,7 +147,7 @@ LUA_FUNCTION_DEF (text, bytes);
  * Return a new text with lowercased characters, if is_utf is true then Rspamd applies utf8 lowercase
  * @param {boolean} is_utf apply utf8 lowercase
  * @param {boolean} inplace lowercase the original text
- * @return rspamd_text} new rspamd_text (or the original text if inplace) with lowercased letters
+ * @return {rspamd_text} new rspamd_text (or the original text if inplace) with lowercased letters
  */
 LUA_FUNCTION_DEF (text, lower);
 LUA_FUNCTION_DEF (text, take_ownership);
@@ -157,7 +165,7 @@ LUA_FUNCTION_DEF (text, take_ownership);
  *
  * @param {string} set_to_exclude characters to exclude
  * @param {boolean} always_copy always copy the source text
- * @return {tspamd_text} modified or copied text
+ * @return {rspamd_text} modified or copied text
  */
 LUA_FUNCTION_DEF (text, exclude_chars);
 /***
@@ -171,7 +179,7 @@ LUA_FUNCTION_DEF (text, exclude_chars);
  * - UTF8 sequences are normalised
  *
  * @param {boolean} always_copy always copy the source text
- * @return {tspamd_text} modified or copied text
+ * @return {rspamd_text} modified or copied text
  */
 LUA_FUNCTION_DEF (text, oneline);
 /***
@@ -179,7 +187,7 @@ LUA_FUNCTION_DEF (text, oneline);
  * Returns a text encoded in base32 (new rspamd_text is allocated)
  *
  * @param {string} b32type base32 type (default, bleach, rfc)
- * @return {tspamd_text} new text encoded in base32
+ * @return {rspamd_text} new text encoded in base32
  */
 LUA_FUNCTION_DEF (text, base32);
 /***
@@ -189,19 +197,34 @@ LUA_FUNCTION_DEF (text, base32);
  * @param {number} line_length return text splited with newlines up to this attribute
  * @param {string} nline newline type: `cr`, `lf`, `crlf`
  * @param {boolean} fold use folding when splitting into lines (false by default)
- * @return {tspamd_text} new text encoded in base64
+ * @return {rspamd_text} new text encoded in base64
  */
 LUA_FUNCTION_DEF (text, base64);
 /***
  * @method rspamd_text:hex()
  * Returns a text encoded in hex (new rspamd_text is allocated)
  *
- * @return {tspamd_text} new text encoded in hex
+ * @return {rspamd_text} new text encoded in hex
  */
 LUA_FUNCTION_DEF (text, hex);
+/***
+ * @method rspamd_text:find(pattern [, init])
+ * Looks for the first match of pattern in the string s.
+ * If it finds a match, then find returns the indices of s where this occurrence
+ * starts and ends; otherwise, it returns nil. A third,
+ * optional numerical argument init specifies where to start the search;
+ * its default value is 1 and can be negative.
+ * This method currently supports merely a plain search, no patterns.
+ *
+ * @param {string} pattern pattern to find
+ * @param {number} init specifies where to start the search (1 default)
+ * @return {number,number/nil} If it finds a match, then find returns the indices of s where this occurrence starts and ends; otherwise, it returns nil
+ */
+LUA_FUNCTION_DEF (text, find);
 LUA_FUNCTION_DEF (text, gc);
 LUA_FUNCTION_DEF (text, eq);
 LUA_FUNCTION_DEF (text, lt);
+LUA_FUNCTION_DEF (text, concat);
 
 static const struct luaL_reg textlib_f[] = {
 		LUA_INTERFACE_DEF (text, fromstring),
@@ -225,6 +248,7 @@ static const struct luaL_reg textlib_m[] = {
 		LUA_INTERFACE_DEF (text, split),
 		LUA_INTERFACE_DEF (text, at),
 		LUA_INTERFACE_DEF (text, memchr),
+		LUA_INTERFACE_DEF (text, byte),
 		LUA_INTERFACE_DEF (text, bytes),
 		LUA_INTERFACE_DEF (text, lower),
 		LUA_INTERFACE_DEF (text, exclude_chars),
@@ -232,12 +256,14 @@ static const struct luaL_reg textlib_m[] = {
 		LUA_INTERFACE_DEF (text, base32),
 		LUA_INTERFACE_DEF (text, base64),
 		LUA_INTERFACE_DEF (text, hex),
+		LUA_INTERFACE_DEF (text, find),
 		{"write", lua_text_save_in_file},
 		{"__len", lua_text_len},
 		{"__tostring", lua_text_str},
 		{"__gc", lua_text_gc},
 		{"__eq", lua_text_eq},
 		{"__lt", lua_text_lt},
+		{"__concat", lua_text_concat},
 		{NULL, NULL}
 };
 
@@ -247,6 +273,35 @@ lua_check_text (lua_State * L, gint pos)
 	void *ud = rspamd_lua_check_udata (L, pos, "rspamd{text}");
 	luaL_argcheck (L, ud != NULL, pos, "'text' expected");
 	return ud ? (struct rspamd_lua_text *)ud : NULL;
+}
+
+struct rspamd_lua_text *
+lua_check_text_or_string (lua_State * L, gint pos)
+{
+	gint pos_type = lua_type (L, pos);
+
+	if (pos_type == LUA_TUSERDATA) {
+		void *ud = rspamd_lua_check_udata (L, pos, "rspamd{text}");
+		luaL_argcheck (L, ud != NULL, pos, "'text' expected");
+		return ud ? (struct rspamd_lua_text *) ud : NULL;
+	}
+	else if (pos_type == LUA_TSTRING) {
+		/* Fake static lua_text */
+		static struct rspamd_lua_text fake_text;
+		gsize len;
+
+		fake_text.start = lua_tolstring (L, pos, &len);
+		if (len >= G_MAXUINT) {
+			return NULL;
+		}
+
+		fake_text.len = len;
+		fake_text.flags = RSPAMD_TEXT_FLAG_FAKE;
+
+		return &fake_text;
+	}
+
+	return NULL;
 }
 
 struct rspamd_lua_text *
@@ -916,23 +971,30 @@ lua_text_split (lua_State *L)
 static gint
 lua_text_at (lua_State *L)
 {
+	return lua_text_byte(L);
+}
+
+static gint
+lua_text_byte (lua_State *L)
+{
 	LUA_TRACE_POINT;
 	struct rspamd_lua_text *t = lua_check_text (L, 1);
-	gint pos = lua_tointeger (L, 2);
-
-	if (t) {
-		if (pos > 0 && pos <= t->len) {
-			lua_pushinteger (L, t->start[pos - 1]);
-		}
-		else {
-			lua_pushnil (L);
-		}
-	}
-	else {
+	if (!t) {
 		return luaL_error (L, "invalid arguments");
 	}
 
-	return 1;
+	gsize start = relative_pos_start (luaL_optinteger (L, 2, 1), t->len);
+	gsize end = relative_pos_end (luaL_optinteger (L, 3, start), t->len);
+	start--;
+
+	if (start >= end) {
+		return 0;
+	}
+
+	for (gsize i = start; i < end; i++) {
+		lua_pushinteger (L, t->start[i]);
+	}
+	return end - start;
 }
 
 static gint
@@ -1082,6 +1144,8 @@ lua_text_gc (lua_State *L)
 	struct rspamd_lua_text *t = lua_check_text (L, 1);
 
 	if (t != NULL) {
+		g_assert (!(t->flags & RSPAMD_TEXT_FLAG_FAKE));
+
 		if (t->flags & RSPAMD_TEXT_FLAG_OWN) {
 			if (t->flags & RSPAMD_TEXT_FLAG_WIPE) {
 				rspamd_explicit_memzero ((guchar *)t->start, t->len);
@@ -1109,8 +1173,8 @@ static gint
 lua_text_eq (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_text *t1 = lua_check_text (L, 1),
-			*t2 = lua_check_text (L, 2);
+	struct rspamd_lua_text *t1 = lua_check_text_or_string (L, 1),
+			*t2 = lua_check_text_or_string (L, 2);
 
 	if (t1->len == t2->len) {
 		lua_pushboolean (L, memcmp (t1->start, t2->start, t1->len) == 0);
@@ -1126,8 +1190,8 @@ static gint
 lua_text_lt (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	struct rspamd_lua_text *t1 = lua_check_text (L, 1),
-			*t2 = lua_check_text (L, 2);
+	struct rspamd_lua_text *t1 = lua_check_text_or_string (L, 1),
+			*t2 = lua_check_text_or_string (L, 2);
 
 	if (t1 && t2) {
 		if (t1->len == t2->len) {
@@ -1136,6 +1200,24 @@ lua_text_lt (lua_State *L)
 		else {
 			lua_pushboolean (L, t1->len < t2->len);
 		}
+	}
+
+	return 1;
+}
+
+static gint
+lua_text_concat (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_text *t1 = lua_check_text_or_string (L, 1),
+			*t2 = lua_check_text_or_string (L, 2);
+
+	if (t1 && t2) {
+		struct rspamd_lua_text *final;
+
+		final = lua_new_text (L, NULL, t1->len + t2->len, TRUE);
+		memcpy ((void *)final->start, t1->start, t1->len);
+		memcpy ((void *)(final->start + t1->len), t2->start, t2->len);
 	}
 
 	return 1;
@@ -1260,6 +1342,46 @@ lua_text_hex (lua_State *L)
 	}
 
 	return 1;
+}
+
+static gint
+lua_text_find (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_text *t = lua_check_text (L, 1);
+	gsize patlen, init = 1;
+	const gchar *pat = luaL_checklstring (L, 2, &patlen);
+
+	if (t != NULL && pat != NULL) {
+
+		if (lua_isnumber (L, 3)) {
+			init = relative_pos_start (lua_tointeger (L, 3), t->len);
+		}
+
+		init --;
+
+		if (init > t->len) {
+			return luaL_error (L, "invalid arguments to find: init too large");
+		}
+
+		goffset pos = rspamd_substring_search (t->start + init,
+				t->len - init,
+				pat, patlen);
+
+		if (pos == -1) {
+			lua_pushnil (L);
+
+			return 1;
+		}
+
+		lua_pushinteger (L, pos + 1);
+		lua_pushinteger (L, pos + patlen);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 2;
 }
 
 #define BITOP(a,b,op) \
