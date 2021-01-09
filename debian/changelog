@@ -1,3 +1,13 @@
+rspamd (2.7-1) unstable; urgency=medium
+
+  * New upstream version 2.7
+  * d/patches:
+    + Refresh patchs according new upstream release
+    + Remove applied-upstream patches
+  * d/lintian-overrides: Update according new upstream release
+
+ -- Sebastien Badia <sbadia@debian.org>  Sat, 09 Jan 2021 12:58:44 +0100
+
 rspamd (2.6-1) unstable; urgency=medium
 
   [ Christian Göttsche ]
