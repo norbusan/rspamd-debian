@@ -7,11 +7,9 @@ Forwarded: not-needed
  CMakeLists.txt | 4 +++-
  1 file changed, 3 insertions(+), 1 deletion(-)
 
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index b794b9d..f2531ce 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -752,7 +752,9 @@ INSTALL(PROGRAMS "utils/rspamd_stats.pl" RENAME rspamd_stats DESTINATION bin)
+@@ -756,7 +756,9 @@ INSTALL(PROGRAMS "utils/rspamd_stats.pl"
  
  # Install webui
  IF(INSTALL_WEBUI MATCHES "ON")

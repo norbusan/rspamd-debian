@@ -11,8 +11,6 @@ Forwarded: not-needed
  src/CMakeLists.txt                  | 4 +++-
  5 files changed, 10 insertions(+), 3 deletions(-)
 
-diff --git a/contrib/aho-corasick/CMakeLists.txt b/contrib/aho-corasick/CMakeLists.txt
-index 2c431b5..9fa5033 100644
 --- a/contrib/aho-corasick/CMakeLists.txt
 +++ b/contrib/aho-corasick/CMakeLists.txt
 @@ -11,3 +11,5 @@ ELSE()
@@ -21,8 +19,6 @@ index 2c431b5..9fa5033 100644
  ENDIF()
 +
 +SET_TARGET_PROPERTIES(rspamd-actrie PROPERTIES VERSION "${RSPAMD_VERSION}")
-diff --git a/contrib/kann/CMakeLists.txt b/contrib/kann/CMakeLists.txt
-index b3a1d54..ab56b0c 100644
 --- a/contrib/kann/CMakeLists.txt
 +++ b/contrib/kann/CMakeLists.txt
 @@ -1,10 +1,11 @@
@@ -39,11 +35,9 @@ index b3a1d54..ab56b0c 100644
 -INSTALL(TARGETS rspamd-kann LIBRARY DESTINATION ${RSPAMD_LIBDIR})
 \ No newline at end of file
 +INSTALL(TARGETS rspamd-kann LIBRARY DESTINATION ${RSPAMD_LIBDIR})
-diff --git a/contrib/libev/CMakeLists.txt b/contrib/libev/CMakeLists.txt
-index 53ab6c3..a3b7cc4 100644
 --- a/contrib/libev/CMakeLists.txt
 +++ b/contrib/libev/CMakeLists.txt
-@@ -59,6 +59,7 @@ CHECK_LIBRARY_EXISTS(m ceil "" HAVE_LIBM)
+@@ -59,6 +59,7 @@ CHECK_LIBRARY_EXISTS(m ceil "" HAVE_LIBM
  CONFIGURE_FILE(config.h.in libev-config.h)
  
  ADD_LIBRARY(rspamd-ev SHARED ${LIBEVSRC})
@@ -51,8 +45,6 @@ index 53ab6c3..a3b7cc4 100644
  include_directories("${CMAKE_CURRENT_BINARY_DIR}")
  ADD_DEFINITIONS("-DEV_CONFIG_H=\"libev-config.h\""
  		-DEV_MULTIPLICITY=1
-diff --git a/contrib/replxx/CMakeLists.txt b/contrib/replxx/CMakeLists.txt
-index 749e612..d6c8630 100644
 --- a/contrib/replxx/CMakeLists.txt
 +++ b/contrib/replxx/CMakeLists.txt
 @@ -65,6 +65,7 @@ set(
@@ -70,8 +62,6 @@ index 749e612..d6c8630 100644
 -install( TARGETS ${TARGETS} LIBRARY DESTINATION ${RSPAMD_LIBDIR})
 \ No newline at end of file
 +install( TARGETS ${TARGETS} LIBRARY DESTINATION ${RSPAMD_LIBDIR})
-diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 9a34d2a..1655d42 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -177,6 +177,8 @@ ELSE()
