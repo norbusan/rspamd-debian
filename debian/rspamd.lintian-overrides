@@ -7,4 +7,4 @@ rspamd: package-contains-documentation-outside-usr-share-doc usr/share/rspamd/ww
 # this file is not a documentation file, but the webinterface
 rspamd: package-contains-documentation-outside-usr-share-doc usr/share/rspamd/www/index.html
 # this spelling is not findable in the rspamd source code
-rspamd: spelling-error-in-binary usr/lib/rspamd/librspamd-server.so.2.6 uite suite
+rspamd: spelling-error-in-binary usr/lib/rspamd/librspamd-server.so.2.7 uite suite
