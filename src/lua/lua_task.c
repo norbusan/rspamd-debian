@@ -353,10 +353,10 @@ LUA_FUNCTION_DEF (task, get_header);
 /***
  * @method task:has_header(name[, case_sensitive])
  * Get decoded value of a header specified with optional case_sensitive flag.
- * By default headers are searched in caseless matter.
+ * By default headers are searched in the case insensitive matter.
  * @param {string} name name of header to get
  * @param {boolean} case_sensitive case sensitiveness flag to search for a header
- * @return {boolean},{number} true if header exists, the second value is number of headers with this name
+ * @return {boolean} true if header exists
  */
 LUA_FUNCTION_DEF (task, has_header);
 /***
@@ -1385,7 +1385,7 @@ lua_task_set_cached (lua_State *L, struct rspamd_task *task, const gchar *key,
 	entry->ref = luaL_ref (L, LUA_REGISTRYINDEX);
 
 	if (task->message) {
-		memcpy (entry->id, MESSAGE_FIELD (task, digest), sizeof (entry->id));
+		entry->id = GPOINTER_TO_UINT (task->message);
 	}
 }
 
@@ -1399,8 +1399,7 @@ lua_task_get_cached (lua_State *L, struct rspamd_task *task, const gchar *key)
 	entry = g_hash_table_lookup (task->lua_cache, key);
 
 	if (entry != NULL && (task->message &&
-						  memcmp (entry->id, MESSAGE_FIELD (task, digest),
-								  sizeof (entry->id)) == 0)) {
+						  entry->id == GPOINTER_TO_UINT (task->message))) {
 		lua_rawgeti (L, LUA_REGISTRYINDEX, entry->ref);
 
 		return TRUE;
@@ -2297,6 +2296,9 @@ lua_task_set_pre_result (lua_State * L)
 			else if (strstr (fl_str, "no_smtp_message") != NULL) {
 				flags |= RSPAMD_PASSTHROUGH_NO_SMTP_MESSAGE;
 			}
+			else if (strstr (fl_str, "process_all") != NULL) {
+				flags |= RSPAMD_PASSTHROUGH_PROCESS_ALL;
+			}
 		}
 
 
@@ -2311,7 +2313,7 @@ lua_task_set_pre_result (lua_State * L)
 
 		/* Don't classify or filter message if pre-filter sets results */
 
-		if (res_name == NULL && !(flags & RSPAMD_PASSTHROUGH_LEAST)) {
+		if (res_name == NULL && !(flags & (RSPAMD_PASSTHROUGH_LEAST|RSPAMD_PASSTHROUGH_PROCESS_ALL))) {
 			task->processed_stages |= (RSPAMD_TASK_STAGE_CLASSIFIERS |
 									   RSPAMD_TASK_STAGE_CLASSIFIERS_PRE |
 									   RSPAMD_TASK_STAGE_CLASSIFIERS_POST);
@@ -2544,7 +2546,13 @@ lua_task_get_rawbody (lua_State * L)
 			t->flags = 0;
 		}
 		else {
-			lua_pushnil (L);
+			/* Push body it it is there */
+			if (task->msg.len > 0 && task->msg.begin != NULL) {
+				lua_new_text (L, task->msg.begin, task->msg.len, FALSE);
+			}
+			else {
+				lua_pushnil (L);
+			}
 		}
 	}
 	else {
@@ -2565,6 +2573,10 @@ lua_task_get_emails (lua_State * L)
 
 	if (task) {
 		if (task->message) {
+			if (task->cfg) {
+				max_urls = task->cfg->max_lua_urls;
+			}
+
 			if (!lua_url_cbdata_fill (L, 2, &cb, PROTOCOL_MAILTO,
 					~(RSPAMD_URL_FLAG_CONTENT|RSPAMD_URL_FLAG_IMAGE), max_urls)) {
 				return luaL_error (L, "invalid arguments");
@@ -2639,18 +2651,14 @@ lua_task_get_parts (lua_State * L)
 
 	if (task != NULL) {
 		if (task->message) {
-			if (!lua_task_get_cached (L, task, "mime_parts")) {
-				lua_createtable (L, MESSAGE_FIELD (task, parts)->len, 0);
+			lua_createtable (L, MESSAGE_FIELD (task, parts)->len, 0);
 
-				PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, parts), i, part) {
-					ppart = lua_newuserdata (L, sizeof (struct rspamd_mime_part *));
-					*ppart = part;
-					rspamd_lua_setclass (L, "rspamd{mimepart}", -1);
-					/* Make it array */
-					lua_rawseti (L, -2, i + 1);
-				}
-
-				lua_task_set_cached (L, task, "mime_parts", -1);
+			PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, parts), i, part) {
+				ppart = lua_newuserdata (L, sizeof (struct rspamd_mime_part *));
+				*ppart = part;
+				rspamd_lua_setclass (L, "rspamd{mimepart}", -1);
+				/* Make it array */
+				lua_rawseti (L, -2, i + 1);
 			}
 		}
 		else {
@@ -2820,8 +2828,7 @@ rspamd_lua_push_header_array (lua_State *L,
 	if (rh == NULL) {
 		if (how == RSPAMD_TASK_HEADER_PUSH_HAS) {
 			lua_pushboolean (L, false);
-			lua_pushnumber (L, 0);
-			nret = 2;
+			nret = 1;
 		}
 		else if (how == RSPAMD_TASK_HEADER_PUSH_COUNT) {
 			lua_pushnumber (L, 0);
@@ -2856,17 +2863,23 @@ rspamd_lua_push_header_array (lua_State *L,
 		lua_pushinteger (L, i);
 	}
 	else if (how == RSPAMD_TASK_HEADER_PUSH_HAS) {
-		i = 0;
-		nret = 2;
+		nret = 1;
+		bool found = false;
 
-		DL_FOREACH (rh, cur) {
-			if (!strong || strcmp (name, cur->name) == 0) {
-				i++;
+		if (strong) {
+			/* We still have to check all headers in the chain */
+			DL_FOREACH (rh, cur) {
+				if (strcmp (name, cur->name) == 0) {
+					found = true;
+					break;
+				}
 			}
 		}
+		else {
+			found = true;
+		}
 
-		lua_pushboolean (L, true);
-		lua_pushinteger (L, i);
+		lua_pushboolean (L, found);
 	}
 	else {
 		DL_FOREACH (rh, cur) {
@@ -5042,19 +5055,27 @@ lua_task_get_date (lua_State *L)
 			if (h) {
 				time_t tt;
 				struct tm t;
+				GError *err = NULL;
 
-				tt = rspamd_parse_smtp_date (h->decoded, strlen (h->decoded));
+				tt = rspamd_parse_smtp_date (h->decoded, strlen (h->decoded),
+						&err);
 
-				if (!gmt) {
-					rspamd_localtime (tt, &t);
+				if (err == NULL) {
+					if (!gmt) {
+						rspamd_localtime (tt, &t);
 #if !defined(__sun)
-					t.tm_gmtoff = 0;
+						t.tm_gmtoff = 0;
 #endif
-					t.tm_isdst = 0;
-					tim = mktime (&t);
+						t.tm_isdst = 0;
+						tim = mktime (&t);
+					}
+					else {
+						tim = tt;
+					}
 				}
 				else {
-					tim = tt;
+					g_error_free (err);
+					tim = 0.0;
 				}
 			}
 			else {
@@ -5753,7 +5774,7 @@ lua_task_set_settings_id (lua_State *L)
 				rspamd_config_find_settings_id_ref (task->cfg, id);
 
 		if (selt == NULL) {
-			return luaL_error (L, "settings id %u is unknown", id);
+			return luaL_error (L, "settings id %f is unknown", (lua_Number)id);
 		}
 		if (task->settings_elt) {
 			/* Overwrite existing settings from Lua */

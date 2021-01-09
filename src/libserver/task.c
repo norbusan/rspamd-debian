@@ -721,21 +721,25 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 	st = rspamd_task_select_processing_stage (task, stages);
 
 	switch (st) {
+	case RSPAMD_TASK_STAGE_CONNFILTERS:
+		all_done = rspamd_symcache_process_symbols (task, task->cfg->cache, st);
+		break;
+
 	case RSPAMD_TASK_STAGE_READ_MESSAGE:
 		if (!rspamd_message_parse (task)) {
 			ret = FALSE;
 		}
 		break;
 
-	case RSPAMD_TASK_STAGE_PRE_FILTERS:
-	case RSPAMD_TASK_STAGE_FILTERS:
-		all_done = rspamd_symcache_process_symbols (task, task->cfg->cache, st);
-		break;
-
 	case RSPAMD_TASK_STAGE_PROCESS_MESSAGE:
 		if (!(task->flags & RSPAMD_TASK_FLAG_SKIP_PROCESS)) {
 			rspamd_message_process (task);
 		}
+		break;
+
+	case RSPAMD_TASK_STAGE_PRE_FILTERS:
+	case RSPAMD_TASK_STAGE_FILTERS:
+		all_done = rspamd_symcache_process_symbols (task, task->cfg->cache, st);
 		break;
 
 	case RSPAMD_TASK_STAGE_CLASSIFIERS:
@@ -752,6 +756,7 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 
 	case RSPAMD_TASK_STAGE_COMPOSITES:
 		rspamd_composites_process_task (task);
+		task->result->nresults_postfilters = task->result->nresults;
 		break;
 
 	case RSPAMD_TASK_STAGE_POST_FILTERS:
@@ -809,8 +814,13 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 		}
 		break;
 	case RSPAMD_TASK_STAGE_COMPOSITES_POST:
-		/* Second run of composites processing before idempotent filters */
-		rspamd_composites_process_task (task);
+		/* Second run of composites processing before idempotent filters (if needed) */
+		if (task->result->nresults_postfilters != task->result->nresults) {
+			rspamd_composites_process_task (task);
+		}
+		else {
+			msg_debug_task ("skip second run of composites as the result has not been changed");
+		}
 		break;
 
 	case RSPAMD_TASK_STAGE_IDEMPOTENT:
@@ -1806,8 +1816,8 @@ rspamd_task_stage_name (enum rspamd_task_stage stg)
 	case RSPAMD_TASK_STAGE_CONNECT:
 		ret = "connect";
 		break;
-	case RSPAMD_TASK_STAGE_ENVELOPE:
-		ret = "envelope";
+	case RSPAMD_TASK_STAGE_CONNFILTERS:
+		ret = "connection_filter";
 		break;
 	case RSPAMD_TASK_STAGE_READ_MESSAGE:
 		ret = "read_message";

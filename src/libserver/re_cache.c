@@ -553,7 +553,7 @@ rspamd_re_cache_check_lua_condition (struct rspamd_task *task,
 {
 	lua_State *L = (lua_State *)task->cfg->lua_state;
 	GError *err = NULL;
-	struct rspamd_lua_text *t;
+	struct rspamd_lua_text __attribute__ ((unused)) *t;
 	gint text_pos;
 
 	if (G_LIKELY (lua_cbref == -1)) {
@@ -789,10 +789,12 @@ rspamd_re_cache_process_regexp_data (struct rspamd_re_runtime *rt,
 	}
 	else {
 		for (i = 0; i < count; i ++) {
+			/* For Hyperscan we can probably safely disable all those limits */
+#if 0
 			if (rt->cache->max_re_data > 0 && lens[i] > rt->cache->max_re_data) {
 				lens[i] = rt->cache->max_re_data;
 			}
-
+#endif
 			rt->stat.bytes_scanned += lens[i];
 		}
 
@@ -935,19 +937,24 @@ rspamd_re_cache_process_selector (struct rspamd_task *task,
 						lua_tostring (L, -1));
 	}
 	else {
+		struct rspamd_lua_text *txt;
 		gsize slen;
 		const gchar *sel_data;
 
-		if (lua_type (L, -1) == LUA_TSTRING) {
-			sel_data = lua_tolstring (L, -1, &slen);
-			*n = 1;
-			*svec = g_malloc (sizeof (guchar *));
-			*lenvec = g_malloc (sizeof (guint));
-			(*svec)[0] = g_malloc (slen);
-			memcpy ((*svec)[0], sel_data, slen);
-			(*lenvec)[0] = slen;
+		if (lua_type (L, -1) != LUA_TTABLE) {
+			txt = lua_check_text_or_string (L, -1);
 
-			result = TRUE;
+			if (txt) {
+				sel_data = txt->start;
+				slen = txt->len;
+				*n = 1;
+				*svec = g_malloc (sizeof (guchar *));
+				*lenvec = g_malloc (sizeof (guint));
+				(*svec)[0] = g_malloc (slen);
+				memcpy ((*svec)[0], sel_data, slen);
+				(*lenvec)[0] = slen;
+				result = TRUE;
+			}
 		}
 		else {
 			*n = rspamd_lua_table_size (L, -1);
@@ -959,7 +966,16 @@ rspamd_re_cache_process_selector (struct rspamd_task *task,
 				for (guint i = 0; i < *n; i ++) {
 					lua_rawgeti (L, -1, i + 1);
 
-					sel_data = lua_tolstring (L, -1, &slen);
+					txt = lua_check_text_or_string (L, -1);
+					if (txt) {
+						sel_data = txt->start;
+						slen = txt->len;
+					}
+					else {
+						sel_data = "";
+						slen = 0;
+					}
+
 					(*svec)[i] = g_malloc (slen);
 					memcpy ((*svec)[i], sel_data, slen);
 					(*lenvec)[i] = slen;
@@ -1198,13 +1214,13 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 				}
 				else {
 					/* Skip empty parts */
-					if (IS_PART_EMPTY (text_part)) {
+					if (IS_TEXT_PART_EMPTY (text_part)) {
 						len = 0;
 						in = "";
 					}
 					else {
 						/* Check raw flags */
-						if (!IS_PART_UTF (text_part)) {
+						if (!IS_TEXT_PART_UTF (text_part)) {
 							raw = TRUE;
 						}
 
@@ -1345,7 +1361,7 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 				scvec[i + 1] = (guchar *)text_part->utf_stripped_content->data;
 				lenvec[i + 1] = text_part->utf_stripped_content->len;
 
-				if (!IS_PART_UTF (text_part)) {
+				if (!IS_TEXT_PART_UTF (text_part)) {
 					raw = TRUE;
 				}
 			}
@@ -1382,7 +1398,7 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 					scvec[i] = (guchar *)text_part->parsed.begin;
 					lenvec[i] = text_part->parsed.len;
 
-					if (!IS_PART_UTF (text_part)) {
+					if (!IS_TEXT_PART_UTF (text_part)) {
 						raw = TRUE;
 					}
 				}
@@ -1767,7 +1783,6 @@ rspamd_re_cache_is_finite (struct rspamd_re_cache *cache,
 		/* Try to compile pattern */
 
 		gchar *pat = rspamd_re_cache_hs_pattern_from_pcre (re);
-		/* Memory leak here but ok since we do exit */
 
 		if (hs_compile (pat,
 				flags | HS_FLAG_PREFILTER,
@@ -1775,9 +1790,18 @@ rspamd_re_cache_is_finite (struct rspamd_re_cache *cache,
 				&cache->plt,
 				&test_db,
 				&hs_errors) != HS_SUCCESS) {
+
+			msg_info_re_cache ("cannot compile (prefilter mode) '%s' to hyperscan: '%s'",
+					pat,
+					hs_errors != NULL ? hs_errors->message : "unknown error");
+
+			hs_free_compile_error (hs_errors);
+			g_free (pat);
+
 			exit (EXIT_FAILURE);
 		}
 
+		g_free (pat);
 		exit (EXIT_SUCCESS);
 	}
 	else if (cld > 0) {
@@ -1975,12 +1999,13 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 		if (pcre_flags & PCRE_FLAG(DOTALL)) {
 			hs_flags[i] |= HS_FLAG_DOTALL;
 		}
-		if (rspamd_regexp_get_maxhits (re) == 1) {
-			hs_flags[i] |= HS_FLAG_SINGLEMATCH;
-		}
+
 
 		if (re_flags & RSPAMD_REGEXP_FLAG_LEFTMOST) {
 			hs_flags[i] |= HS_FLAG_SOM_LEFTMOST;
+		}
+		else if (rspamd_regexp_get_maxhits (re) == 1) {
+			hs_flags[i] |= HS_FLAG_SINGLEMATCH;
 		}
 
 		gchar *pat = rspamd_re_cache_hs_pattern_from_pcre (re);
@@ -1991,8 +2016,9 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 				&cache->plt,
 				&test_db,
 				&hs_errors) != HS_SUCCESS) {
-			msg_info_re_cache ("cannot compile %s to hyperscan, try prefilter match",
-					pat);
+			msg_info_re_cache ("cannot compile '%s' to hyperscan: '%s', try prefilter match",
+					pat,
+					hs_errors != NULL ? hs_errors->message : "unknown error");
 			hs_free_compile_error (hs_errors);
 
 			/* The approximation operation might take a significant

@@ -807,7 +807,7 @@ static void
 rspamd_fuzzy_check_callback (struct rspamd_fuzzy_reply *result, void *ud)
 {
 	struct fuzzy_session *session = ud;
-	gboolean encrypted = FALSE, is_shingle = FALSE;
+	gboolean is_shingle = FALSE, __attribute__ ((unused)) encrypted = FALSE;
 	struct rspamd_fuzzy_cmd *cmd = NULL;
 	const struct rspamd_shingle *shingle = NULL;
 	struct rspamd_shingle sgl_cpy;
@@ -970,7 +970,7 @@ rspamd_fuzzy_check_callback (struct rspamd_fuzzy_reply *result, void *ud)
 static void
 rspamd_fuzzy_process_command (struct fuzzy_session *session)
 {
-	gboolean encrypted = FALSE, is_shingle = FALSE;
+	gboolean is_shingle = FALSE, __attribute__ ((unused)) encrypted = FALSE;
 	struct rspamd_fuzzy_cmd *cmd = NULL;
 	struct rspamd_fuzzy_reply result;
 	struct fuzzy_peer_cmd up_cmd;
@@ -2503,7 +2503,7 @@ start_fuzzy (struct rspamd_worker *worker)
 	if (ctx->update_map != NULL) {
 		rspamd_config_radix_from_ucl (worker->srv->cfg, ctx->update_map,
 				"Allow fuzzy updates from specified addresses",
-				&ctx->update_ips, NULL, worker);
+				&ctx->update_ips, NULL, worker, "fuzzy update");
 	}
 
 	if (ctx->skip_map != NULL) {
@@ -2529,7 +2529,7 @@ start_fuzzy (struct rspamd_worker *worker)
 				"Block fuzzy requests from the specific IPs",
 				&ctx->blocked_ips,
 				NULL,
-				worker);
+				worker, "fuzzy blocked");
 	}
 
 	/* Create radix trees */
@@ -2538,13 +2538,14 @@ start_fuzzy (struct rspamd_worker *worker)
 				"Skip ratelimits from specific ip addresses/networks",
 				&ctx->ratelimit_whitelist,
 				NULL,
-				worker);
+				worker, "fuzzy ratelimit whitelist");
 	}
 
 	if (!isnan (ctx->delay) && ctx->delay_whitelist_map != NULL) {
 		rspamd_config_radix_from_ucl (worker->srv->cfg, ctx->delay_whitelist_map,
 				"Skip delay from the following ips",
-				&ctx->delay_whitelist, NULL, worker);
+				&ctx->delay_whitelist, NULL, worker,
+				"fuzzy delayed whitelist");
 	}
 
 	/* Ratelimits */

@@ -69,7 +69,7 @@ rspamd_rfc2231_decode (rspamd_mempool_t *pool,
 
 		if (charset == NULL) {
 			/* Try heuristic */
-			charset = rspamd_mime_charset_find_by_content (value_start, r);
+			charset = rspamd_mime_charset_find_by_content (value_start, r, TRUE);
 		}
 
 		if (charset == NULL) {
@@ -242,7 +242,7 @@ rspamd_content_type_postprocess (rspamd_mempool_t *pool,
 
 	RSPAMD_FTOK_ASSIGN (&srch, "charset");
 
-	if (rspamd_ftok_casecmp (&param->name, &srch) == 0) {
+	if (rspamd_ftok_icase_equal (&param->name, &srch)) {
 		/* Adjust charset */
 		found = param;
 		ct->charset.begin = param->value.begin;
@@ -251,7 +251,7 @@ rspamd_content_type_postprocess (rspamd_mempool_t *pool,
 
 	RSPAMD_FTOK_ASSIGN (&srch, "boundary");
 
-	if (rspamd_ftok_casecmp (&param->name, &srch) == 0) {
+	if (rspamd_ftok_icase_equal (&param->name, &srch)) {
 		found = param;
 		gchar *lc_boundary;
 		/* Adjust boundary */
@@ -266,8 +266,11 @@ rspamd_content_type_postprocess (rspamd_mempool_t *pool,
 	}
 
 	if (!found) {
-		/* Just lowercase */
-		rspamd_str_lc ((gchar *)param->value.begin, param->value.len);
+		RSPAMD_FTOK_ASSIGN (&srch, "name");
+		if (!rspamd_ftok_icase_equal (&param->name, &srch)) {
+			/* Just lowercase */
+			rspamd_str_lc ((gchar *) param->value.begin, param->value.len);
+		}
 	}
 }
 
@@ -282,7 +285,7 @@ rspamd_content_disposition_postprocess (rspamd_mempool_t *pool,
 	srch.begin = "filename";
 	srch.len = 8;
 
-	if (rspamd_ftok_casecmp (&param->name, &srch) == 0) {
+	if (rspamd_ftok_icase_equal (&param->name, &srch)) {
 		/* Adjust filename */
 		cd->filename.begin = param->value.begin;
 		cd->filename.len = param->value.len;
@@ -702,6 +705,13 @@ rspamd_content_type_parse (const gchar *in,
 			if (rspamd_ftok_casecmp (&res->subtype, &srch) == 0) {
 				res->flags |= RSPAMD_CONTENT_TYPE_BROKEN;
 				RSPAMD_FTOK_ASSIGN (&res->subtype, "alternative");
+			}
+
+			/* PKCS7 smime */
+			RSPAMD_FTOK_ASSIGN (&srch, "pkcs7-mime");
+			if (rspamd_substring_search (res->subtype.begin, res->subtype.len,
+					srch.begin, srch.len) != -1) {
+				res->flags |= RSPAMD_CONTENT_TYPE_SMIME;
 			}
 		}
 

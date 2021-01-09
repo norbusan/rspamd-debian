@@ -816,7 +816,7 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 	rspamd_regexp_library_init (cfg);
 	rspamd_multipattern_library_init (cfg->hs_cache_dir);
 
-#ifdef WITH_HYPERSCAN
+#if defined(WITH_HYPERSCAN) && !defined(__aarch64__)
 	if (!cfg->disable_hyperscan) {
 		if (!(cfg->libs_ctx->crypto_ctx->cpu_config & CPUID_SSSE3)) {
 			msg_warn_config ("CPU doesn't have SSSE3 instructions set "
@@ -925,8 +925,6 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 			msg_warn_config ("controller worker is unconfigured: learning,"
 					" periodic scripts, maps watching and many other"
 					" Rspamd features will be broken");
-
-			ret = FALSE;
 		}
 
 		ret = rspamd_symcache_validate (cfg->cache, cfg, FALSE) && ret;
@@ -1589,7 +1587,7 @@ rspamd_init_filters (struct rspamd_config *cfg, bool reconfig, bool strict)
 
 			}
 			else {
-				if (!mod->module_config_func (cfg)) {
+				if (!mod->module_config_func (cfg, strict)) {
 					msg_err_config ("config of %s failed", mod->name);
 					ret = FALSE;
 
@@ -2226,12 +2224,9 @@ rspamd_config_get_action_by_type (struct rspamd_config *cfg,
 }
 
 gboolean
-rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
-							  const ucl_object_t *obj,
-							  const gchar *description,
-							  struct rspamd_radix_map_helper **target,
-							  GError **err,
-							  struct rspamd_worker *worker)
+rspamd_config_radix_from_ucl (struct rspamd_config *cfg, const ucl_object_t *obj, const gchar *description,
+							  struct rspamd_radix_map_helper **target, GError **err,
+							  struct rspamd_worker *worker, const gchar *map_name)
 {
 	ucl_type_t type;
 	ucl_object_iter_t it = NULL;
@@ -2269,7 +2264,8 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 			else {
 				/* Just a list */
 				if (!*target) {
-					*target = rspamd_map_helper_new_radix (NULL);
+					*target = rspamd_map_helper_new_radix (
+							rspamd_map_add_fake (cfg, description, map_name));
 				}
 
 				rspamd_map_helper_insert_radix_resolve (*target, str, "");
@@ -2300,7 +2296,8 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 				str = ucl_object_tostring (cur);
 
 				if (!*target) {
-					*target = rspamd_map_helper_new_radix (NULL);
+					*target = rspamd_map_helper_new_radix (
+							rspamd_map_add_fake (cfg, description, map_name));
 				}
 
 				rspamd_map_helper_insert_radix_resolve (*target, str, "");
@@ -2803,9 +2800,9 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 		if (cfg->local_addrs) {
 			rspamd_config_radix_from_ucl (cfg, cfg->local_addrs,
 					"Local addresses",
-					(struct rspamd_radix_map_helper **)ctx->local_addrs,
+					(struct rspamd_radix_map_helper **) ctx->local_addrs,
 					NULL,
-					NULL);
+					NULL, "local addresses");
 		}
 
 		rspamd_free_zstd_dictionary (ctx->in_dict);

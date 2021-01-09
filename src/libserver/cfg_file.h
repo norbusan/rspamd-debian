@@ -311,6 +311,7 @@ struct rspamd_action;
 
 struct rspamd_config_cfg_lua_script {
 	gint cbref;
+	gint priority;
 	struct rspamd_config_cfg_lua_script *prev, *next;
 };
 
@@ -760,12 +761,9 @@ void rspamd_actions_sort (struct rspamd_config *cfg);
  */
 struct rspamd_radix_map_helper;
 
-gboolean rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
-									   const ucl_object_t *obj,
-									   const gchar *description,
-									   struct rspamd_radix_map_helper **target,
-									   GError **err,
-									   struct rspamd_worker *worker);
+gboolean rspamd_config_radix_from_ucl (struct rspamd_config *cfg, const ucl_object_t *obj, const gchar *description,
+									   struct rspamd_radix_map_helper **target, GError **err,
+									   struct rspamd_worker *worker, const gchar *map_name);
 
 /**
  * Adds new settings id to be preprocessed

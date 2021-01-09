@@ -106,7 +106,7 @@ static struct html_tag_def tag_defs[] = {
 	TAG_DEF(Tag_LABEL, "label", (CM_INLINE)),
 	TAG_DEF(Tag_LEGEND, "legend", (CM_INLINE)),
 	TAG_DEF(Tag_LI, "li", (CM_LIST | CM_OPT | CM_NO_INDENT | FL_BLOCK)),
-	TAG_DEF(Tag_LINK, "link", (CM_HEAD | CM_EMPTY|FL_HREF)),
+	TAG_DEF(Tag_LINK, "link", (CM_EMPTY|FL_HREF)),
 	TAG_DEF(Tag_LISTING, "listing", (CM_BLOCK | CM_OBSOLETE)),
 	TAG_DEF(Tag_MAP, "map", (CM_INLINE|FL_HREF)),
 	TAG_DEF(Tag_MENU, "menu", (CM_BLOCK | CM_OBSOLETE)),
@@ -208,9 +208,25 @@ rspamd_html_library_init (void)
 
 		for (i = 0; i < G_N_ELEMENTS (tag_defs); i++) {
 			k = kh_put (tag_by_id, html_tag_by_id, tag_defs[i].id, &rc);
+
+			if (rc == 0) {
+				/* Collision by id */
+				msg_err ("collision in html tag id: %d (%s) vs %d (%s)",
+						(int)tag_defs[i].id, tag_defs[i].name,
+						(int)kh_val (html_tag_by_id, k).id, kh_val (html_tag_by_id, k).name);
+			}
+
 			kh_val (html_tag_by_id, k) = tag_defs[i];
 
 			k = kh_put (tag_by_name, html_tag_by_name, tag_defs[i].name, &rc);
+
+			if (rc == 0) {
+				/* Collision by name */
+				msg_err ("collision in html tag name: %d (%s) vs %d (%s)",
+						(int)tag_defs[i].id, tag_defs[i].name,
+						(int)kh_val (html_tag_by_id, k).id, kh_val (html_tag_by_id, k).name);
+			}
+
 			kh_val (html_tag_by_name, k) = tag_defs[i];
 		}
 
@@ -229,11 +245,52 @@ rspamd_html_library_init (void)
 			if (entities_defs[i].code != 0) {
 				k = kh_put (entity_by_number, html_entity_by_number,
 						entities_defs[i].code, &rc);
-				kh_val (html_entity_by_number, k) = entities_defs[i].replacement;
+
+				if (rc == 0) {
+					/* Collision by id */
+					gint cmp_res = strcmp (entities_defs[i].replacement,
+							kh_val (html_entity_by_number, k));
+					if (cmp_res != 0) {
+						if (strlen (entities_defs[i].replacement) <
+							strlen (kh_val (html_entity_by_number, k))) {
+							/* Shorter replacement is more likely to be valid */
+							msg_debug ("1 collision in html entity id: %d (%s); replace %s by %s",
+									(int) entities_defs[i].code, entities_defs[i].name,
+									kh_val (html_entity_by_number, k),
+									entities_defs[i].replacement);
+							kh_val (html_entity_by_number, k) = entities_defs[i].replacement;
+						}
+						else if (strlen (entities_defs[i].replacement) ==
+								 strlen (kh_val (html_entity_by_number, k)) &&
+										 cmp_res < 0) {
+							/* Identical len but lexicographically shorter */
+							msg_debug ("collision in html entity id: %d (%s); replace %s by %s",
+									(int) entities_defs[i].code, entities_defs[i].name,
+									kh_val (html_entity_by_number, k),
+									entities_defs[i].replacement);
+							kh_val (html_entity_by_number, k) = entities_defs[i].replacement;
+						}
+						/* Do not replace otherwise */
+					}
+					/* Identic replacement */
+				}
+				else {
+					kh_val (html_entity_by_number, k) = entities_defs[i].replacement;
+				}
 			}
 
 			k = kh_put (entity_by_name, html_entity_by_name,
 					entities_defs[i].name, &rc);
+
+			if (rc == 0) {
+				/* Collision by name */
+				if (strcmp (kh_val (html_entity_by_number, k),
+						entities_defs[i].replacement) != 0) {
+					msg_err ("collision in html entity name: %d (%s)",
+							(int) entities_defs[i].code, entities_defs[i].name);
+				}
+			}
+
 			kh_val (html_entity_by_name, k) = entities_defs[i].replacement;
 		}
 
@@ -925,6 +982,9 @@ rspamd_html_parse_tag_component (rspamd_mempool_t *pool,
 		}
 		else if (g_ascii_strncasecmp (p, "rel", len) == 0) {
 			NEW_COMPONENT (RSPAMD_HTML_COMPONENT_REL);
+		}
+		else if (g_ascii_strncasecmp (p, "alt", len) == 0) {
+			NEW_COMPONENT (RSPAMD_HTML_COMPONENT_ALT);
 		}
 	}
 	else if (len == 4) {
@@ -1760,7 +1820,8 @@ rspamd_html_process_data_image (rspamd_mempool_t *pool,
 static void
 rspamd_html_process_img_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 							 struct html_content *hc, khash_t (rspamd_url_hash) *url_set,
-							 GPtrArray *part_urls)
+							 GPtrArray *part_urls,
+							 GByteArray *dest)
 {
 	struct html_tag_component *comp;
 	struct html_image *img;
@@ -1873,6 +1934,19 @@ rspamd_html_process_img_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 				}
 			}
 		}
+		else if (comp->type == RSPAMD_HTML_COMPONENT_ALT && comp->len > 0 && dest != NULL) {
+			if (dest->len > 0 && !g_ascii_isspace (dest->data[dest->len - 1])) {
+				/* Add a space */
+				g_byte_array_append (dest, " ", 1);
+			}
+
+			g_byte_array_append (dest, comp->start, comp->len);
+
+			if (!g_ascii_isspace (dest->data[dest->len - 1])) {
+				/* Add a space */
+				g_byte_array_append (dest, " ", 1);
+			}
+		}
 
 		cur = g_list_next (cur);
 	}
@@ -1914,7 +1988,7 @@ rspamd_html_process_link_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 			if (comp->len == sizeof ("icon") - 1 &&
 				rspamd_lc_cmp (comp->start, "icon", sizeof ("icon") - 1) == 0) {
 
-				rspamd_html_process_img_tag (pool, tag, hc, url_set, part_urls);
+				rspamd_html_process_img_tag (pool, tag, hc, url_set, part_urls, NULL);
 			}
 		}
 
@@ -3118,7 +3192,7 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool,
 					save_space = FALSE;
 				}
 
-				if (cur_tag->flags & FL_HREF) {
+				if (cur_tag->flags & FL_HREF && !(cur_tag->flags & FL_IGNORE)) {
 					if (!(cur_tag->flags & (FL_CLOSING))) {
 						url = rspamd_html_process_url_tag (pool, cur_tag, hc);
 
@@ -3191,7 +3265,7 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool,
 
 				if (cur_tag->id == Tag_IMG && !(cur_tag->flags & FL_CLOSING)) {
 					rspamd_html_process_img_tag (pool, cur_tag, hc, url_set,
-							part_urls);
+							part_urls, dest);
 				}
 				else if (cur_tag->id == Tag_LINK && !(cur_tag->flags & FL_CLOSING)) {
 					rspamd_html_process_link_tag (pool, cur_tag, hc, url_set,

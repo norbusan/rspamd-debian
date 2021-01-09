@@ -781,7 +781,7 @@ static void
 mark_old_workers (gpointer key, gpointer value, gpointer unused)
 {
 	struct rspamd_worker *w = value;
-	struct rspamd_main *rspamd_main;
+	struct rspamd_main __attribute__ ((unused)) *rspamd_main;
 
 	rspamd_main = w->srv;
 
@@ -968,11 +968,15 @@ load_rspamd_config (struct rspamd_main *rspamd_main,
 		rspamd_lua_post_load_config (cfg);
 
 		if (init_modules) {
-			rspamd_init_filters (cfg, reload, false);
+			if (!rspamd_init_filters (cfg, reload, false)) {
+				return FALSE;
+			}
 		}
 
 		/* Do post-load actions */
-		rspamd_config_post_load (cfg, opts);
+		if (!rspamd_config_post_load (cfg, opts)) {
+			return FALSE;
+		}
 	}
 
 	return TRUE;
@@ -1260,6 +1264,65 @@ version (void)
 #endif
 }
 
+static gboolean
+rspamd_main_daemon (struct rspamd_main *rspamd_main)
+{
+	int fd;
+	pid_t old_pid = getpid ();
+
+	switch (fork ()) {
+	case -1:
+		msg_err_main ("fork() failed: %s", strerror (errno));
+		return FALSE;
+
+	case 0:
+		break;
+
+	default:
+		/* Old process */
+		exit (0);
+	}
+
+	rspamd_log_on_fork (g_quark_from_static_string ("main"),
+			rspamd_main->cfg,
+			rspamd_main->logger);
+
+	if (setsid () == -1) {
+		msg_err_main ("setsid () failed: %s", strerror (errno));
+		return FALSE;
+	}
+
+	umask (0);
+
+	fd = open ("/dev/null", O_RDWR);
+	if (fd == -1) {
+		msg_err_main ("open(\"/dev/null\") failed: %s", strerror (errno));
+		return FALSE;
+	}
+
+	if (dup2 (fd, STDIN_FILENO) == -1) {
+		msg_err_main ("dup2(STDIN) failed: %s", strerror (errno));
+		return FALSE;
+	}
+
+	if (dup2 (fd, STDOUT_FILENO) == -1) {
+		msg_err_main ("dup2(STDOUT) failed: %s", strerror (errno));
+		return FALSE;
+	}
+
+	if (fd > STDERR_FILENO) {
+		if (close(fd) == -1) {
+			msg_err_main ("close() failed: %s", strerror (errno));
+			return FALSE;
+		}
+	}
+
+	msg_info_main ("daemonized successfully; old pid %P, new pid %P",
+			old_pid, getpid ());
+
+	return TRUE;
+}
+
 gint
 main (gint argc, gchar **argv, gchar **env)
 {
@@ -1332,7 +1395,7 @@ main (gint argc, gchar **argv, gchar **env)
 	type = g_quark_from_static_string ("main");
 
 	/* First set logger to console logger */
-	rspamd_main->logger = rspamd_log_open_emergency (rspamd_main->server_pool);
+	rspamd_main->logger = rspamd_log_open_emergency (rspamd_main->server_pool, 0);
 	g_assert (rspamd_main->logger != NULL);
 
 	if (is_debug) {
@@ -1395,9 +1458,8 @@ main (gint argc, gchar **argv, gchar **env)
 
 	/* Daemonize */
 	if (!no_fork) {
-		if (daemon (0, 0) == -1) {
-			msg_err_main ("cannot daemonize: %s", strerror (errno));
-			exit (-errno);
+		if (!rspamd_main_daemon (rspamd_main)) {
+			exit (EXIT_FAILURE);
 		}
 
 		/* Close emergency logger */

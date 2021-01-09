@@ -783,6 +783,10 @@ rspamd_dkim_add_arc_seal_headers (rspamd_mempool_t *pool,
 			g_ptr_array_add (ctx->hlist, hdr);
 		}
 	}
+
+	rspamd_mempool_add_destructor (ctx->pool,
+			(rspamd_mempool_destruct_t)rspamd_dkim_hlist_free,
+			ctx->hlist);
 }
 
 /**
@@ -848,6 +852,8 @@ rspamd_create_dkim_context (const gchar *sig,
 	end = p + strlen (p);
 	ctx->common.sig_hash = rspamd_cryptobox_fast_hash (sig, end - sig,
 			rspamd_hash_seed ());
+
+	msg_debug_dkim ("create dkim context sig = %L", ctx->common.sig_hash);
 
 	while (p <= end) {
 		switch (state) {
@@ -1688,21 +1694,24 @@ rspamd_get_dkim_key (rspamd_dkim_context_t *ctx,
 static gboolean
 rspamd_dkim_relaxed_body_step (struct rspamd_dkim_common_ctx *ctx, EVP_MD_CTX *ck,
 		const gchar **start, guint size,
-		guint *remain)
+		gssize *remain)
 {
 	const gchar *h;
-	static gchar buf[BUFSIZ];
 	gchar *t;
-	guint len, inlen, added = 0;
+	guint len, inlen;
+	gssize octets_remain;
 	gboolean got_sp;
+	gchar buf[1024];
 
 	len = size;
 	inlen = sizeof (buf) - 1;
 	h = *start;
 	t = buf;
 	got_sp = FALSE;
+	octets_remain = *remain;
 
-	while (len && inlen) {
+	while (len > 0 && inlen > 0 && (octets_remain != 0)) {
+
 		if (*h == '\r' || *h == '\n') {
 			if (got_sp) {
 				/* Ignore spaces at the end of line */
@@ -1710,14 +1719,22 @@ rspamd_dkim_relaxed_body_step (struct rspamd_dkim_common_ctx *ctx, EVP_MD_CTX *c
 			}
 			*t++ = '\r';
 			*t++ = '\n';
+
 			if (len > 1 && (*h == '\r' && h[1] == '\n')) {
 				h += 2;
 				len -= 2;
+				octets_remain -= 2;
 			}
 			else {
 				h ++;
 				len --;
-				added ++;
+				if (octets_remain >= 2) {
+					octets_remain -= 2; /* Input has just \n or \r so we actually add more octets */
+				}
+				else {
+					octets_remain --;
+					break;
+				}
 			}
 			break;
 		}
@@ -1733,6 +1750,7 @@ rspamd_dkim_relaxed_body_step (struct rspamd_dkim_common_ctx *ctx, EVP_MD_CTX *c
 				h++;
 				inlen--;
 				len--;
+				octets_remain --;
 				got_sp = TRUE;
 				continue;
 			}
@@ -1740,76 +1758,97 @@ rspamd_dkim_relaxed_body_step (struct rspamd_dkim_common_ctx *ctx, EVP_MD_CTX *c
 		else {
 			got_sp = FALSE;
 		}
+
 		*t++ = *h++;
 		inlen--;
 		len--;
+		octets_remain --;
 	}
 
 	*start = h;
 
-	if (*remain > 0) {
-		gsize cklen = MIN(t - buf, *remain + added);
+	if (t - buf > 0) {
+		gsize cklen = t - buf;
 
 		EVP_DigestUpdate (ck, buf, cklen);
 		ctx->body_canonicalised += cklen;
-		*remain = *remain - (cklen - added);
-		msg_debug_dkim ("update signature with body buffer "
-				"(%z size, %ud remain, %ud added)",
-						cklen, *remain, added);
+		msg_debug_dkim ("relaxed update signature with body buffer "
+				"(%z size, %z -> %z remain)",
+						cklen, *remain, octets_remain);
+		*remain = octets_remain;
+
 	}
 
-	return (len != 0);
+	return ((len != 0) && (octets_remain != 0));
 }
 
 static gboolean
 rspamd_dkim_simple_body_step (struct rspamd_dkim_common_ctx *ctx,
 		EVP_MD_CTX *ck, const gchar **start, guint size,
-		guint *remain)
+		gssize *remain)
 {
 	const gchar *h;
-	static gchar buf[BUFSIZ];
 	gchar *t;
-	guint len, inlen, added = 0;
+	guint len, inlen;
+	gssize octets_remain;
+	gchar buf[1024];
 
 	len = size;
 	inlen = sizeof (buf) - 1;
 	h = *start;
 	t = &buf[0];
+	octets_remain = *remain;
 
-	while (len && inlen) {
+	while (len > 0 && inlen > 0 && (octets_remain != 0)) {
 		if (*h == '\r' || *h == '\n') {
 			*t++ = '\r';
 			*t++ = '\n';
+
 			if (len > 1 && (*h == '\r' && h[1] == '\n')) {
 				h += 2;
 				len -= 2;
+
+				if (octets_remain >= 2) {
+					octets_remain -= 2; /* Input has just \n or \r so we actually add more octets */
+				}
+				else {
+					octets_remain --;
+				}
 			}
 			else {
 				h ++;
 				len --;
-				added ++;
+
+				if (octets_remain >= 2) {
+					octets_remain -= 2; /* Input has just \n or \r so we actually add more octets */
+				}
+				else {
+					octets_remain --;
+				}
 			}
 			break;
 		}
+
 		*t++ = *h++;
+		octets_remain --;
 		inlen--;
 		len--;
 	}
 
 	*start = h;
 
-	if (*remain > 0) {
-		gsize cklen = MIN(t - buf, *remain + added);
+	if (t - buf > 0) {
+		gsize cklen = t - buf;
 
 		EVP_DigestUpdate (ck, buf, cklen);
 		ctx->body_canonicalised += cklen;
-		*remain = *remain - (cklen - added);
-		msg_debug_dkim ("update signature with body buffer "
-				"(%z size, %ud remain, %ud added)",
-				cklen, *remain, added);
+		msg_debug_dkim ("simple update signature with body buffer "
+						"(%z size, %z -> %z remain)",
+				cklen, *remain, octets_remain);
+		*remain = octets_remain;
 	}
 
-	return (len != 0);
+	return ((len != 0) && (octets_remain != 0));
 }
 
 static const gchar *
@@ -1988,7 +2027,7 @@ rspamd_dkim_canonize_body (struct rspamd_dkim_common_ctx *ctx,
 	gboolean sign)
 {
 	const gchar *p;
-	guint remain = ctx->len ? ctx->len : (guint)(end - start);
+	gssize remain = ctx->len ? ctx->len : -1;
 	guint total_len = end - start;
 	gboolean need_crlf = FALSE;
 
@@ -2416,18 +2455,28 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 			if (rh) {
 				/* We need to find our own signature */
 				if (!dkim_domain) {
+					msg_err_dkim ("cannot verify dkim as we have no dkim domain!");
 					return FALSE;
 				}
 
+				gboolean found = FALSE;
+
 				DL_FOREACH (rh, cur) {
-					guint64 th = rspamd_cryptobox_fast_hash (rh->decoded,
-							strlen (rh->decoded), rspamd_hash_seed ());
+					guint64 th = rspamd_cryptobox_fast_hash (cur->decoded,
+							strlen (cur->decoded), rspamd_hash_seed ());
 
 					if (th == ctx->sig_hash) {
-						rspamd_dkim_signature_update (ctx, rh->raw_value,
-								rh->raw_len);
+						rspamd_dkim_signature_update (ctx, cur->raw_value,
+								cur->raw_len);
+						found = TRUE;
 						break;
 					}
+				}
+				if (!found) {
+					msg_err_dkim ("BUGON: cannot verify dkim as we have lost our signature"
+								  " during simple canonicalisation, expected hash=%L",
+								  ctx->sig_hash);
+					return FALSE;
 				}
 			}
 			else {

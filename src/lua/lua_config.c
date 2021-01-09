@@ -1817,22 +1817,32 @@ lua_parse_symbol_type (const gchar *str)
 					ret |= SYMBOL_TYPE_VIRTUAL;
 					ret &= ~SYMBOL_TYPE_NORMAL;
 					ret &= ~SYMBOL_TYPE_CALLBACK;
-				} else if (g_ascii_strcasecmp (str, "callback") == 0) {
+				}
+				else if (g_ascii_strcasecmp (str, "callback") == 0) {
 					ret |= SYMBOL_TYPE_CALLBACK;
 					ret &= ~SYMBOL_TYPE_NORMAL;
 					ret &= ~SYMBOL_TYPE_VIRTUAL;
-				} else if (g_ascii_strcasecmp (str, "normal") == 0) {
+				}
+				else if (g_ascii_strcasecmp (str, "normal") == 0) {
 					ret |= SYMBOL_TYPE_NORMAL;
 					ret &= ~SYMBOL_TYPE_CALLBACK;
 					ret &= ~SYMBOL_TYPE_VIRTUAL;
-				} else if (g_ascii_strcasecmp (str, "prefilter") == 0) {
+				}
+				else if (g_ascii_strcasecmp (str, "prefilter") == 0) {
 					ret |= SYMBOL_TYPE_PREFILTER | SYMBOL_TYPE_GHOST;
-				} else if (g_ascii_strcasecmp (str, "postfilter") == 0) {
+				}
+				else if (g_ascii_strcasecmp (str, "postfilter") == 0) {
 					ret |= SYMBOL_TYPE_POSTFILTER | SYMBOL_TYPE_GHOST;
-				} else if (g_ascii_strcasecmp (str, "idempotent") == 0) {
+				}
+				else if (g_ascii_strcasecmp (str, "connfilter") == 0 ||
+						 g_ascii_strcasecmp (str, "conn_filter") == 0) {
+					ret |= SYMBOL_TYPE_CONNFILTER | SYMBOL_TYPE_GHOST;
+				}
+				else if (g_ascii_strcasecmp (str, "idempotent") == 0) {
 					ret |= SYMBOL_TYPE_POSTFILTER | SYMBOL_TYPE_GHOST |
-							SYMBOL_TYPE_IDEMPOTENT | SYMBOL_TYPE_CALLBACK;
-				} else {
+						   SYMBOL_TYPE_IDEMPOTENT | SYMBOL_TYPE_CALLBACK;
+				}
+				else {
 					gint fl = 0;
 
 					fl = lua_parse_symbol_flags (str);
@@ -1920,6 +1930,10 @@ lua_push_symbol_flags (lua_State *L, guint flags, enum lua_push_symbol_flags_opt
 
 	if (flags & SYMBOL_TYPE_SKIPPED) {
 		LUA_OPTION_PUSH (skip);
+	}
+
+	if (flags & SYMBOL_TYPE_COMPOSITE) {
+		LUA_OPTION_PUSH (composite);
 	}
 }
 
@@ -2976,7 +2990,6 @@ lua_config_register_regexp (lua_State *L)
 	GError *err = NULL;
 	enum rspamd_re_type type = RSPAMD_RE_BODY;
 	gboolean pcre_only = FALSE;
-	guint old_flags;
 
 	/*
 	 * - `re`* : regular expression object
@@ -3013,9 +3026,8 @@ lua_config_register_regexp (lua_State *L)
 			}
 			else {
 				if (pcre_only) {
-					old_flags = rspamd_regexp_get_flags (re->re);
-					old_flags |= RSPAMD_REGEXP_FLAG_PCRE_ONLY;
-					rspamd_regexp_set_flags (re->re, old_flags);
+					rspamd_regexp_set_flags (re->re,
+							rspamd_regexp_get_flags (re->re) | RSPAMD_REGEXP_FLAG_PCRE_ONLY);
 				}
 
 				if (header_str != NULL) {
@@ -3041,6 +3053,11 @@ lua_config_register_regexp (lua_State *L)
 				if (cache_re != re->re) {
 					rspamd_regexp_unref (re->re);
 					re->re = rspamd_regexp_ref (cache_re);
+
+					if (pcre_only) {
+						rspamd_regexp_set_flags (re->re,
+								rspamd_regexp_get_flags (re->re) | RSPAMD_REGEXP_FLAG_PCRE_ONLY);
+					}
 				}
 			}
 		}
@@ -3055,20 +3072,30 @@ lua_config_replace_regexp (lua_State *L)
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	struct rspamd_lua_regexp *old_re = NULL, *new_re = NULL;
+	gboolean pcre_only = FALSE;
 	GError *err = NULL;
 
 	if (cfg != NULL) {
 		if (!rspamd_lua_parse_table_arguments (L, 2, &err,
 				RSPAMD_LUA_PARSE_ARGUMENTS_DEFAULT,
-				"*old_re=U{regexp};*new_re=U{regexp}",
-				&old_re, &new_re)) {
-			msg_err_config ("cannot get parameters list: %e", err);
+				"*old_re=U{regexp};*new_re=U{regexp};pcre_only=B",
+				&old_re, &new_re, &pcre_only)) {
+			gint ret = luaL_error (L, "cannot get parameters list: %s",
+					err ? err->message : "invalid arguments");
 
 			if (err) {
 				g_error_free (err);
 			}
+
+			return ret;
 		}
 		else {
+
+			if (pcre_only) {
+				rspamd_regexp_set_flags (new_re->re,
+						rspamd_regexp_get_flags (new_re->re) | RSPAMD_REGEXP_FLAG_PCRE_ONLY);
+			}
+
 			rspamd_re_cache_replace (cfg->re_cache, old_re->re, new_re->re);
 		}
 	}
@@ -3128,21 +3155,36 @@ lua_config_add_on_load (lua_State *L)
 	return 0;
 }
 
+static inline int
+rspamd_post_init_sc_sort (const struct rspamd_config_cfg_lua_script *pra,
+				const struct rspamd_config_cfg_lua_script *prb)
+{
+	/* Inverse sort */
+	return prb->priority - pra->priority;
+}
+
 static gint
 lua_config_add_post_init (lua_State *L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	struct rspamd_config_cfg_lua_script *sc;
+	guint priority = 0;
 
 	if (cfg == NULL || lua_type (L, 2) != LUA_TFUNCTION) {
 		return luaL_error (L, "invalid arguments");
 	}
 
+	if (lua_type (L, 3) == LUA_TNUMBER) {
+		priority = lua_tointeger (L , 3);
+	}
+
 	sc = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*sc));
 	lua_pushvalue (L, 2);
 	sc->cbref = luaL_ref (L, LUA_REGISTRYINDEX);
+	sc->priority = priority;
 	DL_APPEND (cfg->post_init_scripts, sc);
+	DL_SORT (cfg->post_init_scripts, rspamd_post_init_sc_sort);
 
 	return 0;
 }
