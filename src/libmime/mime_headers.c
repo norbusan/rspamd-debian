@@ -20,6 +20,7 @@
 #include "contrib/uthash/utlist.h"
 #include "libserver/mempool_vars_internal.h"
 #include "libserver/url.h"
+#include "libserver/cfg_file.h"
 #include "libutil/util.h"
 #include <unicode/utf8.h>
 
@@ -43,6 +44,11 @@ rspamd_mime_header_check_special (struct rspamd_task *task,
 	struct rspamd_received_header *recv;
 	const gchar *p, *end;
 	gchar *id;
+	gint max_recipients = -1;
+
+	if (task->cfg) {
+		max_recipients = task->cfg->max_recipients;
+	}
 
 	h = rspamd_icase_hash (rh->name, strlen (rh->name), 0xdeadbabe);
 
@@ -61,26 +67,26 @@ rspamd_mime_header_check_special (struct rspamd_task *task,
 		break;
 	case 0x76F31A09F4352521ULL:	/* to */
 		MESSAGE_FIELD (task, rcpt_mime) = rspamd_email_address_from_mime (task->task_pool,
-				rh->decoded, strlen (rh->decoded),
-				MESSAGE_FIELD (task, rcpt_mime));
+				rh->value, strlen (rh->value),
+				MESSAGE_FIELD (task, rcpt_mime), max_recipients);
 		rh->flags |= RSPAMD_HEADER_TO|RSPAMD_HEADER_RCPT|RSPAMD_HEADER_UNIQUE;
 		break;
 	case 0x7EB117C1480B76ULL:	/* cc */
 		MESSAGE_FIELD (task, rcpt_mime) = rspamd_email_address_from_mime (task->task_pool,
-				rh->decoded, strlen (rh->decoded),
-				MESSAGE_FIELD (task, rcpt_mime));
+				rh->value, strlen (rh->value),
+				MESSAGE_FIELD (task, rcpt_mime), max_recipients);
 		rh->flags |= RSPAMD_HEADER_CC|RSPAMD_HEADER_RCPT|RSPAMD_HEADER_UNIQUE;
 		break;
 	case 0xE4923E11C4989C8DULL:	/* bcc */
 		MESSAGE_FIELD (task, rcpt_mime) = rspamd_email_address_from_mime (task->task_pool,
-				rh->decoded, strlen (rh->decoded),
-				MESSAGE_FIELD (task, rcpt_mime));
+				rh->value, strlen (rh->value),
+				MESSAGE_FIELD (task, rcpt_mime), max_recipients);
 		rh->flags |= RSPAMD_HEADER_BCC|RSPAMD_HEADER_RCPT|RSPAMD_HEADER_UNIQUE;
 		break;
 	case 0x41E1985EDC1CBDE4ULL:	/* from */
 		MESSAGE_FIELD (task, from_mime) = rspamd_email_address_from_mime (task->task_pool,
-				rh->decoded, strlen (rh->decoded),
-				MESSAGE_FIELD (task, from_mime));
+				rh->value, strlen (rh->value),
+				MESSAGE_FIELD (task, from_mime), max_recipients);
 		rh->flags |= RSPAMD_HEADER_FROM|RSPAMD_HEADER_SENDER|RSPAMD_HEADER_UNIQUE;
 		break;
 	case 0x43A558FC7C240226ULL:	/* message-id */ {
@@ -653,9 +659,10 @@ rspamd_mime_header_decode (rspamd_mempool_t *pool, const gchar *in,
 				qmarks = 0;
 			}
 			else {
-				g_string_append_len (out, c, 2);
-				c = p + 1;
+				g_string_append_len (out, c, 1);
+				c = p;
 				state = parse_normal;
+				continue; /* Deal with == case */
 			}
 			p ++;
 			break;
@@ -900,6 +907,7 @@ enum rspamd_received_part_type {
 	RSPAMD_RECEIVED_PART_BY,
 	RSPAMD_RECEIVED_PART_FOR,
 	RSPAMD_RECEIVED_PART_WITH,
+	RSPAMD_RECEIVED_PART_ID,
 	RSPAMD_RECEIVED_PART_UNKNOWN,
 };
 
@@ -1231,6 +1239,12 @@ rspamd_smtp_received_spill (struct rspamd_task *task,
 				p += sizeof ("for") - 1;
 				cur_part = rspamd_smtp_received_process_part (task, p, end - p,
 						RSPAMD_RECEIVED_PART_FOR, &pos);
+			}
+			else if (len > sizeof ("id") && (lc_map[p[0]] == 'i' &&
+											  lc_map[p[1]] == 'd')) {
+				p += sizeof ("id") - 1;
+				cur_part = rspamd_smtp_received_process_part (task, p, end - p,
+						RSPAMD_RECEIVED_PART_ID, &pos);
 			}
 			else {
 				while (p < end) {
@@ -1609,6 +1623,22 @@ rspamd_smtp_received_parse (struct rspamd_task *task,
 			}
 
 			break;
+		case RSPAMD_RECEIVED_PART_FOR:
+			rh->for_addr = rspamd_email_address_from_smtp (cur->data, cur->dlen);
+
+			if (rh->for_addr) {
+				if (rh->for_addr->addr_len > 0) {
+					t1.begin = rh->for_addr->addr;
+					t1.len = rh->for_addr->addr_len;
+					rh->for_mbox = rspamd_mempool_ftokdup (task->task_pool,
+							&t1);
+				}
+
+				rspamd_mempool_add_destructor (task->task_pool,
+						(rspamd_mempool_destruct_t)rspamd_email_address_free,
+						rh->for_addr);
+			}
+			break;
 		default:
 			/* Do nothing */
 			break;
@@ -1625,7 +1655,7 @@ rspamd_smtp_received_parse (struct rspamd_task *task,
 
 	if (date_pos > 0 && date_pos < len) {
 		rh->timestamp = rspamd_parse_smtp_date (data + date_pos,
-				len - date_pos);
+				len - date_pos, NULL);
 	}
 
 	return 0;

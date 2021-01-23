@@ -116,7 +116,9 @@ urls:mutex(
     urls:flag "-t --tld"
         :description "Get TLDs only",
     urls:flag "-H --host"
-        :description "Get hosts only"
+        :description "Get hosts only",
+    urls:flag "-f --full"
+      :description "Show piecewise urls as processed by Rspamd"
 )
 
 urls:flag "-u --unique"
@@ -513,6 +515,8 @@ local function urls_handler(opts)
         s = u:get_tld()
       elseif opts.host then
         s = u:get_host()
+      elseif opts.full then
+        s = rspamd_logger.slog('%s: %s', u:get_text(), u:to_table())
       else
         s = u:get_text()
       end
@@ -723,20 +727,27 @@ local function modify_handler(opts)
         out[#out + 1] = o
       end
     else
-      out[#out + 1] = task:get_rawbody()
+      out[#out + 1] = {task:get_rawbody(), false}
     end
 
     for _,o in ipairs(out) do
       if type(o) == 'string' then
         io.write(o)
         io.write(newline_s)
-      else
+      elseif type(o) == 'table' then
         io.flush()
-        o[1]:save_in_file(1)
+        if type(o[1]) == 'string' then
+          io.write(o[1])
+        else
+          o[1]:save_in_file(1)
+        end
 
         if o[2] then
           io.write(newline_s)
         end
+      else
+        o:save_in_file(1)
+        io.write(newline_s)
       end
     end
 
@@ -749,6 +760,11 @@ local function sign_handler(opts)
   rspamd_url.init(rspamd_config:get_tld_path())
 
   local lua_dkim = require("lua_ffi").dkim
+
+  if not lua_dkim then
+    io.stderr:write('FFI support is required: please use LuaJIT or install lua-ffi')
+    os.exit(1)
+  end
 
   local sign_key
   if rspamd_util.file_exists(opts.key) then

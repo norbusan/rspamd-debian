@@ -89,6 +89,8 @@ local settings = {
   key_prefix = 'arc_keys', -- default hash name
   reuse_auth_results = false, -- Reuse the existing authentication results
   whitelisted_signers_map = nil, -- Trusted signers domains
+  allowed_ids = nil, -- Allowed settings id
+  forbidden_ids = nil, -- Banned settings id
 }
 
 -- To match normal AR
@@ -119,44 +121,54 @@ local function parse_arc_header(hdr, target)
     target[i].header = hdr[i].decoded
     target[i].raw_header = hdr[i].value
   end
+
+  -- sort by i= attribute
+  table.sort(target, function(a, b)
+    return (a.i or 0) < (b.i or 0)
+  end)
 end
 
 local function arc_validate_seals(task, seals, sigs, seal_headers, sig_headers)
+  local fail_reason
   for i = 1,#seals do
     if (sigs[i].i or 0) ~= i then
-      rspamd_logger.infox(task, 'bad i value for signature: %s, expected %s',
-        sigs[i].i, i)
-      task:insert_result(arc_symbols['invalid'], 1.0, 'invalid count of seals and signatures')
-      return false
+      fail_reason = string.format('bad i for signature: %d, expected %d; d=%s',
+          sigs[i].i, i, sigs[i].d)
+      rspamd_logger.infox(task, fail_reason)
+      task:insert_result(arc_symbols['invalid'], 1.0, fail_reason)
+      return false,fail_reason
     end
     if (seals[i].i or 0) ~= i then
-      rspamd_logger.infox(task, 'bad i value for seal: %s, expected %s',
-        seals[i].i, i)
-      task:insert_result(arc_symbols['invalid'], 1.0, 'invalid count of seals and signatures')
-      return false
+      fail_reason = string.format('bad i for seal: %d, expected %d; d=%s',
+          seals[i].i, i, seals[i].d)
+      rspamd_logger.infox(task, fail_reason)
+      task:insert_result(arc_symbols['invalid'], 1.0,fail_reason)
+      return false,fail_reason
     end
 
     if not seals[i].cv then
-      task:insert_result(arc_symbols['invalid'], 1.0, 'no cv on i=' .. tostring(i))
-      return false
+      fail_reason = string.format('no cv on i=%d', i)
+      task:insert_result(arc_symbols['invalid'], 1.0, fail_reason)
+      return false,fail_reason
     end
 
     if i == 1 then
       -- We need to ensure that cv of seal is equal to 'none'
       if seals[i].cv ~= 'none' then
-        task:insert_result(arc_symbols['invalid'], 1.0, 'cv is not "none" for i=1')
-        return false
+        fail_reason = 'cv is not "none" for i=1'
+        task:insert_result(arc_symbols['invalid'], 1.0, fail_reason)
+        return false,fail_reason
       end
     else
       if seals[i].cv ~= 'pass' then
-        task:insert_result(arc_symbols['reject'], 1.0, string.format('cv is %s on i=%d',
-            seals[i].cv, i))
-        return false
+        fail_reason = string.format('cv is %s on i=%d',  seals[i].cv, i)
+        task:insert_result(arc_symbols['reject'], 1.0, fail_reason)
+        return true,fail_reason
       end
     end
   end
 
-  return true
+  return true,nil
 end
 
 local function arc_callback(task)
@@ -208,13 +220,20 @@ local function arc_callback(task)
   lua_util.debugm(N, task, 'got %s arc sections', #cbdata.seals)
 
   -- Now check sanity of what we have
-  if not arc_validate_seals(task, cbdata.seals, cbdata.sigs,
-    arc_seal_headers, arc_sig_headers) then
+  local valid,validation_error = arc_validate_seals(task, cbdata.seals, cbdata.sigs,
+      arc_seal_headers, arc_sig_headers)
+  if not valid then
+    task:cache_set('arc-failure', validation_error)
     return
   end
 
   task:cache_set('arc-sigs', cbdata.sigs)
   task:cache_set('arc-seals', cbdata.seals)
+
+  if validation_error then
+    -- ARC rejection but no strong failure for signing
+    return
+  end
 
   local function gen_arc_seal_cb(sig)
     return function (_, res, err, domain)
@@ -239,8 +258,10 @@ local function arc_callback(task)
 
       if cbdata.checked == #arc_sig_headers then
         if cbdata.res == 'success' then
-          task:insert_result(arc_symbols.allow, 1.0, string.format('%s:s=%s:i=%d',
-              domain, sig.s, cbdata.checked))
+          local arc_allow_result = string.format('%s:s=%s:i=%d',
+              domain, sig.s, cbdata.checked)
+          task:insert_result(arc_symbols.allow, 1.0, arc_allow_result)
+          task:cache_set('arc-allow', arc_allow_result)
         else
           task:insert_result(arc_symbols.reject, 1.0,
               rspamd_logger.slog('seal check failed: %s, %s', cbdata.res,
@@ -537,11 +558,21 @@ local function arc_sign_seal(task, params, header)
         'ARC-Seal', cur_arc_seal) }
     }
   })
-  task:insert_result(settings.sign_symbol, 1.0, string.format('i=%d', cur_idx))
+  task:insert_result(settings.sign_symbol, 1.0,
+      string.format('%s:s=%s:i=%d', params.domain, params.selector, cur_idx))
 end
 
 local function prepare_arc_selector(task, sel)
   local arc_seals = task:cache_get('arc-seals')
+
+  if not arc_seals then
+    -- Check if our arc is broken
+    local failure_reason = task:cache_get('arc-failure')
+    if failure_reason then
+      rspamd_logger.infox(task, 'skip ARC as the existing chain is broken: %s', failure_reason)
+      return false
+    end
+  end
 
   sel.arc_cv = 'none'
   sel.arc_idx = 1
@@ -551,58 +582,84 @@ local function prepare_arc_selector(task, sel)
   if arc_seals then
     sel.arc_idx = #arc_seals + 1
 
-    if task:has_symbol(arc_symbols.allow) then
-      sel.arc_cv = 'pass'
-    else
-      sel.arc_cv = 'fail'
+    local function default_arc_cv()
+      if task:cache_get('arc-allow') then
+        sel.arc_cv = 'pass'
+      else
+        sel.arc_cv = 'fail'
+      end
     end
+
+    if settings.reuse_auth_results then
+      local ar_header = task:get_header('Authentication-Results')
+
+      if ar_header then
+        local arc_match = string.match(ar_header, 'arc=(%w+)')
+
+        if arc_match then
+          if arc_match == 'none' or arc_match == 'pass' then
+            -- none should be converted to `pass`
+            sel.arc_cv = 'pass'
+          else
+            sel.arc_cv = 'fail'
+          end
+        else
+          default_arc_cv()
+        end
+      else
+        -- Cannot reuse, use normal path
+        default_arc_cv()
+      end
+    else
+      default_arc_cv()
+    end
+
   end
+
+  return true
 end
 
-local function do_sign(task, p)
-  if p.alg and p.alg ~= 'rsa' then
+local function do_sign(task, sign_params)
+  if sign_params.alg and sign_params.alg ~= 'rsa' then
     -- No support for ed25519 keys
     return
   end
 
-  prepare_arc_selector(task, p)
+  if not prepare_arc_selector(task, sign_params) then
+    -- Broken arc
+    return
+  end
 
   if settings.check_pubkey then
-    local resolve_name = p.selector .. "._domainkey." .. p.domain
+    local resolve_name = sign_params.selector .. "._domainkey." .. sign_params.domain
     task:get_resolver():resolve_txt({
       task = task,
       name = resolve_name,
       callback = function(_, _, results, err)
         if not err and results and results[1] then
-          p.pubkey = results[1]
-          p.strict_pubkey_check = not settings.allow_pubkey_mismatch
+          sign_params.pubkey = results[1]
+          sign_params.strict_pubkey_check = not settings.allow_pubkey_mismatch
         elseif not settings.allow_pubkey_mismatch then
           rspamd_logger.errx('public key for domain %s/%s is not found: %s, skip signing',
-              p.domain, p.selector, err)
+              sign_params.domain, sign_params.selector, err)
           return
         else
           rspamd_logger.infox('public key for domain %s/%s is not found: %s',
-              p.domain, p.selector, err)
+              sign_params.domain, sign_params.selector, err)
         end
 
-        local dret, hdr = dkim_sign(task, p)
+        local dret, hdr = dkim_sign(task, sign_params)
         if dret then
-          local sret, _ = arc_sign_seal(task, p, hdr)
-          if sret then
-            task:insert_result(settings.sign_symbol, 1.0)
-          end
+          arc_sign_seal(task, sign_params, hdr)
         end
 
       end,
       forced = true
     })
   else
-    local dret, hdr = dkim_sign(task, p)
+    local dret, hdr = dkim_sign(task, sign_params)
     if dret then
-      local sret, _ = arc_sign_seal(task, p, hdr)
-      if sret then
-        task:insert_result(settings.sign_symbol, 1.0)
-      end
+      arc_sign_seal(task, sign_params, hdr)
     end
   end
 end
@@ -625,27 +682,27 @@ local function arc_signing_cb(task)
       dkim_sign_tools.sign_using_vault(N, task, settings, selectors, do_sign, sign_error)
     else
       -- TODO: no support for multiple sigs
-      local p = selectors[1]
-      prepare_arc_selector(task, p)
-      if ((p.key or p.rawkey) and p.selector) then
-        if p.key then
-          p.key = lua_util.template(p.key, {
-            domain = p.domain,
-            selector = p.selector
+      local cur_selector = selectors[1]
+      prepare_arc_selector(task, cur_selector)
+      if ((cur_selector.key or cur_selector.rawkey) and cur_selector.selector) then
+        if cur_selector.key then
+          cur_selector.key = lua_util.template(cur_selector.key, {
+            domain = cur_selector.domain,
+            selector = cur_selector.selector
           })
 
-          local exists,err = rspamd_util.file_exists(p.key)
+          local exists,err = rspamd_util.file_exists(cur_selector.key)
           if not exists then
             if err and err == 'No such file or directory' then
-              lua_util.debugm(N, task, 'cannot read key from %s: %s', p.key, err)
+              lua_util.debugm(N, task, 'cannot read key from %s: %s', cur_selector.key, err)
             else
-              rspamd_logger.warnx(task, 'cannot read key from %s: %s', p.key, err)
+              rspamd_logger.warnx(task, 'cannot read key from %s: %s', cur_selector.key, err)
             end
             return false
           end
         end
 
-        do_sign(task, p)
+        do_sign(task, cur_selector)
       else
         rspamd_logger.infox(task, 'key path or dkim selector unconfigured; no signing')
         return false
@@ -684,12 +741,20 @@ if settings.use_redis then
   settings.redis_params = redis_params
 end
 
-rspamd_config:register_symbol({
+local sym_reg_tbl = {
   name = settings['sign_symbol'],
   callback = arc_signing_cb,
   groups = {"policies", "arc"},
   score = 0.0,
-})
+}
+if type(settings.allowed_ids) == 'table' then
+  sym_reg_tbl.allowed_ids = settings.allowed_ids
+end
+if type(settings.forbidden_ids) == 'table' then
+  sym_reg_tbl.forbidden_ids = settings.forbidden_ids
+end
 
--- Do not sign unless valid
+rspamd_config:register_symbol(sym_reg_tbl)
+
+-- Do not sign unless checked
 rspamd_config:register_dependency(settings['sign_symbol'], 'ARC_CALLBACK')

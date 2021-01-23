@@ -271,7 +271,7 @@ lua_html_push_image (lua_State *L, struct html_image *img)
 	struct lua_html_tag *ltag;
 	struct rspamd_url **purl;
 
-	lua_newtable (L);
+	lua_createtable (L, 0, 7);
 
 	if (img->src) {
 		lua_pushstring (L, "src");
@@ -334,21 +334,20 @@ lua_html_get_images (lua_State *L)
 	guint i;
 
 	if (hc != NULL) {
-		lua_newtable (L);
+		if (hc->images) {
+			lua_createtable (L, hc->images->len, 0);
 
-		if (hc->images && hc->images->len > 0) {
-			for (i = 0; i < hc->images->len; i ++) {
-				img = g_ptr_array_index (hc->images, i);
+			PTR_ARRAY_FOREACH (hc->images, i, img) {
 				lua_html_push_image (L, img);
 				lua_rawseti (L, -2, i + 1);
 			}
 		}
 		else {
-			lua_pushnil (L);
+			lua_newtable (L);
 		}
 	}
 	else {
-		lua_pushnil (L);
+		lua_newtable (L);
 	}
 
 	return 1;
@@ -716,15 +715,15 @@ lua_html_tag_get_extra (lua_State *L)
 
 	if (ltag) {
 		if (ltag->tag->extra) {
-			if ((ltag->tag->flags & FL_HREF) || ltag->tag->id == Tag_BASE) {
+			if (ltag->tag->flags & FL_IMAGE) {
+				img = ltag->tag->extra;
+				lua_html_push_image (L, img);
+			}
+			else if (ltag->tag->flags & FL_HREF) {
 				/* For A that's URL */
 				purl = lua_newuserdata (L, sizeof (gpointer));
 				*purl = ltag->tag->extra;
 				rspamd_lua_setclass (L, "rspamd{url}", -1);
-			}
-			else if (ltag->tag->id == Tag_IMG) {
-				img = ltag->tag->extra;
-				lua_html_push_image (L, img);
 			}
 			else if (ltag->tag->flags & FL_BLOCK) {
 				lua_html_push_block (L, ltag->tag->extra);

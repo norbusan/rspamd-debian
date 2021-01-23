@@ -202,12 +202,13 @@ void rspamd_worker_session_cache_remove (void *cache, void *ptr);
 struct rspamd_worker *rspamd_fork_worker (struct rspamd_main *,
 										  struct rspamd_worker_conf *, guint idx,
 										  struct ev_loop *ev_base,
-										  rspamd_worker_term_cb term_handler);
+										  rspamd_worker_term_cb term_handler,
+										  GHashTable *listen_sockets);
 
 /**
  * Sets crash signals handlers if compiled with libunwind
  */
-void rspamd_set_crash_handler (struct rspamd_main *);
+RSPAMD_NO_SANITIZE void rspamd_set_crash_handler (struct rspamd_main *);
 
 /**
  * Initialise the main monitoring worker

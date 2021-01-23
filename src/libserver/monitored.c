@@ -265,7 +265,7 @@ rspamd_monitored_dns_conf (struct rspamd_monitored *m,
 		if (elt) {
 			if (ucl_object_type (elt) == UCL_STRING) {
 				radix_add_generic_iplist (ucl_object_tostring (elt),
-						&conf->expected, FALSE);
+						&conf->expected, FALSE, NULL);
 			}
 			else if (ucl_object_type (elt) == UCL_ARRAY) {
 				const ucl_object_t *cur;
@@ -273,7 +273,7 @@ rspamd_monitored_dns_conf (struct rspamd_monitored *m,
 
 				while ((cur = ucl_object_iterate (elt, &it, true)) != NULL) {
 					radix_add_generic_iplist (ucl_object_tostring (elt),
-							&conf->expected, FALSE);
+							&conf->expected, FALSE, NULL);
 				}
 			}
 		}
@@ -558,7 +558,7 @@ rspamd_monitored_create_ (struct rspamd_monitored_ctx *ctx,
 	rspamd_cryptobox_hash_update (&st, m->url, strlen (m->url));
 	rspamd_cryptobox_hash_update (&st, loc, strlen (loc));
 	rspamd_cryptobox_hash_final (&st, cksum);
-	cksum_encoded = rspamd_encode_base32 (cksum, sizeof (cksum));
+	cksum_encoded = rspamd_encode_base32 (cksum, sizeof (cksum), RSPAMD_BASE32_DEFAULT);
 	rspamd_strlcpy (m->tag, cksum_encoded, sizeof (m->tag));
 
 	if (g_hash_table_lookup (ctx->helts, m->tag) != NULL) {

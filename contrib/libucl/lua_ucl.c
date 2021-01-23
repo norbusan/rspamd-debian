@@ -240,7 +240,7 @@ ucl_object_lua_push_scalar (lua_State *L, const ucl_object_t *obj,
 		lua_pushboolean (L, ucl_obj_toboolean (obj));
 		break;
 	case UCL_STRING:
-		lua_pushstring (L, ucl_obj_tostring (obj));
+		lua_pushlstring (L, ucl_obj_tostring (obj), obj->len);
 		break;
 	case UCL_INT:
 #if LUA_VERSION_NUM >= 501
@@ -598,11 +598,12 @@ static int
 lua_ucl_to_string (lua_State *L, const ucl_object_t *obj, enum ucl_emitter type)
 {
 	unsigned char *result;
+	size_t outlen;
 
-	result = ucl_object_emit (obj, type);
+	result = ucl_object_emit_len (obj, type, &outlen);
 
 	if (result != NULL) {
-		lua_pushstring (L, (const char *)result);
+		lua_pushlstring (L, (const char *)result, outlen);
 		free (result);
 	}
 	else {
@@ -854,7 +855,21 @@ lua_ucl_parser_parse_text (lua_State *L)
 	int ret = 2;
 
 	parser = lua_ucl_parser_get (L, 1);
-	t = lua_touserdata (L, 2);
+
+	if (lua_type (L, 2) == LUA_TUSERDATA) {
+		t = lua_touserdata (L, 2);
+	}
+	else {
+		const gchar *s;
+		gsize len;
+		static struct _rspamd_lua_text st_t;
+
+		s = lua_tolstring (L, 2, &len);
+		st_t.start = s;
+		st_t.len = len;
+
+		t = &st_t;
+	}
 
 	if (lua_type (L, 3) == LUA_TSTRING) {
 		type = lua_ucl_str_to_parse_type (lua_tostring (L, 3));

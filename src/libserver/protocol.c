@@ -374,7 +374,8 @@ rspamd_protocol_handle_flag (struct rspamd_task *task, const gchar *str,
 
 	CHECK_TASK_FLAG("pass_all", RSPAMD_TASK_FLAG_PASS_ALL);
 	CHECK_TASK_FLAG("no_log", RSPAMD_TASK_FLAG_NO_LOG);
-	CHECK_TASK_FLAG("skip", RSPAMD_TASK_FLAG_NO_LOG);
+	CHECK_TASK_FLAG("skip", RSPAMD_TASK_FLAG_SKIP);
+	CHECK_TASK_FLAG("skip_process", RSPAMD_TASK_FLAG_SKIP_PROCESS);
 	CHECK_TASK_FLAG("no_stat", RSPAMD_TASK_FLAG_NO_STAT);
 	CHECK_TASK_FLAG("ssl", RSPAMD_TASK_FLAG_SSL);
 	CHECK_TASK_FLAG("profile", RSPAMD_TASK_FLAG_PROFILE);
@@ -1182,7 +1183,7 @@ rspamd_scan_result_ucl (struct rspamd_task *task,
 	const gchar *subject;
 	struct rspamd_passthrough_result *pr = NULL;
 
-	action = rspamd_check_action_metric (task, &pr);
+	action = rspamd_check_action_metric (task, &pr, NULL);
 	is_spam = !(action->flags & RSPAMD_ACTION_HAM);
 
 	if (task->cmd == CMD_CHECK) {
@@ -1761,7 +1762,7 @@ end:
 
 		if (metric_res != NULL) {
 
-			action = rspamd_check_action_metric (task, NULL);
+			action = rspamd_check_action_metric (task, NULL, NULL);
 			/* TODO: handle custom actions in stats */
 			if (action->action_type == METRIC_ACTION_SOFT_REJECT &&
 					(task->flags & RSPAMD_TASK_FLAG_GREYLISTED)) {

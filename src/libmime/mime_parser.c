@@ -23,6 +23,8 @@
 #include "multipattern.h"
 #include "contrib/libottery/ottery.h"
 #include "contrib/uthash/utlist.h"
+#include <openssl/cms.h>
+#include <openssl/pkcs7.h>
 
 struct rspamd_mime_parser_lib_ctx {
 	struct rspamd_multipattern *mp_boundary;
@@ -77,7 +79,16 @@ static enum rspamd_mime_parse_error
 rspamd_mime_parse_normal_part (struct rspamd_task *task,
 		struct rspamd_mime_part *part,
 		struct rspamd_mime_parser_ctx *st,
+		struct rspamd_content_type *ct,
 		GError **err);
+
+static enum rspamd_mime_parse_error
+rspamd_mime_process_multipart_node (struct rspamd_task *task,
+									struct rspamd_mime_parser_ctx *st,
+									struct rspamd_mime_part *multipart,
+									const gchar *start, const gchar *end,
+									gboolean is_finished,
+									GError **err);
 
 
 #define RSPAMD_MIME_QUARK (rspamd_mime_parser_quark())
@@ -575,6 +586,7 @@ static enum rspamd_mime_parse_error
 rspamd_mime_parse_normal_part (struct rspamd_task *task,
 		struct rspamd_mime_part *part,
 		struct rspamd_mime_parser_ctx *st,
+		struct rspamd_content_type *ct,
 		GError **err)
 {
 	rspamd_fstring_t *parsed;
@@ -683,11 +695,73 @@ rspamd_mime_parse_normal_part (struct rspamd_task *task,
 	}
 
 	part->part_number = MESSAGE_FIELD (task, parts)->len;
+	part->urls = g_ptr_array_new ();
 	g_ptr_array_add (MESSAGE_FIELD (task, parts), part);
 	msg_debug_mime ("parsed data part %T/%T of length %z (%z orig), %s cte",
 			&part->ct->type, &part->ct->subtype, part->parsed_data.len,
 			part->raw_data.len, rspamd_cte_to_string (part->cte));
 	rspamd_mime_parser_calc_digest (part);
+
+	if (ct && (ct->flags & RSPAMD_CONTENT_TYPE_SMIME)) {
+		CMS_ContentInfo *cms;
+		const unsigned char *der_beg = part->parsed_data.begin;
+		cms = d2i_CMS_ContentInfo (NULL, &der_beg, part->parsed_data.len);
+
+		if (cms) {
+			const ASN1_OBJECT *asn_ct = CMS_get0_eContentType (cms);
+			int ct_nid = OBJ_obj2nid (asn_ct);
+
+			if (ct_nid == NID_pkcs7_data) {
+				BIO *bio = BIO_new_mem_buf (part->parsed_data.begin,
+						part->parsed_data.len);
+
+				PKCS7 *p7;
+				p7 = d2i_PKCS7_bio (bio, NULL);
+
+				if (p7) {
+					ct_nid = OBJ_obj2nid (p7->type);
+
+					if (ct_nid == NID_pkcs7_signed) {
+						PKCS7 *p7_signed_content = p7->d.sign->contents;
+
+						ct_nid =  OBJ_obj2nid (p7_signed_content->type);
+
+						if (ct_nid == NID_pkcs7_data) {
+							int ret;
+
+							msg_debug_mime ("found an additional part inside of "
+											"smime structure of type %T/%T; length=%d",
+									&ct->type, &ct->subtype, p7_signed_content->d.data->length);
+							/*
+							 * Since ASN.1 structures are freed, we need to copy
+							 * the content
+							 */
+							gchar *cpy = rspamd_mempool_alloc (task->task_pool,
+									p7_signed_content->d.data->length);
+							memcpy (cpy, p7_signed_content->d.data->data,
+									p7_signed_content->d.data->length);
+							ret = rspamd_mime_process_multipart_node (task,
+									st, NULL,
+									cpy,cpy + p7_signed_content->d.data->length,
+									TRUE, err);
+
+							PKCS7_free (p7);
+							BIO_free (bio);
+							CMS_ContentInfo_free (cms);
+
+							return ret;
+						}
+					}
+
+					PKCS7_free (p7);
+				}
+
+				BIO_free (bio);
+			}
+
+			CMS_ContentInfo_free (cms);
+		}
+	}
 
 	return RSPAMD_MIME_PARSE_OK;
 }
@@ -838,13 +912,13 @@ rspamd_mime_process_multipart_node (struct rspamd_task *task,
 		g_ptr_array_add (st->stack, npart);
 		npart->part_type = RSPAMD_MIME_PART_MESSAGE;
 
-		if ((ret = rspamd_mime_parse_normal_part (task, npart, st, err))
+		if ((ret = rspamd_mime_parse_normal_part (task, npart, st, sel, err))
 				== RSPAMD_MIME_PARSE_OK) {
 			ret = rspamd_mime_parse_message (task, npart, st, err);
 		}
 	}
 	else {
-		ret = rspamd_mime_parse_normal_part (task, npart, st, err);
+		ret = rspamd_mime_parse_normal_part (task, npart, st, sel, err);
 	}
 
 	return ret;
@@ -1017,6 +1091,7 @@ rspamd_mime_parse_multipart_part (struct rspamd_task *task,
 	}
 
 	part->part_number = MESSAGE_FIELD (task, parts)->len;
+	part->urls = g_ptr_array_new ();
 	g_ptr_array_add (MESSAGE_FIELD (task, parts), part);
 	st->nesting ++;
 	rspamd_mime_part_get_cte (task, part->raw_headers, part, FALSE);
@@ -1108,19 +1183,26 @@ rspamd_mime_preprocess_cb (struct rspamd_multipattern *mp,
 				bend ++;
 			}
 
-			if (bend < end) {
+			while (bend < end) {
 				if (*bend == '\r') {
-					bend++;
+					bend ++;
 
 					/* \r\n */
 					if (bend < end && *bend == '\n') {
-						bend++;
+						bend ++;
 					}
 				}
-				else {
+				else if (*bend == '\n') {
 					/* \n */
-					bend++;
+					bend ++;
 				}
+				else if (g_ascii_isspace (*bend)){
+					/* Spaces in the same line, skip them */
+					bend ++;
+					continue;
+				}
+
+				break;
 			}
 
 			b.boundary = p - st->start - 2;
@@ -1292,34 +1374,6 @@ rspamd_mime_parse_message (struct rspamd_task *task,
 		/* Top level message */
 		p = task->msg.begin;
 		len = task->msg.len;
-		/* Skip any space characters to avoid some bad messages to be unparsed */
-		while (len > 0 && g_ascii_isspace (*p)) {
-			p ++;
-			len --;
-		}
-		/*
-		 * Exim somehow uses mailbox format for messages being scanned:
-		 * From x@x.com Fri May 13 19:08:48 2016
-		 *
-		 * Need to check that for all inputs due to proxy
-		 */
-		if (len > sizeof ("From ") - 1) {
-			if (memcmp (p, "From ", sizeof ("From ") - 1) == 0) {
-				/* Skip to CRLF */
-				msg_info_task ("mailbox input detected, enable workaround");
-				p += sizeof ("From ") - 1;
-				len -= sizeof ("From ") - 1;
-
-				while (len > 0 && *p != '\n') {
-					p ++;
-					len --;
-				}
-				while (len > 0 && g_ascii_isspace (*p)) {
-					p ++;
-					len --;
-				}
-			}
-		}
 
 		str.str = (gchar *)p;
 		str.len = len;
@@ -1497,14 +1551,14 @@ rspamd_mime_parse_message (struct rspamd_task *task,
 		ret = rspamd_mime_parse_multipart_part (task, npart, nst, err);
 	}
 	else if (sel->flags & RSPAMD_CONTENT_TYPE_MESSAGE) {
-		if ((ret = rspamd_mime_parse_normal_part (task, npart, nst, err))
+		if ((ret = rspamd_mime_parse_normal_part (task, npart, nst, sel, err))
 			== RSPAMD_MIME_PARSE_OK) {
 			npart->part_type = RSPAMD_MIME_PART_MESSAGE;
 			ret = rspamd_mime_parse_message (task, npart, nst, err);
 		}
 	}
 	else {
-		ret = rspamd_mime_parse_normal_part (task, npart, nst, err);
+		ret = rspamd_mime_parse_normal_part (task, npart, nst, sel, err);
 	}
 
 	if (ret != RSPAMD_MIME_PARSE_OK) {

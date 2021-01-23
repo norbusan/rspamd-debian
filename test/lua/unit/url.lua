@@ -118,6 +118,21 @@ context("URL check functions", function()
     {"http:www.twitter.com#test", true, {
       host = 'www.twitter.com', fragment = 'test'
     }},
+    {"http://example。com#test", true, {
+      host = 'example.com', fragment = 'test'
+    }},
+    {"http://hoho.example。com#test", true, {
+      host = 'hoho.example.com', fragment = 'test'
+    }},
+    {"http://hoho。example。com#test", true, {
+      host = 'hoho.example.com', fragment = 'test'
+    }},
+    {"http://hoho．example。com#test", true, {
+      host = 'hoho.example.com', fragment = 'test'
+    }},
+    {"http://hehe｡example。com#test", true, {
+      host = 'hehe.example.com', fragment = 'test'
+    }},
   }
 
   -- Some cases from https://code.google.com/p/google-url/source/browse/trunk/src/url_canon_unittest.cc
@@ -169,10 +184,11 @@ context("URL check functions", function()
     {"..", "/"},
     {"/../", "/"},
     {"../", "/"},
+    {"///foo", "/foo"},
   }
 
   for i,v in ipairs(cases) do
-    test("Normalize paths " .. i, function()
+    test(string.format("Normalize paths '%s'", v[1]), function()
       local buf = ffi.new("uint8_t[?]", #v[1])
       local sizbuf = ffi.new("size_t[1]")
       ffi.copy(buf, v[1], #v[1])

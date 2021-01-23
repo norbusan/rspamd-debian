@@ -924,22 +924,34 @@ rspamd_parse_inet_address_ip (const char *src, gsize srclen,
 	return ret;
 }
 
+/*
+ * This is used to allow rspamd_inet_address_to_string to be used several times
+ * at the same function invocation, like printf("%s -> %s", f(ip1), f(ip2));
+ * Yes, it is bad but it helps to utilise this function without temporary buffers
+ * for up to 5 simultaneous invocations.
+ */
+#define NADDR_BUFS 5
+
 const char *
 rspamd_inet_address_to_string (const rspamd_inet_addr_t *addr)
 {
-	static char addr_str[INET6_ADDRSTRLEN + 1];
+	static char addr_str[NADDR_BUFS][INET6_ADDRSTRLEN + 1];
+	static guint cur_addr = 0;
+	char *addr_buf;
 
 	if (addr == NULL) {
 		return "<empty inet address>";
 	}
 
+	addr_buf = addr_str[cur_addr++ % NADDR_BUFS];
+
 	switch (addr->af) {
 	case AF_INET:
-		return inet_ntop (addr->af, &addr->u.in.addr.s4.sin_addr, addr_str,
-				   sizeof (addr_str));
+		return inet_ntop (addr->af, &addr->u.in.addr.s4.sin_addr, addr_buf,
+				INET6_ADDRSTRLEN + 1);
 	case AF_INET6:
-		return inet_ntop (addr->af, &addr->u.in.addr.s6.sin6_addr, addr_str,
-				   sizeof (addr_str));
+		return inet_ntop (addr->af, &addr->u.in.addr.s6.sin6_addr, addr_buf,
+				INET6_ADDRSTRLEN + 1);
 	case AF_UNIX:
 		return addr->u.un->addr.sun_path;
 	}
@@ -947,33 +959,39 @@ rspamd_inet_address_to_string (const rspamd_inet_addr_t *addr)
 	return "undefined";
 }
 
+#define PRETTY_IP_BUFSIZE 128
+
 const char *
 rspamd_inet_address_to_string_pretty (const rspamd_inet_addr_t *addr)
 {
-	static char addr_str[PATH_MAX + 5];
+	static char addr_str[NADDR_BUFS][PRETTY_IP_BUFSIZE];
+	static guint cur_addr = 0;
+	char *addr_buf;
 
 	if (addr == NULL) {
 		return "<empty inet address>";
 	}
 
+	addr_buf = addr_str[cur_addr++ % NADDR_BUFS];
+
 	switch (addr->af) {
 	case AF_INET:
-		rspamd_snprintf (addr_str, sizeof (addr_str), "%s:%d",
+		rspamd_snprintf (addr_buf, PRETTY_IP_BUFSIZE, "%s:%d",
 				rspamd_inet_address_to_string (addr),
 				rspamd_inet_address_get_port (addr));
 		break;
 	case AF_INET6:
-		rspamd_snprintf (addr_str, sizeof (addr_str), "[%s]:%d",
+		rspamd_snprintf (addr_buf, PRETTY_IP_BUFSIZE, "[%s]:%d",
 				rspamd_inet_address_to_string (addr),
 				rspamd_inet_address_get_port (addr));
 		break;
 	case AF_UNIX:
-		rspamd_snprintf (addr_str, sizeof (addr_str), "unix:%s",
+		rspamd_snprintf (addr_buf, PRETTY_IP_BUFSIZE, "unix:%s",
 				rspamd_inet_address_to_string (addr));
 		break;
 	}
 
-	return addr_str;
+	return addr_buf;
 }
 
 uint16_t
@@ -1042,10 +1060,11 @@ rspamd_inet_address_connect (const rspamd_inet_addr_t *addr, gint type,
 
 int
 rspamd_inet_address_listen (const rspamd_inet_addr_t *addr, gint type,
-		gboolean async)
+							enum rspamd_inet_address_listen_opts opts,
+							gint listen_queue)
 {
 	gint fd, r;
-	gint on = 1;
+	gint on = 1, serrno;
 	const struct sockaddr *sa;
 	const char *path;
 
@@ -1053,7 +1072,8 @@ rspamd_inet_address_listen (const rspamd_inet_addr_t *addr, gint type,
 		return -1;
 	}
 
-	fd = rspamd_socket_create (addr->af, type, 0, async);
+	fd = rspamd_socket_create (addr->af, type, 0,
+			(opts & RSPAMD_INET_ADDRESS_LISTEN_ASYNC));
 	if (fd == -1) {
 		return -1;
 	}
@@ -1070,7 +1090,27 @@ rspamd_inet_address_listen (const rspamd_inet_addr_t *addr, gint type,
 		sa = &addr->u.in.addr.sa;
 	}
 
-	(void)setsockopt (fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&on, sizeof (gint));
+#if defined(SO_REUSEADDR)
+	if (setsockopt (fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&on, sizeof (gint)) == -1) {
+		msg_err ("cannot set SO_REUSEADDR on %s (fd=%d): %s",
+				rspamd_inet_address_to_string_pretty (addr),
+				fd, strerror (errno));
+		goto err;
+	}
+#endif
+
+#if defined(SO_REUSEPORT) && defined(LINUX)
+	if (opts & RSPAMD_INET_ADDRESS_LISTEN_REUSEPORT) {
+		on = 1;
+
+		if (setsockopt (fd, SOL_SOCKET, SO_REUSEPORT, (const void *)&on, sizeof (gint)) == -1) {
+			msg_err ("cannot set SO_REUSEPORT on %s (fd=%d): %s",
+					rspamd_inet_address_to_string_pretty (addr),
+					fd, strerror (errno));
+			goto err;
+		}
+	}
+#endif
 
 #ifdef HAVE_IPV6_V6ONLY
 	if (addr->af == AF_INET6) {
@@ -1086,47 +1126,62 @@ rspamd_inet_address_listen (const rspamd_inet_addr_t *addr, gint type,
 
 	r = bind (fd, sa, addr->slen);
 	if (r == -1) {
-		if (!async || errno != EINPROGRESS) {
-			close (fd);
+		if (!(opts & RSPAMD_INET_ADDRESS_LISTEN_ASYNC) || errno != EINPROGRESS) {
 			msg_warn ("bind %s failed: %d, '%s'",
 					rspamd_inet_address_to_string_pretty (addr),
 					errno,
 					strerror (errno));
-			return -1;
+
+			goto err;
+		}
+	}
+
+	if (addr->af == AF_UNIX) {
+		path = addr->u.un->addr.sun_path;
+		/* Try to set mode and owner */
+
+		if (addr->u.un->owner != (uid_t)-1 || addr->u.un->group != (gid_t)-1) {
+			if (chown (path, addr->u.un->owner, addr->u.un->group) == -1) {
+				msg_info ("cannot change owner for %s to %d:%d: %s",
+						path, addr->u.un->owner, addr->u.un->group,
+						strerror (errno));
+			}
+		}
+
+		if (chmod (path, addr->u.un->mode) == -1) {
+			msg_info ("cannot change mode for %s to %od %s",
+					path, addr->u.un->mode, strerror (errno));
 		}
 	}
 
 	if (type != (int)SOCK_DGRAM) {
 
-		if (addr->af == AF_UNIX) {
-			path = addr->u.un->addr.sun_path;
-			/* Try to set mode and owner */
+		if (!(opts & RSPAMD_INET_ADDRESS_LISTEN_NOLISTEN)) {
+			r = listen (fd, listen_queue);
 
-			if (addr->u.un->owner != (uid_t)-1 || addr->u.un->group != (gid_t)-1) {
-				if (chown (path, addr->u.un->owner, addr->u.un->group) == -1) {
-					msg_info ("cannot change owner for %s to %d:%d: %s",
-							path, addr->u.un->owner, addr->u.un->group,
-							strerror (errno));
-				}
+			if (r == -1) {
+				msg_warn ("listen %s failed: %d, '%s'",
+						rspamd_inet_address_to_string_pretty (addr),
+						errno, strerror (errno));
+
+				goto err;
 			}
-
-			if (chmod (path, addr->u.un->mode) == -1) {
-				msg_info ("cannot change mode for %s to %od %s",
-						path, addr->u.un->mode, strerror (errno));
-			}
-		}
-		r = listen (fd, -1);
-
-		if (r == -1) {
-			msg_warn ("listen %s failed: %d, '%s'",
-					rspamd_inet_address_to_string_pretty (addr),
-					errno, strerror (errno));
-			close (fd);
-			return -1;
 		}
 	}
 
 	return fd;
+
+err:
+	/* Error path */
+	serrno = errno;
+
+	if (fd != -1) {
+		close (fd);
+	}
+
+	errno = serrno;
+
+	return -1;
 }
 
 gssize

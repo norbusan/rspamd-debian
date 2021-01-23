@@ -8,6 +8,10 @@
 #include <lualib.h>
 #include <stdbool.h>
 
+#ifdef WITH_LUAJIT
+#include <luajit.h>
+#endif
+
 #include "rspamd.h"
 #include "ucl.h"
 #include "lua_ucl.h"
@@ -41,11 +45,16 @@ luaL_register (lua_State *L, const gchar *name, const struct luaL_reg *methods)
 #endif
 
 #if defined(LUA_VERSION_NUM) && LUA_VERSION_NUM == 501
+
+/* Special hack to work with moonjit of specific version */
+#if !defined(MOONJIT_VERSION) && (!defined(LUAJIT_VERSION_NUM) || LUAJIT_VERSION_NUM != 20200)
 static inline int lua_absindex (lua_State *L, int i) {
 	if (i < 0 && i > LUA_REGISTRYINDEX)
 		i += lua_gettop(L) + 1;
 	return i;
 }
+#endif
+
 static inline int lua_rawgetp (lua_State *L, int i, const void *p) {
 	int abs_i = lua_absindex(L, i);
 	lua_pushlightuserdata(L, (void*)p);
@@ -63,11 +72,9 @@ static inline void lua_rawsetp (lua_State *L, int i, const void *p) {
 #endif
 
 /* Interface definitions */
-#define LUA_FUNCTION_DEF(class, name) static int lua_ ## class ## _ ## name ( \
-		lua_State * L)
-#define LUA_PUBLIC_FUNCTION_DEF(class, name) int lua_ ## class ## _ ## name ( \
-		lua_State * L)
-#define LUA_INTERFACE_DEF(class, name) { # name, lua_ ## class ## _ ## name }
+#define LUA_FUNCTION_DEF(class, name) static int lua_##class##_##name (lua_State * L)
+#define LUA_PUBLIC_FUNCTION_DEF(class, name) int lua_##class##_##name (lua_State * L)
+#define LUA_INTERFACE_DEF(class, name) { #name, lua_##class##_##name }
 
 #ifdef  __cplusplus
 extern "C" {
@@ -94,6 +101,7 @@ struct rspamd_lua_ip {
 #define RSPAMD_TEXT_FLAG_MMAPED (1u << 1u)
 #define RSPAMD_TEXT_FLAG_WIPE (1u << 2u)
 #define RSPAMD_TEXT_FLAG_SYSMALLOC (1u << 3u)
+#define RSPAMD_TEXT_FLAG_FAKE (1u << 4u)
 struct rspamd_lua_text {
 	const gchar *start;
 	guint len;
@@ -144,7 +152,7 @@ struct rspamd_lua_map {
 
 struct rspamd_lua_cached_entry {
 	gint ref;
-	guchar id[4];
+	guint id;
 };
 
 /* Common utility functions */
@@ -160,6 +168,13 @@ void rspamd_lua_new_class (lua_State *L,
  * Set class name for object at @param objidx position
  */
 void rspamd_lua_setclass (lua_State *L, const gchar *classname, gint objidx);
+
+/**
+ * Pushes the metatable for specific class on top of the stack
+ * @param L
+ * @param classname
+ */
+void rspamd_lua_class_metatable (lua_State *L, const gchar *classname);
 
 /**
  * Adds a new field to the class (metatable) identified by `classname`
@@ -240,6 +255,14 @@ void rspamd_lua_task_push (lua_State *L, struct rspamd_task *task);
 struct rspamd_lua_ip *lua_check_ip (lua_State *L, gint pos);
 
 struct rspamd_lua_text *lua_check_text (lua_State *L, gint pos);
+/**
+ * Checks for a text or a string. In case of string a pointer to static structure is returned.
+ * So it should not be reused or placed to Lua stack anyhow!
+ * @param L
+ * @param pos
+ * @return
+ */
+struct rspamd_lua_text *lua_check_text_or_string (lua_State *L, gint pos);
 /* Creates and *pushes* new rspamd text, data is copied if  RSPAMD_TEXT_FLAG_OWN is in flags*/
 struct rspamd_lua_text *lua_new_text (lua_State *L, const gchar *start,
 		gsize len, gboolean own);
@@ -251,6 +274,7 @@ enum rspamd_lua_task_header_type {
 	RSPAMD_TASK_HEADER_PUSH_RAW,
 	RSPAMD_TASK_HEADER_PUSH_FULL,
 	RSPAMD_TASK_HEADER_PUSH_COUNT,
+	RSPAMD_TASK_HEADER_PUSH_HAS,
 };
 
 gint rspamd_lua_push_header (lua_State *L,
@@ -359,6 +383,10 @@ void luaopen_kann (lua_State *L);
 
 void luaopen_spf (lua_State *L);
 
+void luaopen_tensor (lua_State *L);
+
+void luaopen_parsers (lua_State *L);
+
 void rspamd_lua_dostring (const gchar *line);
 
 double rspamd_lua_normalize (struct rspamd_config *cfg,
@@ -411,18 +439,21 @@ enum rspamd_lua_parse_arguments_flags {
  * [*]key=S|I|N|B|V|U{a-z};[key=...]
  * - S - const char *
  * - I - gint64_t
+ * - i - int32_t
  * - N - double
- * - B - boolean
+ * - B - gboolean
  * - V - size_t + const char *
  * - U{classname} - userdata of the following class (stored in gpointer)
  * - F - function
  * - O - ucl_object_t *
+ * - D - same as N but argument is set to NAN not to 0.0
+ * - u{classname} - userdata of the following class (stored directly)
  *
  * If any of keys is prefixed with `*` then it is treated as required argument
  * @param L lua state
  * @param pos at which pos start extraction
  * @param err error pointer
- * @param how extraction type
+ * @param how extraction type (IGNORE_MISSING means that default values will not be set)
  * @param extraction_pattern static pattern
  * @return TRUE if a table has been parsed
  */
@@ -576,6 +607,41 @@ gint rspamd_lua_push_words (lua_State *L, GArray *words,
  * @return
  */
 gchar *rspamd_lua_get_module_name (lua_State *L);
+
+/**
+ * Call Lua function in a universal way. Arguments string:
+ * - i - lua_integer, argument - gint64
+ * - n - lua_number, argument - gdouble
+ * - s - lua_string, argument - const gchar * (zero terminated)
+ * - l - lua_lstring, argument - (size_t + const gchar *) pair
+ * - u - lua_userdata, argument - (const char * + void *) - classname + pointer
+ * - b - lua_boolean, argument - gboolean (not bool due to varargs promotion)
+ * - f - lua_function, argument - int - position of the function on stack (not lua_registry)
+ * - t - lua_text, argument - int - position of the lua_text on stack (not lua_registry)
+ * @param L lua state
+ * @param cbref LUA_REGISTRY reference
+ * @param strloc where this function is called from
+ * @param nret number of results (or LUA_MULTRET)
+ * @param args arguments format string
+ * @param err error to promote
+ * @param ... arguments
+ * @return true of pcall returned 0, false + err otherwise
+ */
+bool rspamd_lua_universal_pcall (lua_State *L, gint cbref, const gchar* strloc,
+		gint nret, const gchar *args, GError **err, ...);
+
+/**
+ * Wrapper for lua_geti from lua 5.3
+ * @param L
+ * @param index
+ * @param i
+ * @return
+ */
+#if defined( LUA_VERSION_NUM ) && LUA_VERSION_NUM <= 502
+gint rspamd_lua_geti (lua_State *L, int index, int i);
+#else
+#define rspamd_lua_geti lua_geti
+#endif
 
 /* Paths defs */
 #define RSPAMD_CONFDIR_INDEX "CONFDIR"

@@ -24,6 +24,7 @@
 #include "contrib/t1ha/t1ha.h"
 #include "libserver/worker_util.h"
 #include "khash.h"
+#include "utlist.h"
 #include <math.h>
 
 #if defined(__STDC_VERSION__) &&  __STDC_VERSION__ >= 201112L
@@ -97,6 +98,11 @@ struct rspamd_symcache_id_list {
 	};
 };
 
+struct rspamd_symcache_condition {
+	gint cb;
+	struct rspamd_symcache_condition *prev, *next;
+};
+
 struct rspamd_symcache_item {
 	/* This block is likely shared */
 	struct rspamd_symcache_item_stat *st;
@@ -104,6 +110,7 @@ struct rspamd_symcache_item {
 	guint64 last_count;
 	struct rspamd_counter_data *cd;
 	gchar *symbol;
+	const gchar *type_descr;
 	gint type;
 
 	/* Callback data */
@@ -111,7 +118,7 @@ struct rspamd_symcache_item {
 		struct {
 			symbol_func_t func;
 			gpointer user_data;
-			gint condition_cb;
+			struct rspamd_symcache_condition *conditions;
 		} normal;
 		struct {
 			gint parent;
@@ -150,9 +157,9 @@ struct rspamd_symcache {
 	GHashTable *items_by_symbol;
 	GPtrArray *items_by_id;
 	struct symcache_order *items_by_order;
-	GPtrArray *filters;
-	GPtrArray *prefilters_empty;
+	GPtrArray *connfilters;
 	GPtrArray *prefilters;
+	GPtrArray *filters;
 	GPtrArray *postfilters;
 	GPtrArray *composites;
 	GPtrArray *idempotent;
@@ -579,8 +586,15 @@ rspamd_symcache_process_dep (struct rspamd_symcache *cache,
 	if (dep->vid >= 0) {
 		/* Case of the virtual symbol that depends on another (maybe virtual) symbol */
 		vdit = rspamd_symcache_find_filter (cache, dep->sym, false);
-		msg_debug_cache ("process virtual dependency %s(%d) on %s(%d)", it->symbol,
-				dep->vid, vdit->symbol, vdit->id);
+
+		if (!vdit) {
+			msg_err_cache ("cannot add dependency from %s on %s: no dependency symbol registered",
+					dep->sym, dit->symbol);
+		}
+		else {
+			msg_debug_cache ("process virtual dependency %s(%d) on %s(%d)", it->symbol,
+					dep->vid, vdit->symbol, vdit->id);
+		}
 	}
 	else {
 		vdit = dit;
@@ -600,7 +614,10 @@ rspamd_symcache_process_dep (struct rspamd_symcache *cache,
 			gboolean ok_dep = FALSE;
 
 			if (it->is_filter) {
-				if (dit->type & SYMBOL_TYPE_PREFILTER) {
+				if (dit->is_filter) {
+					ok_dep = TRUE;
+				}
+				else if (dit->type & SYMBOL_TYPE_PREFILTER) {
 					ok_dep = TRUE;
 				}
 			}
@@ -682,7 +699,7 @@ rspamd_symcache_post_init (struct rspamd_symcache *cache)
 		it = rspamd_symcache_find_filter (cache, ddep->from, true);
 
 		if (it == NULL) {
-			msg_err_cache ("cannot register delayed dependency between %s and %s, "
+			msg_err_cache ("cannot register delayed dependency between %s and %s: "
 					"%s is missing", ddep->from, ddep->to, ddep->from);
 		}
 		else {
@@ -708,7 +725,10 @@ rspamd_symcache_post_init (struct rspamd_symcache *cache)
 			luaL_unref (dcond->L, LUA_REGISTRYINDEX, dcond->cbref);
 		}
 		else {
-			it->specific.normal.condition_cb = dcond->cbref;
+			struct rspamd_symcache_condition *ncond = rspamd_mempool_alloc0 (cache->static_pool,
+					sizeof (*ncond));
+			ncond->cb = dcond->cbref;
+			DL_APPEND (it->specific.normal.conditions, ncond);
 		}
 
 		cur = g_list_next (cur);
@@ -741,7 +761,7 @@ rspamd_symcache_post_init (struct rspamd_symcache *cache)
 		}
 	}
 
-	g_ptr_array_sort_with_data (cache->prefilters_empty, prefilters_cmp, cache);
+	g_ptr_array_sort_with_data (cache->connfilters, prefilters_cmp, cache);
 	g_ptr_array_sort_with_data (cache->prefilters, prefilters_cmp, cache);
 	g_ptr_array_sort_with_data (cache->postfilters, postfilters_cmp, cache);
 	g_ptr_array_sort_with_data (cache->idempotent, postfilters_cmp, cache);
@@ -926,6 +946,7 @@ rspamd_symcache_save_items (struct rspamd_symcache *cache, const gchar *name)
 	struct ucl_emitter_functions *efunc;
 	gpointer k, v;
 	gint fd;
+	FILE *fp;
 	bool ret;
 	gchar path[PATH_MAX];
 
@@ -949,16 +970,17 @@ rspamd_symcache_save_items (struct rspamd_symcache *cache, const gchar *name)
 	}
 
 	rspamd_file_lock (fd, FALSE);
+	fp = fdopen (fd, "w");
 
 	memset (&hdr, 0, sizeof (hdr));
 	memcpy (hdr.magic, rspamd_symcache_magic,
 			sizeof (rspamd_symcache_magic));
 
-	if (write (fd, &hdr, sizeof (hdr)) == -1) {
+	if (fwrite (&hdr, sizeof (hdr), 1, fp) == -1) {
 		msg_err_cache ("cannot write to file %s, error %d, %s", path,
 				errno, strerror (errno));
 		rspamd_file_unlock (fd, FALSE);
-		close (fd);
+		fclose (fp);
 
 		return FALSE;
 	}
@@ -990,12 +1012,12 @@ rspamd_symcache_save_items (struct rspamd_symcache *cache, const gchar *name)
 		ucl_object_insert_key (top, elt, k, 0, false);
 	}
 
-	efunc = ucl_object_emit_fd_funcs (fd);
+	efunc = ucl_object_emit_file_funcs (fp);
 	ret = ucl_object_emit_full (top, UCL_EMIT_JSON_COMPACT, efunc, NULL);
 	ucl_object_emit_funcs_free (efunc);
 	ucl_object_unref (top);
 	rspamd_file_unlock (fd, FALSE);
-	close (fd);
+	fclose (fp);
 
 	if (rename (path, name) == -1) {
 		msg_err_cache ("cannot rename %s -> %s, error %d, %s", path, name,
@@ -1019,6 +1041,7 @@ rspamd_symcache_add_symbol (struct rspamd_symcache *cache,
 							gint parent)
 {
 	struct rspamd_symcache_item *item = NULL;
+	const gchar *type_str = "normal";
 
 	g_assert (cache != NULL);
 
@@ -1032,6 +1055,11 @@ rspamd_symcache_add_symbol (struct rspamd_symcache *cache,
 
 	if (name != NULL && !(type & SYMBOL_TYPE_CALLBACK)) {
 		struct rspamd_symcache_item *existing;
+
+		if (strcspn (name, " \t\n\r") != strlen (name)) {
+			msg_warn_cache ("bogus characters in symbol name: \"%s\"",
+					name);
+		}
 
 		if ((existing = g_hash_table_lookup (cache->items_by_symbol, name)) != NULL) {
 
@@ -1097,23 +1125,24 @@ rspamd_symcache_add_symbol (struct rspamd_symcache *cache,
 		g_assert (parent == -1);
 
 		if (item->type & SYMBOL_TYPE_PREFILTER) {
-			if (item->type & SYMBOL_TYPE_EMPTY) {
-				/* Executed before mime parsing stage */
-				g_ptr_array_add (cache->prefilters_empty, item);
-				item->container = cache->prefilters_empty;
-			}
-			else {
-				g_ptr_array_add (cache->prefilters, item);
-				item->container = cache->prefilters;
-			}
+			type_str = "prefilter";
+			g_ptr_array_add (cache->prefilters, item);
+			item->container = cache->prefilters;
 		}
 		else if (item->type & SYMBOL_TYPE_IDEMPOTENT) {
+			type_str = "idempotent";
 			g_ptr_array_add (cache->idempotent, item);
 			item->container = cache->idempotent;
 		}
 		else if (item->type & SYMBOL_TYPE_POSTFILTER) {
+			type_str = "postfilter";
 			g_ptr_array_add (cache->postfilters, item);
 			item->container = cache->postfilters;
+		}
+		else if (item->type & SYMBOL_TYPE_CONNFILTER) {
+			type_str = "connfilter";
+			g_ptr_array_add (cache->connfilters, item);
+			item->container = cache->connfilters;
 		}
 		else {
 			item->is_filter = TRUE;
@@ -1126,7 +1155,7 @@ rspamd_symcache_add_symbol (struct rspamd_symcache *cache,
 
 		item->specific.normal.func = func;
 		item->specific.normal.user_data = user_data;
-		item->specific.normal.condition_cb = -1;
+		item->specific.normal.conditions = NULL;
 	}
 	else {
 		/*
@@ -1136,7 +1165,7 @@ rspamd_symcache_add_symbol (struct rspamd_symcache *cache,
 		 * - composite symbol
 		 */
 		if (item->type & SYMBOL_TYPE_COMPOSITE) {
-			item->specific.normal.condition_cb = -1;
+			item->specific.normal.conditions = NULL;
 			item->specific.normal.user_data = user_data;
 			g_assert (user_data != NULL);
 			g_ptr_array_add (cache->composites, item);
@@ -1144,6 +1173,7 @@ rspamd_symcache_add_symbol (struct rspamd_symcache *cache,
 			item->id = cache->items_by_id->len;
 			g_ptr_array_add (cache->items_by_id, item);
 			item->container = cache->composites;
+			type_str = "composite";
 		}
 		else if (item->type & SYMBOL_TYPE_CLASSIFIER) {
 			/* Treat it as normal symbol to allow enable/disable */
@@ -1153,7 +1183,8 @@ rspamd_symcache_add_symbol (struct rspamd_symcache *cache,
 			item->is_filter = TRUE;
 			item->specific.normal.func = NULL;
 			item->specific.normal.user_data = NULL;
-			item->specific.normal.condition_cb = -1;
+			item->specific.normal.conditions = NULL;
+			type_str = "classifier";
 		}
 		else {
 			item->is_virtual = TRUE;
@@ -1164,6 +1195,7 @@ rspamd_symcache_add_symbol (struct rspamd_symcache *cache,
 			g_ptr_array_add (cache->virtual, item);
 			item->container = cache->virtual;
 			/* Not added to items_by_id, handled by parent */
+			type_str = "virtual";
 		}
 	}
 
@@ -1185,16 +1217,17 @@ rspamd_symcache_add_symbol (struct rspamd_symcache *cache,
 
 	if (name != NULL) {
 		item->symbol = rspamd_mempool_strdup (cache->static_pool, name);
-		msg_debug_cache ("used items: %d, added symbol: %s, %d",
-				cache->used_items, name, item->id);
+		msg_debug_cache ("used items: %d, added symbol: %s, %d; symbol type: %s",
+				cache->used_items, name, item->id, type_str);
 	} else {
 		g_assert (func != NULL);
-		msg_debug_cache ("used items: %d, added unnamed symbol: %d",
-				cache->used_items, item->id);
+		msg_debug_cache ("used items: %d, added unnamed symbol: %d; symbol type: %s",
+				cache->used_items, item->id, type_str);
 	}
 
 	item->deps = g_ptr_array_new ();
 	item->rdeps = g_ptr_array_new ();
+	item->type_descr = type_str;
 	rspamd_mempool_add_destructor (cache->static_pool,
 			rspamd_ptr_array_free_hard, item->deps);
 	rspamd_mempool_add_destructor (cache->static_pool,
@@ -1296,9 +1329,9 @@ rspamd_symcache_destroy (struct rspamd_symcache *cache)
 		g_hash_table_destroy (cache->items_by_symbol);
 		g_ptr_array_free (cache->items_by_id, TRUE);
 		rspamd_mempool_delete (cache->static_pool);
-		g_ptr_array_free (cache->filters, TRUE);
+		g_ptr_array_free (cache->connfilters, TRUE);
 		g_ptr_array_free (cache->prefilters, TRUE);
-		g_ptr_array_free (cache->prefilters_empty, TRUE);
+		g_ptr_array_free (cache->filters, TRUE);
 		g_ptr_array_free (cache->postfilters, TRUE);
 		g_ptr_array_free (cache->idempotent, TRUE);
 		g_ptr_array_free (cache->composites, TRUE);
@@ -1324,9 +1357,9 @@ rspamd_symcache_new (struct rspamd_config *cfg)
 	cache->items_by_symbol = g_hash_table_new (rspamd_str_hash,
 			rspamd_str_equal);
 	cache->items_by_id = g_ptr_array_new ();
-	cache->filters = g_ptr_array_new ();
+	cache->connfilters = g_ptr_array_new ();
 	cache->prefilters = g_ptr_array_new ();
-	cache->prefilters_empty = g_ptr_array_new ();
+	cache->filters = g_ptr_array_new ();
 	cache->postfilters = g_ptr_array_new ();
 	cache->idempotent = g_ptr_array_new ();
 	cache->composites = g_ptr_array_new ();
@@ -1609,8 +1642,8 @@ rspamd_symcache_is_item_allowed (struct rspamd_task *task,
 		(item->type & SYMBOL_TYPE_MIME_ONLY && !RSPAMD_TASK_IS_MIME(task))) {
 
 		if (!item->enabled) {
-			msg_debug_cache_task ("skipping %s of %s as it is permanently disabled",
-					what, item->symbol);
+			msg_debug_cache_task ("skipping %s of %s as it is permanently disabled; symbol type=%s",
+					what, item->symbol, item->type_descr);
 
 			return FALSE;
 		}
@@ -1620,8 +1653,8 @@ rspamd_symcache_is_item_allowed (struct rspamd_task *task,
 			 */
 			if (exec_only) {
 				msg_debug_cache_task ("skipping check of %s as it cannot be "
-									  "executed for this task type",
-						item->symbol);
+									  "executed for this task type; symbol type=%s",
+						item->symbol, item->type_descr);
 
 				return FALSE;
 			}
@@ -1636,10 +1669,11 @@ rspamd_symcache_is_item_allowed (struct rspamd_task *task,
 			rspamd_symcache_check_id_list (&item->forbidden_ids,
 					id)) {
 			msg_debug_cache_task ("deny %s of %s as it is forbidden for "
-						 "settings id %ud",
+						 "settings id %ud; symbol type=%s",
 						 what,
 						 item->symbol,
-						 id);
+						 id,
+						 item->type_descr);
 
 			return FALSE;
 		}
@@ -1651,9 +1685,11 @@ rspamd_symcache_is_item_allowed (struct rspamd_task *task,
 
 				if (task->settings_elt->policy == RSPAMD_SETTINGS_POLICY_IMPLICIT_ALLOW) {
 					msg_debug_cache_task ("allow execution of %s settings id %ud "
-										  "allows implicit execution of the symbols",
+										  "allows implicit execution of the symbols;"
+										  "symbol type=%s",
 							item->symbol,
-							id);
+							id,
+							item->type_descr);
 
 					return TRUE;
 				}
@@ -1668,25 +1704,29 @@ rspamd_symcache_is_item_allowed (struct rspamd_task *task,
 				}
 
 				msg_debug_cache_task ("deny %s of %s as it is not listed "
-									  "as allowed for settings id %ud",
+									  "as allowed for settings id %ud; symbol type=%s",
 						what,
 						item->symbol,
-						id);
+						id,
+						item->type_descr);
 				return FALSE;
 			}
 		}
 		else {
 			msg_debug_cache_task ("allow %s of %s for "
-								  "settings id %ud as it can be only disabled explicitly",
+								  "settings id %ud as it can be only disabled explicitly;"
+								  " symbol type=%s",
 					what,
 					item->symbol,
-					id);
+					id,
+					item->type_descr);
 		}
 	}
 	else if (item->type & SYMBOL_TYPE_EXPLICIT_ENABLE) {
-		msg_debug_cache_task ("deny %s of %s as it must be explicitly enabled",
+		msg_debug_cache_task ("deny %s of %s as it must be explicitly enabled; symbol type=%s",
 				what,
-				item->symbol);
+				item->symbol,
+				item->type_descr);
 		return FALSE;
 	}
 
@@ -1734,32 +1774,42 @@ rspamd_symcache_check_symbol (struct rspamd_task *task,
 	if (!rspamd_symcache_is_item_allowed (task, item, TRUE)) {
 		check = FALSE;
 	}
-	else if (item->specific.normal.condition_cb != -1) {
-		/* We also executes condition callback to check if we need this symbol */
-		L = task->cfg->lua_state;
-		lua_rawgeti (L, LUA_REGISTRYINDEX, item->specific.normal.condition_cb);
-		ptask = lua_newuserdata (L, sizeof (struct rspamd_task *));
-		rspamd_lua_setclass (L, "rspamd{task}", -1);
-		*ptask = task;
+	else if (item->specific.normal.conditions) {
+		struct rspamd_symcache_condition *cur_cond;
 
-		if (lua_pcall (L, 1, 1, 0) != 0) {
-			msg_info_task ("call to condition for %s failed: %s",
-					item->symbol, lua_tostring (L, -1));
-			lua_pop (L, 1);
-		}
-		else {
-			check = lua_toboolean (L, -1);
-			lua_pop (L, 1);
+		DL_FOREACH (item->specific.normal.conditions, cur_cond) {
+			/* We also executes condition callback to check if we need this symbol */
+			L = task->cfg->lua_state;
+			lua_rawgeti (L, LUA_REGISTRYINDEX, cur_cond->cb);
+			ptask = lua_newuserdata (L, sizeof (struct rspamd_task *));
+			rspamd_lua_setclass (L, "rspamd{task}", -1);
+			*ptask = task;
+
+			if (lua_pcall (L, 1, 1, 0) != 0) {
+				msg_info_task ("call to condition for %s failed: %s",
+						item->symbol, lua_tostring (L, -1));
+				lua_pop (L, 1);
+			}
+			else {
+				check = lua_toboolean (L, -1);
+				lua_pop (L, 1);
+			}
+
+			if (!check) {
+				break;
+			}
 		}
 
 		if (!check) {
-			msg_debug_cache_task ("skipping check of %s as its start condition is false",
-					item->symbol);
+			msg_debug_cache_task ("skipping check of %s as its start condition is false; "
+								  "symbol type = %s",
+					item->symbol, item->type_descr);
 		}
 	}
 
 	if (check) {
-		msg_debug_cache_task ("execute %s, %d", item->symbol, item->id);
+		msg_debug_cache_task ("execute %s, %d; symbol type = %s", item->symbol,
+				item->id, item->type_descr);
 
 		if (checkpoint->profile) {
 			ev_now_update_if_cheap (task->event_loop);
@@ -2057,13 +2107,13 @@ rspamd_symcache_process_symbols (struct rspamd_task *task,
 	start_events_pending = rspamd_session_events_pending (task->s);
 
 	switch (stage) {
-	case RSPAMD_TASK_STAGE_PRE_FILTERS_EMPTY:
-		/* Check for prefilters */
+	case RSPAMD_TASK_STAGE_CONNFILTERS:
+		/* Check for connection filters */
 		saved_priority = G_MININT;
 		all_done = TRUE;
 
-		for (i = 0; i < (gint) cache->prefilters_empty->len; i++) {
-			item = g_ptr_array_index (cache->prefilters_empty, i);
+		for (i = 0; i < (gint) cache->connfilters->len; i++) {
+			item = g_ptr_array_index (cache->connfilters, i);
 			dyn_item = rspamd_symcache_get_dynamic (checkpoint, item);
 
 			if (RSPAMD_TASK_IS_SKIPPED (task)) {
@@ -2099,7 +2149,6 @@ rspamd_symcache_process_symbols (struct rspamd_task *task,
 				all_done = FALSE;
 			}
 		}
-
 		break;
 
 	case RSPAMD_TASK_STAGE_PRE_FILTERS:
@@ -2871,26 +2920,33 @@ rspamd_symcache_is_symbol_enabled (struct rspamd_task *task,
 					ret = FALSE;
 				}
 				else {
-					if (item->specific.normal.condition_cb != -1) {
-						/*
-						 * We also executes condition callback to check
-						 * if we need this symbol
-						 */
-						L = task->cfg->lua_state;
-						lua_rawgeti (L, LUA_REGISTRYINDEX,
-								item->specific.normal.condition_cb);
-						ptask = lua_newuserdata (L, sizeof (struct rspamd_task *));
-						rspamd_lua_setclass (L, "rspamd{task}", -1);
-						*ptask = task;
+					if (item->specific.normal.conditions) {
+						struct rspamd_symcache_condition *cur_cond;
 
-						if (lua_pcall (L, 1, 1, 0) != 0) {
-							msg_info_task ("call to condition for %s failed: %s",
-									item->symbol, lua_tostring (L, -1));
-							lua_pop (L, 1);
-						}
-						else {
-							ret = lua_toboolean (L, -1);
-							lua_pop (L, 1);
+						DL_FOREACH (item->specific.normal.conditions, cur_cond) {
+							/*
+							 * We also executes condition callback to check
+							 * if we need this symbol
+							 */
+							L = task->cfg->lua_state;
+							lua_rawgeti (L, LUA_REGISTRYINDEX, cur_cond->cb);
+							ptask = lua_newuserdata (L, sizeof (struct rspamd_task *));
+							rspamd_lua_setclass (L, "rspamd{task}", -1);
+							*ptask = task;
+
+							if (lua_pcall (L, 1, 1, 0) != 0) {
+								msg_info_task ("call to condition for %s failed: %s",
+										item->symbol, lua_tostring (L, -1));
+								lua_pop (L, 1);
+							}
+							else {
+								ret = lua_toboolean (L, -1);
+								lua_pop (L, 1);
+							}
+
+							if (!ret) {
+								break;
+							}
 						}
 					}
 				}
@@ -3472,12 +3528,9 @@ rspamd_symcache_get_allowed_settings_ids (struct rspamd_symcache *cache,
 		return item->allowed_ids.dyn.n;
 	}
 	else {
-		while (item->allowed_ids.st[cnt] != 0) {
+		while (item->allowed_ids.st[cnt] != 0 && cnt < G_N_ELEMENTS (item->allowed_ids.st)) {
 			cnt ++;
-
-			g_assert (cnt < G_N_ELEMENTS (item->allowed_ids.st));
 		}
-
 
 		*nids = cnt;
 
@@ -3506,10 +3559,8 @@ rspamd_symcache_get_forbidden_settings_ids (struct rspamd_symcache *cache,
 		return item->allowed_ids.dyn.n;
 	}
 	else {
-		while (item->forbidden_ids.st[cnt] != 0) {
+		while (item->forbidden_ids.st[cnt] != 0 && cnt < G_N_ELEMENTS (item->allowed_ids.st)) {
 			cnt ++;
-
-			g_assert (cnt < G_N_ELEMENTS (item->allowed_ids.st));
 		}
 
 		*nids = cnt;
@@ -3518,7 +3569,7 @@ rspamd_symcache_get_forbidden_settings_ids (struct rspamd_symcache *cache,
 	}
 }
 
-/* Usable for near-sorted ids list */
+/* Insertion sort: usable for near-sorted ids list */
 static inline void
 rspamd_ids_insertion_sort (guint *a, guint n)
 {
@@ -3546,7 +3597,7 @@ rspamd_symcache_add_id_to_list (rspamd_mempool_t *pool,
 	if (ls->st[0] == -1) {
 		/* Dynamic array */
 		if (ls->dyn.len < ls->dyn.allocated) {
-			/* Trivial, append + qsort */
+			/* Trivial, append + sort */
 			ls->dyn.n[ls->dyn.len++] = id;
 		}
 		else {
@@ -3565,7 +3616,7 @@ rspamd_symcache_add_id_to_list (rspamd_mempool_t *pool,
 	}
 	else {
 		/* Static part */
-		while (ls->st[cnt] != 0) {
+		while (ls->st[cnt] != 0 && cnt < G_N_ELEMENTS (ls->st)) {
 			cnt ++;
 		}
 

@@ -52,6 +52,7 @@
 #cmakedefine HAVE_MACHINE_ENDIAN_H  1
 #cmakedefine HAVE_MAXPATHLEN     1
 #cmakedefine HAVE_FMEMOPEN       1
+#cmakedefine HAVE_MEMRCHR        1
 #cmakedefine HAVE_MEMSET_S       1
 #cmakedefine HAVE_MKSTEMP        1
 #cmakedefine HAVE_MMAP_ANON      1
@@ -83,6 +84,7 @@
 #cmakedefine HAVE_PWD_H          1
 #cmakedefine HAVE_RDTSC          1
 #cmakedefine HAVE_READPASSPHRASE_H  1
+#cmakedefine HAVE_RECVMMSG       1
 #cmakedefine HAVE_RUSAGE_SELF    1
 #cmakedefine HAVE_SA_SIGINFO     1
 #cmakedefine HAVE_SANE_SHMEM     1
@@ -427,6 +429,12 @@ extern uint64_t ottery_rand_uint64(void);
 #else
   /* In fact, everything else is not supported ¯\_(ツ)_/¯ */
   #error incompatible compiler found, need gcc > 2.7 or clang
+#endif
+
+#ifdef __GNUC__
+#define RSPAMD_CONST_FUNCTION __attribute__ ((const))
+#else
+#define RSPAMD_CONST_FUNCTION
 #endif
 
 #define HAVE_OPENSSL             1

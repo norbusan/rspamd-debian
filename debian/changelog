@@ -1,3 +1,68 @@
+rspamd (2.7-1) unstable; urgency=medium
+
+  * New upstream version 2.7
+  * d/patches:
+    + Refresh patchs according new upstream release
+    + Remove applied-upstream patches
+  * d/lintian-overrides: Update according new upstream release
+
+ -- Sebastien Badia <sbadia@debian.org>  Sat, 23 Jan 2021 21:09:19 +0100
+
+rspamd (2.6-1) unstable; urgency=medium
+
+  [ Christian Göttsche ]
+  * New upstream version 2.6
+  * Work on Lintian issues
+  * Refresh patches
+  * d/salsa-ci.yml: fail on Lintian warnings
+  * debian: run wrap-and-sort
+  * d/rspamd.lintian-overrides: do not use spelling mistake in comment
+
+  [ Sebastien Badia ]
+  * d/source/lintian-overrides: drop unused override
+  * d/control: Bump Standards-Versions to 4.5.1 (no changes)
+
+ -- Sebastien Badia <sbadia@debian.org>  Sat, 12 Dec 2020 15:54:28 +0100
+
+rspamd (2.5-4) unstable; urgency=medium
+
+  [ Christian Göttsche ]
+  * d/salsa-ci.yml: fail on Lintian warnings
+  * d/rspamd.lintian-overrides: do not use spelling mistake in comment.
+  * d/source/lintian-overrides: drop unused override.
+  * d/tests/install: print curl errors to stdout (Closes: #972384)
+    In case the first try of curl fails, but a subsequent retry succeeds
+    the testsuite will still fail cause curl will have printed the failure
+    of the first try to stderr.
+    Redirect curl errors to stdout and rely on the exit value.
+
+ -- Sebastien Badia <sbadia@debian.org>  Thu, 05 Nov 2020 19:39:33 +0100
+
+rspamd (2.5-3) unstable; urgency=medium
+
+  * d/patches:
+    + Fix ftbfs with gcc 10, Thanks Steve (Closes: #966475)
+    + Added forwarded tags (according new lintian checks)
+
+ -- Sebastien Badia <sbadia@debian.org>  Mon, 03 Aug 2020 16:56:40 +0200
+
+rspamd (2.5-2) unstable; urgency=medium
+
+  [ Christian Göttsche ]
+  * d/control: switch to compat level 13.
+  * rspamd.triggers: activate on resolved paths for jquery and
+    glyphicons-halflings-regular.ttf.
+  * d/{control,rules}: use libunwind only on supported architectures
+  * d/rules:
+    + drop as-needed linker flag.
+    + enable CMAKE_BUILD_WITH_INSTALL_RPATH.
+      Make the build reproducible (Closes: #956120)
+  * d/tests:
+    + add test that we use existing and resolved paths in the dpkg triggers
+    + try to adjust flaky autopkgtest runs
+
+ -- Sebastien Badia <sbadia@debian.org>  Thu, 28 May 2020 11:06:51 +0200
+
 rspamd (2.5-1~bpo10+1) buster-backports; urgency=medium
 
   * Rebuild for buster-backports

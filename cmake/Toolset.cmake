@@ -1,4 +1,5 @@
 option (ENABLE_FAST_MATH     "Build rspamd with fast math compiler flag [default: ON]" ON)
+option (ENABLE_ANALYZER      "Build rspamd with static analyzer [default: OFF]" OFF)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     SET (COMPILER_GCC 1)
@@ -138,6 +139,14 @@ if (COMPILER_GCC)
     set (CMAKE_CXX_FLAGS_RELEASE       "${CMAKE_CXX_FLAGS_RELEASE} -O3 ${COMPILER_FAST_MATH} -fomit-frame-pointer")
 
     if (ENABLE_FULL_DEBUG MATCHES "ON")
+        if (ENABLE_ANALYZER MATCHES "ON")
+            # Check support of -fanalyzer
+            CHECK_C_COMPILER_FLAG(-fanalyzer SUPPORT_FANALYZER)
+            if (SUPPORT_FANALYZER)
+                set (CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -fanalyzer")
+                #set (CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fanalyzer")
+            endif()
+        endif ()
         set (CMAKE_C_FLAGS_DEBUG           "${CMAKE_C_FLAGS_DEBUG} -O0 ${COMPILER_DEBUG_FLAGS}")
         set (CMAKE_CXX_FLAGS_DEBUG         "${CMAKE_CXX_FLAGS_DEBUG} -O0 ${COMPILER_DEBUG_FLAGS}")
     else()
@@ -167,6 +176,7 @@ option(ENABLE_LTO       "Build rspamd with Link Time Optimization if supported [
 
 if (CMAKE_BUILD_TYPE_UC MATCHES "COVERAGE")
     set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+    message (STATUS "IPO not enabled for COVERAGE build")
 elseif (ENABLE_LTO)
     if (${CMAKE_VERSION} VERSION_GREATER "3.9.0")
         cmake_policy (SET CMP0069 NEW)
@@ -179,6 +189,8 @@ elseif (ENABLE_LTO)
             message(WARNING "IPO is not supported: ${LTO_DIAG}")
         endif ()
     endif ()
+else ()
+    message (STATUS "IPO not enabled for the ${CMAKE_BUILD_TYPE} build")
 endif ()
 
 message (STATUS "Final CFLAGS: ${CMAKE_C_FLAGS} ${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE_UC}}")

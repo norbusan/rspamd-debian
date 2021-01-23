@@ -544,7 +544,7 @@ local function multimap_callback(task, rule)
         return true,nil,1.0
       end
     elseif type(p_ret) == 'boolean' then
-      return p_ret,nil,0.0
+      return p_ret,nil,1.0
     end
 
     return false,nil,0.0
@@ -560,6 +560,15 @@ local function multimap_callback(task, rule)
               'replace it with just %s',
               symbol, rule.symbol, rule.symbol)
           symbol = rule.symbol
+        end
+      elseif rule.disable_multisymbol then
+        symbol = rule.symbol
+        if type(opt) == 'table' then
+          table.insert(opt, result)
+        elseif type(opt) ~= nil then
+          opt = {opt,result}
+        else
+          opt = {result}
         end
       else
         forced = true
@@ -877,7 +886,7 @@ local function multimap_callback(task, rule)
 
       for _,p in fun.iter(fun.filter(filter_parts, parts)) do
         if filter_archive(p) then
-          local fnames = p:get_archive():get_files()
+          local fnames = p:get_archive():get_files(1000)
 
           for _,fn in ipairs(fnames) do
             match_filename(rule, fn)
@@ -1260,26 +1269,47 @@ if opts and type(opts) == 'table' then
         rspamd_config:register_symbol({
           type = 'virtual',
           name = s,
-          parent = id
+          parent = id,
+          score = 0, -- Default score
         })
         rule['symbols_set'][s] = 1
       end, rule['symbols'])
     end
-    if rule['score'] then
+    if not rule.score then
+      rspamd_logger.infox(rspamd_config, 'set default score 0 for multimap rule %s', rule.symbol)
+      rule.score = 0
+    end
+    if rule.score then
       -- Register metric symbol
       rule.name = rule.symbol
       rule.description = rule.description or 'multimap symbol'
       rule.group = rule.group or N
 
+      local tmp_flags
+      tmp_flags = rule.flags
+
+      if rule.type == 'received' and rule.flags then
+        -- XXX: hack to allow received flags/nflags
+        -- See issue #3526 on GH
+        rule.flags = nil
+      end
+
+      -- XXX: for combined maps we use trace, so flags must include one_shot to avoid scores multiplication
+      if rule.combined and not rule.flags then
+        rule.flags = 'one_shot'
+      end
       rspamd_config:set_metric_symbol(rule)
+      rule.flags = tmp_flags
     end
   end, fun.filter(function(r) return not r['prefilter'] end, rules))
 
-  fun.each(function(r)
+  -- prefilter symbils
+  fun.each(function(rule)
     rspamd_config:register_symbol({
       type = 'prefilter',
-      name = r['symbol'],
-      callback = gen_multimap_callback(r),
+      name = rule['symbol'],
+      score = rule.score or 0,
+      callback = gen_multimap_callback(rule),
     })
   end, fun.filter(function(r) return r['prefilter'] end, rules))
 

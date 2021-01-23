@@ -98,7 +98,14 @@ local function spf_handler(opts)
   end
 
   if opts.from then
-    task:set_from('smtp', {addr = opts.from})
+    local rspamd_parsers = require "rspamd_parsers"
+    local addr_parsed = rspamd_parsers.parse_mail_address(opts.from)
+    if addr_parsed then
+      task:set_from('smtp', addr_parsed[1])
+    else
+      io.stderr:write('Invalid from addr\n')
+      os.exit(1)
+    end
   elseif opts.domain then
     task:set_from('smtp', {user = 'user', domain = opts.domain})
   else
@@ -157,6 +164,8 @@ local function spf_handler(opts)
       local result, flag_or_policy, error_or_addr
       if opts.ip then
         result, flag_or_policy, error_or_addr = record:check_ip(opts.ip)
+      elseif opts.all then
+        result = true
       end
       if opts.ip and not opts.all then
         if result then

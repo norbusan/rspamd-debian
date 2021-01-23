@@ -372,6 +372,8 @@ rspamd_mime_expr_parse_regexp_atom (rspamd_mempool_t * pool, const gchar *line,
 		case 'u':
 		case 'O':
 		case 'r':
+		case 'L':
+			/* Handled by rspamd_regexp_t */
 			g_string_append_c (re_flags, *p);
 			p++;
 			break;
@@ -807,11 +809,49 @@ set:
 		mime_atom->d.re = rspamd_mime_expr_parse_regexp_atom (pool,
 				mime_atom->str, cfg);
 		if (mime_atom->d.re == NULL) {
-			g_set_error (err, rspamd_mime_expr_quark(), 200, "cannot parse regexp '%s'",
+			g_set_error (err, rspamd_mime_expr_quark(), 200,
+					"cannot parse regexp '%s'",
 					mime_atom->str);
 			goto err;
 		}
 		else {
+			gint lua_cbref = -1;
+
+			/* Check regexp condition */
+			if (real_ud->conf_obj != NULL) {
+				const ucl_object_t *re_conditions = ucl_object_lookup (real_ud->conf_obj,
+						"re_conditions");
+
+				if (re_conditions != NULL) {
+					if (ucl_object_type (re_conditions) != UCL_OBJECT) {
+						g_set_error (err, rspamd_mime_expr_quark (), 320,
+								"re_conditions is not a table for '%s'",
+								mime_atom->str);
+						goto err;
+					}
+
+					const ucl_object_t *function_obj = ucl_object_lookup (re_conditions,
+							mime_atom->str);
+
+					if (function_obj != NULL) {
+						if (ucl_object_type (function_obj) != UCL_USERDATA) {
+							g_set_error (err, rspamd_mime_expr_quark (), 320,
+									"condition for '%s' is invalid, must be function",
+									mime_atom->str);
+							goto err;
+						}
+
+						struct ucl_lua_funcdata *fd = function_obj->value.ud;
+
+						lua_cbref = fd->idx;
+					}
+				}
+			}
+
+			if (lua_cbref != -1) {
+				msg_info_config ("added condition for regexp %s", mime_atom->str);
+			}
+
 			/* Register new item in the cache */
 			if (mime_atom->d.re->type == RSPAMD_RE_HEADER ||
 					mime_atom->d.re->type == RSPAMD_RE_RAWHEADER ||
@@ -823,7 +863,8 @@ set:
 							mime_atom->d.re->regexp,
 							mime_atom->d.re->type,
 							mime_atom->d.re->extra.header,
-							strlen (mime_atom->d.re->extra.header) + 1);
+							strlen (mime_atom->d.re->extra.header) + 1,
+							lua_cbref);
 					/* Pass ownership to the cache */
 					rspamd_regexp_unref (own_re);
 				}
@@ -834,6 +875,7 @@ set:
 							200,
 							"no header name in header regexp: '%s'",
 							mime_atom->str);
+					rspamd_regexp_unref (mime_atom->d.re->regexp);
 					goto err;
 				}
 
@@ -845,17 +887,19 @@ set:
 							mime_atom->d.re->regexp,
 							mime_atom->d.re->type,
 							mime_atom->d.re->extra.selector,
-							strlen (mime_atom->d.re->extra.selector) + 1);
+							strlen (mime_atom->d.re->extra.selector) + 1,
+							lua_cbref);
 					/* Pass ownership to the cache */
 					rspamd_regexp_unref (own_re);
 				}
 				else {
-					/* We have header regexp, but no header name is detected */
+					/* We have selector regexp, but no selector name is detected */
 					g_set_error (err,
 							rspamd_mime_expr_quark (),
 							200,
 							"no selector name in selector regexp: '%s'",
 							mime_atom->str);
+					rspamd_regexp_unref (mime_atom->d.re->regexp);
 					goto err;
 				}
 			}
@@ -865,7 +909,8 @@ set:
 						mime_atom->d.re->regexp,
 						mime_atom->d.re->type,
 						NULL,
-						0);
+						0,
+						lua_cbref);
 				/* Pass ownership to the cache */
 				rspamd_regexp_unref (own_re);
 			}
@@ -877,7 +922,8 @@ set:
 		lua_getglobal (cfg->lua_state, mime_atom->str);
 
 		if (lua_type (cfg->lua_state, -1) != LUA_TFUNCTION) {
-			g_set_error (err, rspamd_mime_expr_quark(), 200, "no such lua function '%s'",
+			g_set_error (err, rspamd_mime_expr_quark(), 200,
+					"no such lua function '%s'",
 					mime_atom->str);
 			lua_pop (cfg->lua_state, 1);
 
@@ -940,7 +986,8 @@ set:
 		mime_atom->d.func = rspamd_mime_expr_parse_function_atom (pool,
 				mime_atom->str);
 		if (mime_atom->d.func == NULL) {
-			g_set_error (err, rspamd_mime_expr_quark(), 200, "cannot parse function '%s'",
+			g_set_error (err, rspamd_mime_expr_quark(), 200,
+					"cannot parse function '%s'",
 					mime_atom->str);
 			goto err;
 		}
@@ -1410,20 +1457,22 @@ rspamd_has_only_html_part (struct rspamd_task * task, GArray * args,
 	void *unused)
 {
 	struct rspamd_mime_text_part *p;
-	gboolean res = FALSE;
+	guint i, cnt_html = 0, cnt_txt = 0;
 
-	if (MESSAGE_FIELD (task, text_parts)->len == 1) {
+	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, text_parts), i, p) {
 		p = g_ptr_array_index (MESSAGE_FIELD (task, text_parts), 0);
 
-		if (IS_PART_HTML (p)) {
-			res = TRUE;
-		}
-		else {
-			res = FALSE;
+		if (!IS_TEXT_PART_ATTACHMENT (p)) {
+			if (IS_TEXT_PART_HTML (p)) {
+				cnt_html++;
+			}
+			else {
+				cnt_txt++;
+			}
 		}
 	}
 
-	return res;
+	return (cnt_html > 0 && cnt_txt == 0);
 }
 
 static gboolean
@@ -1520,7 +1569,7 @@ rspamd_is_html_balanced (struct rspamd_task * task, GArray * args, void *unused)
 	gboolean res = TRUE;
 
 	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, text_parts), i, p) {
-		if (IS_PART_HTML (p)) {
+		if (IS_TEXT_PART_HTML (p)) {
 			if (p->flags & RSPAMD_MIME_TEXT_PART_FLAG_BALANCED) {
 				res = TRUE;
 			}
@@ -1555,7 +1604,7 @@ rspamd_has_html_tag (struct rspamd_task * task, GArray * args, void *unused)
 	}
 
 	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, text_parts), i, p) {
-		if (IS_PART_HTML (p) && p->html) {
+		if (IS_TEXT_PART_HTML (p) && p->html) {
 			res = rspamd_html_tag_seen (p->html, arg->data);
 		}
 
@@ -1576,7 +1625,7 @@ rspamd_has_fake_html (struct rspamd_task * task, GArray * args, void *unused)
 	gboolean res = FALSE;
 
 	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, text_parts), i, p) {
-		if (IS_PART_HTML (p) && (p->html == NULL || p->html->html_tags == NULL)) {
+		if (IS_TEXT_PART_HTML (p) && (p->html == NULL || p->html->html_tags == NULL)) {
 			res = TRUE;
 		}
 
@@ -2328,7 +2377,7 @@ rspamd_has_symbol_expr (struct rspamd_task *task,
 
 	symbol_str = (const gchar *)sym_arg->data;
 
-	if (rspamd_task_find_symbol_result (task, symbol_str)) {
+	if (rspamd_task_find_symbol_result (task, symbol_str, NULL)) {
 		return TRUE;
 	}
 

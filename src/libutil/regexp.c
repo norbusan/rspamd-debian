@@ -325,6 +325,12 @@ rspamd_regexp_new (const gchar *pattern, const gchar *flags,
 
 	rspamd_regexp_library_init (NULL);
 
+	if (pattern == NULL) {
+		g_set_error (err, rspamd_regexp_quark(), EINVAL,
+				"cannot create regexp from a NULL pattern");
+		return NULL;
+	}
+
 	if (flags == NULL) {
 		/* We need to parse pattern and detect flags set */
 		if (*start == '/') {
@@ -405,6 +411,10 @@ rspamd_regexp_new (const gchar *pattern, const gchar *flags,
 			case 'O':
 				/* We optimize all regexps by default */
 				rspamd_flags |= RSPAMD_REGEXP_FLAG_NOOPT;
+				break;
+			case 'L':
+				/* SOM_LEFTMOST hyperscan flag */
+				rspamd_flags |= RSPAMD_REGEXP_FLAG_LEFTMOST;
 				break;
 			case 'r':
 				rspamd_flags |= RSPAMD_REGEXP_FLAG_RAW;
@@ -632,7 +642,7 @@ rspamd_regexp_search (rspamd_regexp_t *re, const gchar *text, gsize len,
 			*end = mt + ovec[1];
 		}
 
-		if (captures != NULL && rc > 1) {
+		if (captures != NULL && rc >= 1) {
 			struct rspamd_re_capture *elt;
 
 			g_assert (g_array_get_element_size (captures) ==
@@ -746,7 +756,7 @@ rspamd_regexp_search (rspamd_regexp_t *re, const gchar *text, gsize len,
 			*end = mt + ovec[1];
 		}
 
-		if (captures != NULL && novec > 1) {
+		if (captures != NULL && novec >= 1) {
 			struct rspamd_re_capture *elt;
 
 			g_assert (g_array_get_element_size (captures) ==

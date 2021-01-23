@@ -23,14 +23,18 @@ end
 
 local E = {}
 local N = 'force_actions'
+local selector_cache = {}
 
 local fun = require "fun"
 local lua_util = require "lua_util"
 local rspamd_cryptobox_hash = require "rspamd_cryptobox_hash"
 local rspamd_expression = require "rspamd_expression"
 local rspamd_logger = require "rspamd_logger"
+local lua_selectors = require "lua_selectors"
 
-local function gen_cb(expr, act, pool, message, subject, raction, honor, limit, least)
+-- Params table fields:
+-- expr, act, pool, message, subject, raction, honor, limit, flags
+local function gen_cb(params)
 
   local function parse_atom(str)
     local atom = table.concat(fun.totable(fun.take_while(function(c)
@@ -55,40 +59,64 @@ local function gen_cb(expr, act, pool, message, subject, raction, honor, limit, 
     return 0
   end
 
-  local e, err = rspamd_expression.create(expr, {parse_atom, process_atom}, pool)
+  local e, err = rspamd_expression.create(params.expr, {parse_atom, process_atom}, params.pool)
   if err then
-    rspamd_logger.errx(rspamd_config, 'Couldnt create expression [%1]: %2', expr, err)
+    rspamd_logger.errx(rspamd_config, 'Couldnt create expression [%1]: %2', params.expr, err)
     return
   end
 
   return function(task)
 
+    local function process_message_selectors(repl, selector_expr)
+      -- create/reuse selector to extract value for this placeholder
+      local selector = selector_cache[selector_expr]
+      if not selector then
+        selector_cache[selector_expr] = lua_selectors.create_selector_closure(rspamd_config, selector_expr, '', true)
+        selector = selector_cache[selector_expr]
+        if not selector then
+          rspamd_logger.errx(task, 'could not create selector [%1]', selector_expr)
+          return "((could not create selector))"
+        end
+      end
+      local extracted = selector(task)
+      if extracted then
+        if type(extracted) == 'table' then
+          extracted = table.concat(extracted, ',')
+        end
+      else
+        rspamd_logger.errx(task, 'could not extract value with selector [%1]', selector_expr)
+        extracted = '((error extracting value))'
+      end
+      return extracted
+    end
+
     local cact = task:get_metric_action('default')
-    if cact == act then
+    if not params.message and not params.subject and params.act and cact == params.act then
       return false
     end
-    if honor and honor[cact] then
+    if params.honor and params.honor[cact] then
       return false
-    elseif raction and not raction[cact] then
+    elseif params.raction and not params.raction[cact] then
       return false
     end
 
     local ret = e:process(task)
-    if ret > limit then
-      if subject then
-        task:set_metric_subject(subject)
+    lua_util.debugm(N, task, "expression %s returned %s", params.expr, ret)
+    if (not params.limit and ret > 0) or (ret > (params.limit or 0)) then
+      if params.subject then
+        task:set_metric_subject(params.subject)
       end
 
-      local flags = ""
-      if least then flags = "least" end
+      local flags = params.flags or ""
 
-      if type(message) == 'string' then
-        task:set_pre_result(act, message, N, nil, nil, flags)
-
+      if type(params.message) == 'string' then
+        -- process selector expressions in the message
+        local message = string.gsub(params.message, '(${(.-)})', process_message_selectors)
+        task:set_pre_result{action = params.act, message = message, module = N, flags = flags}
       else
-        task:set_pre_result(act, nil, N, nil, nil, flags)
+        task:set_pre_result{action = params.act, module = N, flags = flags}
       end
-      return true, act
+      return true, params.act
     end
 
   end, e:atoms()
@@ -114,7 +142,12 @@ local function configure_module()
             message = (opts.messages or E)[expr]
           end
           if type(expr) == 'string' then
-            local cb, atoms = gen_cb(expr, action, rspamd_config:get_mempool(), message, subject)
+            -- expr, act, pool, message, subject, raction, honor, limit, flags
+            local cb, atoms = gen_cb{expr = expr,
+                                     act = action,
+                                     pool = rspamd_config:get_mempool(),
+                                     message = message,
+                                     subject = subject}
             if cb and atoms then
               local h = rspamd_cryptobox_hash.create()
               h:update(expr)
@@ -139,15 +172,22 @@ local function configure_module()
     for name, sett in pairs(opts.rules) do
       local action = sett.action
       local expr = sett.expression
+
       if action and expr then
-        local subject = sett.subject
-        local message = sett.message
-        local lim = sett.limit or 0
-        local least = sett.least or false
+        local flags = {}
+        if sett.least then table.insert(flags, "least") end
+        if sett.process_all then table.insert(flags, "process_all") end
         local raction = lua_util.list_to_hash(sett.require_action)
         local honor = lua_util.list_to_hash(sett.honor_action)
-        local cb, atoms = gen_cb(expr, action, rspamd_config:get_mempool(),
-          message, subject, raction, honor, lim, least)
+        local cb, atoms = gen_cb{expr = expr,
+                                 act = action,
+                                 pool = rspamd_config:get_mempool(),
+                                 message = sett.message,
+                                 subject = sett.subject,
+                                 raction = raction,
+                                 honor = honor,
+                                 limit = sett.limit,
+                                 flags = table.concat(flags, ',')}
         if cb and atoms then
           local t = {}
           if (raction or honor) then

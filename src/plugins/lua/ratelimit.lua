@@ -856,17 +856,18 @@ if opts then
     lua_util.disable_module(N, "redis")
   else
     local s = {
-      type = 'prefilter,nostat',
+      type = 'prefilter',
       name = 'RATELIMIT_CHECK',
       priority = 7,
       callback = ratelimit_cb,
-      flags = 'empty',
+      flags = 'empty,nostat',
     }
 
     if settings.symbol then
       s.name = settings.symbol
     elseif settings.info_symbol then
       s.name = settings.info_symbol
+      s.score = 0.0
     end
 
     rspamd_config:register_symbol(s)

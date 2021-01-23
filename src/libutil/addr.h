@@ -86,7 +86,7 @@ rspamd_inet_addr_t *rspamd_inet_address_from_rnds (
 
 /**
  * Parse string with ipv6 address of length `len` to `target` which should be
- * at least sizeof (in6_addr_t)
+ * at least sizeof (struct in6_addr)
  * @param text input string
  * @param len length of `text` (if 0, then `text` must be zero terminated)
  * @param target target structure
@@ -228,15 +228,22 @@ void rspamd_inet_address_set_port (rspamd_inet_addr_t *addr, uint16_t port);
 int rspamd_inet_address_connect (const rspamd_inet_addr_t *addr, gint type,
 								 gboolean async);
 
+enum rspamd_inet_address_listen_opts {
+	RSPAMD_INET_ADDRESS_LISTEN_DEFAULT = 0,
+	RSPAMD_INET_ADDRESS_LISTEN_ASYNC = (1u << 0u),
+	RSPAMD_INET_ADDRESS_LISTEN_REUSEPORT = (1u << 1u),
+	RSPAMD_INET_ADDRESS_LISTEN_NOLISTEN = (1u << 2u),
+};
 /**
  * Listen on a specified inet address
  * @param addr
  * @param type
- * @param async
+ * @param opts
  * @return
  */
 int rspamd_inet_address_listen (const rspamd_inet_addr_t *addr, gint type,
-								gboolean async);
+								enum rspamd_inet_address_listen_opts opts,
+								gint listen_queue);
 
 /**
  * Check whether specified ip is valid (not INADDR_ANY or INADDR_NONE) for ipv4 or ipv6

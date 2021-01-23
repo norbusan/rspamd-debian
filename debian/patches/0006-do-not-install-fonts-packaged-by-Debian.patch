@@ -2,13 +2,14 @@ From: =?utf-8?q?Christian_G=C3=B6ttsche?= <cgzones@googlemail.com>
 Date: Wed, 15 Jan 2020 16:40:41 +0100
 Subject: do not install fonts packaged by Debian
 
+Forwarded: not-needed
 ---
  CMakeLists.txt | 4 +++-
  1 file changed, 3 insertions(+), 1 deletion(-)
 
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -717,7 +717,9 @@ INSTALL(PROGRAMS "utils/rspamd_stats.pl"
+@@ -756,7 +756,9 @@ INSTALL(PROGRAMS "utils/rspamd_stats.pl"
  
  # Install webui
  IF(INSTALL_WEBUI MATCHES "ON")

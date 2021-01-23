@@ -33,11 +33,12 @@ dofile(local_rules .. '/html.lua')
 dofile(local_rules .. '/headers_checks.lua')
 dofile(local_rules .. '/subject_checks.lua')
 dofile(local_rules .. '/misc.lua')
-dofile(local_rules .. '/http_headers.lua')
 dofile(local_rules .. '/forwarding.lua')
 dofile(local_rules .. '/mid.lua')
 dofile(local_rules .. '/bitcoin.lua')
+dofile(local_rules .. '/bounce.lua')
 dofile(local_rules .. '/content.lua')
+dofile(local_rules .. '/controller/init.lua')
 
 if rspamd_util.file_exists(local_conf .. '/rspamd.local.lua') then
   dofile(local_conf .. '/rspamd.local.lua')

@@ -54,7 +54,7 @@ local types = {
   -- text
   rtf = {
     ct = "application/rtf",
-    type = 'text',
+    type = 'binary',
   },
   pdf = {
     ct = 'application/pdf',
@@ -115,6 +115,14 @@ local types = {
   },
   zoo = {
     ct = 'application/x-zoo',
+    type = 'archive',
+  },
+  egg = {
+    ct = 'application/x-egg',
+    type = 'archive',
+  },
+  alz = {
+    ct = 'application/x-alz',
     type = 'archive',
   },
   xar = {

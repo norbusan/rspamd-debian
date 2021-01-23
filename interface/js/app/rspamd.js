@@ -26,10 +26,10 @@
 /* global jQuery:false, FooTable:false, Visibility:false */
 
 define(["jquery", "d3pie", "visibility", "nprogress", "stickytabs", "app/stats", "app/graph", "app/config",
-    "app/symbols", "app/history", "app/upload"],
+    "app/symbols", "app/history", "app/upload", "app/selectors"],
 // eslint-disable-next-line max-params
 function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_config,
-    tab_symbols, tab_history, tab_upload) {
+    tab_symbols, tab_history, tab_upload, tab_selectors) {
     "use strict";
     var ui = {
         page_size: {
@@ -78,6 +78,10 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
             });
         });
 
+        // Remove jquery-stickytabs listeners
+        $(window).off("hashchange");
+        $(".nav-tabs-sticky > .nav-item > .nav-link").off("click").removeClass("active");
+
         stopTimers();
         cleanCredentials();
         ui.connect();
@@ -85,17 +89,18 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
 
     function tabClick(id) {
         var tab_id = id;
-        if ($(tab_id).attr("disabled")) return;
-        $(tab_id).attr("disabled", true);
+        if ($(id).attr("disabled")) return;
+        var navBarControls = $("#selSrv, #navBar li, #navBar a, #navBar button");
+        if (id !== "#autoRefresh") navBarControls.attr("disabled", true).addClass("disabled", true);
 
         stopTimers();
 
-        if (tab_id === "#refresh") {
-            tab_id = "#" + $(".navbar-nav .active > a").attr("id");
+        if (id === "#refresh" || id === "#autoRefresh") {
+            tab_id = "#" + $(".nav-link.active").attr("id");
         }
 
         $("#autoRefresh").hide();
-        $(".btn-group .btn:visible").last().addClass("radius-right");
+        $("#refresh").addClass("radius-right");
 
         function setAutoRefresh(refreshInterval, timer, callback) {
             function countdown(interval) {
@@ -114,26 +119,35 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                 });
             }
 
-            $(".btn-group .btn:visible").last().removeClass("radius-right");
+            $("#refresh").removeClass("radius-right");
             $("#autoRefresh").show();
 
             countdown(refreshInterval);
             if (!refreshInterval) return;
             timer_id[timer] = Visibility.every(refreshInterval, function () {
                 countdown(refreshInterval);
+                if ($("#refresh").attr("disabled")) return;
+                $("#refresh").attr("disabled", true).addClass("disabled", true);
                 callback();
             });
+        }
+
+        if (["#scan_nav", "#selectors_nav", "#disconnect"].indexOf(tab_id) !== -1) {
+            $("#refresh").hide();
+        } else {
+            $("#refresh").show();
         }
 
         switch (tab_id) {
             case "#status_nav":
                 (function () {
-                    var refreshInterval = $(".dropdown-menu li.active.preset a").data("value");
+                    var refreshInterval = $(".dropdown-menu a.active.preset").data("value");
                     setAutoRefresh(refreshInterval, "status",
                         function () { return tab_stat.statWidgets(ui, graphs, checked_server); });
-                    if (refreshInterval) tab_stat.statWidgets(ui, graphs, checked_server);
+                    if (id !== "#autoRefresh") tab_stat.statWidgets(ui, graphs, checked_server);
 
                     $(".preset").show();
+                    $(".history").hide();
                     $(".dynamic").hide();
                 }());
                 break;
@@ -146,14 +160,15 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                     var refreshInterval = step[selData] || 3600000;
                     $("#dynamic-item").text((refreshInterval / 60000) + " min");
 
-                    if (!$(".dropdown-menu li.active.dynamic a").data("value")) {
+                    if (!$(".dropdown-menu a.active.dynamic").data("value")) {
                         refreshInterval = null;
                     }
                     setAutoRefresh(refreshInterval, "throughput",
                         function () { return tab_graph.draw(ui, graphs, tables, neighbours, checked_server, selData); });
-                    if (refreshInterval) tab_graph.draw(ui, graphs, tables, neighbours, checked_server, selData);
+                    if (id !== "#autoRefresh") tab_graph.draw(ui, graphs, tables, neighbours, checked_server, selData);
 
                     $(".preset").hide();
+                    $(".history").hide();
                     $(".dynamic").show();
                 }());
                 break;
@@ -165,8 +180,20 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                 tab_symbols.getSymbols(ui, tables, checked_server);
                 break;
             case "#history_nav":
-                tab_history.getHistory(ui, tables);
-                tab_history.getErrors(ui, tables);
+                (function () {
+                    function getHistoryAndErrors() {
+                        tab_history.getHistory(ui, tables);
+                        tab_history.getErrors(ui, tables);
+                    }
+                    var refreshInterval = $(".dropdown-menu a.active.history").data("value");
+                    setAutoRefresh(refreshInterval, "history",
+                        function () { return getHistoryAndErrors(); });
+                    if (id !== "#autoRefresh") getHistoryAndErrors();
+
+                    $(".preset").hide();
+                    $(".history").show();
+                    $(".dynamic").hide();
+                }());
                 break;
             case "#disconnect":
                 disconnect();
@@ -175,9 +202,11 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         }
 
         setTimeout(function () {
-            $(tab_id).removeAttr("disabled");
-            $("#refresh").removeAttr("disabled");
-        }, 1000);
+            // Do not enable Refresh button until AJAX requests to all neighbours are finished
+            if (tab_id === "#history_nav") navBarControls = $(navBarControls).not("#refresh");
+
+            navBarControls.removeAttr("disabled").removeClass("disabled");
+        }, (id === "#autoRefresh") ? 0 : 1000);
     }
 
     function drawTooltips() {
@@ -248,6 +277,10 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
     }
 
     function displayUI() {
+        // In many browsers local storage can only store string.
+        // So when we store the boolean true or false, it actually stores the strings "true" or "false".
+        ui.read_only = sessionStorage.getItem("read_only") === "true";
+
         ui.query("auth", {
             success: function (neighbours_status) {
                 $("#selSrv").empty();
@@ -260,27 +293,22 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                         $('#selSrv [value="' + e.name + '"]').prop("disabled", true);
                     }
                 });
+                if (!ui.read_only) tab_selectors.displayUI(ui);
             },
             errorMessage: "Cannot get server status",
             server: "All SERVERS"
         });
 
-        // In many browsers local storage can only store string.
-        // So when we store the boolean true or false, it actually stores the strings "true" or "false".
-        ui.read_only = sessionStorage.getItem("read_only") === "true";
         if (ui.read_only) {
-            $(".learn").hide();
-            $("#resetHistory").attr("disabled", true);
-            $("#errors-history").hide();
+            $(".ro-disable").attr("disabled", true);
+            $(".ro-hide").hide();
         } else {
-            $(".learn").show();
-            $("#resetHistory").removeAttr("disabled", true);
-            $("#errors-history").show();
+            $(".ro-disable").removeAttr("disabled", true);
+            $(".ro-hide").show();
         }
 
-        var buttons = $("#navBar form.navbar-right");
-        $("#mainUI").show();
-        $(buttons).show();
+        $("#preloader").addClass("d-none");
+        $("#navBar, #mainUI").removeClass("d-none");
         $(".nav-tabs-sticky").stickyTabs({initialTab:"#status_nav"});
     }
 
@@ -358,6 +386,7 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                     } else {
                         alertMessage("alert-error", "Request failed");
                     }
+                    if (o.complete) o.complete();
                     NProgress.done();
                 }
             },
@@ -387,35 +416,34 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         });
 
         $(document).ajaxStart(function () {
-            $("#navBar").addClass("loading");
+            $("#refresh > svg").addClass("fa-spin");
         });
         $(document).ajaxComplete(function () {
             setTimeout(function () {
-                $("#navBar").removeClass("loading");
+                $("#refresh > svg").removeClass("fa-spin");
             }, 1000);
         });
 
-        $("a[data-toggle=\"tab\"]").on("shown.bs.tab", function (e) {
-            var tab_id = "#" + $(e.target).attr("id");
-            tabClick(tab_id);
+        $('a[data-toggle="tab"]').on("shown.bs.tab", function (e) {
+            tabClick("#" + $(e.target).attr("id"));
         });
-        $("a[data-toggle=\"button\"]").on("click", function (e) {
-            var tab_id = "#" + $(e.target).attr("id");
-            tabClick(tab_id);
-        });
-        $(".dropdown-menu li a").click(function (e) {
+        $("#refresh, #disconnect").on("click", function (e) {
             e.preventDefault();
-            var classList = $(this).parent().attr("class");
-            var menuClass = (/\b(?:dynamic|preset)\b/).exec(classList)[0];
-            $(".dropdown-menu li.active." + menuClass).removeClass("active");
-            $(this).parent("li").addClass("active");
-            tabClick("#refresh");
+            tabClick("#" + $(e.target).attr("id"));
+        });
+        $(".dropdown-menu a").click(function (e) {
+            e.preventDefault();
+            var classList = $(this).attr("class");
+            var menuClass = (/\b(?:dynamic|history|preset)\b/).exec(classList)[0];
+            $(".dropdown-menu a.active." + menuClass).removeClass("active");
+            $(this).addClass("active");
+            tabClick("#autoRefresh");
         });
 
         $("#selSrv").change(function () {
             checked_server = this.value;
             $("#selSrv [value=\"" + checked_server + "\"]").prop("checked", true);
-            tabClick("#" + $("#navBar ul li.active > a").attr("id"));
+            tabClick("#" + $("#navBar > ul > .nav-item > .nav-link.active").attr("id"));
         });
 
         // Radio buttons
@@ -427,9 +455,12 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         });
         tab_config.setup(ui);
         tab_history.setup(ui, tables);
+        tab_selectors.setup(ui);
         tab_symbols.setup(ui, tables);
         tab_upload.setup(ui, tables);
         selData = tab_graph.setup(ui);
+
+        $("#loading").addClass("d-none");
     };
 
     ui.connect = function () {
@@ -442,13 +473,12 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                 displayUI();
             },
             error: function () {
-                var dialog = $("#connectDialog");
-                var backdrop = $("#backDrop");
-                $("#mainUI").hide();
-                $(dialog).show();
-                $(backdrop).show();
-                $("#connectPassword").focus();
-                $("#connectForm").off("submit");
+                $("#connectDialog")
+                    .on("shown.bs.modal", function () {
+                        $("#connectDialog").off("shown.bs.modal");
+                        $("#connectPassword").focus();
+                    })
+                    .modal("show");
 
                 $("#connectForm").on("submit", function (e) {
                     e.preventDefault();
@@ -469,8 +499,8 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                             if (data.auth === "ok") {
                                 sessionStorage.setItem("read_only", data.read_only);
                                 saveCredentials(password);
-                                $(dialog).hide();
-                                $(backdrop).hide();
+                                $("#connectForm").off("submit");
+                                $("#connectDialog").modal("hide");
                                 displayUI();
                             }
                         },
@@ -587,6 +617,7 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
      * @param {string} url - A string containing the URL to which the request is sent
      * @param {Object} [options] - A set of key/value pairs that configure the Ajax request. All settings are optional.
      *
+     * @param {Function} [options.complete] - A function to be called when the requests to all neighbours complete.
      * @param {Object|string|Array} [options.data] - Data to be sent to the server.
      * @param {Function} [options.error] - A function to be called if the request fails.
      * @param {string} [options.errorMessage] - Text to display in the alert message if the request fails.
@@ -605,7 +636,7 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         // Force options to be an object
         var o = options || {};
         Object.keys(o).forEach(function (option) {
-            if (["data", "error", "errorMessage", "errorOnceId", "headers", "method", "params", "server", "statusCode",
+            if (["complete", "data", "error", "errorMessage", "errorOnceId", "headers", "method", "params", "server", "statusCode",
                 "success"]
                 .indexOf(option) < 0) {
                 throw new Error("Unknown option: " + option);
@@ -682,7 +713,7 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         $("#" + table + "_page_size").change(function () {
             set_page_size(table, this.value, function (n) { tables[table].pageSize(n); });
         });
-        $(document).on("click", ".btn-sym-order-" + table + " button", function () {
+        $(document).on("click", ".btn-sym-order-" + table + " input", function () {
             var order = this.value;
             $("#selSymOrder_" + table).val(order);
             change_symbols_order(order);
@@ -795,25 +826,26 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         });
     };
 
+    ui.escapeHTML = function (string) {
+        var htmlEscaper = /[&<>"'/`=]/g;
+        var htmlEscapes = {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            "\"": "&quot;",
+            "'": "&#39;",
+            "/": "&#x2F;",
+            "`": "&#x60;",
+            "=": "&#x3D;"
+        };
+        return String(string).replace(htmlEscaper, function (match) {
+            return htmlEscapes[match];
+        });
+    };
+
     ui.preprocess_item = function (rspamd, item) {
-        function escapeHTML(string) {
-            var htmlEscaper = /[&<>"'/`=]/g;
-            var htmlEscapes = {
-                "&": "&amp;",
-                "<": "&lt;",
-                ">": "&gt;",
-                "\"": "&quot;",
-                "'": "&#39;",
-                "/": "&#x2F;",
-                "`": "&#x60;",
-                "=": "&#x3D;"
-            };
-            return String(string).replace(htmlEscaper, function (match) {
-                return htmlEscapes[match];
-            });
-        }
         function escape_HTML_array(arr) {
-            arr.forEach(function (d, i) { arr[i] = escapeHTML(d); });
+            arr.forEach(function (d, i) { arr[i] = ui.escapeHTML(d); });
         }
 
         for (var prop in item) {
@@ -829,9 +861,9 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                         if (!sym.name) {
                             sym.name = key;
                         }
-                        sym.name = escapeHTML(sym.name);
+                        sym.name = ui.escapeHTML(sym.name);
                         if (sym.description) {
-                            sym.description = escapeHTML(sym.description);
+                            sym.description = ui.escapeHTML(sym.description);
                         }
 
                         if (sym.options) {
@@ -841,19 +873,19 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                     break;
                 default:
                     if (typeof item[prop] === "string") {
-                        item[prop] = escapeHTML(item[prop]);
+                        item[prop] = ui.escapeHTML(item[prop]);
                     }
             }
         }
 
         if (item.action === "clean" || item.action === "no action") {
-            item.action = "<div style='font-size:11px' class='label label-success'>" + item.action + "</div>";
+            item.action = "<div style='font-size:11px' class='badge badge-success'>" + item.action + "</div>";
         } else if (item.action === "rewrite subject" || item.action === "add header" || item.action === "probable spam") {
-            item.action = "<div style='font-size:11px' class='label label-warning'>" + item.action + "</div>";
+            item.action = "<div style='font-size:11px' class='badge badge-warning'>" + item.action + "</div>";
         } else if (item.action === "spam" || item.action === "reject") {
-            item.action = "<div style='font-size:11px' class='label label-danger'>" + item.action + "</div>";
+            item.action = "<div style='font-size:11px' class='badge badge-danger'>" + item.action + "</div>";
         } else {
-            item.action = "<div style='font-size:11px' class='label label-info'>" + item.action + "</div>";
+            item.action = "<div style='font-size:11px' class='badge badge-info'>" + item.action + "</div>";
         }
 
         var score_content = (item.score < item.required_score)

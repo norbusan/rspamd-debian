@@ -1,0 +1,44 @@
+#!/bin/sh
+
+# NOTE: should be synced with debian/rspamd.triggers
+
+set -eu
+
+test_file()
+{
+	FILE=$1
+	if [ ! -f "$FILE" ]; then
+		echo "File '$FILE' not found!"
+		exit 1
+	fi
+	echo "File '$FILE' found."
+
+	REALPATH=$(realpath -e "$FILE") || true
+	if [ "$REALPATH" != "$FILE" ]; then
+		if [ $# -eq 1 ]; then
+			echo "Path '$FILE' does not equal its resolved path: '$REALPATH!"
+			exit 1;
+		fi
+
+		ALTERNATIVE_FILE=$2
+		if [ "$REALPATH" != "$ALTERNATIVE_FILE" ]; then
+			echo "Path '$FILE' does neither equal its resolved path nor its alternative path '$ALTERNATIVE_FILE': '$REALPATH!"
+			exit 1
+		fi
+		echo "Path '$FILE' equals its alternative path '$ALTERNATIVE_FILE'."
+	else
+		echo "Path '$FILE' equals its resolved path."
+	fi
+}
+
+echo "Start checking files..."
+
+test_file /usr/share/javascript/bootstrap4/js/bootstrap.bundle.min.js /usr/share/nodejs/bootstrap/dist/js/bootstrap.bundle.min.js
+test_file /usr/share/javascript/bootstrap4/css/bootstrap.min.css /usr/share/nodejs/bootstrap/dist/css/bootstrap.min.css
+test_file /usr/share/javascript/jquery/jquery.min.js /usr/share/nodejs/jquery/dist/jquery.min.js
+test_file /usr/share/javascript/requirejs/require.js
+test_file /usr/share/fonts-glyphicons/glyphicons-halflings-regular.ttf /usr/share/fonts/truetype/glyphicons/glyphicons-halflings-regular.ttf
+test_file /usr/share/fonts-glyphicons/glyphicons-halflings-regular.woff
+test_file /usr/share/fonts-glyphicons/glyphicons-halflings-regular.woff2
+
+echo "Finished checking files."

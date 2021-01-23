@@ -87,6 +87,7 @@ struct rspamd_worker_heartbeat {
 
 enum rspamd_worker_state {
 	rspamd_worker_state_running = 0,
+	rspamd_worker_state_wanna_die,
 	rspamd_worker_state_terminating,
 	rspamd_worker_wait_connections,
 	rspamd_worker_wait_final_scripts,
@@ -211,7 +212,7 @@ typedef struct module_s {
 
 	int (*module_init_func) (struct rspamd_config *cfg, struct module_ctx **ctx);
 
-	int (*module_config_func) (struct rspamd_config *cfg);
+	int (*module_config_func) (struct rspamd_config *cfg, bool validate);
 
 	int (*module_reconfig_func) (struct rspamd_config *cfg);
 
@@ -234,6 +235,7 @@ struct rspamd_worker_listen_socket {
 	const rspamd_inet_addr_t *addr;
 	gint fd;
 	enum rspamd_worker_socket_type type;
+	bool is_systemd;
 };
 
 typedef struct worker_s {

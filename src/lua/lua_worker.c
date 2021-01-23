@@ -499,8 +499,6 @@ rspamd_lua_execute_lua_subprocess (lua_State *L,
 {
 	gint err_idx, r;
 	guint64 wlen = 0;
-	const gchar *ret = NULL;
-	gsize retlen;
 
 	lua_pushcfunction (L, &rspamd_lua_traceback);
 	err_idx = lua_gettop (L);
@@ -526,29 +524,25 @@ rspamd_lua_execute_lua_subprocess (lua_State *L,
 		}
 	}
 	else {
-		if (lua_type (L, -1) == LUA_TSTRING) {
-			ret = lua_tolstring (L, -1, &retlen);
-			wlen = retlen;
-		}
-		else {
-			struct rspamd_lua_text *t;
+		struct rspamd_lua_text *t = lua_check_text_or_string (L, -1);
 
-			t = lua_check_text (L, -1);
+		if (t) {
+			wlen = t->len;
+			r = write (cbdata->sp[1], &wlen, sizeof (wlen));
 
-			if (t) {
-				ret = t->start;
-				wlen = t->len;
+			if (r == -1) {
+				msg_err ("write failed: %s", strerror (errno));
+			}
+
+			r = write (cbdata->sp[1], t->start, wlen);
+
+			if (r == -1) {
+				msg_err ("write failed: %s", strerror (errno));
 			}
 		}
-
-		r = write (cbdata->sp[1], &wlen, sizeof (wlen));
-		if (r == -1) {
-			msg_err ("write failed: %s", strerror (errno));
-		}
-
-		r = write (cbdata->sp[1], ret, wlen);
-		if (r == -1) {
-			msg_err ("write failed: %s", strerror (errno));
+		else {
+			msg_err ("subprocess: invalid return value: %s",
+					lua_typename (L, lua_type (L, -1)));
 		}
 	}
 
@@ -746,7 +740,7 @@ rspamd_lua_subprocess_io (EV_P_ ev_io *w, int revents)
 			/* Write reply to the child */
 			rspamd_socket_blocking (cbdata->sp[0]);
 			memset (rep, 0, sizeof (rep));
-			(void)write (cbdata->sp[0], rep, sizeof (rep));
+			(void) !write (cbdata->sp[0], rep, sizeof (rep));
 		}
 	}
 }
@@ -786,7 +780,7 @@ lua_worker_spawn_process (lua_State *L)
 		cbdata->out_pos = 0;
 	}
 
-	if (rspamd_socketpair (cbdata->sp, TRUE) == -1) {
+	if (rspamd_socketpair (cbdata->sp, SOCK_STREAM) == -1) {
 		msg_err ("cannot spawn socketpair: %s", strerror (errno));
 		luaL_unref (L, LUA_REGISTRYINDEX, cbdata->func_cbref);
 		luaL_unref (L, LUA_REGISTRYINDEX, cbdata->cb_cbref);

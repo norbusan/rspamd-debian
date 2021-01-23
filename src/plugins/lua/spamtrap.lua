@@ -55,8 +55,11 @@ local function spamtrap_cb(task)
         settings['fuzzy_flag'],
         settings['fuzzy_weight'])
     end
+    local act_flags = ''
     if settings['learn_spam'] then
       task:set_flag("learn_spam")
+      -- Allow processing as we still need to learn and do other stuff
+      act_flags = 'process_all'
     end
     task:insert_result(settings['symbol'], 1, rcpt)
 
@@ -72,7 +75,10 @@ local function spamtrap_cb(task)
         elseif settings.action == 'reject' then
           smtp_message = 'message rejected'
         end
-        task:set_pre_result(settings['action'], smtp_message, 'spamtrap')
+        task:set_pre_result{action = settings['action'],
+                            message = smtp_message,
+                            module = 'spamtrap',
+                            flags = act_flags}
       end
     end
   end
@@ -135,22 +141,6 @@ local function spamtrap_cb(task)
 end
 
 -- Module setup
-local function try_opts(where)
-  local ret = false
-  local opts = rspamd_config:get_all_opt(where)
-  if type(opts) == 'table' then
-    if type(opts['check_local']) == 'boolean' then
-      check_local = opts['check_local']
-      ret = true
-    end
-    if type(opts['check_authed']) == 'boolean' then
-      check_authed = opts['check_authed']
-      ret = true
-    end
-  end
-
-  return ret
-end
 
 local opts = rspamd_config:get_all_opt('spamtrap')
 if not (opts and type(opts) == 'table') then
@@ -158,7 +148,11 @@ if not (opts and type(opts) == 'table') then
   return
 end
 
-if not try_opts(M) then try_opts('options') end
+
+local auth_and_local_conf = lua_util.config_check_local_or_authed(rspamd_config, 'spamtrap',
+    false, false)
+check_local = auth_and_local_conf[1]
+check_authed = auth_and_local_conf[2]
 
 if opts then
   for k,v in pairs(opts) do
@@ -167,7 +161,7 @@ if opts then
   if settings['map'] then
     settings['map'] = rspamd_config:add_map{
       url = settings['map'],
-      description = "Spamtrap map for %s", settings['symbol'],
+      description = string.format("Spamtrap map for %s", settings['symbol']),
       type = "regexp"
     }
   else

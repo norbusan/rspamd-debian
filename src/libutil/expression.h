@@ -30,8 +30,10 @@ extern "C" {
 
 enum rspamd_expression_op {
 	OP_INVALID = 0,
-	OP_PLUS, /* || or + */
-	OP_MULT, /* && or * */
+	OP_PLUS, /* + */
+	OP_MULT, /* * */
+	OP_MINUS, /* - */
+	OP_DIVIDE, /* / */
 	OP_OR, /* || or | */
 	OP_AND, /* && or & */
 	OP_NOT, /* ! */
@@ -39,6 +41,8 @@ enum rspamd_expression_op {
 	OP_GT, /* > */
 	OP_LE, /* <= */
 	OP_GE, /* >= */
+	OP_EQ, /* == */
+	OP_NE, /* != */
 	OP_OBRACE, /* ( */
 	OP_CBRACE /* ) */
 };

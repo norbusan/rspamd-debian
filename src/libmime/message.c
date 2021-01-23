@@ -93,10 +93,11 @@ rspamd_mime_part_extract_words (struct rspamd_task *task,
 				if (w->stemmed.len <= 3) {
 					short_len++;
 				}
-			}
 
-			if (w->flags & RSPAMD_STAT_TOKEN_FLAG_TEXT) {
-				part->nwords ++;
+				if (w->flags & RSPAMD_STAT_TOKEN_FLAG_TEXT &&
+					!(w->flags & RSPAMD_STAT_TOKEN_FLAG_SKIPPED)) {
+					part->nwords ++;
+				}
 			}
 
 			if (w->flags & (RSPAMD_STAT_TOKEN_FLAG_BROKEN_UNICODE|
@@ -146,7 +147,7 @@ rspamd_mime_part_create_words (struct rspamd_task *task,
 {
 	enum rspamd_tokenize_type tok_type;
 
-	if (IS_PART_UTF (part)) {
+	if (IS_TEXT_PART_UTF (part)) {
 
 #if U_ICU_VERSION_MAJOR_NUM < 50
 		/* Hack to prevent hang with Thai in old libicu */
@@ -208,8 +209,8 @@ rspamd_mime_part_detect_language (struct rspamd_task *task,
 {
 	struct rspamd_lang_detector_res *lang;
 
-	if (!IS_PART_EMPTY (part) && part->utf_words && part->utf_words->len > 0 &&
-			task->lang_det) {
+	if (!IS_TEXT_PART_EMPTY (part) && part->utf_words && part->utf_words->len > 0 &&
+		task->lang_det) {
 		if (rspamd_language_detector_detect (task, task->lang_det, part)) {
 			lang = g_ptr_array_index (part->languages, 0);
 			part->language = lang->lang;
@@ -239,7 +240,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 	} state = normal_char;
 
 	while (p < pe) {
-		if (IS_PART_UTF (part)) {
+		if (IS_TEXT_PART_UTF (part)) {
 			gint32 off = p - begin;
 			U8_NEXT (begin, off, pe - begin, uc);
 
@@ -274,7 +275,16 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 			}
 		}
 
-		if (G_UNLIKELY (*p) == '\r') {
+		if (G_UNLIKELY (p >= pe)) {
+			/*
+			 * This is reached when there is a utf8 part and we
+			 * have zero width spaces at the end of the text
+			 * So we just check overflow and refuse to access *p if it is
+			 * after our real content.
+			 */
+			break;
+		}
+		else if (G_UNLIKELY (*p) == '\r') {
 			switch (state) {
 			case normal_char:
 				state = seen_cr;
@@ -323,7 +333,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 
 				c = p + 1;
 
-				if (IS_PART_HTML (part) || !url_open_bracket) {
+				if (IS_TEXT_PART_HTML (part) || !url_open_bracket) {
 					g_byte_array_append (part->utf_stripped_content,
 							(const guint8 *)" ", 1);
 					g_ptr_array_add (part->newlines,
@@ -338,7 +348,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 			case seen_cr:
 				/* \r\n */
 				if (!crlf_added) {
-					if (IS_PART_HTML (part) || !url_open_bracket) {
+					if (IS_TEXT_PART_HTML (part) || !url_open_bracket) {
 						g_byte_array_append (part->utf_stripped_content,
 								(const guint8 *) " ", 1);
 						crlf_added = TRUE;
@@ -508,7 +518,7 @@ rspamd_normalize_text_part (struct rspamd_task *task,
 
 	part->newlines = g_ptr_array_sized_new (128);
 
-	if (IS_PART_EMPTY (part)) {
+	if (IS_TEXT_PART_EMPTY (part)) {
 		part->utf_stripped_content = g_byte_array_new ();
 	}
 	else {
@@ -531,7 +541,7 @@ rspamd_normalize_text_part (struct rspamd_task *task,
 		}
 	}
 
-	if (IS_PART_UTF (part)) {
+	if (IS_TEXT_PART_UTF (part)) {
 		utext_openUTF8 (&part->utf_stripped_text,
 				part->utf_stripped_content->data,
 				part->utf_stripped_content->len,
@@ -758,7 +768,8 @@ rspamd_message_process_html_text_part (struct rspamd_task *task,
 			text_part->html,
 			text_part->utf_raw_content,
 			&text_part->exceptions,
-			MESSAGE_FIELD (task, urls));
+			MESSAGE_FIELD (task, urls),
+			text_part->mime_part->urls);
 
 	if (text_part->utf_content->len == 0) {
 		text_part->flags |= RSPAMD_MIME_TEXT_PART_FLAG_EMPTY;
@@ -777,13 +788,13 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 {
 	struct rspamd_mime_text_part *text_part;
 	rspamd_ftok_t html_tok, xhtml_tok;
-	gboolean found_html = FALSE, found_txt = FALSE, straight_ct = FALSE;
+	gboolean found_html = FALSE, found_txt = FALSE;
+	guint flags = 0;
 	enum rspamd_action_type act;
 
-	if (((mime_part->ct && (mime_part->ct->flags & RSPAMD_CONTENT_TYPE_TEXT)) &&
-		 (straight_ct = TRUE)) ||
-		(mime_part->detected_type &&
-		 strcmp (mime_part->detected_type, "text") == 0)) {
+	if ((mime_part->ct && (mime_part->ct->flags & RSPAMD_CONTENT_TYPE_TEXT)) ||
+		(mime_part->detected_type && strcmp (mime_part->detected_type, "text") == 0)) {
+
 		found_txt = TRUE;
 
 		html_tok.begin = "html";
@@ -793,18 +804,22 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 
 		if (rspamd_ftok_casecmp (&mime_part->ct->subtype, &html_tok) == 0 ||
 			rspamd_ftok_casecmp (&mime_part->ct->subtype, &xhtml_tok) == 0 ||
-			(mime_part->detected_ct &&
-				rspamd_ftok_casecmp (&mime_part->detected_ct->subtype, &html_tok) == 0)) {
+			(mime_part->detected_ext &&
+				strcmp (mime_part->detected_ext, "html") == 0)) {
 			found_html = TRUE;
 		}
 	}
 
 	/* Skip attachments */
 	if ((found_txt || found_html) &&
-			mime_part->cd && mime_part->cd->type == RSPAMD_CT_ATTACHMENT &&
-			(!straight_ct || (task->cfg && !task->cfg->check_text_attachements))) {
-		debug_task ("skip attachments for checking as text parts");
-		return FALSE;
+			(mime_part->cd && mime_part->cd->type == RSPAMD_CT_ATTACHMENT)) {
+		if (!task->cfg->check_text_attachements) {
+			debug_task ("skip attachments for checking as text parts");
+			return FALSE;
+		}
+		else {
+			flags |= RSPAMD_MIME_TEXT_PART_ATTACHMENT;
+		}
 	}
 	else if (!(found_txt || found_html)) {
 		/* Not a text part */
@@ -819,6 +834,7 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 	text_part->parsed.begin = mime_part->parsed_data.begin;
 	text_part->parsed.len = mime_part->parsed_data.len;
 	text_part->utf_stripped_text = (UText)UTEXT_INITIALIZER;
+	text_part->flags |= flags;
 
 	if (found_html) {
 		if (!rspamd_message_process_html_text_part (task, text_part)) {
@@ -847,7 +863,7 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 
 			rspamd_add_passthrough_result (task, action,
 					RSPAMD_PASSTHROUGH_CRITICAL,
-					score, "Gtube pattern", "GTUBE", 0);
+					score, "Gtube pattern", "GTUBE", 0, NULL);
 		}
 
 		rspamd_task_insert_result (task, GTUBE_SYMBOL, 0, NULL);
@@ -858,7 +874,7 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 	/* Post process part */
 	rspamd_normalize_text_part (task, text_part);
 
-	if (!IS_PART_HTML (text_part)) {
+	if (!IS_TEXT_PART_HTML (text_part)) {
 		if (mime_part->parent_part) {
 			struct rspamd_mime_part *parent = mime_part->parent_part;
 
@@ -925,6 +941,7 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 	part->parsed_data.begin = start;
 	part->parsed_data.len = len;
 	part->part_number = MESSAGE_FIELD (task, parts)->len;
+	part->urls = g_ptr_array_new ();
 	part->raw_headers = rspamd_message_headers_new ();
 	part->headers_order = NULL;
 
@@ -1052,6 +1069,10 @@ rspamd_message_dtor (struct rspamd_message *msg)
 					LUA_REGISTRYINDEX,
 					p->specific.lua_specific.cbref);
 		}
+
+		if (p->urls) {
+			g_ptr_array_unref (p->urls);
+		}
 	}
 
 	PTR_ARRAY_FOREACH (msg->text_parts, i, tp) {
@@ -1121,26 +1142,22 @@ rspamd_message_parse (struct rspamd_task *task)
 	 * Exim somehow uses mailbox format for messages being scanned:
 	 * From xxx@xxx.com Fri May 13 19:08:48 2016
 	 *
-	 * So we check if a task has non-http format then we check for such a line
-	 * at the beginning to avoid errors
+	 * So we check if a task has this line to avoid possible issues
 	 */
-	if (task->cmd != CMD_CHECK_V2 || (task->protocol_flags &
-			RSPAMD_TASK_PROTOCOL_FLAG_LOCAL_CLIENT)) {
-		if (len > sizeof ("From ") - 1) {
-			if (memcmp (p, "From ", sizeof ("From ") - 1) == 0) {
-				/* Skip to CRLF */
-				msg_info_task ("mailbox input detected, enable workaround");
-				p += sizeof ("From ") - 1;
-				len -= sizeof ("From ") - 1;
+	if (len > sizeof ("From ") - 1) {
+		if (memcmp (p, "From ", sizeof ("From ") - 1) == 0) {
+			/* Skip to CRLF */
+			msg_info_task ("mailbox input detected, enable workaround");
+			p += sizeof ("From ") - 1;
+			len -= sizeof ("From ") - 1;
 
-				while (len > 0 && *p != '\n') {
-					p ++;
-					len --;
-				}
-				while (len > 0 && g_ascii_isspace (*p)) {
-					p ++;
-					len --;
-				}
+			while (len > 0 && *p != '\n') {
+				p ++;
+				len --;
+			}
+			while (len > 0 && g_ascii_isspace (*p)) {
+				p ++;
+				len --;
 			}
 		}
 	}
@@ -1313,7 +1330,6 @@ rspamd_message_parse (struct rspamd_task *task)
 
 	memcpy (MESSAGE_FIELD (task, digest), n, sizeof (n));
 
-	/* Parse urls inside Subject header */
 	if (MESSAGE_FIELD (task, subject)) {
 		p = MESSAGE_FIELD (task, subject);
 		len = strlen (p);
@@ -1321,9 +1337,6 @@ rspamd_message_parse (struct rspamd_task *task)
 				p, len,
 				seed);
 		memcpy (MESSAGE_FIELD (task, digest), n, sizeof (n));
-		rspamd_url_find_multiple (task->task_pool, p, len,
-				RSPAMD_URL_FIND_STRICT, NULL,
-				rspamd_url_task_subject_callback, task);
 	}
 
 	if (task->queue_id) {
@@ -1464,6 +1477,10 @@ rspamd_message_process (struct rspamd_task *task)
 			lua_settop (L, funcs_top);
 		}
 
+		/* Try to detect image before checking for text */
+		rspamd_images_process_mime_part_maybe (task, part);
+
+		/* Still no content detected, try text heuristic */
 		if (part->part_type == RSPAMD_MIME_PART_UNDEFINED) {
 			rspamd_message_process_text_part_maybe (task, part);
 		}
@@ -1471,6 +1488,15 @@ rspamd_message_process (struct rspamd_task *task)
 
 	if (old_top != -1) {
 		lua_settop (L, old_top);
+	}
+
+	/* Parse urls inside Subject header */
+	if (MESSAGE_FIELD (task, subject)) {
+		rspamd_url_find_multiple (task->task_pool, MESSAGE_FIELD (task, subject),
+				strlen (MESSAGE_FIELD (task, subject)),
+				RSPAMD_URL_FIND_STRICT, NULL,
+				rspamd_url_task_subject_callback,
+				task);
 	}
 
 	/* Calculate average words length and number of short words */
@@ -1503,7 +1529,7 @@ rspamd_message_process (struct rspamd_task *task)
 			srch.len = 11;
 
 			if (rspamd_ftok_cmp (&p1->mime_part->parent_part->ct->subtype, &srch) == 0) {
-				if (!IS_PART_EMPTY (p1) && !IS_PART_EMPTY (p2) &&
+				if (!IS_TEXT_PART_EMPTY (p1) && !IS_TEXT_PART_EMPTY (p2) &&
 					p1->normalized_hashes && p2->normalized_hashes) {
 					/*
 					 * We also detect language on one part and propagate it to
@@ -1512,10 +1538,10 @@ rspamd_message_process (struct rspamd_task *task)
 					struct rspamd_mime_text_part *sel;
 
 					/* Prefer HTML as text part is not displayed normally */
-					if (IS_PART_HTML (p1)) {
+					if (IS_TEXT_PART_HTML (p1)) {
 						sel = p1;
 					}
-					else if (IS_PART_HTML (p2)) {
+					else if (IS_TEXT_PART_HTML (p2)) {
 						sel = p2;
 					}
 					else {
@@ -1601,7 +1627,6 @@ rspamd_message_process (struct rspamd_task *task)
 		}
 	}
 
-	rspamd_images_process (task);
 	rspamd_images_link (task);
 
 	rspamd_tokenize_meta_words (task);

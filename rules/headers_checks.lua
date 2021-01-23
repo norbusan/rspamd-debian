@@ -340,17 +340,17 @@ local check_mime_id = rspamd_config:register_symbol{
   callback = function(task)
     -- Check if there is a MIME-Version header
     local missing_mime = false
-    if not task:get_header('MIME-Version') then
+    if not task:has_header('MIME-Version') then
       missing_mime = true
     end
 
     -- Check presense of MIME specific headers
-    local ct_header = task:get_header('Content-Type')
-    local cte_header = task:get_header('Content-Transfer-Encoding')
+    local has_ct_header = task:has_header('Content-Type')
+    local has_cte_header = task:has_header('Content-Transfer-Encoding')
 
     -- Add the symbol if we have MIME headers, but no MIME-Version
     -- (do not add the symbol for RFC822 messages)
-    if (ct_header or cte_header) and missing_mime then
+    if (has_ct_header or has_cte_header) and missing_mime then
       task:insert_result('MISSING_MIME_VERSION', 1.0)
     end
 
@@ -595,26 +595,10 @@ rspamd_config.MULTIPLE_FROM = {
 
 rspamd_config.MV_CASE = {
   callback = function (task)
-    local mv = task:get_header('Mime-Version', true)
-    if (mv) then return true end
+    return task:has_header('Mime-Version', true)
   end,
   description = 'Mime-Version .vs. MIME-Version',
   score = 0.5,
-  group = 'headers'
-}
-
-rspamd_config.FAKE_REPLY = {
-  callback = function (task)
-    local subject = task:get_header('Subject')
-    if (subject and subject:lower():find('^re:')) then
-      local ref = task:get_header('References')
-      local rt  = task:get_header('In-Reply-To')
-      if (not (ref or rt)) then return true end
-    end
-    return false
-  end,
-  description = 'Fake reply',
-  score = 1.0,
   group = 'headers'
 }
 
@@ -626,35 +610,44 @@ local check_from_id = rspamd_config:register_symbol{
   callback = function(task)
     local envfrom = task:get_from(1)
     local from = task:get_from(2)
-    if (from and from[1] and (from[1].name == nil or from[1].name == '' )) then
-      task:insert_result('FROM_NO_DN', 1.0)
-    elseif (from and from[1] and from[1].name and
-            util.strequal_caseless(from[1].name, from[1].addr)) then
-      task:insert_result('FROM_DN_EQ_ADDR', 1.0)
-    elseif (from and from[1] and from[1].name and from[1].name ~= '') then
-      task:insert_result('FROM_HAS_DN', 1.0)
-      -- Look for Mr/Mrs/Dr titles
-      local n = from[1].name:lower()
-      local match, match_end
-      match, match_end = n:find('^mrs?[%.%s]')
-      if match then
-        task:insert_result('FROM_NAME_HAS_TITLE', 1.0, n:sub(match, match_end-1))
-      end
-      match, match_end = n:find('^dr[%.%s]')
-      if match then
-        task:insert_result('FROM_NAME_HAS_TITLE', 1.0, n:sub(match, match_end-1))
-      end
-      -- Check for excess spaces
-      if n:find('%s%s') then
-        task:insert_result('FROM_NAME_EXCESS_SPACE', 1.0)
-      end
+    if (envfrom and envfrom[1] and not envfrom[1]["flags"]["valid"]) then
+      task:insert_result('ENVFROM_INVALID', 1.0)
     end
-    if (envfrom and from and envfrom[1] and from[1] and
-        util.strequal_caseless(envfrom[1].addr, from[1].addr))
-    then
-      task:insert_result('FROM_EQ_ENVFROM', 1.0)
-    elseif (envfrom and envfrom[1] and envfrom[1].addr) then
-      task:insert_result('FROM_NEQ_ENVFROM', 1.0, ((from or E)[1] or E).addr or '', envfrom[1].addr)
+    if (from and from[1]) then
+      if not (from[1]["flags"]["valid"]) then
+        task:insert_result('FROM_INVALID', 1.0)
+      end
+      if (from[1].name == nil or from[1].name == '' ) then
+        task:insert_result('FROM_NO_DN', 1.0)
+      elseif (from[1].name and
+            util.strequal_caseless(from[1].name, from[1].addr)) then
+        task:insert_result('FROM_DN_EQ_ADDR', 1.0)
+      elseif (from[1].name and from[1].name ~= '') then
+        task:insert_result('FROM_HAS_DN', 1.0)
+        -- Look for Mr/Mrs/Dr titles
+        local n = from[1].name:lower()
+        local match, match_end
+        match, match_end = n:find('^mrs?[%.%s]')
+        if match then
+          task:insert_result('FROM_NAME_HAS_TITLE', 1.0, n:sub(match, match_end-1))
+        end
+        match, match_end = n:find('^dr[%.%s]')
+        if match then
+          task:insert_result('FROM_NAME_HAS_TITLE', 1.0, n:sub(match, match_end-1))
+        end
+        -- Check for excess spaces
+        if n:find('%s%s') then
+          task:insert_result('FROM_NAME_EXCESS_SPACE', 1.0)
+        end
+      end
+
+      if envfrom then
+        if util.strequal_caseless(envfrom[1].addr, from[1].addr) then
+          task:insert_result('FROM_EQ_ENVFROM', 1.0)
+        elseif envfrom[1].addr ~= '' then
+          task:insert_result('FROM_NEQ_ENVFROM', 1.0, from[1].addr, envfrom[1].addr)
+        end
+      end
     end
 
     local to = task:get_recipients(2)
@@ -670,6 +663,22 @@ local check_from_id = rspamd_config:register_symbol{
   end
 }
 
+rspamd_config:register_symbol{
+  name = 'ENVFROM_INVALID',
+  score = 2.0,
+  group = 'headers',
+  parent = check_from_id,
+  type = 'virtual',
+  description = 'Envelope from does not have a valid format',
+}
+rspamd_config:register_symbol{
+  name = 'FROM_INVALID',
+  score = 2.0,
+  group = 'headers',
+  parent = check_from_id,
+  type = 'virtual',
+  description = 'From header does not have a valid format',
+}
 rspamd_config:register_symbol{
   name = 'FROM_NO_DN',
   score = 0.0,
@@ -1107,8 +1116,7 @@ rspamd_config.INVALID_RCPT_8BIT = {
 
 rspamd_config.XM_CASE = {
   callback = function (task)
-    local xm = task:get_header('X-mailer', true)
-    if (xm) then return true end
+    return task:has_header('X-mailer', true)
   end,
   description = 'X-mailer .vs. X-Mailer',
   score = 0.5,

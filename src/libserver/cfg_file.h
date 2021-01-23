@@ -311,6 +311,7 @@ struct rspamd_action;
 
 struct rspamd_config_cfg_lua_script {
 	gint cbref;
+	gint priority;
 	struct rspamd_config_cfg_lua_script *prev, *next;
 };
 
@@ -471,6 +472,7 @@ struct rspamd_config {
 	guint full_gc_iters;                            /**< iterations between full gc cycle					*/
 	guint max_lua_urls;                             /**< maximum number of urls to be passed to Lua			*/
 	guint max_urls;                                 /**< maximum number of urls to be processed in general	*/
+	gint max_recipients;                           /**< maximum number of recipients to be processed	*/
 	guint max_blas_threads;                         /**< maximum threads for openblas when learning ANN		*/
 	guint max_opts_len;                             /**< maximum length for all options for a symbol		*/
 
@@ -544,7 +546,7 @@ void rspamd_config_free (struct rspamd_config *cfg);
  */
 const ucl_object_t *rspamd_config_get_module_opt (struct rspamd_config *cfg,
 												  const gchar *module_name,
-												  const gchar *opt_name);
+												  const gchar *opt_name) G_GNUC_WARN_UNUSED_RESULT;
 
 
 /**
@@ -759,12 +761,9 @@ void rspamd_actions_sort (struct rspamd_config *cfg);
  */
 struct rspamd_radix_map_helper;
 
-gboolean rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
-									   const ucl_object_t *obj,
-									   const gchar *description,
-									   struct rspamd_radix_map_helper **target,
-									   GError **err,
-									   struct rspamd_worker *worker);
+gboolean rspamd_config_radix_from_ucl (struct rspamd_config *cfg, const ucl_object_t *obj, const gchar *description,
+									   struct rspamd_radix_map_helper **target, GError **err,
+									   struct rspamd_worker *worker, const gchar *map_name);
 
 /**
  * Adds new settings id to be preprocessed

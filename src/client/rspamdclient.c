@@ -20,7 +20,6 @@
 #include "libserver/protocol_internal.h"
 #include "unix-std.h"
 #include "contrib/zstd/zstd.h"
-#include "contrib/zstd/zdict.h"
 
 #ifdef HAVE_FETCH_H
 #include <fetch.h>
@@ -264,6 +263,7 @@ rspamd_client_init (struct rspamd_http_context *http_ctx,
 	gint fd;
 
 	fd = rspamd_socket (name, port, SOCK_STREAM, TRUE, FALSE, TRUE);
+
 	if (fd == -1) {
 		return NULL;
 	}
@@ -279,7 +279,15 @@ rspamd_client_init (struct rspamd_http_context *http_ctx,
 			0,
 			fd);
 
+	if (!conn->http_conn) {
+		rspamd_client_destroy (conn);
+		return NULL;
+	}
+
+	/* Pass socket ownership */
+	rspamd_http_connection_own_socket (conn->http_conn);
 	conn->server_name = g_string_new (name);
+
 	if (port != 0) {
 		rspamd_printf_gstring (conn->server_name, ":%d", (int)port);
 	}
@@ -382,7 +390,7 @@ rspamd_client_command (struct rspamd_client_connection *conn,
 					return FALSE;
 				}
 
-				dict_id = ZDICT_getDictID (comp_dictionary, dict_len);
+				dict_id = -1;
 
 				if (dict_id == 0) {
 					g_set_error (err, RCLIENT_ERROR, errno,
@@ -474,7 +482,10 @@ void
 rspamd_client_destroy (struct rspamd_client_connection *conn)
 {
 	if (conn != NULL) {
-		rspamd_http_connection_unref (conn->http_conn);
+		if (conn->http_conn) {
+			rspamd_http_connection_unref (conn->http_conn);
+		}
+
 		if (conn->req != NULL) {
 			rspamd_client_request_free (conn->req);
 		}
@@ -482,9 +493,11 @@ rspamd_client_destroy (struct rspamd_client_connection *conn)
 		if (conn->key) {
 			rspamd_pubkey_unref (conn->key);
 		}
+
 		if (conn->keypair) {
 			rspamd_keypair_unref (conn->keypair);
 		}
+
 		g_string_free (conn->server_name, TRUE);
 		g_free (conn);
 	}

@@ -214,6 +214,13 @@ rspamd_rs_compile_cb (guint ncompiled, GError *err, void *cbd)
 
 	ctx = (struct hs_helper_ctx *)worker->ctx;
 
+	if (err != NULL) {
+		/* Failed to compile: log and go out */
+		msg_err ("cannot compile Hyperscan database: %e", err);
+
+		return;
+	}
+
 	if (ncompiled > 0) {
 		/* Enforce update for other workers */
 		hack_global_forced = TRUE;
@@ -221,10 +228,10 @@ rspamd_rs_compile_cb (guint ncompiled, GError *err, void *cbd)
 
 	/*
 	 * Do not send notification unless all other workers are started
-	 * XXX: now we just sleep for 5 seconds to ensure that
+	 * XXX: now we just sleep for 1 seconds to ensure that
 	 */
 	if (!ctx->loaded) {
-		when = 5.0; /* Postpone */
+		when = 1.0; /* Postpone */
 		ctx->loaded = TRUE;
 		msg_info ("compiled %d regular expressions to the hyperscan tree, "
 				  "postpone loaded notification for %.0f seconds to avoid races",
@@ -247,11 +254,13 @@ static gboolean
 rspamd_rs_compile (struct hs_helper_ctx *ctx, struct rspamd_worker *worker,
 		gboolean forced)
 {
+#ifndef __aarch64__
 	if (!(ctx->cfg->libs_ctx->crypto_ctx->cpu_config & CPUID_SSSE3)) {
 		msg_warn ("CPU doesn't have SSSE3 instructions set "
 				"required for hyperscan, disable hyperscan compilation");
 		return FALSE;
 	}
+#endif
 
 	if (!rspamd_hs_helper_cleanup_dir (ctx, forced)) {
 		msg_warn ("cannot cleanup cache dir '%s'", ctx->hs_dir);

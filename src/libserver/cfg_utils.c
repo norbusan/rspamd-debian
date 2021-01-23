@@ -38,7 +38,6 @@
 
 #define ZSTD_STATIC_LINKING_ONLY
 #include "contrib/zstd/zstd.h"
-#include "contrib/zstd/zdict.h"
 
 #ifdef HAVE_OPENSSL
 #include <openssl/rand.h>
@@ -54,6 +53,8 @@
 #include <sys/resource.h>
 #endif
 #include <math.h>
+
+#include "blas-config.h"
 
 #define DEFAULT_SCORE 10.0
 
@@ -221,6 +222,7 @@ rspamd_config_new (enum rspamd_config_init_flags flags)
 	cfg->cache_reload_time = 30.0;
 	cfg->max_lua_urls = 1024;
 	cfg->max_urls = cfg->max_lua_urls * 10;
+	cfg->max_recipients = 1024;
 	cfg->max_blas_threads = 1;
 	cfg->max_opts_len = 4096;
 
@@ -814,7 +816,7 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 	rspamd_regexp_library_init (cfg);
 	rspamd_multipattern_library_init (cfg->hs_cache_dir);
 
-#ifdef WITH_HYPERSCAN
+#if defined(WITH_HYPERSCAN) && !defined(__aarch64__)
 	if (!cfg->disable_hyperscan) {
 		if (!(cfg->libs_ctx->crypto_ctx->cpu_config & CPUID_SSSE3)) {
 			msg_warn_config ("CPU doesn't have SSSE3 instructions set "
@@ -923,8 +925,6 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 			msg_warn_config ("controller worker is unconfigured: learning,"
 					" periodic scripts, maps watching and many other"
 					" Rspamd features will be broken");
-
-			ret = FALSE;
 		}
 
 		ret = rspamd_symcache_validate (cfg->cache, cfg, FALSE) && ret;
@@ -1587,7 +1587,7 @@ rspamd_init_filters (struct rspamd_config *cfg, bool reconfig, bool strict)
 
 			}
 			else {
-				if (!mod->module_config_func (cfg)) {
+				if (!mod->module_config_func (cfg, strict)) {
 					msg_err_config ("config of %s failed", mod->name);
 					ret = FALSE;
 
@@ -2224,12 +2224,9 @@ rspamd_config_get_action_by_type (struct rspamd_config *cfg,
 }
 
 gboolean
-rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
-							  const ucl_object_t *obj,
-							  const gchar *description,
-							  struct rspamd_radix_map_helper **target,
-							  GError **err,
-							  struct rspamd_worker *worker)
+rspamd_config_radix_from_ucl (struct rspamd_config *cfg, const ucl_object_t *obj, const gchar *description,
+							  struct rspamd_radix_map_helper **target, GError **err,
+							  struct rspamd_worker *worker, const gchar *map_name)
 {
 	ucl_type_t type;
 	ucl_object_iter_t it = NULL;
@@ -2267,7 +2264,8 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 			else {
 				/* Just a list */
 				if (!*target) {
-					*target = rspamd_map_helper_new_radix (NULL);
+					*target = rspamd_map_helper_new_radix (
+							rspamd_map_add_fake (cfg, description, map_name));
 				}
 
 				rspamd_map_helper_insert_radix_resolve (*target, str, "");
@@ -2298,7 +2296,8 @@ rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
 				str = ucl_object_tostring (cur);
 
 				if (!*target) {
-					*target = rspamd_map_helper_new_radix (NULL);
+					*target = rspamd_map_helper_new_radix (
+							rspamd_map_add_fake (cfg, description, map_name));
 				}
 
 				rspamd_map_helper_insert_radix_resolve (*target, str, "");
@@ -2761,7 +2760,7 @@ rspamd_open_zstd_dictionary (const char *path)
 		return NULL;
 	}
 
-	dict->id = ZDICT_getDictID (dict->dict, dict->size);
+	dict->id = -1;
 
 	if (dict->id == 0) {
 		g_free (dict);
@@ -2781,12 +2780,11 @@ rspamd_free_zstd_dictionary (struct zstd_dictionary *dict)
 	}
 }
 
-#ifdef HAVE_CBLAS
-#ifdef HAVE_CBLAS_H
-#include "cblas.h"
-#else
+#ifdef HAVE_OPENBLAS_SET_NUM_THREADS
 extern void openblas_set_num_threads(int num_threads);
 #endif
+#ifdef HAVE_BLI_THREAD_SET_NUM_THREADS
+extern void bli_thread_set_num_threads(int num_threads);
 #endif
 
 gboolean
@@ -2802,9 +2800,9 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 		if (cfg->local_addrs) {
 			rspamd_config_radix_from_ucl (cfg, cfg->local_addrs,
 					"Local addresses",
-					(struct rspamd_radix_map_helper **)ctx->local_addrs,
+					(struct rspamd_radix_map_helper **) ctx->local_addrs,
 					NULL,
-					NULL);
+					NULL, "local addresses");
 		}
 
 		rspamd_free_zstd_dictionary (ctx->in_dict);
@@ -2891,9 +2889,13 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 			ZSTD_freeCStream (ctx->out_zstream);
 			ctx->out_zstream = NULL;
 		}
-#ifdef HAVE_CBLAS
+#ifdef HAVE_OPENBLAS_SET_NUM_THREADS
 		openblas_set_num_threads (cfg->max_blas_threads);
 #endif
+#ifdef HAVE_BLI_THREAD_SET_NUM_THREADS
+		bli_thread_set_num_threads (cfg->max_blas_threads);
+#endif
+
 	}
 
 	return ret;

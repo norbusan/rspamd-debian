@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#include <src/libmime/message.h>
 #include "lua_common.h"
+#include "lua_url.h"
 #include "libmime/message.h"
 #include "libmime/lang_detection.h"
 #include "libstat/stat_api.h"
@@ -544,6 +544,15 @@ LUA_FUNCTION_DEF (mimepart, set_specific);
  */
 LUA_FUNCTION_DEF (mimepart, is_specific);
 
+/***
+ * @method mime_part:get_urls([need_emails|list_protos][, need_images])
+ * Get all URLs found in a mime part. Telephone urls and emails are not included unless explicitly asked in `list_protos`
+ * @param {boolean} need_emails if `true` then reutrn also email urls, this can be a comma separated string of protocols desired or a table (e.g. `mailto` or `telephone`)
+ * @param {boolean} need_images return urls from images (<img src=...>) as well
+ * @return {table rspamd_url} list of all urls found
+ */
+LUA_FUNCTION_DEF (mimepart, get_urls);
+
 static const struct luaL_reg mimepartlib_m[] = {
 	LUA_INTERFACE_DEF (mimepart, get_content),
 	LUA_INTERFACE_DEF (mimepart, get_raw_content),
@@ -569,6 +578,7 @@ static const struct luaL_reg mimepartlib_m[] = {
 	LUA_INTERFACE_DEF (mimepart, is_message),
 	LUA_INTERFACE_DEF (mimepart, get_children),
 	LUA_INTERFACE_DEF (mimepart, get_parent),
+	LUA_INTERFACE_DEF (mimepart, get_urls),
 	LUA_INTERFACE_DEF (mimepart, is_text),
 	LUA_INTERFACE_DEF (mimepart, is_broken),
 	LUA_INTERFACE_DEF (mimepart, is_attachment),
@@ -607,12 +617,12 @@ lua_textpart_is_utf (lua_State * L)
 	LUA_TRACE_POINT;
 	struct rspamd_mime_text_part *part = lua_check_textpart (L);
 
-	if (part == NULL || IS_PART_EMPTY (part)) {
+	if (part == NULL || IS_TEXT_PART_EMPTY (part)) {
 		lua_pushboolean (L, FALSE);
 		return 1;
 	}
 
-	lua_pushboolean (L, IS_PART_UTF (part));
+	lua_pushboolean (L, IS_TEXT_PART_UTF (part));
 
 	return 1;
 }
@@ -680,7 +690,7 @@ lua_textpart_get_content (lua_State * L)
 	}
 
 	if (!type) {
-		if (IS_PART_EMPTY (part)) {
+		if (IS_TEXT_PART_EMPTY (part)) {
 			lua_pushnil (L);
 			return 1;
 		}
@@ -688,7 +698,7 @@ lua_textpart_get_content (lua_State * L)
 		len = part->utf_content->len;
 	}
 	else if (strcmp (type, "content") == 0) {
-		if (IS_PART_EMPTY (part)) {
+		if (IS_TEXT_PART_EMPTY (part)) {
 			lua_pushnil (L);
 			return 1;
 		}
@@ -697,7 +707,7 @@ lua_textpart_get_content (lua_State * L)
 		len = part->utf_content->len;
 	}
 	else if (strcmp (type, "content_oneline") == 0) {
-		if (IS_PART_EMPTY (part)) {
+		if (IS_TEXT_PART_EMPTY (part)) {
 			lua_pushnil (L);
 			return 1;
 		}
@@ -753,7 +763,7 @@ lua_textpart_get_raw_content (lua_State * L)
 	struct rspamd_mime_text_part *part = lua_check_textpart (L);
 	struct rspamd_lua_text *t;
 
-	if (part == NULL || IS_PART_EMPTY (part)) {
+	if (part == NULL || IS_TEXT_PART_EMPTY (part)) {
 		lua_pushnil (L);
 		return 1;
 	}
@@ -774,7 +784,7 @@ lua_textpart_get_content_oneline (lua_State * L)
 	struct rspamd_mime_text_part *part = lua_check_textpart (L);
 	struct rspamd_lua_text *t;
 
-	if (part == NULL || IS_PART_EMPTY (part)) {
+	if (part == NULL || IS_TEXT_PART_EMPTY (part)) {
 		lua_pushnil (L);
 		return 1;
 	}
@@ -799,7 +809,7 @@ lua_textpart_get_length (lua_State * L)
 		return 1;
 	}
 
-	if (IS_PART_EMPTY (part) || part->utf_content == NULL) {
+	if (IS_TEXT_PART_EMPTY (part) || part->utf_content == NULL) {
 		lua_pushinteger (L, 0);
 	}
 	else {
@@ -863,7 +873,7 @@ lua_textpart_get_lines_count (lua_State * L)
 		return 1;
 	}
 
-	if (IS_PART_EMPTY (part)) {
+	if (IS_TEXT_PART_EMPTY (part)) {
 		lua_pushinteger (L, 0);
 	}
 	else {
@@ -884,7 +894,7 @@ lua_textpart_get_words_count (lua_State *L)
 		return 1;
 	}
 
-	if (IS_PART_EMPTY (part) || part->utf_words == NULL) {
+	if (IS_TEXT_PART_EMPTY (part) || part->utf_words == NULL) {
 		lua_pushinteger (L, 0);
 	}
 	else {
@@ -926,7 +936,7 @@ lua_textpart_get_words (lua_State *L)
 		return luaL_error (L, "invalid arguments");
 	}
 
-	if (IS_PART_EMPTY (part) || part->utf_words == NULL) {
+	if (IS_TEXT_PART_EMPTY (part) || part->utf_words == NULL) {
 		lua_createtable (L, 0, 0);
 	}
 	else {
@@ -959,7 +969,7 @@ lua_textpart_filter_words (lua_State *L)
 		return luaL_error (L, "invalid arguments");
 	}
 
-	if (IS_PART_EMPTY (part) || part->utf_words == NULL) {
+	if (IS_TEXT_PART_EMPTY (part) || part->utf_words == NULL) {
 		lua_createtable (L, 0, 0);
 	}
 	else {
@@ -1045,7 +1055,7 @@ lua_textpart_is_empty (lua_State * L)
 		return 1;
 	}
 
-	lua_pushboolean (L, IS_PART_EMPTY (part));
+	lua_pushboolean (L, IS_TEXT_PART_EMPTY (part));
 
 	return 1;
 }
@@ -1061,7 +1071,7 @@ lua_textpart_is_html (lua_State * L)
 		return 1;
 	}
 
-	lua_pushboolean (L, IS_PART_HTML (part));
+	lua_pushboolean (L, IS_TEXT_PART_HTML (part));
 
 	return 1;
 }
@@ -1754,22 +1764,27 @@ lua_mimepart_is_attachment (lua_State * L)
 		return luaL_error (L, "invalid arguments");
 	}
 
-	if (part->part_type != RSPAMD_MIME_PART_IMAGE) {
-		if (part->cd && part->cd->type == RSPAMD_CT_ATTACHMENT) {
-			lua_pushboolean (L, true);
-		}
-		else {
-			if (part->cd && part->cd->filename.len > 0) {
-				/* We still have filename and it is not an image */
+	if (part->cd && part->cd->type == RSPAMD_CT_ATTACHMENT) {
+		lua_pushboolean (L, true);
+	}
+	else {
+		/* if has_name and not (image and Content-ID_header_present) */
+		if (part->cd && part->cd->filename.len > 0) {
+			if (part->part_type != RSPAMD_MIME_PART_IMAGE &&
+				rspamd_message_get_header_from_hash (part->raw_headers,
+						"Content-Id") == NULL) {
+				/* Filename is presented but no content id and not image */
 				lua_pushboolean (L, true);
 			}
 			else {
+				/* Image or an embeded object */
 				lua_pushboolean (L, false);
 			}
 		}
-	}
-	else {
-		lua_pushboolean (L, false);
+		else {
+			/* No filename */
+			lua_pushboolean (L, false);
+		}
 	}
 
 	return 1;
@@ -2065,6 +2080,46 @@ lua_mimepart_get_specific (lua_State * L)
 	else {
 		lua_rawgeti (L, LUA_REGISTRYINDEX, part->specific.lua_specific.cbref);
 	}
+
+	return 1;
+}
+
+static gint
+lua_mimepart_get_urls (lua_State * L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_mime_part *part = lua_check_mimepart (L);
+
+	if (part == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	struct lua_tree_cb_data cb;
+	struct rspamd_url *u;
+	static const gint default_protocols_mask = PROTOCOL_HTTP|PROTOCOL_HTTPS|
+											   PROTOCOL_FILE|PROTOCOL_FTP;
+	gsize sz, max_urls = 0, i;
+
+	if (part->urls == NULL) {
+		lua_newtable (L);
+
+		return 1;
+	}
+
+	if (!lua_url_cbdata_fill (L, 2, &cb, default_protocols_mask,
+			~(0), max_urls)) {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	sz = part->urls->len;
+
+	lua_createtable (L, sz, 0);
+
+	PTR_ARRAY_FOREACH (part->urls, i, u) {
+		lua_tree_url_callback (u, u, &cb);
+	}
+
+	lua_url_cbdata_dtor (&cb);
 
 	return 1;
 }

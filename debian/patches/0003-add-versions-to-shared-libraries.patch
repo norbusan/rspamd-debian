@@ -2,6 +2,7 @@ From: =?utf-8?q?Christian_G=C3=B6ttsche?= <cgzones@googlemail.com>
 Date: Tue, 14 Jan 2020 22:02:02 +0100
 Subject: add versions to shared libraries
 
+Forwarded: not-needed
 ---
  contrib/aho-corasick/CMakeLists.txt | 2 ++
  contrib/kann/CMakeLists.txt         | 3 ++-
@@ -46,7 +47,7 @@ Subject: add versions to shared libraries
  		-DEV_MULTIPLICITY=1
 --- a/contrib/replxx/CMakeLists.txt
 +++ b/contrib/replxx/CMakeLists.txt
-@@ -66,6 +66,7 @@ set(
+@@ -65,6 +65,7 @@ set(
  
  set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
  add_library(rspamd-replxx SHARED ${REPLXX_SOURCES})
@@ -54,9 +55,9 @@ Subject: add versions to shared libraries
  
  target_include_directories(
  	rspamd-replxx
-@@ -75,4 +76,4 @@ target_include_directories(
- set( TARGETS ${TARGETS} rspamd-replxx )
+@@ -75,4 +76,4 @@ set( TARGETS ${TARGETS} rspamd-replxx )
  target_compile_definitions(rspamd-replxx PRIVATE REPLXX_BUILDING_DLL)
+ target_link_libraries(rspamd-replxx "${RSPAMD_REQUIRED_LIBRARIES}")
  
 -install( TARGETS ${TARGETS} LIBRARY DESTINATION ${RSPAMD_LIBDIR})
 \ No newline at end of file

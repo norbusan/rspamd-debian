@@ -1,4 +1,4 @@
-# Logging configuration
+# Basic rspamd configuration
 # Please don't modify this file as your changes might be overwritten with
 # the next update.
 #
@@ -29,6 +29,7 @@ check_all_filters = false;
 dns_max_requests = 64;
 max_lua_urls = 1024;
 max_urls = 10240;
+max_recipients = 1024;
 
 dns {
     timeout = 1s;

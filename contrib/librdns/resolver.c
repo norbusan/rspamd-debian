@@ -758,14 +758,14 @@ rdns_make_request_full (
 			type = req->requested_names[i].type;
 			if (queries > 1) {
 				if (!rdns_add_rr (req, cur_name, clen, type, &comp)) {
-					rdns_err ("cannot add rr", cur_name);
+					rdns_err ("cannot add rr");
 					REF_RELEASE (req);
 					rnds_compression_free (comp);
 					return NULL;
 				}
 			} else {
 				if (!rdns_add_rr (req, cur_name, clen, type, NULL)) {
-					rdns_err ("cannot add rr", cur_name);
+					rdns_err ("cannot add rr");
 					REF_RELEASE (req);
 					rnds_compression_free (comp);
 					return NULL;
@@ -1049,18 +1049,19 @@ rdns_resolver_free (struct rdns_resolver *resolver)
 
 
 struct rdns_resolver *
-rdns_resolver_new (void)
+rdns_resolver_new (int flags)
 {
-	struct rdns_resolver     *new;
+	struct rdns_resolver     *new_resolver;
 
-	new = calloc (1, sizeof (struct rdns_resolver));
+	new_resolver = calloc (1, sizeof (struct rdns_resolver));
 
-	REF_INIT_RETAIN (new, rdns_resolver_free);
+	REF_INIT_RETAIN (new_resolver, rdns_resolver_free);
 
-	new->logger = rdns_logger_internal;
-	new->log_data = new;
+	new_resolver->logger = rdns_logger_internal;
+	new_resolver->log_data = new_resolver;
+	new_resolver->flags = flags;
 
-	return new;
+	return new_resolver;
 }
 
 void

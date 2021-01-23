@@ -166,6 +166,7 @@ typedef void (*dkim_key_handler_f) (rspamd_dkim_key_t *key, gsize keylen,
  */
 rspamd_dkim_context_t *rspamd_create_dkim_context (const gchar *sig,
 												   rspamd_mempool_t *pool,
+												   struct rspamd_dns_resolver *resolver,
 												   guint time_jitter,
 												   enum rspamd_dkim_type type,
 												   GError **err);
@@ -267,6 +268,15 @@ guint rspamd_dkim_key_get_ttl (rspamd_dkim_key_t *k);
 rspamd_dkim_key_t *rspamd_dkim_make_key (const gchar *keydata, guint keylen,
 										 enum rspamd_dkim_key_type type,
 										 GError **err);
+
+#define RSPAMD_DKIM_KEY_ID_LEN 16
+/**
+ * Returns key id for dkim key (raw md5 of RSPAMD_DKIM_KEY_ID_LEN)
+ * NOT ZERO TERMINATED, use RSPAMD_DKIM_KEY_ID_LEN for length
+ * @param key
+ * @return
+ */
+const guchar *rspamd_dkim_key_id (rspamd_dkim_key_t *key);
 
 /**
  * Parse DKIM public key from a TXT record

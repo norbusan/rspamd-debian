@@ -106,7 +106,7 @@ static struct html_tag_def tag_defs[] = {
 	TAG_DEF(Tag_LABEL, "label", (CM_INLINE)),
 	TAG_DEF(Tag_LEGEND, "legend", (CM_INLINE)),
 	TAG_DEF(Tag_LI, "li", (CM_LIST | CM_OPT | CM_NO_INDENT | FL_BLOCK)),
-	TAG_DEF(Tag_LINK, "link", (CM_HEAD | CM_EMPTY|FL_HREF)),
+	TAG_DEF(Tag_LINK, "link", (CM_EMPTY|FL_HREF)),
 	TAG_DEF(Tag_LISTING, "listing", (CM_BLOCK | CM_OBSOLETE)),
 	TAG_DEF(Tag_MAP, "map", (CM_INLINE|FL_HREF)),
 	TAG_DEF(Tag_MENU, "menu", (CM_BLOCK | CM_OBSOLETE)),
@@ -189,6 +189,10 @@ khash_t(tag_by_name) *html_tag_by_name;
 khash_t(tag_by_id) *html_tag_by_id;
 khash_t(color_by_name) *html_color_by_name;
 
+static struct rspamd_url *rspamd_html_process_url (rspamd_mempool_t *pool,
+												   const gchar *start, guint len,
+												   struct html_tag_component *comp);
+
 static void
 rspamd_html_library_init (void)
 {
@@ -204,9 +208,25 @@ rspamd_html_library_init (void)
 
 		for (i = 0; i < G_N_ELEMENTS (tag_defs); i++) {
 			k = kh_put (tag_by_id, html_tag_by_id, tag_defs[i].id, &rc);
+
+			if (rc == 0) {
+				/* Collision by id */
+				msg_err ("collision in html tag id: %d (%s) vs %d (%s)",
+						(int)tag_defs[i].id, tag_defs[i].name,
+						(int)kh_val (html_tag_by_id, k).id, kh_val (html_tag_by_id, k).name);
+			}
+
 			kh_val (html_tag_by_id, k) = tag_defs[i];
 
 			k = kh_put (tag_by_name, html_tag_by_name, tag_defs[i].name, &rc);
+
+			if (rc == 0) {
+				/* Collision by name */
+				msg_err ("collision in html tag name: %d (%s) vs %d (%s)",
+						(int)tag_defs[i].id, tag_defs[i].name,
+						(int)kh_val (html_tag_by_id, k).id, kh_val (html_tag_by_id, k).name);
+			}
+
 			kh_val (html_tag_by_name, k) = tag_defs[i];
 		}
 
@@ -225,11 +245,52 @@ rspamd_html_library_init (void)
 			if (entities_defs[i].code != 0) {
 				k = kh_put (entity_by_number, html_entity_by_number,
 						entities_defs[i].code, &rc);
-				kh_val (html_entity_by_number, k) = entities_defs[i].replacement;
+
+				if (rc == 0) {
+					/* Collision by id */
+					gint cmp_res = strcmp (entities_defs[i].replacement,
+							kh_val (html_entity_by_number, k));
+					if (cmp_res != 0) {
+						if (strlen (entities_defs[i].replacement) <
+							strlen (kh_val (html_entity_by_number, k))) {
+							/* Shorter replacement is more likely to be valid */
+							msg_debug ("1 collision in html entity id: %d (%s); replace %s by %s",
+									(int) entities_defs[i].code, entities_defs[i].name,
+									kh_val (html_entity_by_number, k),
+									entities_defs[i].replacement);
+							kh_val (html_entity_by_number, k) = entities_defs[i].replacement;
+						}
+						else if (strlen (entities_defs[i].replacement) ==
+								 strlen (kh_val (html_entity_by_number, k)) &&
+										 cmp_res < 0) {
+							/* Identical len but lexicographically shorter */
+							msg_debug ("collision in html entity id: %d (%s); replace %s by %s",
+									(int) entities_defs[i].code, entities_defs[i].name,
+									kh_val (html_entity_by_number, k),
+									entities_defs[i].replacement);
+							kh_val (html_entity_by_number, k) = entities_defs[i].replacement;
+						}
+						/* Do not replace otherwise */
+					}
+					/* Identic replacement */
+				}
+				else {
+					kh_val (html_entity_by_number, k) = entities_defs[i].replacement;
+				}
 			}
 
 			k = kh_put (entity_by_name, html_entity_by_name,
 					entities_defs[i].name, &rc);
+
+			if (rc == 0) {
+				/* Collision by name */
+				if (strcmp (kh_val (html_entity_by_number, k),
+						entities_defs[i].replacement) != 0) {
+					msg_err ("collision in html entity name: %d (%s)",
+							(int) entities_defs[i].code, entities_defs[i].name);
+				}
+			}
+
 			kh_val (html_entity_by_name, k) = entities_defs[i].replacement;
 		}
 
@@ -345,7 +406,12 @@ rspamd_html_decode_entitles_inplace (gchar *s, gsize len)
 	gchar *t = s, *h = s, *e = s, *end_ptr, old_c;
 	const gchar *end;
 	const gchar *entity;
-	gboolean seen_hash = FALSE, seen_digit_only = FALSE, seen_hex = FALSE;
+	gboolean seen_hash = FALSE, seen_hex = FALSE;
+	enum {
+		do_undefined,
+		do_digits_only,
+		do_mixed,
+	} seen_digit_only;
 	gint state = 0, base;
 	UChar32 uc;
 	khiter_t k;
@@ -359,7 +425,7 @@ rspamd_html_decode_entitles_inplace (gchar *s, gsize len)
 
 	end = s + l;
 
-	while (h - s < l) {
+	while (h - s < l && t <= h) {
 		switch (state) {
 		/* Out of entity */
 		case 0:
@@ -367,7 +433,7 @@ rspamd_html_decode_entitles_inplace (gchar *s, gsize len)
 				state = 1;
 				seen_hash = FALSE;
 				seen_hex = FALSE;
-				seen_digit_only = FALSE;
+				seen_digit_only = do_undefined;
 				e = h;
 				h++;
 				continue;
@@ -516,17 +582,18 @@ decode_entity:
 					h ++;
 				}
 			}
-			else if (g_ascii_isdigit (*h) || (seen_hex && g_ascii_isxdigit (*h))) {
-				seen_digit_only = TRUE;
+			else if (seen_digit_only != do_mixed &&
+				(g_ascii_isdigit (*h) || (seen_hex && g_ascii_isxdigit (*h)))) {
+				seen_digit_only = do_digits_only;
 			}
 			else {
-				if (seen_digit_only && seen_hash && h > e) {
+				if (seen_digit_only == do_digits_only && seen_hash && h > e) {
 					/* We have seen some digits, so we can try to decode, eh */
 					/* Fuck retarded email clients... */
 					goto decode_entity;
 				}
 
-				seen_digit_only = FALSE;
+				seen_digit_only = do_mixed;
 			}
 
 			h++;
@@ -912,6 +979,12 @@ rspamd_html_parse_tag_component (rspamd_mempool_t *pool,
 	if (len == 3) {
 		if (g_ascii_strncasecmp (p, "src", len) == 0) {
 			NEW_COMPONENT (RSPAMD_HTML_COMPONENT_HREF);
+		}
+		else if (g_ascii_strncasecmp (p, "rel", len) == 0) {
+			NEW_COMPONENT (RSPAMD_HTML_COMPONENT_REL);
+		}
+		else if (g_ascii_strncasecmp (p, "alt", len) == 0) {
+			NEW_COMPONENT (RSPAMD_HTML_COMPONENT_ALT);
 		}
 	}
 	else if (len == 4) {
@@ -1505,7 +1578,7 @@ rspamd_html_process_url (rspamd_mempool_t *pool, const gchar *start, guint len,
 
 	/* Filter some completely damaged urls */
 	if (rc == URI_ERRNO_OK && url->hostlen > 0 &&
-		!((url->flags & RSPAMD_URL_FLAG_OBSCURED) && (url->protocol & PROTOCOL_UNKNOWN))) {
+		!((url->protocol & PROTOCOL_UNKNOWN))) {
 		url->flags |= saved_flags;
 
 		if (has_bad_chars) {
@@ -1514,6 +1587,11 @@ rspamd_html_process_url (rspamd_mempool_t *pool, const gchar *start, guint len,
 
 		if (no_prefix) {
 			url->flags |= RSPAMD_URL_FLAG_SCHEMALESS;
+
+			if (url->tldlen == 0 || (url->flags & RSPAMD_URL_FLAG_NO_TLD)) {
+				/* Ignore urls with both no schema and no tld */
+				return NULL;
+			}
 		}
 
 		decoded = url->string;
@@ -1539,7 +1617,7 @@ rspamd_html_process_url (rspamd_mempool_t *pool, const gchar *start, guint len,
 
 static struct rspamd_url *
 rspamd_html_process_url_tag (rspamd_mempool_t *pool, struct html_tag *tag,
-		struct html_content *hc)
+							 struct html_content *hc)
 {
 	struct html_tag_component *comp;
 	GList *cur;
@@ -1559,14 +1637,22 @@ rspamd_html_process_url_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 			/* Check base url */
 			if (hc && hc->base_url && comp->len > 2) {
 				/*
-				 * Relative url canot start from the following:
+				 * Relative url cannot start from the following:
 				 * schema://
+				 * data:
 				 * slash
 				 */
 				gchar *buf;
 				gsize orig_len;
 
 				if (rspamd_substring_search (start, len, "://", 3) == -1) {
+
+					if (len >= sizeof ("data:") &&
+						g_ascii_strncasecmp (start, "data:", sizeof ("data:") - 1) == 0) {
+						/* Image data url, never insert as url */
+						return NULL;
+					}
+
 					/* Assume relative url */
 
 					gboolean need_slash = FALSE;
@@ -1619,6 +1705,7 @@ struct rspamd_html_url_query_cbd {
 	rspamd_mempool_t *pool;
 	khash_t (rspamd_url_hash) *url_set;
 	struct rspamd_url *url;
+	GPtrArray *part_urls;
 };
 
 static gboolean
@@ -1642,14 +1729,18 @@ rspamd_html_url_query_callback (struct rspamd_url *url, gsize start_offset,
 					cbd->url->querylen, rspamd_url_query_unsafe (cbd->url));
 
 	url->flags |= RSPAMD_URL_FLAG_QUERY;
-	rspamd_url_set_add_or_increase (cbd->url_set, url);
+
+	if (rspamd_url_set_add_or_increase (cbd->url_set, url) && cbd->part_urls) {
+		g_ptr_array_add (cbd->part_urls, url);
+	}
 
 	return TRUE;
 }
 
 static void
 rspamd_process_html_url (rspamd_mempool_t *pool, struct rspamd_url *url,
-						 khash_t (rspamd_url_hash) *url_set)
+						 khash_t (rspamd_url_hash) *url_set,
+						 GPtrArray *part_urls)
 {
 	if (url->flags & RSPAMD_URL_FLAG_UNNORMALISED) {
 		url->flags |= RSPAMD_URL_FLAG_OBSCURED;
@@ -1661,11 +1752,16 @@ rspamd_process_html_url (rspamd_mempool_t *pool, struct rspamd_url *url,
 		qcbd.pool = pool;
 		qcbd.url_set = url_set;
 		qcbd.url = url;
+		qcbd.part_urls = part_urls;
 
 		rspamd_url_find_multiple(pool,
 				rspamd_url_query_unsafe (url), url->querylen,
 				RSPAMD_URL_FIND_ALL, NULL,
 				rspamd_html_url_query_callback, &qcbd);
+	}
+
+	if (part_urls) {
+		g_ptr_array_add (part_urls, url);
 	}
 }
 
@@ -1723,7 +1819,9 @@ rspamd_html_process_data_image (rspamd_mempool_t *pool,
 
 static void
 rspamd_html_process_img_tag (rspamd_mempool_t *pool, struct html_tag *tag,
-		struct html_content *hc, khash_t (rspamd_url_hash) *url_set)
+							 struct html_content *hc, khash_t (rspamd_url_hash) *url_set,
+							 GPtrArray *part_urls,
+							 GByteArray *dest)
 {
 	struct html_tag_component *comp;
 	struct html_image *img;
@@ -1737,6 +1835,7 @@ rspamd_html_process_img_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 	cur = tag->params->head;
 	img = rspamd_mempool_alloc0 (pool, sizeof (*img));
 	img->tag = tag;
+	tag->flags |= FL_IMAGE;
 
 	while (cur) {
 		comp = cur->data;
@@ -1769,7 +1868,11 @@ rspamd_html_process_img_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 
 						if (img->url) {
 							img->url->flags |= RSPAMD_URL_FLAG_IMAGE;
-							rspamd_url_set_add_or_increase (url_set, img->url);
+
+							if (rspamd_url_set_add_or_increase (url_set, img->url) &&
+								part_urls) {
+								g_ptr_array_add (part_urls, img->url);
+							}
 						}
 					}
 				}
@@ -1831,6 +1934,19 @@ rspamd_html_process_img_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 				}
 			}
 		}
+		else if (comp->type == RSPAMD_HTML_COMPONENT_ALT && comp->len > 0 && dest != NULL) {
+			if (dest->len > 0 && !g_ascii_isspace (dest->data[dest->len - 1])) {
+				/* Add a space */
+				g_byte_array_append (dest, " ", 1);
+			}
+
+			g_byte_array_append (dest, comp->start, comp->len);
+
+			if (!g_ascii_isspace (dest->data[dest->len - 1])) {
+				/* Add a space */
+				g_byte_array_append (dest, " ", 1);
+			}
+		}
 
 		cur = g_list_next (cur);
 	}
@@ -1853,6 +1969,31 @@ rspamd_html_process_img_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 
 	g_ptr_array_add (hc->images, img);
 	tag->extra = img;
+}
+
+static void
+rspamd_html_process_link_tag (rspamd_mempool_t *pool, struct html_tag *tag,
+							 struct html_content *hc, khash_t (rspamd_url_hash) *url_set,
+							 GPtrArray *part_urls)
+{
+	struct html_tag_component *comp;
+	GList *cur;
+
+	cur = tag->params->head;
+
+	while (cur) {
+		comp = cur->data;
+
+		if (comp->type == RSPAMD_HTML_COMPONENT_REL && comp->len > 0) {
+			if (comp->len == sizeof ("icon") - 1 &&
+				rspamd_lc_cmp (comp->start, "icon", sizeof ("icon") - 1) == 0) {
+
+				rspamd_html_process_img_tag (pool, tag, hc, url_set, part_urls, NULL);
+			}
+		}
+
+		cur = g_list_next (cur);
+	}
 }
 
 static void
@@ -2594,7 +2735,8 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool,
 							   struct html_content *hc,
 							   GByteArray *in,
 							   GList **exceptions,
-							   khash_t (rspamd_url_hash) *url_set)
+							   khash_t (rspamd_url_hash) *url_set,
+							   GPtrArray *part_urls)
 {
 	const guchar *p, *c, *end, *savep = NULL;
 	guchar t;
@@ -3050,7 +3192,7 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool,
 					save_space = FALSE;
 				}
 
-				if (cur_tag->flags & FL_HREF) {
+				if (cur_tag->flags & FL_HREF && !(cur_tag->flags & FL_IGNORE)) {
 					if (!(cur_tag->flags & (FL_CLOSING))) {
 						url = rspamd_html_process_url_tag (pool, cur_tag, hc);
 
@@ -3058,7 +3200,8 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool,
 
 							if (url_set != NULL) {
 								if (rspamd_url_set_add_or_increase (url_set, url)) {
-									rspamd_process_html_url (pool, url, url_set);
+									rspamd_process_html_url (pool, url, url_set,
+											part_urls);
 								}
 							}
 
@@ -3112,6 +3255,7 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool,
 							msg_debug_html ("got valid base tag");
 							hc->base_url = url;
 							cur_tag->extra = url;
+							cur_tag->flags |= FL_HREF;
 						}
 						else {
 							msg_debug_html ("got invalid base tag!");
@@ -3120,7 +3264,12 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool,
 				}
 
 				if (cur_tag->id == Tag_IMG && !(cur_tag->flags & FL_CLOSING)) {
-					rspamd_html_process_img_tag (pool, cur_tag, hc, url_set);
+					rspamd_html_process_img_tag (pool, cur_tag, hc, url_set,
+							part_urls, dest);
+				}
+				else if (cur_tag->id == Tag_LINK && !(cur_tag->flags & FL_CLOSING)) {
+					rspamd_html_process_link_tag (pool, cur_tag, hc, url_set,
+							part_urls);
 				}
 				else if (cur_tag->flags & FL_BLOCK) {
 					struct html_block *bl;
@@ -3185,5 +3334,5 @@ rspamd_html_process_part (rspamd_mempool_t *pool,
 		struct html_content *hc,
 		GByteArray *in)
 {
-	return rspamd_html_process_part_full (pool, hc, in, NULL, NULL);
+	return rspamd_html_process_part_full (pool, hc, in, NULL, NULL, NULL);
 }

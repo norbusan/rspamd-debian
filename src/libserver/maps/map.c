@@ -263,6 +263,14 @@ rspamd_map_cache_cb (struct ev_loop *loop, ev_timer *w, int revents)
 			w->repeat = cache_cbd->map->poll_timeout;
 		}
 
+		if (w->repeat < 0) {
+			msg_info_map ("cached data for %s has skewed check time: %d last checked, %d poll timeout, %.2f diff",
+					map->name, (int)cache_cbd->data->last_checked,
+					(int)cache_cbd->map->poll_timeout,
+					(rspamd_get_calendar_ticks () - cache_cbd->data->last_checked));
+			w->repeat = 0.0;
+		}
+
 		cache_cbd->last_checked = cache_cbd->data->last_checked;
 		msg_debug_map ("cached data is up to date for %s", map->name);
 		ev_timer_again (loop, &cache_cbd->timeout);
@@ -1127,6 +1135,40 @@ rspamd_map_schedule_periodic (struct rspamd_map *map, int how)
 			cbd, jittered_sec, map->name, reason);
 }
 
+static gint
+rspamd_map_af_to_weight (const rspamd_inet_addr_t *addr)
+{
+	int ret;
+
+	switch (rspamd_inet_address_get_af (addr)) {
+	case AF_UNIX:
+		ret = 2;
+		break;
+	case AF_INET:
+		ret = 1;
+		break;
+	default:
+		ret = 0;
+		break;
+	}
+
+	return ret;
+}
+
+static gint
+rspamd_map_dns_address_sort_func (gconstpointer a, gconstpointer b)
+{
+	const rspamd_inet_addr_t *ip1 = *(const rspamd_inet_addr_t **)a,
+			*ip2 = *(const rspamd_inet_addr_t **)b;
+	gint w1, w2;
+
+	w1 = rspamd_map_af_to_weight (ip1);
+	w2 = rspamd_map_af_to_weight (ip2);
+
+	/* Inverse order */
+	return w2 - w1;
+}
+
 static void
 rspamd_map_dns_callback (struct rdns_reply *reply, void *arg)
 {
@@ -1146,11 +1188,6 @@ rspamd_map_dns_callback (struct rdns_reply *reply, void *arg)
 	}
 
 	if (reply->code == RDNS_RC_NOERROR) {
-		/*
-		 * We just get the first address hoping that a resolver performs
-		 * round-robin rotation well
-		 */
-
 		DL_FOREACH (reply->entries, cur_rep) {
 			rspamd_inet_addr_t *addr;
 			addr = rspamd_inet_address_from_rnds (reply->entries);
@@ -1188,13 +1225,24 @@ rspamd_map_dns_callback (struct rdns_reply *reply, void *arg)
 	}
 
 	if (cbd->stage == http_map_http_conn && cbd->addrs->len > 0) {
-		guint selected_addr_idx;
+		rspamd_ptr_array_shuffle (cbd->addrs);
+		gint idx = 0;
+		/*
+		 * For the existing addr we can just select any address as we have
+		 * data available
+		 */
+		if (cbd->map->nelts > 0 && rspamd_random_double_fast () > 0.5) {
+			/* Already shuffled, use whatever is the first */
+			cbd->addr = (rspamd_inet_addr_t *) g_ptr_array_index (cbd->addrs, idx);
+		}
+		else {
+			/* Always prefer IPv4 as IPv6 is almost all the time broken */
+			g_ptr_array_sort (cbd->addrs, rspamd_map_dns_address_sort_func);
+			cbd->addr = (rspamd_inet_addr_t *) g_ptr_array_index (cbd->addrs, idx);
+		}
 
-		selected_addr_idx = rspamd_random_uint64_fast () % cbd->addrs->len;
-		cbd->addr = (rspamd_inet_addr_t *)g_ptr_array_index (cbd->addrs,
-				selected_addr_idx);
-
-		msg_debug_map ("open http connection to %s",
+retry:
+		msg_debug_map ("try open http connection to %s",
 				rspamd_inet_address_to_string_pretty (cbd->addr));
 		cbd->conn = rspamd_http_connection_new_client (NULL,
 				NULL,
@@ -1207,14 +1255,30 @@ rspamd_map_dns_callback (struct rdns_reply *reply, void *arg)
 			write_http_request (cbd);
 		}
 		else {
-			cbd->periodic->errored = TRUE;
-			msg_err_map ("error reading %s(%s): "
-						 "connection with http server terminated incorrectly: %s",
-					cbd->bk->uri,
-					cbd->addr ? rspamd_inet_address_to_string_pretty (cbd->addr) : "",
-					strerror (errno));
+			if (idx < cbd->addrs->len - 1) {
+				/* We can retry */
+				idx++;
+				rspamd_inet_addr_t *prev_addr = cbd->addr;
+				cbd->addr = (rspamd_inet_addr_t *) g_ptr_array_index (cbd->addrs, idx);
+				msg_info_map ("cannot connect to %s to get data for %s: %s, retry with %s (%d of %d)",
+						rspamd_inet_address_to_string_pretty (prev_addr),
+						cbd->bk->uri,
+						strerror (errno),
+						rspamd_inet_address_to_string_pretty (cbd->addr),
+						idx + 1, cbd->addrs->len);
+				goto retry;
+			}
+			else {
+				/* Nothing else left */
+				cbd->periodic->errored = TRUE;
+				msg_err_map ("error reading %s(%s): "
+							 "connection with http server terminated incorrectly: %s",
+						cbd->bk->uri,
+						cbd->addr ? rspamd_inet_address_to_string_pretty (cbd->addr) : "",
+						strerror (errno));
 
-			rspamd_map_process_periodic (cbd->periodic);
+				rspamd_map_process_periodic (cbd->periodic);
+			}
 		}
 	}
 
@@ -1624,6 +1688,11 @@ rspamd_map_common_http_callback (struct rspamd_map *map,
 		/* Read cached data */
 		if (check) {
 			if (data->last_modified < data->cache->last_modified) {
+				msg_info_map ("need to reread cached map triggered by %s "
+							  "(%d our modify time, %d cached modify time)",
+						bk->uri,
+						(int)data->last_modified,
+						(int)data->cache->last_modified);
 				periodic->need_modify = TRUE;
 				/* Reset the whole chain */
 				periodic->cur_backend = 0;
@@ -1963,34 +2032,31 @@ rspamd_map_on_stat (struct ev_loop *loop, ev_stat *w, int revents)
 	struct rspamd_map *map = (struct rspamd_map *)w->data;
 
 	if (w->attr.st_nlink > 0) {
+		msg_info_map ("old mtime is %t (size = %Hz), "
+					  "new mtime is %t (size = %Hz) for map file %s",
+				w->prev.st_mtime, (gsize)w->prev.st_size,
+				w->attr.st_mtime, (gsize)w->attr.st_size,
+				w->path);
 
-		if (w->attr.st_mtime > w->prev.st_mtime) {
-			msg_info_map ("old mtime is %t (size = %Hz), "
-				 "new mtime is %t (size = %Hz) for map file %s",
-					w->prev.st_mtime, (gsize)w->prev.st_size,
-					w->attr.st_mtime, (gsize)w->attr.st_size,
-					w->path);
+		/* Fire need modify flag */
+		struct rspamd_map_backend *bk;
+		guint i;
 
-			/* Fire need modify flag */
-			struct rspamd_map_backend *bk;
-			guint i;
-
-			PTR_ARRAY_FOREACH (map->backends, i, bk) {
-				if (bk->protocol == MAP_PROTO_FILE) {
-					bk->data.fd->need_modify = TRUE;
-				}
+		PTR_ARRAY_FOREACH (map->backends, i, bk) {
+			if (bk->protocol == MAP_PROTO_FILE) {
+				bk->data.fd->need_modify = TRUE;
 			}
-
-			map->next_check = 0;
-
-			if (map->scheduled_check) {
-				ev_timer_stop (map->event_loop, &map->scheduled_check->ev);
-				MAP_RELEASE (map->scheduled_check, "rspamd_map_on_stat");
-				map->scheduled_check = NULL;
-			}
-
-			rspamd_map_schedule_periodic (map, RSPAMD_MAP_SCHEDULE_INIT);
 		}
+
+		map->next_check = 0;
+
+		if (map->scheduled_check) {
+			ev_timer_stop (map->event_loop, &map->scheduled_check->ev);
+			MAP_RELEASE (map->scheduled_check, "rspamd_map_on_stat");
+			map->scheduled_check = NULL;
+		}
+
+		rspamd_map_schedule_periodic (map, RSPAMD_MAP_SCHEDULE_INIT);
 	}
 }
 
@@ -2582,7 +2648,7 @@ rspamd_map_calculate_hash (struct rspamd_map *map)
 	}
 
 	rspamd_cryptobox_hash_final (&st, cksum);
-	cksum_encoded = rspamd_encode_base32 (cksum, sizeof (cksum));
+	cksum_encoded = rspamd_encode_base32 (cksum, sizeof (cksum), RSPAMD_BASE32_DEFAULT);
 	rspamd_strlcpy (map->tag, cksum_encoded, sizeof (map->tag));
 	g_free (cksum_encoded);
 }
@@ -2673,6 +2739,26 @@ rspamd_map_add (struct rspamd_config *cfg,
 	msg_info_map ("added map %s", bk->uri);
 
 	cfg->maps = g_list_prepend (cfg->maps, map);
+
+	return map;
+}
+
+struct rspamd_map *
+rspamd_map_add_fake (struct rspamd_config *cfg,
+				const gchar *description,
+				const gchar *name)
+{
+	struct rspamd_map *map;
+
+	map = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (struct rspamd_map));
+	map->cfg = cfg;
+	map->id = rspamd_random_uint64_fast ();
+	map->name = rspamd_mempool_strdup (cfg->cfg_pool, name);
+	map->user_data = (void **)&map; /* to prevent null pointer dereferencing */
+
+	if (description != NULL) {
+		map->description = rspamd_mempool_strdup (cfg->cfg_pool, description);
+	}
 
 	return map;
 }
