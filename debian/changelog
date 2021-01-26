@@ -2,7 +2,7 @@ rspamd (2.7-1~bpo10+1) buster-backports; urgency=medium
 
   * Rebuild for buster-backports.
 
- -- Sebastien Badia <sbadia@debian.org>  Sat, 23 Jan 2021 21:30:20 +0100
+ -- Sebastien Badia <sbadia@debian.org>  Tue, 26 Jan 2021 22:05:39 +0100
 
 rspamd (2.7-1) unstable; urgency=medium
 
