@@ -1154,8 +1154,8 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 	case RSPAMD_RE_HEADER:
 	case RSPAMD_RE_RAWHEADER:
 		/* Get list of specified headers */
-		rh = rspamd_message_get_header_array (task,
-				re_class->type_data);
+		rh = rspamd_message_get_header_array(task,
+				re_class->type_data, FALSE);
 
 		if (rh) {
 			ret = rspamd_re_cache_process_headers_list (task, rt, re,
@@ -1177,8 +1177,8 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 		break;
 	case RSPAMD_RE_MIMEHEADER:
 		PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, parts), i, mime_part) {
-			rh = rspamd_message_get_header_from_hash (mime_part->raw_headers,
-					re_class->type_data);
+			rh = rspamd_message_get_header_from_hash(mime_part->raw_headers,
+					re_class->type_data, FALSE);
 
 			if (rh) {
 				ret += rspamd_re_cache_process_headers_list (task, rt, re,
@@ -1224,8 +1224,8 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 							raw = TRUE;
 						}
 
-						in = text_part->utf_content->data;
-						len = text_part->utf_content->len;
+						in = text_part->utf_content.begin;
+						len = text_part->utf_content.len;
 					}
 				}
 
@@ -1345,7 +1345,7 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 		 * of the body content.
 		 */
 
-		rh = rspamd_message_get_header_array (task, "Subject");
+		rh = rspamd_message_get_header_array(task, "Subject", FALSE);
 
 		if (rh) {
 			scvec[0] = (guchar *)rh->decoded;
@@ -1894,6 +1894,7 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 	struct iovec iov[7];
 	struct rspamd_re_cache *cache;
 	GError *err;
+	pid_t our_pid = getpid ();
 
 	cache = cbdata->cache;
 
@@ -1946,8 +1947,8 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 		return;
 	}
 
-	rspamd_snprintf (path, sizeof (path), "%s%c%s.hs.new", cbdata->cache_dir,
-			G_DIR_SEPARATOR, re_class->hash);
+	rspamd_snprintf (path, sizeof (path), "%s%c%s.%P.hs.new", cbdata->cache_dir,
+			G_DIR_SEPARATOR, re_class->hash, our_pid);
 	fd = open (path, O_CREAT|O_TRUNC|O_EXCL|O_WRONLY, 00600);
 
 	if (fd == -1) {
@@ -2185,7 +2186,7 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 		g_free (hs_flags);
 
 		/* Now rename temporary file to the new .hs file */
-		rspamd_snprintf (npath, sizeof (path), "%s%c%s.hs", cbdata->cache_dir,
+		rspamd_snprintf (npath, sizeof (npath), "%s%c%s.hs", cbdata->cache_dir,
 				G_DIR_SEPARATOR, re_class->hash);
 
 		if (rename (path, npath) == -1) {
@@ -2290,10 +2291,18 @@ rspamd_re_cache_is_valid_hyperscan_file (struct rspamd_re_cache *cache,
 	len = strlen (path);
 
 	if (len < sizeof (rspamd_cryptobox_HASHBYTES + 3)) {
+		if (!silent)  {
+			msg_err_re_cache ("cannot open hyperscan cache file %s: too short filename",
+					path);
+		}
 		return FALSE;
 	}
 
 	if (memcmp (path + len - 3, ".hs", 3) != 0) {
+		if (!silent)  {
+			msg_err_re_cache ("cannot open hyperscan cache file %s: not ending with .hs",
+					path);
+		}
 		return FALSE;
 	}
 

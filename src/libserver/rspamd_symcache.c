@@ -1375,24 +1375,45 @@ rspamd_symcache_new (struct rspamd_config *cfg)
 	return cache;
 }
 
+static void
+rspamd_symcache_metric_connect_cb (gpointer k, gpointer v, gpointer ud)
+{
+	struct rspamd_symcache *cache = (struct rspamd_symcache *)ud;
+	const gchar *sym = k;
+	struct rspamd_symbol *s = (struct rspamd_symbol *)v;
+	gdouble weight;
+	struct rspamd_symcache_item *item;
+
+	weight = *s->weight_ptr;
+	item = g_hash_table_lookup (cache->items_by_symbol, sym);
+
+	if (item) {
+		item->st->weight = weight;
+		s->cache_item = item;
+	}
+}
+
 gboolean
 rspamd_symcache_init (struct rspamd_symcache *cache)
 {
-	gboolean res;
+	gboolean res = TRUE;
 
 	g_assert (cache != NULL);
 
 	cache->reload_time = cache->cfg->cache_reload_time;
 
-	/* Just in-memory cache */
-	if (cache->cfg->cache_filename == NULL) {
-		rspamd_symcache_post_init (cache);
-		return TRUE;
+	if (cache->cfg->cache_filename != NULL) {
+		res = rspamd_symcache_load_items (cache, cache->cfg->cache_filename);
 	}
 
-	/* Copy saved cache entries */
-	res = rspamd_symcache_load_items (cache, cache->cfg->cache_filename);
 	rspamd_symcache_post_init (cache);
+
+	/* Connect metric symbols with symcache symbols */
+	if (cache->cfg->symbols) {
+		g_hash_table_foreach (cache->cfg->symbols,
+				rspamd_symcache_metric_connect_cb,
+				cache);
+	}
 
 	return res;
 }
@@ -1441,9 +1462,11 @@ rspamd_symcache_validate_cb (gpointer k, gpointer v, gpointer ud)
 	}
 
 	if (!ghost && skipped) {
-		item->type |= SYMBOL_TYPE_SKIPPED;
-		msg_warn_cache ("symbol %s has no score registered, skip its check",
-				item->symbol);
+		if (!(item->type & SYMBOL_TYPE_SKIPPED)) {
+			item->type |= SYMBOL_TYPE_SKIPPED;
+			msg_warn_cache ("symbol %s has no score registered, skip its check",
+					item->symbol);
+		}
 	}
 
 	if (ghost) {
@@ -1480,24 +1503,6 @@ rspamd_symcache_validate_cb (gpointer k, gpointer v, gpointer ud)
 	cache->total_weight += fabs (item->st->weight);
 }
 
-static void
-rspamd_symcache_metric_validate_cb (gpointer k, gpointer v, gpointer ud)
-{
-	struct rspamd_symcache *cache = (struct rspamd_symcache *)ud;
-	const gchar *sym = k;
-	struct rspamd_symbol *s = (struct rspamd_symbol *)v;
-	gdouble weight;
-	struct rspamd_symcache_item *item;
-
-	weight = *s->weight_ptr;
-	item = g_hash_table_lookup (cache->items_by_symbol, sym);
-
-	if (item) {
-		item->st->weight = weight;
-		s->cache_item = item;
-	}
-}
-
 gboolean
 rspamd_symcache_validate (struct rspamd_symcache *cache,
 						  struct rspamd_config *cfg,
@@ -1514,10 +1519,6 @@ rspamd_symcache_validate (struct rspamd_symcache *cache,
 		return FALSE;
 	}
 
-	/* Now adjust symbol weights according to default metric */
-	g_hash_table_foreach (cfg->symbols,
-			rspamd_symcache_metric_validate_cb,
-			cache);
 
 	g_hash_table_foreach (cache->items_by_symbol,
 			rspamd_symcache_validate_cb,
@@ -2344,7 +2345,10 @@ struct counters_cbdata {
 	struct rspamd_symcache *cache;
 };
 
-#define ROUND_DOUBLE(x) (floor((x) * 100.0) / 100.0)
+/* Leave several digits */
+#define P10(X) (1e##X)
+#define ROUND_DOUBLE_DIGITS(x, dig) (floor((x) * P10(dig)) / P10(dig))
+#define ROUND_DOUBLE(x) ROUND_DOUBLE_DIGITS(x, 3)
 
 static void
 rspamd_symcache_counters_cb (gpointer k, gpointer v, gpointer ud)
@@ -2465,7 +2469,7 @@ rspamd_symcache_resort_cb (EV_P_ ev_timer *w, int revents)
 	struct rspamd_symcache_item *item;
 	guint i;
 	gdouble cur_ticks;
-	static const double decay_rate = 0.7;
+	static const double decay_rate = 0.25;
 
 	cache = cbdata->cache;
 	/* Plan new event */

@@ -109,6 +109,13 @@ LUA_FUNCTION_DEF (mempool, has_variable);
  * @return {boolean} `true` if variable exists and has been removed
  */
 LUA_FUNCTION_DEF (mempool, delete_variable);
+/**
+ * @method mempool:topointer()
+ *
+ * Returns raw C pointer (lightuserdata) associated with mempool. This might be
+ * broken with luajit and GC64, use with caution.
+ */
+LUA_FUNCTION_DEF (mempool, topointer);
 
 static const struct luaL_reg mempoollib_m[] = {
 	LUA_INTERFACE_DEF (mempool, add_destructor),
@@ -119,6 +126,7 @@ static const struct luaL_reg mempoollib_m[] = {
 	LUA_INTERFACE_DEF (mempool, get_variable),
 	LUA_INTERFACE_DEF (mempool, has_variable),
 	LUA_INTERFACE_DEF (mempool, delete_variable),
+	LUA_INTERFACE_DEF (mempool, topointer),
 	LUA_INTERFACE_DEF (mempool, delete),
 	{"destroy", lua_mempool_delete},
 	{"__tostring", rspamd_lua_class_tostring},
@@ -480,7 +488,7 @@ lua_mempool_get_variable (lua_State *L)
 							gdouble num;
 							memcpy (&num, pv, sizeof (num));
 							lua_pushnumber (L, num);
-							lua_rawseti (L, -1, i + 1);
+							lua_rawseti (L, -2, i + 1);
 							pv += sizeof (num);
 						}
 					}
@@ -516,8 +524,10 @@ lua_mempool_get_variable (lua_State *L)
 
 				return nvar;
 			}
-
-			lua_pushstring (L, value);
+			else {
+				/* No type specified, return string */
+				lua_pushstring(L, value);
+			}
 		}
 		else {
 			lua_pushnil (L);
@@ -566,6 +576,23 @@ lua_mempool_delete_variable (lua_State *L)
 	}
 
 	lua_pushboolean (L, ret);
+
+	return 1;
+}
+
+static gint
+lua_mempool_topointer (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	rspamd_mempool_t *pool = rspamd_lua_check_mempool (L, 1);
+
+	if (pool) {
+		/* XXX: this might cause issues on arm64 and LuaJIT */
+		lua_pushlightuserdata (L, pool);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
 
 	return 1;
 }

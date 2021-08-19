@@ -67,6 +67,7 @@ enum rspamd_worker_flags {
 	RSPAMD_WORKER_SCANNER = (1 << 5),
 	RSPAMD_WORKER_CONTROLLER = (1 << 6),
 	RSPAMD_WORKER_NO_TERMINATE_DELAY = (1 << 7),
+	RSPAMD_WORKER_OLD_CONFIG = (1 << 8),
 };
 
 struct rspamd_worker_accept_event {
@@ -314,21 +315,6 @@ struct rspamd_main {
 	struct ev_loop *event_loop;
 	ev_signal term_ev, int_ev, hup_ev, usr1_ev;                 /**< signals 										*/
 	struct rspamd_http_context *http_ctx;
-};
-
-enum rspamd_exception_type {
-	RSPAMD_EXCEPTION_NEWLINE = 0,
-	RSPAMD_EXCEPTION_URL,
-	RSPAMD_EXCEPTION_GENERIC,
-};
-/**
- * Structure to point exception in text from processing
- */
-struct rspamd_process_exception {
-	goffset pos;
-	guint len;
-	gpointer ptr;
-	enum rspamd_exception_type type;
 };
 
 /**

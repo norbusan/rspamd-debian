@@ -1094,6 +1094,12 @@ exports.enable_debug_logging = function()
   unconditional_debug = true
 end
 
+exports.enable_debug_modules = function(...)
+  for _,m in ipairs({...}) do
+    debug_modules[m] = true
+  end
+end
+
 exports.disable_debug_logging = function()
   unconditional_debug = false
 end
@@ -1453,6 +1459,21 @@ exports.maybe_smtp_quote_value = function(str)
   end
 
   return str
+end
+
+---[[[
+-- @function lua_util.shuffle(table)
+-- Performs in-place shuffling of a table
+-- @param {table} tbl table to shuffle
+-- @return {table} same table
+--]]]
+exports.shuffle = function(tbl)
+  local size = #tbl
+  for i = size, 1, -1 do
+    local rand = math.random(size)
+    tbl[i], tbl[rand] = tbl[rand], tbl[i]
+  end
+  return tbl
 end
 
 return exports

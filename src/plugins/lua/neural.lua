@@ -114,15 +114,38 @@ local function ann_scores_filter(task)
       score = out[1]
 
       local symscore = string.format('%.3f', score)
+      task:cache_set(rule.prefix .. '_neural_score', score)
       lua_util.debugm(N, task, '%s:%s:%s ann score: %s',
           rule.prefix, set.name, set.ann.version, symscore)
 
       if score > 0 then
         local result = score
-        task:insert_result(rule.symbol_spam, result, symscore)
+
+        if not rule.spam_score_threshold or result >= rule.spam_score_threshold then
+          if rule.flat_threshold_curve then
+            task:insert_result(rule.symbol_spam, 1.0, symscore)
+          else
+            task:insert_result(rule.symbol_spam, result, symscore)
+          end
+        else
+          lua_util.debugm(N, task, '%s:%s:%s ann score: %s < %s (spam_score_threshold)',
+              rule.prefix, set.name, set.ann.version, symscore,
+              rule.spam_score_threshold)
+        end
       else
         local result = -(score)
-        task:insert_result(rule.symbol_ham, result, symscore)
+
+        if not rule.ham_score_threshold or result >= rule.ham_score_threshold then
+          if rule.flat_threshold_curve then
+            task:insert_result(rule.symbol_ham, 1.0, symscore)
+          else
+            task:insert_result(rule.symbol_ham, result, symscore)
+          end
+        else
+          lua_util.debugm(N, task, '%s:%s:%s ann score: %s < %s (ham_score_threshold)',
+              rule.prefix, set.name, set.ann.version, result,
+              rule.ham_score_threshold)
+        end
       end
     end
   end

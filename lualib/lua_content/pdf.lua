@@ -38,7 +38,7 @@ local pdf_patterns = {
     patterns = {
       [[netsh\s]],
       [[echo\s]],
-      [[\/[A-Za-z]*#\d\d(?:[#A-Za-z<>/\s])]], -- Hex encode obfuscation
+      [=[\/[A-Za-z]*#\d\d[#A-Za-z<>/\s]]=], -- Hex encode obfuscation
     }
   },
   start_object = {
@@ -519,7 +519,7 @@ end
 local process_dict
 
 -- This function processes javascript string and returns JS hash and JS rspamd_text
-local function process_javascript(task, pdf, js)
+local function process_javascript(task, pdf, js, obj)
   local rspamd_cryptobox_hash = require "rspamd_cryptobox_hash"
   if type(js) == 'string' then
     js = rspamd_text.fromstring(js):oneline()
@@ -545,6 +545,7 @@ local function process_javascript(task, pdf, js)
     data = js,
     hash = hash:hex(),
     bin_hash = bin_hash,
+    object = obj,
   }
   pdf.scripts[bin_hash] = njs
   return njs
@@ -567,7 +568,7 @@ local function process_action(task, pdf, obj)
         end
       end
 
-      js = process_javascript(task, pdf, js)
+      js = process_javascript(task, pdf, js, obj)
       if js then
         obj.js = js
         lua_util.debugm(N, task, 'extracted javascript from %s:%s: %s',
@@ -614,6 +615,7 @@ local function process_catalog(task, pdf, obj)
           lua_util.debugm(N, task, 'found openaction JS in %s:%s: %s',
               obj.major, obj.minor, action.js)
           pdf.openaction = action.js
+          action.js.object = obj
         elseif action.launch then
           lua_util.debugm(N, task, 'found openaction launch in %s:%s: %s',
               obj.major, obj.minor, action.launch)
@@ -765,7 +767,7 @@ process_dict = function(task, pdf, obj, dict)
           end
         end
 
-        js = process_javascript(task, pdf, js)
+        js = process_javascript(task, pdf, js, obj)
         if js then
           obj.js = js
           lua_util.debugm(N, task, 'extracted javascript from %s:%s: %s',
@@ -1243,8 +1245,10 @@ local function process_pdf(input, mpart, task)
           -- OpenAction only
           if pdf_object.openaction and pdf_object.openaction.bin_hash then
             if config.min_js_fuzzy and #pdf_object.openaction.data >= config.min_js_fuzzy then
-              lua_util.debugm(N, task, "pdf: add fuzzy hash from openaction: %s",
-                  pdf_object.openaction.hash)
+              lua_util.debugm(N, task, "pdf: add fuzzy hash from openaction: %s; size = %s; object: %s:%s",
+                  pdf_object.openaction.hash,
+                  #pdf_object.openaction.data,
+                  pdf_object.openaction.object.major, pdf_object.openaction.object.minor)
               table.insert(pdf_output.fuzzy_hashes, pdf_object.openaction.bin_hash)
             else
               lua_util.debugm(N, task, "pdf: skip fuzzy hash from Javascript: %s, too short: %s",
@@ -1255,8 +1259,10 @@ local function process_pdf(input, mpart, task)
           -- All hashes
           for h,sc in pairs(pdf_object.scripts) do
             if config.min_js_fuzzy and #sc.data >= config.min_js_fuzzy then
-              lua_util.debugm(N, task, "pdf: add fuzzy hash from Javascript: %s",
-                  sc.hash)
+              lua_util.debugm(N, task, "pdf: add fuzzy hash from Javascript: %s; size = %s; object: %s:%s",
+                  sc.hash,
+                  #sc.data,
+                  sc.object.major, sc.object.minor)
               table.insert(pdf_output.fuzzy_hashes, h)
             else
               lua_util.debugm(N, task, "pdf: skip fuzzy hash from Javascript: %s, too short: %s",
@@ -1326,16 +1332,33 @@ processors.suspicious = function(input, task, positions, pdf_object, pdf_output)
       suspicious_factor = suspicious_factor + 0.5
     elseif match[2] == 2 then
       nexec = nexec + 1
-    else
-      nencoded = nencoded + 1
+    elseif match[2] == 3 then
+      local enc_data = input:sub(match[1] - 2, match[1] - 1)
+      local legal_escape = false
 
-      if last_encoded then
-        if match[1] - last_encoded < 8 then
-          -- likely consecutive encoded chars, increase factor
-          close_encoded = close_encoded + 1
+      if enc_data then
+        enc_data = enc_data:strtoul()
+
+        if enc_data then
+          -- Legit encode cases are non printable characters (e.g. spaces)
+          if enc_data < 0x21 or enc_data >= 0x7f then
+            legal_escape = true
+          end
         end
       end
-      last_encoded = match[1]
+
+      if not legal_escape then
+        nencoded = nencoded + 1
+
+        if last_encoded then
+          if match[1] - last_encoded < 8 then
+            -- likely consecutive encoded chars, increase factor
+            close_encoded = close_encoded + 1
+          end
+        end
+        last_encoded = match[1]
+
+      end
     end
   end
 

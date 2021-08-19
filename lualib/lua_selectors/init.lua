@@ -64,9 +64,11 @@ local function implicit_tostring(t, ud_or_table)
     else
       return tostring(ud_or_table),'string'
     end
-  else
+  elseif t ~= 'nil' then
     return tostring(ud_or_table),'string'
   end
+
+  return nil
 end
 
 local function process_selector(task, sel)
@@ -214,7 +216,11 @@ end
 local function make_grammar()
   local l = require "lpeg"
   local spc = l.S(" \t\n")^0
-  local atom = l.C((l.R("az") + l.R("AZ") + l.R("09") + l.S("_-"))^1)
+  local cont = l.R("\128\191") -- continuation byte
+  local utf8_high = l.R("\194\223") * cont
+      + l.R("\224\239") * cont * cont
+      + l.R("\240\244") * cont * cont * cont
+  local atom = l.C((l.R("az") + l.R("AZ") + l.R("09") + l.S("_-") + utf8_high)^1)
   local singlequoted_string = l.P "'" * l.C(((1 - l.S "'\r\n\f\\") + (l.P'\\' * 1))^0) * "'"
   local doublequoted_string = l.P '"' * l.C(((1 - l.S'"\r\n\f\\') + (l.P'\\' * 1))^0) * '"'
   local argument = atom + singlequoted_string + doublequoted_string
@@ -350,6 +356,8 @@ exports.parse_selector = function(cfg, str)
             end
 
             local ret_type = type(ret)
+
+            if ret_type == 'nil' then return nil end
             -- Now apply types heuristic
             if ret_type == 'string' then
               return ret,'string'
@@ -485,7 +493,7 @@ exports.combine_selectors = function(_, selectors, delimiter)
         rawset(tbl, i, fun.duplicate(tostring(s)))
       else
         -- Raw table
-        rawset(tbl, i, s)
+        rawset(tbl, i, fun.map(tostring, s))
       end
     end
 

@@ -50,7 +50,7 @@
 
 #define DEFAULT_SYMBOL "R_FUZZY_HASH"
 
-#define DEFAULT_IO_TIMEOUT 500
+#define DEFAULT_IO_TIMEOUT 1.0
 #define DEFAULT_RETRANSMITS 3
 #define DEFAULT_MAX_ERRORS 4
 #define DEFAULT_REVIVE_TIME 60
@@ -79,6 +79,7 @@ struct fuzzy_rule {
 	GPtrArray *fuzzy_headers;
 	GString *hash_key;
 	GString *shingles_key;
+	gdouble io_timeout;
 	struct rspamd_cryptobox_keypair *local_key;
 	struct rspamd_cryptobox_pubkey *peer_key;
 	double max_score;
@@ -86,7 +87,9 @@ struct fuzzy_rule {
 	gboolean read_only;
 	gboolean skip_unknown;
 	gboolean no_share;
+	gboolean no_subject;
 	gint learn_condition_cb;
+	guint32 retransmits;
 	struct rspamd_hash_map_helper *skip_map;
 	struct fuzzy_ctx *ctx;
 	gint lua_id;
@@ -100,13 +103,13 @@ struct fuzzy_ctx {
 	const gchar *default_symbol;
 	struct rspamd_radix_map_helper *whitelist;
 	struct rspamd_keypair_cache *keypairs_cache;
-	guint32 io_timeout;
-	guint32 retransmits;
 	guint   max_errors;
 	gdouble revive_time;
+	gdouble io_timeout;
 	gint check_mime_part_ref; /* Lua callback */
 	gint process_rule_ref; /* Lua callback */
 	gint cleanup_rules_ref;
+	guint32 retransmits;
 	gboolean enabled;
 };
 
@@ -418,6 +421,20 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 		rule->max_score = ucl_obj_todouble (value);
 	}
 
+	if ((value = ucl_object_lookup (obj, "retransmits")) != NULL) {
+		rule->retransmits = ucl_obj_toint (value);
+	}
+	else {
+		rule->retransmits = fuzzy_module_ctx->retransmits;
+	}
+
+	if ((value = ucl_object_lookup (obj, "timeout")) != NULL) {
+		rule->io_timeout = ucl_obj_todouble (value);
+	}
+	else {
+		rule->io_timeout = fuzzy_module_ctx->io_timeout;
+	}
+
 	if ((value = ucl_object_lookup (obj,  "symbol")) != NULL) {
 		rule->symbol = ucl_obj_tostring (value);
 	}
@@ -440,6 +457,10 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 
 	if ((value = ucl_object_lookup (obj, "no_share")) != NULL) {
 		rule->no_share = ucl_obj_toboolean (value);
+	}
+
+	if ((value = ucl_object_lookup (obj, "no_subject")) != NULL) {
+		rule->no_subject = ucl_obj_toboolean (value);
 	}
 
 	if ((value = ucl_object_lookup (obj, "algorithm")) != NULL) {
@@ -908,7 +929,7 @@ fuzzy_check_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 			UCL_BOOLEAN,
 			NULL,
 			0,
-			NULL,
+			"true",
 			0);
 	rspamd_rcl_add_doc_by_path (cfg,
 			"fuzzy_check.rule",
@@ -937,6 +958,24 @@ fuzzy_check_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 			NULL,
 			0,
 			NULL,
+			0);
+	rspamd_rcl_add_doc_by_path (cfg,
+			"fuzzy_check.rule",
+			"Do no use subject to distinguish short text hashes",
+			"no_subject",
+			UCL_BOOLEAN,
+			NULL,
+			0,
+			"false",
+			0);
+	rspamd_rcl_add_doc_by_path (cfg,
+			"fuzzy_check.rule",
+			"Disable sharing message stats with the fuzzy server",
+			"no_share",
+			UCL_BOOLEAN,
+			NULL,
+			0,
+			"false",
 			0);
 
 	return 0;
@@ -1031,7 +1070,7 @@ fuzzy_check_module_config (struct rspamd_config *cfg, bool validate)
 
 	if ((value =
 		rspamd_config_get_module_opt (cfg, "fuzzy_check", "timeout")) != NULL) {
-		fuzzy_module_ctx->io_timeout = ucl_obj_todouble (value) * 1000;
+		fuzzy_module_ctx->io_timeout = ucl_obj_todouble (value);
 	}
 	else {
 		fuzzy_module_ctx->io_timeout = DEFAULT_IO_TIMEOUT;
@@ -1688,7 +1727,7 @@ fuzzy_cmd_from_text_part (struct rspamd_task *task,
 			rspamd_cryptobox_hash_update (&st, part->utf_stripped_content->data,
 					part->utf_stripped_content->len);
 
-			if (MESSAGE_FIELD (task, subject)) {
+			if (!rule->no_subject && (MESSAGE_FIELD (task, subject))) {
 				/* We also include subject */
 				rspamd_cryptobox_hash_update (&st, MESSAGE_FIELD (task, subject),
 						strlen (MESSAGE_FIELD (task, subject)));
@@ -2520,12 +2559,13 @@ fuzzy_check_timer_callback (gint fd, short what, void *arg)
 		}
 	}
 
-	if (session->retransmits >= session->rule->ctx->retransmits) {
-		msg_err_task ("got IO timeout with server %s(%s), after %d retransmits",
+	if (session->retransmits >= session->rule->retransmits) {
+		msg_err_task ("got IO timeout with server %s(%s), after %d/%d retransmits",
 				rspamd_upstream_name (session->server),
 				rspamd_inet_address_to_string_pretty (
 						rspamd_upstream_addr_cur (session->server)),
-				session->retransmits);
+				session->retransmits,
+				session->rule->retransmits);
 		rspamd_upstream_fail (session->server, TRUE, "timeout");
 
 		if (session->item) {
@@ -2567,9 +2607,21 @@ fuzzy_check_io_callback (gint fd, short what, void *arg)
 				ret = return_want_more;
 			}
 			else {
-				/* It is actually time out */
-				fuzzy_check_timer_callback (fd, what, arg);
-				return;
+				if (what & EV_WRITE) {
+					/* Retransmit attempt */
+					if (!fuzzy_cmd_vector_to_wire (fd, session->commands)) {
+						ret = return_error;
+					}
+					else {
+						session->state = 1;
+						ret = return_want_more;
+					}
+				}
+				else {
+					/* It is actually time out */
+					fuzzy_check_timer_callback(fd, what, arg);
+					return;
+				}
 			}
 			break;
 		case 1:
@@ -2648,14 +2700,15 @@ fuzzy_controller_timer_callback (gint fd, short what, void *arg)
 
 	task = session->task;
 
-	if (session->retransmits >= session->rule->ctx->retransmits) {
+	if (session->retransmits >= session->rule->retransmits) {
 		rspamd_upstream_fail (session->server, TRUE, "timeout");
 		msg_err_task_check ("got IO timeout with server %s(%s), "
-							"after %d retransmits",
+							"after %d/%d retransmits",
 				rspamd_upstream_name (session->server),
 				rspamd_inet_address_to_string_pretty (
 						rspamd_upstream_addr_cur (session->server)),
-				session->retransmits);
+				session->retransmits,
+				session->rule->retransmits);
 
 		if (session->session) {
 			rspamd_session_remove_event (session->session, fuzzy_lua_fin,
@@ -2789,7 +2842,7 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 										"list %s:%d, skipped by server",
 								ftype,
 								op,
-								MESSAGE_FIELD (session->task, message_id),
+								MESSAGE_FIELD_CHECK (session->task, message_id),
 								(gint)sizeof (rep->digest), rep->digest,
 								symbol,
 								rep->v1.flag);
@@ -2804,7 +2857,7 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 										"list %s:%d, error: %d",
 								ftype,
 								op,
-								MESSAGE_FIELD (session->task, message_id),
+								MESSAGE_FIELD_CHECK (session->task, message_id),
 								(gint)sizeof (rep->digest), rep->digest,
 								symbol,
 								rep->v1.flag,
@@ -3146,7 +3199,7 @@ register_fuzzy_client_call (struct rspamd_task *task,
 						fuzzy_check_io_callback,
 						session);
 				rspamd_ev_watcher_start (session->event_loop, &session->ev,
-						((double)rule->ctx->io_timeout) / 1000.0);
+						rule->io_timeout);
 
 				rspamd_session_add_event (task->s, fuzzy_io_fin, session, M);
 				session->item = rspamd_symcache_get_cur_item (task);
@@ -3272,8 +3325,7 @@ register_fuzzy_controller_call (struct rspamd_http_connection_entry *entry,
 					EV_WRITE,
 					fuzzy_controller_io_callback,
 					s);
-			rspamd_ev_watcher_start (s->event_loop, &s->ev,
-					((double)rule->ctx->io_timeout) / 1000.0);
+			rspamd_ev_watcher_start (s->event_loop, &s->ev, rule->io_timeout);
 
 			(*saved)++;
 			ret = 1;
@@ -3627,7 +3679,7 @@ fuzzy_check_send_lua_learn (struct fuzzy_rule *rule,
 						fuzzy_controller_io_callback,
 						s);
 				rspamd_ev_watcher_start (s->event_loop, &s->ev,
-						((double)rule->ctx->io_timeout) / 1000.0);
+						rule->io_timeout);
 
 				rspamd_session_add_event (task->s,
 						fuzzy_lua_fin,
@@ -3968,7 +4020,7 @@ fuzzy_lua_gen_hashes_handler (lua_State *L)
 				continue;
 			}
 
-			commands = fuzzy_generate_commands (task, rule, FUZZY_WRITE, flag,
+			commands = fuzzy_generate_commands (task, rule, cmd, flag,
 					weight, send_flags);
 
 			if (commands != NULL) {

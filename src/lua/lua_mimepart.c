@@ -209,11 +209,9 @@ LUA_FUNCTION_DEF (textpart, get_languages);
 /***
  * @method text_part:get_fuzzy_hashes(mempool)
  * @param {rspamd_mempool} mempool - memory pool (usually task pool)
- * Returns direct hash + array of shingles being calculated as following:
- * - [1] - fuzzy digest as a string
- * - [2..33] - fuzzy hashes as the following tables:
- *   - [1] - 64 bit integer represented as a string
- *   - [2..4] - strings used to generate this hash
+ * Returns direct hash of textpart as a string and array [1..32] of shingles each represented as a following table:
+ * - [1] - 64 bit fuzzy hash represented as a string
+ * - [2..4] - strings used to generate this hash
  * @return {string,array|tables} fuzzy hashes calculated
  */
 LUA_FUNCTION_DEF (textpart, get_fuzzy_hashes);
@@ -694,8 +692,8 @@ lua_textpart_get_content (lua_State * L)
 			lua_pushnil (L);
 			return 1;
 		}
-		start = part->utf_content->data;
-		len = part->utf_content->len;
+		start = part->utf_content.begin;
+		len = part->utf_content.len;
 	}
 	else if (strcmp (type, "content") == 0) {
 		if (IS_TEXT_PART_EMPTY (part)) {
@@ -703,8 +701,8 @@ lua_textpart_get_content (lua_State * L)
 			return 1;
 		}
 
-		start = part->utf_content->data;
-		len = part->utf_content->len;
+		start = part->utf_content.begin;
+		len = part->utf_content.len;
 	}
 	else if (strcmp (type, "content_oneline") == 0) {
 		if (IS_TEXT_PART_EMPTY (part)) {
@@ -809,11 +807,11 @@ lua_textpart_get_length (lua_State * L)
 		return 1;
 	}
 
-	if (IS_TEXT_PART_EMPTY (part) || part->utf_content == NULL) {
+	if (IS_TEXT_PART_EMPTY (part) || part->utf_content.len == 0) {
 		lua_pushinteger (L, 0);
 	}
 	else {
-		lua_pushinteger (L, part->utf_content->len);
+		lua_pushinteger (L, part->utf_content.len);
 	}
 
 	return 1;
@@ -1181,6 +1179,11 @@ struct lua_shingle_data {
 	rspamd_ftok_t t3;
 };
 
+struct lua_shingle_filter_cbdata {
+	struct rspamd_mime_text_part *part;
+	rspamd_mempool_t *pool;
+};
+
 #define STORE_TOKEN(i, t) do { \
     if ((i) < part->utf_words->len) { \
         word = &g_array_index (part->utf_words, rspamd_stat_token_t, (i)); \
@@ -1197,7 +1200,10 @@ lua_shingles_filter (guint64 *input, gsize count,
 	gsize i, min_idx = 0;
 	struct lua_shingle_data *sd;
 	rspamd_stat_token_t *word;
-	struct rspamd_mime_text_part *part = (struct rspamd_mime_text_part *)ud;
+	struct lua_shingle_filter_cbdata *cbd = (struct lua_shingle_filter_cbdata *)ud;
+	struct rspamd_mime_text_part *part;
+
+	part = cbd->part;
 
 	for (i = 0; i < count; i ++) {
 		if (minimal > input[i]) {
@@ -1206,7 +1212,7 @@ lua_shingles_filter (guint64 *input, gsize count,
 		}
 	}
 
-	sd = g_malloc0 (sizeof (*sd));
+	sd = rspamd_mempool_alloc0 (cbd->pool, sizeof (*sd));
 	sd->hash = minimal;
 
 
@@ -1232,6 +1238,7 @@ lua_textpart_get_fuzzy_hashes (lua_State * L)
 	struct lua_shingle_data *sd;
 	rspamd_cryptobox_hash_state_t st;
 	rspamd_stat_token_t *word;
+	struct lua_shingle_filter_cbdata cbd;
 
 	if (part && pool) {
 		/* TODO: add keys and algorithms support */
@@ -1254,8 +1261,10 @@ lua_textpart_get_fuzzy_hashes (lua_State * L)
 				sizeof (hexdigest));
 		lua_pushlstring (L, hexdigest, sizeof (hexdigest) - 1);
 
+		cbd.pool = pool;
+		cbd.part = part;
 		sgl = rspamd_shingles_from_text (part->utf_words, key,
-				pool, lua_shingles_filter, part, RSPAMD_SHINGLES_MUMHASH);
+				pool, lua_shingles_filter, &cbd, RSPAMD_SHINGLES_MUMHASH);
 
 		if (sgl == NULL) {
 			lua_pushnil (L);
@@ -1634,7 +1643,7 @@ lua_mimepart_get_header_common (lua_State *L, enum rspamd_lua_task_header_type h
 
 		return rspamd_lua_push_header_array (L,
 				name,
-				rspamd_message_get_header_from_hash (part->raw_headers, name),
+				rspamd_message_get_header_from_hash(part->raw_headers, name, FALSE),
 				how,
 				strong);
 	}
@@ -1771,8 +1780,8 @@ lua_mimepart_is_attachment (lua_State * L)
 		/* if has_name and not (image and Content-ID_header_present) */
 		if (part->cd && part->cd->filename.len > 0) {
 			if (part->part_type != RSPAMD_MIME_PART_IMAGE &&
-				rspamd_message_get_header_from_hash (part->raw_headers,
-						"Content-Id") == NULL) {
+					rspamd_message_get_header_from_hash(part->raw_headers,
+							"Content-Id", FALSE) == NULL) {
 				/* Filename is presented but no content id and not image */
 				lua_pushboolean (L, true);
 			}
@@ -1820,7 +1829,7 @@ lua_mimepart_is_broken (lua_State * L)
 				true : false);
 	}
 	else {
-		lua_pushboolean (L, true);
+		lua_pushboolean (L, false);
 	}
 
 	return 1;

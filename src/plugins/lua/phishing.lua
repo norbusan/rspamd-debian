@@ -21,6 +21,7 @@ end
 local rspamd_logger = require "rspamd_logger"
 local util = require "rspamd_util"
 local lua_util = require "lua_util"
+local lua_maps = require "lua_maps"
 
 -- Phishing detection interface for selecting phished urls and inserting corresponding symbol
 --
@@ -33,7 +34,7 @@ local phishtank_symbol = 'PHISHED_PHISHTANK'
 local generic_service_name = 'generic service'
 local domains = nil
 local strict_domains = {}
-local redirector_domains = {}
+local exceptions_maps = {}
 local generic_service_map = nil
 local openphish_map = 'https://www.openphish.com/feed.txt'
 local phishtank_suffix = 'phishtank.rspamd.com'
@@ -180,10 +181,19 @@ local function phishing_cb(task)
     end
   end
 
-  local urls = task:get_urls()
+  -- Process all urls
+  local dmarc_dom
+  local dsym = task:get_symbol('DMARC_POLICY_ALLOW')
+  if dsym then
+    dsym = dsym[1] -- legacy stuff, need to take the first element
+    if dsym.options then
+      dmarc_dom = dsym.options[1]
+    end
+  end
 
-  if urls then
-    for _,url in ipairs(urls) do
+  local urls = task:get_urls() or {}
+  for _,url in ipairs(urls) do
+    local function do_loop_iter() -- to emulate continue
       if generic_service_hash then
         check_phishing_map(generic_service_data, url, generic_service_symbol)
       end
@@ -198,10 +208,21 @@ local function phishing_cb(task)
 
       if url:is_phished() and not url:is_redirected() then
         local purl = url:get_phished()
+
+        if not purl then
+          return
+        end
+
         local tld = url:get_tld()
         local ptld = purl:get_tld()
 
         if not ptld or not tld then
+          return
+        end
+
+        if dmarc_dom and tld == dmarc_dom then
+          lua_util.debugm(N, 'exclude phishing from %s -> %s by dmarc domain', tld,
+                  ptld)
           return
         end
 
@@ -242,7 +263,7 @@ local function phishing_cb(task)
             if a1 ~= a2 then
               weight = 1
               lua_util.debugm(N, task, "confusable: %1 -> %2: different characters",
-                tld, ptld, why)
+                      tld, ptld, why)
             else
               -- We have totally different strings in tld, so penalize it significantly
               if dist > 2 then dist = 2 end
@@ -258,17 +279,17 @@ local function phishing_cb(task)
           if not sweight then sweight = weight end
           if #map > 0 then
             for _,rule in ipairs(map) do
-                for _,dn in ipairs({furl:get_tld(), furl:get_host()}) do
-                  if rule['map']:get_key(dn) then
-                    task:insert_result(rule['symbol'], sweight, ptld .. '->' .. dn)
-                    return true
-                  end
+              for _,dn in ipairs({furl:get_tld(), furl:get_host()}) do
+                if rule['map']:get_key(dn) then
+                  task:insert_result(rule['symbol'], sweight, ptld .. '->' .. dn)
+                  return true
                 end
+              end
             end
           end
         end
 
-        if not found_in_map(redirector_domains) then
+        if not found_in_map(exceptions_maps) then
           if not found_in_map(strict_domains, purl, 1.0) then
             if domains then
               if domains:get_key(ptld) then
@@ -281,49 +302,30 @@ local function phishing_cb(task)
         end
       end
     end
+
+    do_loop_iter()
   end
 end
 
 local function phishing_map(mapname, phishmap, id)
   if opts[mapname] then
-    local xd = {}
+    local xd
     if type(opts[mapname]) == 'table' then
       xd = opts[mapname]
     else
-      xd[1] = opts[mapname]
+      rspamd_logger.errx(rspamd_config, 'invalid exception table')
     end
 
-    local found_maps = {}
 
-    for _,d in ipairs(xd) do
-      local s = string.find(d, ':[^:]+$')
-      if s then
-        local sym = string.sub(d, s + 1, -1)
-        local map = string.sub(d, 1, s - 1)
-
-        if found_maps[sym] then
-          table.insert(found_maps[sym], map)
-        else
-          found_maps[sym] = {map}
-        end
-      else
-        rspamd_logger.infox(rspamd_config, mapname .. ' option must be in format <map>:<symbol>')
-      end
-    end
-
-    for sym,urls in pairs(found_maps) do
-      local rmap = rspamd_config:add_map ({
-        type = 'set',
-        url = urls,
-        description = 'Phishing ' .. mapname .. ' map',
-      })
+    for sym,map_data in pairs(xd) do
+      local rmap = lua_maps.map_add_from_ucl (map_data, 'set',
+              'Phishing ' .. mapname .. ' map')
       if rmap then
         rspamd_config:register_virtual_symbol(sym, 1, id)
         local rule = {symbol = sym, map = rmap}
         table.insert(phishmap, rule)
       else
-        rspamd_logger.infox(rspamd_config, 'cannot add map: %s for symbol: %s',
-            table.concat(urls, ";"), sym)
+        rspamd_logger.infox(rspamd_config, 'cannot add map for symbol: %s', sym)
       end
     end
   end
@@ -453,6 +455,9 @@ if opts then
       callback = phishing_cb
     })
 
+    -- To exclude from domains for dmarc verified messages
+    rspamd_config:register_dependency(symbol, 'DMARC_CHECK')
+
     if opts['generic_service_symbol'] then
       generic_service_symbol = opts['generic_service_symbol']
     end
@@ -532,12 +537,9 @@ if opts then
     })
   end
   if opts['domains'] and type(opts['domains']) == 'string' then
-    domains = rspamd_config:add_map({
-      url = opts['domains'],
-      type = 'set',
-      description = 'Phishing domains'
-    })
+    domains = lua_maps.map_add_from_ucl(opts['domains'], 'set',
+            'Phishing domains')
   end
   phishing_map('strict_domains', strict_domains, id)
-  phishing_map('redirector_domains', redirector_domains, id)
+  phishing_map('exceptions', exceptions_maps, id)
 end

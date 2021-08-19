@@ -17,35 +17,12 @@ limitations under the License.
 local fun = require 'fun'
 local meta_functions = require "lua_meta"
 local lua_util = require "lua_util"
+local rspamd_url = require "rspamd_url"
 local common = require "lua_selectors/common"
 local ts = require("tableshape").types
 local E = {}
 
-local url_flags_ts = ts.array_of(ts.one_of{
-    'content',
-    'has_port',
-    'has_user',
-    'host_encoded',
-    'html_displayed',
-    'idn',
-    'image',
-    'missing_slahes', -- sic
-    'no_tld',
-    'numeric',
-    'obscured',
-    'path_encoded',
-    'phished',
-    'query',
-    'query_encoded',
-    'redirected',
-    'schema_encoded',
-    'schemaless',
-    'subject',
-    'text',
-    'unnormalised',
-    'url_displayed',
-    'zw_spaces',
-    }):is_optional()
+local url_flags_ts = ts.array_of(ts.one_of(lua_util.keys(rspamd_url.flags))):is_optional()
 
 local function gen_exclude_flags_filter(exclude_flags)
   return function(u)
@@ -334,6 +311,21 @@ e.g. `get_tld`]],
       need_emails = (ts.boolean + ts.string / lua_util.toboolean):is_optional(),
       need_images = (ts.boolean + ts.string / lua_util.toboolean):is_optional(),
       ignore_redirected = (ts.boolean + ts.string / lua_util.toboolean):is_optional(),
+    }}
+  },
+  -- URLs filtered by flags
+  ['urls_filtered'] = {
+    ['get_value'] = function(task, args)
+      local urls = task:get_urls_filtered(args[1], args[2])
+      if not urls[1] then
+        return nil
+      end
+      return urls,'userdata_list'
+    end,
+    ['description'] = [[Get list of all urls filtered by flags_include/exclude
+(see rspamd_task:get_urls_filtered for description)]],
+    ['args_schema'] = {ts.array_of{
+      url_flags_ts:is_optional(), url_flags_ts:is_optional()
     }}
   },
   -- Get all emails

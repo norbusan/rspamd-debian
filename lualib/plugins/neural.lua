@@ -54,6 +54,10 @@ local default_options = {
   learning_spawned = false,
   ann_expire = 60 * 60 * 24 * 2, -- 2 days
   hidden_layer_mult = 1.5, -- number of neurons in the hidden layer
+  -- Check ROC curve and AUC in the ML literature
+  spam_score_threshold = nil, -- neural score threshold for spam (must be 0..1 or nil to disable)
+  ham_score_threshold = nil, -- neural score threshold for ham (must be 0..1 or nil to disable)
+  flat_threshold_curve = false, -- use binary classification 0/1 when threshold is reached
   symbol_spam = 'NEURAL_SPAM',
   symbol_ham = 'NEURAL_HAM',
   max_inputs = nil, -- when PCA is used
@@ -649,27 +653,36 @@ local function process_rules_settings()
     end
 
     -- Generic stuff
-    table.sort(fun.totable(fun.filter(filter_symbols_predicate, selt.symbols)))
+    if not profile then
+      -- Do filtering merely if we are using a dynamic profile
+      selt.symbols = fun.totable(fun.filter(filter_symbols_predicate, selt.symbols))
+    end
+
+    table.sort(selt.symbols)
 
     selt.digest = lua_util.table_digest(selt.symbols)
     selt.prefix = redis_ann_prefix(rule, selt.name)
 
+    rspamd_logger.messagex(rspamd_config,
+        'use NN prefix for rule %s; settings id "%s"; symbols digest: "%s"',
+        selt.prefix, selt.name, selt.digest)
+
     lua_redis.register_prefix(selt.prefix, N,
         string.format('NN prefix for rule "%s"; settings id "%s"',
-            rule.prefix, selt.name), {
+            selt.prefix, selt.name), {
           persistent = true,
           type = 'zlist',
         })
     -- Versions
     lua_redis.register_prefix(selt.prefix .. '_\\d+', N,
         string.format('NN storage for rule "%s"; settings id "%s"',
-            rule.prefix, selt.name), {
+            selt.prefix, selt.name), {
           persistent = true,
           type = 'hash',
         })
     lua_redis.register_prefix(selt.prefix .. '_\\d+_spam', N,
         string.format('NN learning set (spam) for rule "%s"; settings id "%s"',
-            rule.prefix, selt.name), {
+            selt.prefix, selt.name), {
           persistent = true,
           type = 'list',
         })

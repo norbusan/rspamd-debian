@@ -352,12 +352,6 @@ define(["jquery", "footable"],
                         if (Object.prototype.hasOwnProperty.call(tables, "history") &&
                             version === prevVersion) {
                             tables.history.rows.load(items);
-                            if (version) { // Non-legacy
-                                // Is there a way to get an event when all rows are loaded?
-                                rspamd.waitForRowsDisplayed("history", items.length, function () {
-                                    rspamd.drawTooltips();
-                                });
-                            }
                         } else {
                             rspamd.destroyTable("history");
                             // Is there a way to get an event when the table is destroyed?
@@ -408,7 +402,14 @@ define(["jquery", "footable"],
         function initErrorsTable(rspamd, tables, rows) {
             tables.errors = FooTable.init("#errorsLog", {
                 columns: [
-                    {sorted:true, direction:"DESC", name:"ts", title:"Time", style:{"font-size":"11px", "width":300, "maxWidth":300}},
+                    {
+                        sorted: true,
+                        direction: "DESC",
+                        name: "ts",
+                        title: "Time",
+                        style: {"font-size": "11px", "width": 300, "maxWidth": 300},
+                        sortValue: function (val) { return Number(val.options.sortValue); }
+                    },
                     {name:"type", title:"Worker type", breakpoints:"xs sm", style:{"font-size":"11px", "width":150, "maxWidth":150}},
                     {name:"pid", title:"PID", breakpoints:"xs sm", style:{"font-size":"11px", "width":110, "maxWidth":110}},
                     {name:"module", title:"Module", style:{"font-size":"11px"}},

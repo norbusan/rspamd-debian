@@ -226,6 +226,18 @@ rspamd_postprocess_ct_attributes (rspamd_mempool_t *pool,
 			param->prev = param;
 		}
 
+		gboolean invalid_utf = FALSE;
+
+		if (param->value.begin != NULL && param->value.len > 0) {
+			param->value.begin = rspamd_mime_header_decode(pool, param->value.begin,
+					param->value.len, &invalid_utf);
+			param->value.len = strlen(param->value.begin);
+		}
+
+		if (invalid_utf) {
+			param->flags |= RSPAMD_CONTENT_PARAM_BROKEN;
+		}
+
 		proc (pool, param, procd);
 	}
 }
@@ -269,7 +281,7 @@ rspamd_content_type_postprocess (rspamd_mempool_t *pool,
 		RSPAMD_FTOK_ASSIGN (&srch, "name");
 		if (!rspamd_ftok_icase_equal (&param->name, &srch)) {
 			/* Just lowercase */
-			rspamd_str_lc ((gchar *) param->value.begin, param->value.len);
+			rspamd_str_lc_utf8 ((gchar *) param->value.begin, param->value.len);
 		}
 	}
 }
@@ -431,8 +443,7 @@ rspamd_content_type_parser (gchar *in, gsize len, rspamd_mempool_t *pool)
 					/* Treat as value start */
 					c = p;
 					eqsign_seen = FALSE;
-					state = parse_space;
-					next_state = parse_param_value;
+					state = parse_param_value;
 					p++;
 				} else {
 					eqsign_seen = TRUE;
@@ -509,6 +520,7 @@ rspamd_content_type_parser (gchar *in, gsize len, rspamd_mempool_t *pool)
 
 				if (p == end) {
 					/* Last quote: done... */
+					state = parse_space;
 					break;
 				}
 

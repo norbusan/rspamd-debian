@@ -31,7 +31,9 @@
 #define SPF_ALL "all"
 #define SPF_A "a"
 #define SPF_IP4 "ip4"
+#define SPF_IP4_ALT "ipv4"
 #define SPF_IP6 "ip6"
+#define SPF_IP6_ALT "ipv6"
 #define SPF_PTR "ptr"
 #define SPF_MX "mx"
 #define SPF_EXISTS "exists"
@@ -1777,7 +1779,7 @@ expand_spf_macro (struct spf_record *rec, struct spf_resolved_element *resolved,
 	gchar *c, *new, *tmp, delim = '.';
 	gsize len = 0, slen = 0, macro_len = 0;
 	gint state = 0, ndelim = 0;
-	gchar ip_buf[INET6_ADDRSTRLEN + 1];
+	gchar ip_buf[64 + 1]; /* cannot use INET6_ADDRSTRLEN as we use ptr lookup */
 	gboolean need_expand = FALSE, reversed;
 	struct rspamd_task *task;
 
@@ -1830,7 +1832,7 @@ expand_spf_macro (struct spf_record *rec, struct spf_resolved_element *resolved,
 			/* Read macro name */
 			switch (g_ascii_tolower (*p)) {
 			case 'i':
-				len += INET6_ADDRSTRLEN - 1;
+				len += sizeof (ip_buf) - 1;
 				break;
 			case 's':
 				if (rec->sender) {
@@ -1970,10 +1972,40 @@ expand_spf_macro (struct spf_record *rec, struct spf_resolved_element *resolved,
 			switch (g_ascii_tolower (*p)) {
 			case 'i':
 				if (task->from_addr) {
-					macro_len = rspamd_strlcpy (ip_buf,
-							rspamd_inet_address_to_string (task->from_addr),
-							sizeof (ip_buf));
-					macro_value = ip_buf;
+					if (rspamd_inet_address_get_af (task->from_addr) == AF_INET) {
+						macro_len = rspamd_strlcpy (ip_buf,
+								rspamd_inet_address_to_string (task->from_addr),
+								sizeof (ip_buf));
+						macro_value = ip_buf;
+					}
+					else if (rspamd_inet_address_get_af (task->from_addr) == AF_INET6) {
+						/* See #3625 for details */
+						socklen_t slen;
+						struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)
+								rspamd_inet_address_get_sa (task->from_addr, &slen);
+
+						/* Expand IPv6 address */
+#define IPV6_OCTET(x) bytes[(x)] >> 4, bytes[(x)] & 0xF
+						unsigned char *bytes = (unsigned char *)&sin6->sin6_addr;
+						macro_len = rspamd_snprintf (ip_buf, sizeof (ip_buf),
+								"%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd."
+								"%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd.%xd",
+								IPV6_OCTET(0), IPV6_OCTET(1),
+								IPV6_OCTET(2), IPV6_OCTET(3),
+								IPV6_OCTET(4), IPV6_OCTET(5),
+								IPV6_OCTET(6), IPV6_OCTET(7),
+								IPV6_OCTET(8), IPV6_OCTET(9),
+								IPV6_OCTET(10), IPV6_OCTET(11),
+								IPV6_OCTET(12), IPV6_OCTET(13),
+								IPV6_OCTET(14), IPV6_OCTET(15));
+						macro_value = ip_buf;
+#undef IPV6_OCTET
+					}
+					else {
+						macro_len = rspamd_snprintf (ip_buf, sizeof (ip_buf),
+								"127.0.0.1");
+						macro_value = ip_buf;
+					}
 				}
 				else {
 					macro_len = rspamd_snprintf (ip_buf, sizeof (ip_buf),
@@ -2161,16 +2193,19 @@ spf_process_element (struct spf_record *rec,
 			break;
 		case 'i':
 			/* include or ip4 */
-			if (g_ascii_strncasecmp (begin, SPF_IP4,
-					sizeof (SPF_IP4) - 1) == 0) {
+			if (g_ascii_strncasecmp (begin, SPF_IP4, sizeof (SPF_IP4) - 1) == 0) {
 				res = parse_spf_ip4 (rec, addr);
 			}
-			else if (g_ascii_strncasecmp (begin, SPF_INCLUDE,
-					sizeof (SPF_INCLUDE) - 1) == 0) {
+			else if (g_ascii_strncasecmp (begin, SPF_INCLUDE, sizeof (SPF_INCLUDE) - 1) == 0) {
 				res = parse_spf_include (rec, addr);
 			}
-			else if (g_ascii_strncasecmp (begin, SPF_IP6, sizeof (SPF_IP6) -
-														  1) == 0) {
+			else if (g_ascii_strncasecmp (begin, SPF_IP6, sizeof (SPF_IP6) - 1) == 0) {
+				res = parse_spf_ip6 (rec, addr);
+			}
+			else if (g_ascii_strncasecmp (begin, SPF_IP4_ALT, sizeof (SPF_IP4_ALT) - 1) == 0) {
+				res = parse_spf_ip4 (rec, addr);
+			}
+			else if (g_ascii_strncasecmp (begin, SPF_IP6_ALT, sizeof (SPF_IP6_ALT) - 1) == 0) {
 				res = parse_spf_ip6 (rec, addr);
 			}
 			else {
