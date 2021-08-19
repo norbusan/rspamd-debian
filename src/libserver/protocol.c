@@ -21,7 +21,6 @@
 #include "worker_private.h"
 #include "libserver/cfg_file_private.h"
 #include "libmime/scan_result_private.h"
-#include "contrib/zstd/zstd.h"
 #include "lua/lua_common.h"
 #include "unix-std.h"
 #include "protocol_internal.h"
@@ -29,6 +28,12 @@
 #include "contrib/fastutf8/fastutf8.h"
 #include "task.h"
 #include <math.h>
+
+#ifdef SYS_ZSTD
+#  include "zstd.h"
+#else
+#  include "contrib/zstd/zstd.h"
+#endif
 
 INIT_LOG_MODULE(protocol)
 
@@ -889,17 +894,22 @@ rspamd_protocol_extended_url (struct rspamd_task *task,
 		ucl_object_insert_key (obj, elt, "host", 0, false);
 	}
 
-	elt = ucl_object_frombool (url->flags & RSPAMD_URL_FLAG_PHISHED);
-	ucl_object_insert_key (obj, elt, "phished", 0, false);
+	ucl_object_t *flags = ucl_object_typed_new (UCL_ARRAY);
 
-	elt = ucl_object_frombool (url->flags & RSPAMD_URL_FLAG_REDIRECTED);
-	ucl_object_insert_key (obj, elt, "redirected", 0, false);
+	for (unsigned int i = 0; i < RSPAMD_URL_MAX_FLAG_SHIFT; i ++) {
+		if (url->flags & (1u << i)) {
+			ucl_object_t *fl = ucl_object_fromstring (rspamd_url_flag_to_string (1u << i));
+			ucl_array_append (flags, fl);
+		}
+	}
 
-	if (url->phished_url) {
-		encoded = rspamd_url_encode (url->phished_url, &enclen, task->task_pool);
-		elt = rspamd_protocol_extended_url (task, url->phished_url, encoded,
+	ucl_object_insert_key (obj, flags, "flags", 0, false);
+
+	if (url->linked_url) {
+		encoded = rspamd_url_encode (url->linked_url, &enclen, task->task_pool);
+		elt = rspamd_protocol_extended_url (task, url->linked_url, encoded,
 				enclen);
-		ucl_object_insert_key (obj, elt, "orig_url", 0, false);
+		ucl_object_insert_key (obj, elt, "linked_url", 0, false);
 	}
 
 	return obj;
@@ -1251,7 +1261,7 @@ rspamd_scan_result_ucl (struct rspamd_task *task,
 		obj = ucl_object_typed_new (UCL_OBJECT);
 	}
 
-	kh_foreach_value_ptr (mres->symbols, sym, {
+	kh_foreach_value (mres->symbols, sym, {
 		if (!(sym->flags & RSPAMD_SYMBOL_RESULT_IGNORED)) {
 			sobj = rspamd_metric_symbol_ucl (task, sym);
 			ucl_object_insert_key (obj, sobj, sym->name, 0, false);
@@ -1968,7 +1978,7 @@ rspamd_protocol_write_log_pipe (struct rspamd_task *task)
 
 					i = 0;
 
-					kh_foreach_value_ptr (mres->symbols, sym, {
+					kh_foreach_value (mres->symbols, sym, {
 						id = rspamd_symcache_find_symbol (task->cfg->cache,
 								sym->name);
 

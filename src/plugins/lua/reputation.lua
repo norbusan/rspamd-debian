@@ -197,7 +197,7 @@ local function dkim_reputation_filter(task, rule)
   for dom,res in pairs(requests) do
     -- tld + "." + check_result, e.g. example.com.+ - reputation for valid sigs
     local query = string.format('%s.%s', dom, res)
-    rule.backend.get_token(task, rule, query, tokens_cb)
+    rule.backend.get_token(task, rule, nil, query, tokens_cb, 'string')
   end
 end
 
@@ -209,7 +209,7 @@ local function dkim_reputation_idempotent(task, rule)
     for dom,res in pairs(requests) do
       -- tld + "." + check_result, e.g. example.com.+ - reputation for valid sigs
       local query = string.format('%s.%s', dom, res)
-      rule.backend.set_token(task, rule, query, sc)
+      rule.backend.set_token(task, rule, nil, query, sc)
     end
   end
 end
@@ -325,7 +325,7 @@ local function url_reputation_filter(task, rule)
       indexed_tokens_cb(err, i, values)
     end
 
-    rule.backend.get_token(task, rule, req[1], tokens_cb)
+    rule.backend.get_token(task, rule, nil, req[1], tokens_cb, 'string')
   end
 end
 
@@ -335,7 +335,7 @@ local function url_reputation_idempotent(task, rule)
 
   if sc then
     for _,tld in ipairs(requests) do
-      rule.backend.set_token(task, rule, tld[1], sc)
+      rule.backend.set_token(task, rule, nil, tld[1], sc)
     end
   end
 end
@@ -411,19 +411,22 @@ local function ip_reputation_filter(task, rule)
     if asn_stats then
       local asn_score = generic_reputation_calc(asn_stats, rule, cfg.scores.asn, task)
       score = score + asn_score
-      table.insert(description_t, string.format('asn: %s(%.2f)', asn, asn_score))
+      table.insert(description_t, string.format('asn: %s(%.2f)',
+              asn, asn_score))
     end
     if country_stats then
       local country_score = generic_reputation_calc(country_stats, rule,
           cfg.scores.country, task)
       score = score + country_score
-      table.insert(description_t, string.format('country: %s(%.2f)', country, country_score))
+      table.insert(description_t, string.format('country: %s(%.2f)',
+              country, country_score))
     end
     if ip_stats then
       local ip_score = generic_reputation_calc(ip_stats, rule, cfg.scores.ip,
         task)
       score = score + ip_score
-      table.insert(description_t, string.format('ip: %s(%.2f)', ip, ip_score))
+      table.insert(description_t, string.format('ip: %s(%.2f)',
+              tostring(ip), ip_score))
     end
 
     if math.abs(score) > 0.001 then
@@ -462,13 +465,16 @@ local function ip_reputation_filter(task, rule)
   end
 
   if asn then
-    rule.backend.get_token(task, rule, cfg.asn_prefix .. asn, gen_token_callback('asn'))
+    rule.backend.get_token(task, rule, cfg.asn_prefix, asn,
+            gen_token_callback('asn'), 'string')
   end
   if country then
-    rule.backend.get_token(task, rule, cfg.country_prefix .. country, gen_token_callback('country'))
+    rule.backend.get_token(task, rule, cfg.country_prefix, country,
+            gen_token_callback('country'), 'string')
   end
 
-  rule.backend.get_token(task, rule, cfg.ip_prefix .. tostring(ip), gen_token_callback('ip'))
+  rule.backend.get_token(task, rule, cfg.ip_prefix, ip,
+          gen_token_callback('ip'), 'ip')
 end
 
 -- Used to set scores
@@ -502,13 +508,13 @@ local function ip_reputation_idempotent(task, rule)
   local sc = extract_task_score(task, rule)
   if sc then
     if asn then
-      rule.backend.set_token(task, rule, cfg.asn_prefix .. asn, sc)
+      rule.backend.set_token(task, rule, cfg.asn_prefix, asn, sc, nil, 'string')
     end
     if country then
-      rule.backend.set_token(task, rule, cfg.country_prefix .. country, sc)
+      rule.backend.set_token(task, rule, cfg.country_prefix, country, sc, nil, 'string')
     end
 
-    rule.backend.set_token(task, rule, cfg.ip_prefix .. tostring(ip), sc)
+    rule.backend.set_token(task, rule, cfg.ip_prefix, ip, sc, nil, 'ip')
   end
 end
 
@@ -565,7 +571,7 @@ local function spf_reputation_filter(task, rule)
     end
   end
 
-  rule.backend.get_token(task, rule, hkey, tokens_cb)
+  rule.backend.get_token(task, rule, nil, hkey, tokens_cb, 'string')
 end
 
 local function spf_reputation_idempotent(task, rule)
@@ -580,7 +586,7 @@ local function spf_reputation_idempotent(task, rule)
 
   lua_util.debugm(N, task, 'set spf record %s -> %s = %s',
       spf_record, hkey, sc)
-  rule.backend.set_token(task, rule, hkey, sc)
+  rule.backend.set_token(task, rule, nil, hkey, sc)
 end
 
 
@@ -652,12 +658,12 @@ local function generic_reputation_filter(task, rule)
       fun.each(function(e)
         lua_util.debugm(N, task, 'check generic reputation (%s) %s',
           rule['symbol'], e)
-        rule.backend.get_token(task, rule, e, tokens_cb)
+        rule.backend.get_token(task, rule, nil, e, tokens_cb, 'string')
       end, selector_res)
     else
       lua_util.debugm(N, task, 'check generic reputation (%s) %s',
         rule['symbol'], selector_res)
-      rule.backend.get_token(task, rule, selector_res, tokens_cb)
+      rule.backend.get_token(task, rule, nil, selector_res, tokens_cb, 'string')
     end
   end
 end
@@ -674,12 +680,12 @@ local function generic_reputation_idempotent(task, rule)
       fun.each(function(e)
         lua_util.debugm(N, task, 'set generic selector (%s) %s = %s',
             rule['symbol'], e, sc)
-        rule.backend.set_token(task, rule, e, sc)
+        rule.backend.set_token(task, rule, nil, e, sc)
       end, selector_res)
     else
       lua_util.debugm(N, task, 'set generic selector (%s) %s = %s',
           rule['symbol'], selector_res, sc)
-      rule.backend.set_token(task, rule, selector_res, sc)
+      rule.backend.set_token(task, rule, nil, selector_res, sc)
     end
   end
 end
@@ -733,7 +739,10 @@ local function reputation_dns_init(rule, _, _, _)
 end
 
 
-local function gen_token_key(token, rule)
+local function gen_token_key(prefix, token, rule)
+  if prefix then
+    token = prefix .. token
+  end
   local res = token
   if rule.backend.config.hashed then
     local hash_alg = rule.backend.config.hash_alg or "blake2"
@@ -766,7 +775,7 @@ end
 
 --[[
 -- Generic interface for get and set tokens functions:
--- get_token(task, rule, token, continuation), where `continuation` is the following function:
+-- get_token(task, rule, prefix, token, continuation, token_type), where `continuation` is the following function:
 --
 -- function(err, token, values) ... end
 -- `err`: string value for error (similar to redis or DNS callbacks)
@@ -785,37 +794,57 @@ end
 -- example of tokens: {'s': 0, 'h': 0, 'p': 1}
 --]]
 
-local function reputation_dns_get_token(task, rule, token, continuation_cb)
+local function reputation_dns_get_token(task, rule, prefix, token, continuation_cb, token_type)
   -- local r = task:get_resolver()
-  local key = gen_token_key(token, rule)
+  -- In DNS we never ever use prefix as prefix, we use if as a suffix!
+  if token_type == 'ip' then
+    token = table.concat(token:inversed_str_octets(), '.')
+  end
+
+  local key = gen_token_key(nil, token, rule)
   local dns_name = key .. '.' .. rule.backend.config.list
+
+  if prefix then
+    dns_name = string.format('%s.%s.%s', key, prefix,
+            rule.backend.config.list)
+  else
+    dns_name = string.format('%s.%s', key, rule.backend.config.list)
+  end
 
   local function dns_cb(_, _, results, err)
     if err and (err ~= 'requested record is not found' and
         err ~= 'no records with this name') then
-      rspamd_logger.errx(task, 'error looking up %s: %s', dns_name, err)
+      rspamd_logger.warnx(task, 'error looking up %s: %s', dns_name, err)
     end
 
     lua_util.debugm(N, task, 'DNS RESPONSE: label=%1 results=%2 err=%3 list=%4',
         dns_name, results, err, rule.backend.config.list)
 
     -- Now split tokens to list of values
-    if results  then
-      local values = {}
-      -- Format: key1=num1;key2=num2...keyn=numn
-      fun.each(function(e)
-        local vals = lua_util.rspamd_str_split(e, "=")
-        if vals and #vals == 2 then
-          local nv = tonumber(vals[2])
-          if nv then
-            values[vals[1]] = nv
-          end
-        end
+    if results and results[1]  then
+      -- Format: num_messages;sc1;sc2...scn
+      local dns_tokens = lua_util.rspamd_str_split(results[1], ";")
+      -- Convert all to numbers excluding any possible non-numbers
+      dns_tokens = fun.totable(fun.filter(function(e)
+        return type(e) == 'number'
       end,
-          lua_util.rspamd_str_split(results[1], ";"))
+      fun.map(function(e)
+        local n = tonumber(e)
+        if n then return n end
+        return "BAD"
+      end, dns_tokens)))
 
-      continuation_cb(nil, dns_name, values)
+      if #dns_tokens < 2 then
+        rspamd_logger.warnx(task, 'cannot parse response for reputation token %s: %s',
+                dns_name, results[1])
+        continuation_cb(results, dns_name, nil)
+      else
+        local cnt = table.remove(dns_tokens, 1)
+        continuation_cb(nil, dns_name, { cnt, dns_tokens })
+      end
     else
+      rspamd_logger.messagex(task, 'invalid response for reputation token %s: %s',
+              dns_name, results[1])
       continuation_cb(results, dns_name, nil)
     end
   end
@@ -918,8 +947,11 @@ local function reputation_redis_init(rule, cfg, ev_base, worker)
   return true
 end
 
-local function reputation_redis_get_token(task, rule, token, continuation_cb)
-  local key = gen_token_key(token, rule)
+local function reputation_redis_get_token(task, rule, prefix, token, continuation_cb, token_type)
+  if token_type and token_type == 'ip' then
+    token = tostring(token)
+  end
+  local key = gen_token_key(prefix, token, rule)
 
   local function redis_get_cb(err, data)
     if data then
@@ -953,8 +985,11 @@ local function reputation_redis_get_token(task, rule, token, continuation_cb)
   end
 end
 
-local function reputation_redis_set_token(task, rule, token, sc, continuation_cb)
-  local key = gen_token_key(token, rule)
+local function reputation_redis_set_token(task, rule, prefix, token, sc, continuation_cb, token_type)
+  if token_type and token_type == 'ip' then
+    token = tostring(token)
+  end
+  local key = gen_token_key(prefix, token, rule)
 
   local function redis_set_cb(err, data)
     if err then

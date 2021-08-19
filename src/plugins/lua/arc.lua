@@ -23,6 +23,7 @@ local rspamd_rsa = require "rspamd_rsa"
 local fun = require "fun"
 local auth_results = require "lua_auth_results"
 local hash = require "rspamd_cryptobox_hash"
+local lua_mime = require "lua_mime"
 
 if confighelp then
   return
@@ -51,22 +52,6 @@ local arc_symbols = {
   dnsfail = 'ARC_DNSFAIL',
   na = 'ARC_NA',
   reject = 'ARC_REJECT',
-}
-
-local symbols = {
-  spf_allow_symbol = 'R_SPF_ALLOW',
-  spf_deny_symbol = 'R_SPF_FAIL',
-  spf_softfail_symbol = 'R_SPF_SOFTFAIL',
-  spf_neutral_symbol = 'R_SPF_NEUTRAL',
-  spf_tempfail_symbol = 'R_SPF_DNSFAIL',
-  spf_permfail_symbol = 'R_SPF_PERMFAIL',
-  spf_na_symbol = 'R_SPF_NA',
-
-  dkim_allow_symbol = 'R_DKIM_ALLOW',
-  dkim_deny_symbol = 'R_DKIM_REJECT',
-  dkim_tempfail_symbol = 'R_DKIM_TEMPFAIL',
-  dkim_na_symbol = 'R_DKIM_NA',
-  dkim_permfail_symbol = 'R_DKIM_PERMFAIL',
 }
 
 local settings = {
@@ -446,8 +431,8 @@ if settings.whitelisted_signers_map then
   end
 end
 
-rspamd_config:register_dependency('ARC_CALLBACK', symbols['spf_allow_symbol'])
-rspamd_config:register_dependency('ARC_CALLBACK', symbols['dkim_allow_symbol'])
+rspamd_config:register_dependency('ARC_CALLBACK', 'SPF_CHECK')
+rspamd_config:register_dependency('ARC_CALLBACK', 'DKIM_CHECK')
 
 local function arc_sign_seal(task, params, header)
   local arc_sigs = task:cache_get('arc-sigs')
@@ -550,12 +535,12 @@ local function arc_sign_seal(task, params, header)
   cur_arc_seal = string.format('%s%s', cur_arc_seal,
     sig:base64(70, nl_type))
 
-  task:set_milter_reply({
-    add_headers = {
+  lua_mime.modify_headers(task, {
+    add = {
       ['ARC-Authentication-Results'] = {order = 1, value = cur_auth_results},
       ['ARC-Message-Signature'] = {order = 1, value = header},
       ['ARC-Seal'] = {order = 1, value = lua_util.fold_header(task,
-        'ARC-Seal', cur_arc_seal) }
+              'ARC-Seal', cur_arc_seal) }
     }
   })
   task:insert_result(settings.sign_symbol, 1.0,
@@ -758,3 +743,6 @@ rspamd_config:register_symbol(sym_reg_tbl)
 
 -- Do not sign unless checked
 rspamd_config:register_dependency(settings['sign_symbol'], 'ARC_CALLBACK')
+-- We need to check dmarc before signing as we have to produce valid AAR header
+-- see #3613
+rspamd_config:register_dependency(settings['sign_symbol'], 'DMARC_CALLBACK')

@@ -123,6 +123,7 @@ rspamd_hs_helper_cleanup_dir (struct hs_helper_ctx *ctx, gboolean forced)
 	gint rc;
 	gchar *pattern;
 	gboolean ret = TRUE;
+	pid_t our_pid = getpid ();
 
 	if (stat (ctx->hs_dir, &st) == -1) {
 		msg_err ("cannot stat path %s, %s",
@@ -132,6 +133,10 @@ rspamd_hs_helper_cleanup_dir (struct hs_helper_ctx *ctx, gboolean forced)
 	}
 
 	globbuf.gl_offs = 0;
+	/*
+	 * We reuse this buffer for .new patterns as well, so allocate with some
+	 * margin
+	 */
 	len = strlen (ctx->hs_dir) + 1 + sizeof ("*.hs.new") + 2;
 	pattern = g_malloc (len);
 	rspamd_snprintf (pattern, len, "%s%c%s", ctx->hs_dir, G_DIR_SEPARATOR, "*.hs");
@@ -145,6 +150,10 @@ rspamd_hs_helper_cleanup_dir (struct hs_helper_ctx *ctx, gboolean forced)
 					msg_err ("cannot unlink %s: %s", globbuf.gl_pathv[i],
 							strerror (errno));
 					ret = FALSE;
+				}
+				else {
+					msg_notice ("successfully removed outdated hyperscan file: %s",
+							globbuf.gl_pathv[i]);
 				}
 			}
 		}
@@ -160,10 +169,50 @@ rspamd_hs_helper_cleanup_dir (struct hs_helper_ctx *ctx, gboolean forced)
 	rspamd_snprintf (pattern, len, "%s%c%s", ctx->hs_dir, G_DIR_SEPARATOR, "*.hs.new");
 	if ((rc = glob (pattern, 0, NULL, &globbuf)) == 0) {
 		for (i = 0; i < globbuf.gl_pathc; i++) {
-			if (unlink (globbuf.gl_pathv[i]) == -1) {
-				msg_err ("cannot unlink %s: %s", globbuf.gl_pathv[i],
-						strerror (errno));
-				ret = FALSE;
+			/* Check if we have a pid in the filename */
+			const gchar *end_num = globbuf.gl_pathv[i] +
+					strlen (globbuf.gl_pathv[i]) - (sizeof (".hs.new") - 1);
+			const gchar *p = end_num - 1;
+			pid_t foreign_pid = -1;
+
+			while (p > globbuf.gl_pathv[i]) {
+				if (g_ascii_isdigit (*p)) {
+					p --;
+				}
+				else {
+					p ++;
+					break;
+				}
+			}
+
+			gulong ul;
+			if (p < end_num && rspamd_strtoul (p, end_num - p, &ul)) {
+				foreign_pid = ul;
+			}
+
+			/*
+			 * Remove only files that was left by us or some non-existing process
+			 * There could be another race condition but it would just leave
+			 * extra files which is relatively innocent?
+			 */
+			if (foreign_pid == -1 || foreign_pid == our_pid || kill (foreign_pid, 0) == -1) {
+				if (unlink(globbuf.gl_pathv[i]) == -1) {
+					msg_err ("cannot unlink %s: %s", globbuf.gl_pathv[i],
+							strerror(errno));
+					ret = FALSE;
+				}
+				else {
+					msg_notice ("successfully removed outdated hyperscan temporary file: %s; "
+								"pid of the file creator process: %P",
+							globbuf.gl_pathv[i],
+							foreign_pid);
+				}
+			}
+			else {
+				msg_notice ("skip removal of the hyperscan temporary file: %s; "
+							"pid of the file creator process: %P",
+						globbuf.gl_pathv[i],
+						foreign_pid);
 			}
 		}
 	}

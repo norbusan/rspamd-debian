@@ -7,8 +7,8 @@
 ############################# INITIAL SECTION #############################################
 CMAKE_MINIMUM_REQUIRED(VERSION 3.12 FATAL_ERROR)
 
-SET(RSPAMD_VERSION_MAJOR 2)
-SET(RSPAMD_VERSION_MINOR 7)
+SET(RSPAMD_VERSION_MAJOR 3)
+SET(RSPAMD_VERSION_MINOR 0)
 
 # Keep two digits all the time
 SET(RSPAMD_VERSION_MAJOR_NUM ${RSPAMD_VERSION_MAJOR}0)
@@ -27,7 +27,9 @@ CMAKE_POLICY(SET CMP0075 NEW)
 
 # This is supported merely with cmake 3.1
 SET(CMAKE_C_STANDARD 11)
+SET(CMAKE_CXX_STANDARD 17)
 SET(CMAKE_C_STANDARD_REQUIRED ON)
+SET(CMAKE_CXX_STANDARD_REQUIRED ON)
 LIST(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/")
 
 SET(RSPAMD_MASTER_SITE_URL "https://rspamd.com")
@@ -40,7 +42,6 @@ ENDIF(NOT RSPAMD_USER)
 # Default for SysV Init
 SET(RSPAMD_WORKER_NORMAL "*:11333")
 SET(RSPAMD_WORKER_CONTROLLER "*:11334")
-SET_PROPERTY(GLOBAL PROPERTY ALLOW_DUPLICATE_CUSTOM_TARGETS 1)
 
 ############################# OPTIONS SECTION #############################################
 OPTION(ENABLE_LUAJIT       "Link with libluajit [default: ON]"                  ON)
@@ -56,6 +57,7 @@ OPTION(ENABLE_UTILS        "Build rspamd internal utils [default: OFF]" OFF)
 OPTION(ENABLE_LIBUNWIND    "Use libunwind to print crash traces [default: OFF]" OFF)
 OPTION(ENABLE_LUA_TRACE    "Trace all Lua C API invocations [default: OFF]" OFF)
 OPTION(ENABLE_LUA_REPL     "Enables Lua repl (requires C++11 compiler) [default: ON]" ON)
+OPTION(SYSTEM_ZSTD         "Use system zstd instead of bundled one [default: OFF]" OFF)
 
 ############################# INCLUDE SECTION #############################################
 
@@ -114,6 +116,10 @@ INCLUDE_DIRECTORIES("${CMAKE_SOURCE_DIR}/"
 		"${CMAKE_SOURCE_DIR}/contrib/aho-corasick"
 		"${CMAKE_SOURCE_DIR}/contrib/lc-btrie"
 		"${CMAKE_SOURCE_DIR}/contrib/lua-lpeg"
+		"${CMAKE_SOURCE_DIR}/contrib/frozen/include"
+		"${CMAKE_SOURCE_DIR}/contrib/fmt/include"
+		"${CMAKE_SOURCE_DIR}/contrib/doctest"
+		"${CMAKE_SOURCE_DIR}/contrib/fu2/include"
 		"${CMAKE_BINARY_DIR}/src" #Stored in the binary dir
 		"${CMAKE_BINARY_DIR}/src/libcryptobox")
 
@@ -154,27 +160,40 @@ ELSE(ENABLE_LUAJIT MATCHES "ON")
 
 	IF (NOT WITH_LIBLUA)
 		ProcessPackage(LIBLUA LIBRARY	"lua"
-				"lua-5.2"
-				LIB_SUFFIXES	"lua5.2"
+				"lua-5.4"
+				LIB_SUFFIXES	"lua5.4"
 				INCLUDE lua.h INCLUDE_SUFFIXES
-				"include/lua-5.2"
-				"include/lua5.2"
-				"include/lua52"
+				"include/lua-5.4"
+				"include/lua5.4"
+				"include/lua54"
 				"include/lua"
 				ROOT ${LUA_ROOT}
-				MODULES lua52
+				MODULES lua54
 				OPTIONAL)
-
 		IF (NOT WITH_LIBLUA)
 			ProcessPackage(LIBLUA LIBRARY	"lua"
-					"lua-5.1"
+					"lua-5.2"
+					LIB_SUFFIXES	"lua5.2"
 					INCLUDE lua.h INCLUDE_SUFFIXES
-					"include/lua-5.1"
-					"include/lua5.1"
-					"include/lua51"
+					"include/lua-5.2"
+					"include/lua5.2"
+					"include/lua52"
 					"include/lua"
 					ROOT ${LUA_ROOT}
-					MODULES lua51)
+					MODULES lua52
+					OPTIONAL)
+
+			IF (NOT WITH_LIBLUA)
+				ProcessPackage(LIBLUA LIBRARY	"lua"
+						"lua-5.1"
+						INCLUDE lua.h INCLUDE_SUFFIXES
+						"include/lua-5.1"
+						"include/lua5.1"
+						"include/lua51"
+						"include/lua"
+						ROOT ${LUA_ROOT}
+						MODULES lua51)
+			ENDIF()
 		ENDIF()
 	ENDIF()
 ENDIF(ENABLE_LUAJIT MATCHES "ON")
@@ -206,9 +225,11 @@ ENDIF()
 ProcessPackage(SQLITE3 LIBRARY sqlite3 INCLUDE sqlite3.h INCLUDE_SUFFIXES include/sqlite3 include/sqlite
 	ROOT ${SQLITE3_ROOT_DIR} MODULES sqlite3 sqlite)
 ProcessPackage(ICUDATA LIBRARY icudata INCLUDE unicode/ucnv.h
-	ROOT ${ICU_ROOT_DIR} MODULES icu-i18n)
+	ROOT ${ICU_ROOT_DIR} MODULES icu-uc)
 ProcessPackage(ICUC LIBRARY icuuc INCLUDE unicode/ucnv.h
-	ROOT ${ICU_ROOT_DIR} MODULES icu-i18n)
+	ROOT ${ICU_ROOT_DIR} MODULES icu-uc)
+ProcessPackage(ICUIO LIBRARY icuio INCLUDE unicode/ucnv.h
+		ROOT ${ICU_ROOT_DIR} MODULES icu-io)
 ProcessPackage(ICUI18N LIBRARY icui18n INCLUDE unicode/ucnv.h
 	ROOT ${ICU_ROOT_DIR} MODULES icu-i18n)
 ProcessPackage(LIBCRYPT LIBRARY crypto INCLUDE openssl/evp.h
@@ -233,6 +254,10 @@ SET(CMAKE_C_FLAGS "${CMAKE_C_OPT_FLAGS} ${CMAKE_C_FLAGS}")
 SET(CMAKE_CXX_FLAGS "${CMAKE_C_OPT_FLAGS} ${CMAKE_CXX_FLAGS}")
 
 ADD_DEFINITIONS(-DHAVE_CONFIG_H)
+ADD_DEFINITIONS(-DDOCTEST_CONFIG_NO_MULTI_LANE_ATOMICS)
+# Workaround for https://github.com/onqtam/doctest/issues/356
+ADD_DEFINITIONS(-DDOCTEST_CONFIG_USE_STD_HEADERS)
+ADD_DEFINITIONS(-DU_CHARSET_IS_UTF8)
 
 # Check platform specific includes
 CHECK_INCLUDE_FILES(sys/types.h HAVE_SYS_TYPES_H)
@@ -315,21 +340,6 @@ CHECK_C_SOURCE_COMPILES(
 		tzset();
 		return timezone;
 	}" HAVE_SANE_TZSET)
-
-IF(WITH_ICONV)
-	CHECK_C_SOURCE_COMPILES("
-#include <iconv.h>
-int main(){
-	iconv_t conv = 0;
-	const char* in = 0;
-	size_t ilen = 0;
-	char* out = 0;
-	size_t olen = 0;
-	iconv(conv, &in, &ilen, &out, &olen);
-	return 0;
-}
-" ICONV_SECOND_ARGUMENT_IS_CONST)
-ENDIF(WITH_ICONV)
 
 # Check macros
 CHECK_SYMBOL_EXISTS(PATH_MAX limits.h HAVE_PATH_MAX)
@@ -620,7 +630,13 @@ ADD_SUBDIRECTORY(contrib/http-parser)
 ADD_SUBDIRECTORY(contrib/fpconv)
 ADD_SUBDIRECTORY(contrib/lc-btrie)
 ADD_SUBDIRECTORY(contrib/libottery)
-ADD_SUBDIRECTORY(contrib/zstd)
+IF(SYSTEM_ZSTD MATCHES "OFF")
+	ADD_SUBDIRECTORY(contrib/zstd)
+ELSE()
+	ProcessPackage(LIBZSTD LIBRARY zstd INCLUDE zstd.h
+		ROOT ${LIBZSTD_ROOT_DIR} MODULES zstd)
+	ADD_DEFINITIONS(-DSYS_ZSTD)
+ENDIF()
 IF(ENABLE_SNOWBALL MATCHES "ON")
 	ADD_SUBDIRECTORY(contrib/snowball)
 	SET(WITH_SNOWBALL 1)
@@ -634,7 +650,8 @@ ADD_SUBDIRECTORY(contrib/libev)
 ADD_SUBDIRECTORY(contrib/kann)
 ADD_SUBDIRECTORY(contrib/fastutf8)
 ADD_SUBDIRECTORY(contrib/google-ced)
-
+ADD_SUBDIRECTORY(contrib/fmt)
+ADD_SUBDIRECTORY(contrib/doctest)
 
 IF (NOT WITH_LUAJIT)
 	ADD_SUBDIRECTORY(contrib/lua-bit)
@@ -685,7 +702,8 @@ LIST(LENGTH CONFFILES CONFLIST_COUNT)
 MATH(EXPR CONFLIST_MAX ${CONFLIST_COUNT}-1)
 
 FILE(GLOB_RECURSE CONF_FILES RELATIVE "${CMAKE_SOURCE_DIR}/conf" CONFIGURE_DEPENDS
-	"${CMAKE_SOURCE_DIR}/conf/*" )
+	"${CMAKE_SOURCE_DIR}/conf/*.conf"
+	"${CMAKE_SOURCE_DIR}/conf/*.inc" )
 FOREACH(CONF_FILE ${CONF_FILES})
 	GET_FILENAME_COMPONENT(_rp ${CONF_FILE} PATH)
 	INSTALL(CODE "FILE(MAKE_DIRECTORY \$ENV{DESTDIR}${CONFDIR}/${_rp})")
@@ -768,8 +786,11 @@ ADD_CUSTOM_TARGET(dist ${CMAKE_SOURCE_DIR}/dist.sh
 	WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 IF(NOT DEBIAN_BUILD)
-	ADD_CUSTOM_TARGET(check DEPENDS rspamd-test)
-	ADD_CUSTOM_TARGET(run-test DEPENDS check COMMAND test/rspamd-test)
+	ADD_CUSTOM_TARGET(check DEPENDS rspamd-test-cxx rspamd-test)
+	ADD_CUSTOM_TARGET(run-test DEPENDS check
+	COMMAND test/rspamd-test-cxx
+	COMMAND sh -c 'LUA_PATH="${CMAKE_SOURCE_DIR}/lualib/?.lua\;${CMAKE_SOURCE_DIR}/lualib/?/?.lua\;${CMAKE_SOURCE_DIR}/lualib/?/init.lua\;${CMAKE_SOURCE_DIR}/contrib/lua-?/?.lua"
+		test/rspamd-test -p /rspamd/lua')
 ENDIF(NOT DEBIAN_BUILD)
 
 

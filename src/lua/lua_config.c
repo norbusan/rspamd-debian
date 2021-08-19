@@ -16,7 +16,7 @@
 #include "lua_common.h"
 #include "libmime/message.h"
 #include "libutil/expression.h"
-#include "libserver/composites.h"
+#include "src/libserver/composites/composites.h"
 #include "libserver/cfg_file_private.h"
 #include "libmime/lang_detection.h"
 #include "lua/lua_map.h"
@@ -2600,47 +2600,22 @@ lua_config_add_composite (lua_State * L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
-	struct rspamd_expression *expr;
 	gchar *name;
 	const gchar *expr_str;
 	struct rspamd_composite *composite;
-	gboolean ret = FALSE, new = TRUE;
-	GError *err = NULL;
+	gboolean ret = FALSE;
 
 	if (cfg) {
 		name = rspamd_mempool_strdup (cfg->cfg_pool, luaL_checkstring (L, 2));
 		expr_str = luaL_checkstring (L, 3);
 
 		if (name && expr_str) {
-			if (!rspamd_parse_expression (expr_str, 0, &composite_expr_subr,
-					NULL, cfg->cfg_pool, &err, &expr)) {
-				msg_err_config ("cannot parse composite expression %s: %e",
-						expr_str,
-						err);
-				g_error_free (err);
-			}
-			else {
-				if (g_hash_table_lookup (cfg->composite_symbols, name) != NULL) {
-					msg_warn_config ("composite %s is redefined", name);
-					new = FALSE;
-				}
+			composite = rspamd_composites_manager_add_from_string(cfg->composites_manager,
+					name, expr_str);
 
-				composite = rspamd_mempool_alloc0 (cfg->cfg_pool,
-						sizeof (struct rspamd_composite));
-				composite->expr = expr;
-				composite->id = g_hash_table_size (cfg->composite_symbols);
-				composite->str_expr = rspamd_mempool_strdup (cfg->cfg_pool,
-						expr_str);
-				composite->sym = name;
-				g_hash_table_insert (cfg->composite_symbols,
-						(gpointer)name,
-						composite);
-
-				if (new) {
-					rspamd_symcache_add_symbol (cfg->cache, name,
-							0, NULL, composite, SYMBOL_TYPE_COMPOSITE, -1);
-				}
-
+			if (composite) {
+				rspamd_symcache_add_symbol (cfg->cache, name,
+						0, NULL, composite, SYMBOL_TYPE_COMPOSITE, -1);
 				ret = TRUE;
 			}
 		}
@@ -3170,6 +3145,8 @@ lua_config_add_post_init (lua_State *L)
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	struct rspamd_config_cfg_lua_script *sc;
 	guint priority = 0;
+	lua_Debug d;
+	gchar tmp[256], *p;
 
 	if (cfg == NULL || lua_type (L, 2) != LUA_TFUNCTION) {
 		return luaL_error (L, "invalid arguments");
@@ -3179,10 +3156,30 @@ lua_config_add_post_init (lua_State *L)
 		priority = lua_tointeger (L , 3);
 	}
 
+	if (lua_getstack (L, 1, &d) == 1) {
+		(void) lua_getinfo (L, "Sl", &d);
+		if ((p = strrchr (d.short_src, '/')) == NULL) {
+			p = d.short_src;
+		}
+		else {
+			p++;
+		}
+
+		if (strlen (p) > 200) {
+			rspamd_snprintf (tmp, sizeof (tmp), "%10s...]:%d", p,
+					d.currentline);
+		}
+		else {
+			rspamd_snprintf (tmp, sizeof (tmp), "%s:%d", p,
+					d.currentline);
+		}
+	}
+
 	sc = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*sc));
 	lua_pushvalue (L, 2);
 	sc->cbref = luaL_ref (L, LUA_REGISTRYINDEX);
 	sc->priority = priority;
+	sc->lua_src_pos = rspamd_mempool_strdup (cfg->cfg_pool, tmp);
 	DL_APPEND (cfg->post_init_scripts, sc);
 	DL_SORT (cfg->post_init_scripts, rspamd_post_init_sc_sort);
 
@@ -3195,14 +3192,36 @@ lua_config_add_config_unload (lua_State *L)
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	struct rspamd_config_cfg_lua_script *sc;
+	lua_Debug d;
+	gchar tmp[256], *p;
 
 	if (cfg == NULL || lua_type (L, 2) != LUA_TFUNCTION) {
 		return luaL_error (L, "invalid arguments");
 	}
 
+	if (lua_getstack (L, 1, &d) == 1) {
+		(void) lua_getinfo (L, "Sl", &d);
+		if ((p = strrchr (d.short_src, '/')) == NULL) {
+			p = d.short_src;
+		}
+		else {
+			p++;
+		}
+
+		if (strlen (p) > 20) {
+			rspamd_snprintf (tmp, sizeof (tmp), "%10s...]:%d", p,
+					d.currentline);
+		}
+		else {
+			rspamd_snprintf (tmp, sizeof (tmp), "%s:%d", p,
+					d.currentline);
+		}
+	}
+
 	sc = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*sc));
 	lua_pushvalue (L, 2);
 	sc->cbref = luaL_ref (L, LUA_REGISTRYINDEX);
+	sc->lua_src_pos = rspamd_mempool_strdup (cfg->cfg_pool, tmp);
 	DL_APPEND (cfg->config_unload_scripts, sc);
 
 	return 0;
@@ -4380,6 +4399,9 @@ lua_config_init_subsystem (lua_State *L)
 
 					return luaL_error (L, "no event base specified");
 				}
+			}
+			else if (strcmp (parts[i], "symcache") == 0) {
+				rspamd_symcache_init (cfg->cache);
 			}
 			else {
 				g_strfreev (parts);

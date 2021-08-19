@@ -21,6 +21,21 @@ extern "C" {
 
 struct rspamd_config;
 
+enum rspamd_exception_type {
+	RSPAMD_EXCEPTION_NEWLINE = 0,
+	RSPAMD_EXCEPTION_URL,
+	RSPAMD_EXCEPTION_GENERIC,
+};
+/**
+ * Structure to point exception in text from processing
+ */
+struct rspamd_process_exception {
+	goffset pos;
+	guint len;
+	gpointer ptr;
+	enum rspamd_exception_type type;
+};
+
 /**
  * Create generic socket
  * @param af address family
@@ -453,8 +468,8 @@ GPtrArray *rspamd_glob_path (const gchar *dir,
 							 GError **err);
 
 struct rspamd_counter_data {
-	gdouble mean;
-	gdouble stddev;
+	float mean;
+	float stddev;
 	guint64 number;
 };
 
@@ -465,9 +480,9 @@ struct rspamd_counter_data {
  * @param alpha decay coefficient (0..1)
  * @return new counter value
  */
-double rspamd_set_counter_ema (struct rspamd_counter_data *cd,
-							   gdouble value,
-							   gdouble alpha);
+float rspamd_set_counter_ema (struct rspamd_counter_data *cd,
+							   float value,
+							   float alpha);
 
 /**
  * Sets counter's data using flat moving average

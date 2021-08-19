@@ -23,7 +23,7 @@ local logger = require "rspamd_logger"
 local lua_util = require "lua_util"
 local rspamd_util = require "rspamd_util"
 local lua_maps = require "lua_maps"
-local lua_mime = require "lua_mime"
+local lua_mime_types = require "lua_mime_types"
 local lua_magic_types = require "lua_magic/types"
 local fun = require "fun"
 
@@ -180,6 +180,11 @@ local settings = {
     ace = 1,
     ['7z'] = 1,
     cab = 1,
+    bz2 = 1,
+    egg = 1,
+    alz = 1,
+    xz = 1,
+    lz = 1,
   },
 
   -- Not really archives
@@ -222,7 +227,8 @@ local function check_mime_type(task)
     end
 
     -- Decode hex encoded characters
-    fname = string.gsub(fname, '%%(%x%x)', function (hex) return string.char(tonumber(hex,16)) end )
+    fname = string.gsub(fname, '%%(%x%x)',
+        function (hex) return string.char(tonumber(hex,16)) end )
 
     -- Replace potentially bad characters with '?'
     fname = fname:gsub('[^%s%g]', '?')
@@ -570,7 +576,7 @@ if opts then
   end
 
   -- Add all extensions
-  for _,pair in ipairs(lua_mime.full_extensions_map) do
+  for _,pair in ipairs(lua_mime_types.full_extensions_map) do
     local ext, ct = pair[1], pair[2]
     if not settings.extension_map[ext] then
         change_extension_map_entry(ext, ct, settings.other_extensions_mult)

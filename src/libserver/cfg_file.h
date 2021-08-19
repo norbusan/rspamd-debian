@@ -76,6 +76,7 @@ enum rspamd_log_cfg_flags {
 	RSPAMD_LOG_FLAG_USEC = (1 << 3),
 	RSPAMD_LOG_FLAG_RSPAMADM = (1 << 4),
 	RSPAMD_LOG_FLAG_ENFORCED = (1 << 5),
+	RSPAMD_LOG_FLAG_SEVERITY = (1 << 6),
 };
 
 struct rspamd_worker_log_pipe {
@@ -312,6 +313,7 @@ struct rspamd_action;
 struct rspamd_config_cfg_lua_script {
 	gint cbref;
 	gint priority;
+	gchar *lua_src_pos;
 	struct rspamd_config_cfg_lua_script *prev, *next;
 };
 
@@ -376,6 +378,7 @@ struct rspamd_config {
 	gboolean soft_reject_on_timeout;                /**< If true emit soft reject on task timeout (if not reject) */
 	gboolean public_groups_only;                    /**< Output merely public groups everywhere				*/
 	gboolean enable_test_patterns;                  /**< Enable test patterns								*/
+	gboolean enable_css_parser;                     /**< Enable css parsing in HTML							*/
 
 	gsize max_cores_size;                           /**< maximum size occupied by rspamd core files			*/
 	gsize max_cores_count;                          /**< maximum number of core files						*/
@@ -416,7 +419,7 @@ struct rspamd_config {
 	ucl_object_t *config_comments;                  /**< comments saved from the config						*/
 	ucl_object_t *doc_strings;                      /**< documentation strings for config options			*/
 	GPtrArray *c_modules;                           /**< list of C modules			*/
-	GHashTable *composite_symbols;                 /**< hash of composite symbols indexed by its name		*/
+	void *composites_manager;                       /**< hash of composite symbols indexed by its name		*/
 	GList *classifiers;                             /**< list of all classifiers defined                    */
 	GList *statfiles;                               /**< list of all statfiles in config file order         */
 	GHashTable *classifiers_symbols;                /**< hashtable indexed by symbol name of classifiers    */
@@ -478,12 +481,13 @@ struct rspamd_config {
 
 	GList *classify_headers;                        /**< list of headers using for statistics				*/
 	struct module_s **compiled_modules;                /**< list of compiled C modules							*/
-	struct worker_s **compiled_workers;                /**< list of compiled C modules							*/struct rspamd_log_format *log_format;            /**< parsed log format									*/
+	struct worker_s **compiled_workers;                /**< list of compiled C modules							*/
+	struct rspamd_log_format *log_format;            /**< parsed log format									*/
 	gchar *log_format_str;                            /**< raw log format string								*/
 
 	struct rspamd_external_libs_ctx *libs_ctx;        /**< context for external libraries						*/
 	struct rspamd_monitored_ctx *monitored_ctx;        /**< context for monitored resources					*/
-	struct rspamd_redis_pool *redis_pool;            /**< redis connectiosn pool								*/
+	struct rspamd_redis_pool *redis_pool;            /**< redis connection pool								*/
 
 	struct rspamd_re_cache *re_cache;                /**< static regexp cache								*/
 

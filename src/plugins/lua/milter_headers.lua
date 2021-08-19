@@ -26,6 +26,7 @@ local util = require "rspamd_util"
 local N = 'milter_headers'
 local lua_util = require "lua_util"
 local lua_maps = require "lua_maps"
+local lua_mime = require "lua_mime"
 local ts = require("tableshape").types
 local E = {}
 
@@ -35,8 +36,10 @@ local settings = {
   remove_upstream_spam_flag = true;
   skip_local = true,
   skip_authenticated = true,
+  skip_all = false,
   local_headers = {},
   authenticated_headers = {},
+  default_headers_order = nil, -- Insert at the end (set 1 to insert just after the first received)
   routines = {
     ['remove-headers'] = {
       headers = {},
@@ -51,7 +54,8 @@ local settings = {
     ['x-spamd-result'] = {
       header = 'X-Spamd-Result',
       remove = 0,
-      stop_chars = ' '
+      stop_chars = ' ',
+      sort_by = 'score',
     },
     ['x-rspamd-server'] = {
       header = 'X-Rspamd-Server',
@@ -60,6 +64,10 @@ local settings = {
     },
     ['x-rspamd-queue-id'] = {
       header = 'X-Rspamd-Queue-Id',
+      remove = 0,
+    },
+    ['x-rspamd-pre-result'] = {
+      header = 'X-Rspamd-Pre-Result',
       remove = 0,
     },
     ['remove-spam-flag'] = {
@@ -157,7 +165,6 @@ local function milter_headers(task)
       return found
     end
 
-
     if settings.extended_headers_rcpt and match_extended_headers_rcpt() then
       return false
     end
@@ -169,6 +176,10 @@ local function milter_headers(task)
 
     if settings.skip_authenticated and not settings.authenticated_headers[hdr] then
       if task:get_user() ~= nil then return true end
+    end
+
+    if settings.skip_all then
+      return true
     end
 
     return false
@@ -214,13 +225,22 @@ local function milter_headers(task)
           }
         end
 
-        table.insert(add[hname],
-            lua_util.fold_header(task, hname, value, stop_chars))
+        if settings.default_headers_order then
+          table.insert(add[hname], {
+            order = settings.default_headers_order,
+            value = lua_util.fold_header(task, hname, value, stop_chars)
+          })
+        else
+          table.insert(add[hname],
+              lua_util.fold_header(task, hname, value, stop_chars))
+        end
+
       end
     end
   end
 
   routines['x-spamd-result'] = function()
+    local local_mod = settings.routines['x-spamd-result']
     if skip_wanted('x-spamd-result') then return end
     if not common.symbols then
       common.symbols = task:get_symbols_all()
@@ -231,21 +251,52 @@ local function milter_headers(task)
     if not common['metric_action'] then
       common['metric_action'] = task:get_metric_action('default')
     end
-    if settings.routines['x-spamd-result'].remove then
-      remove[settings.routines['x-spamd-result'].header] = settings.routines['x-spamd-result'].remove
+    if local_mod.remove then
+      remove[local_mod.header] = local_mod.remove
     end
+
     local buf = {}
-    table.insert(buf, table.concat({
-      'default: ', (common['metric_action'] == 'reject') and 'True' or 'False', ' [',
-      string.format('%.2f', common['metric_score'][1]), ' / ', string.format('%.2f', common['metric_score'][2]), ']'
-    }))
+    local verdict = string.format('default: %s [%.2f / %.2f]',
+        --TODO: (common.metric_action == 'no action') and 'False' or 'True',
+        (common.metric_action == 'reject') and 'True' or 'False',
+        common.metric_score[1], common.metric_score[2])
+    table.insert(buf, verdict)
+
+    -- Deal with symbols
+    table.sort(common.symbols, function(s1, s2)
+      local res
+      if local_mod.sort_by == 'name' then
+        res = s1.name < s2.name
+      else
+        -- inverse order to show important symbols first
+        res = math.abs(s1.score) > math.abs(s2.score)
+      end
+
+      return res
+    end)
+
     for _, s in ipairs(common.symbols) do
-      if not s.options then s.options = {} end
-      table.insert(buf, table.concat({
-        ' ', s.name, '(', string.format('%.2f', s.score), ')[', table.concat(s.options, ','), ']',
-      }))
+      local sym_str = string.format('%s(%.2f)[%s]',
+          s.name, s.score,  table.concat(s.options or {}, ','))
+      table.insert(buf, sym_str)
     end
     add_header('x-spamd-result', table.concat(buf, '; '), ';')
+
+    local has_pr,action,message,module = task:has_pre_result()
+
+    if has_pr then
+      local pr_header = {}
+      if action then
+        table.insert(pr_header, string.format('action=%s', action))
+      end
+      if module then
+        table.insert(pr_header, string.format('module=%s', module))
+      end
+      if message then
+        table.insert(pr_header, message)
+      end
+      add_header('x-rspamd-pre-result', table.concat(pr_header, '; '), ';')
+    end
   end
 
   routines['x-rspamd-queue-id'] = function()
@@ -287,15 +338,17 @@ local function milter_headers(task)
   end
 
   routines['x-rspamd-server'] = function()
+    local local_mod = settings.routines['x-rspamd-server']
     if skip_wanted('x-rspamd-server') then return end
-    if settings.routines['x-rspamd-server'].remove then
-      remove[settings.routines['x-rspamd-server'].header] = settings.routines['x-rspamd-server'].remove
+    if local_mod.remove then
+      remove[local_mod.header] = local_mod.remove
     end
-    local hostname = settings.routines['x-rspamd-server'].hostname
-    add[settings.routines['x-rspamd-server'].header] = hostname and hostname or HOSTNAME
+    local hostname = local_mod.hostname
+    add[local_mod.header] = hostname and hostname or HOSTNAME
   end
 
   routines['x-spamd-bar'] = function()
+    local local_mod = settings.routines['x-spamd-bar']
     if skip_wanted('x-rspamd-bar') then return end
     if not common['metric_score'] then
       common['metric_score'] = task:get_metric_score('default')
@@ -303,21 +356,22 @@ local function milter_headers(task)
     local score = common['metric_score'][1]
     local spambar
     if score <= -1 then
-      spambar = string.rep(settings.routines['x-spamd-bar'].negative, score*-1)
+      spambar = string.rep(local_mod.negative, score * (-1))
     elseif score >= 1 then
-      spambar = string.rep(settings.routines['x-spamd-bar'].positive, score)
+      spambar = string.rep(local_mod.positive, score)
     else
-      spambar = settings.routines['x-spamd-bar'].neutral
+      spambar = local_mod.neutral
     end
-    if settings.routines['x-spamd-bar'].remove then
-      remove[settings.routines['x-spamd-bar'].header] = settings.routines['x-spamd-bar'].remove
+    if local_mod.remove then
+      remove[local_mod.header] = local_mod.remove
     end
     if spambar ~= '' then
-      add[settings.routines['x-spamd-bar'].header] = spambar
+      add[local_mod.header] = spambar
     end
   end
 
   routines['x-spam-level'] = function()
+    local local_mod = settings.routines['x-spam-level']
     if skip_wanted('x-spam-level') then return end
     if not common['metric_score'] then
       common['metric_score'] = task:get_metric_score('default')
@@ -326,10 +380,10 @@ local function milter_headers(task)
     if score < 1 then
       return nil, {}, {}
     end
-    if settings.routines['x-spam-level'].remove then
-      remove[settings.routines['x-spam-level'].header] = settings.routines['x-spam-level'].remove
+    if local_mod.remove then
+      remove[local_mod.header] = local_mod.remove
     end
-    add[settings.routines['x-spam-level'].header] = string.rep(settings.routines['x-spam-level'].char, score)
+    add[local_mod.header] = string.rep(local_mod.char, score)
   end
 
   local function spam_header (class, name, value, remove_v)
@@ -358,6 +412,7 @@ local function milter_headers(task)
   end
 
   routines['x-virus'] = function()
+    local local_mod = settings.routines['x-virus']
     if skip_wanted('x-virus') then return end
     if not common.symbols_hash then
       if not common.symbols then
@@ -369,11 +424,11 @@ local function milter_headers(task)
       end
       common.symbols_hash = h
     end
-    if settings.routines['x-virus'].remove then
-      remove[settings.routines['x-virus'].header] = settings.routines['x-virus'].remove
+    if local_mod.remove then
+      remove[local_mod.header] = local_mod.remove
     end
     local virii = {}
-    for _, sym in ipairs(settings.routines['x-virus'].symbols) do
+    for _, sym in ipairs(local_mod.symbols) do
       local s = common.symbols_hash[sym]
       if s then
         if (s.options or E)[1] then
@@ -385,14 +440,14 @@ local function milter_headers(task)
     end
     if #virii > 0 then
       local virusstatus = table.concat(virii, ',')
-      if settings.routines['x-virus'].status_infected then
-        virusstatus = settings.routines['x-virus'].status_infected .. ', ' .. virusstatus
+      if local_mod.status_infected then
+        virusstatus = local_mod.status_infected .. ', ' .. virusstatus
       end
       add_header('x-virus', virusstatus)
     else
       local failed = false
       local fail_reason = 'unknown'
-      for _, sym in ipairs(settings.routines['x-virus'].symbols_fail) do
+      for _, sym in ipairs(local_mod.symbols_fail) do
         local s = common.symbols_hash[sym]
         if s then
           failed = true
@@ -402,13 +457,13 @@ local function milter_headers(task)
         end
       end
       if not failed then
-        if settings.routines['x-virus'].status_clean then
-          add_header('x-virus', settings.routines['x-virus'].status_clean)
+        if local_mod.status_clean then
+          add_header('x-virus', local_mod.status_clean)
         end
       else
-        if settings.routines['x-virus'].status_clean then
+        if local_mod.status_clean then
           add_header('x-virus', string.format('%s(%s)',
-              settings.routines['x-virus'].status_fail, fail_reason))
+              local_mod.status_fail, fail_reason))
         end
       end
     end
@@ -416,6 +471,7 @@ local function milter_headers(task)
 
   routines['x-os-fingerprint'] = function()
     if skip_wanted('x-os-fingerprint') then return end
+    local local_mod = settings.routines['x-os-fingerprint']
 
     local os_string, link_type, uptime_min, distance =
       task:get_mempool():get_variable('os_fingerprint',
@@ -426,9 +482,8 @@ local function milter_headers(task)
     local value = string.format('%s, (up: %i min), (distance %i, link: %s)',
       os_string, uptime_min, distance, link_type)
 
-    if settings.routines['x-os-fingerprint'].remove then
-      remove[settings.routines['x-os-fingerprint'].header]
-        = settings.routines['x-os-fingerprint'].remove
+    if local_mod.remove then
+      remove[local_mod.header] = local_mod.remove
     end
 
     add_header('x-os-fingerprint', value)
@@ -452,6 +507,7 @@ local function milter_headers(task)
       is_spam = 'No'
     end
     spamstatus = is_spam .. ', score=' .. string.format('%.2f', score)
+
     if settings.routines['x-spam-status'].remove then
       remove[settings.routines['x-spam-status'].header] = settings.routines['x-spam-status'].remove
     end
@@ -467,7 +523,9 @@ local function milter_headers(task)
           settings.routines['authentication-results'].remove
     end
 
-    local res = ar.gen_auth_results(task, nil)
+    local res = ar.gen_auth_results(task,
+        lua_util.override_defaults(ar.default_settings,
+            settings.routines['authentication-results']))
 
     if res then
       add_header('authentication-results', res, ';', 1)
@@ -545,9 +603,10 @@ local function milter_headers(task)
   if not next(add) then add = nil end
   if not next(remove) then remove = nil end
   if add or remove then
-    task:set_milter_reply({
-      add_headers = add,
-      remove_headers = remove
+
+    lua_mime.modify_headers(task, {
+      add = add,
+      remove = remove
     })
   end
 end
@@ -635,6 +694,10 @@ end
 
 if type(opts['skip_authenticated']) == 'boolean' then
   settings.skip_authenticated = opts['skip_authenticated']
+end
+
+if type(opts['skip_all']) == 'boolean' then
+  settings.skip_all = opts['skip_all']
 end
 
 for _, s in ipairs(opts['use']) do

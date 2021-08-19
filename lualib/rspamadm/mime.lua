@@ -266,6 +266,7 @@ end
 
 local function extract_handler(opts)
   local out_elts = {}
+  local tasks = {}
   local process_func
 
   if opts.words then
@@ -300,7 +301,6 @@ local function extract_handler(opts)
                 return string.format('%s:%s', k,v)
               end
             end, '', part:get_stats())))
-        table.insert(out, '\n')
       end
     end
   end
@@ -309,12 +309,15 @@ local function extract_handler(opts)
     if opts.part then
 
       if not opts.json and not opts.ucl then
+        local mtype,msubtype = part:get_type()
+        local det_mtype,det_msubtype = part:get_detected_type()
         table.insert(out,
-            rspamd_logger.slog('Mime Part: %s: %s/%s, filename: %s, size: %s',
+            rspamd_logger.slog('Mime Part: %s: %s/%s (%s/%s detected), filename: %s (%s detected ext), size: %s',
                 part:get_digest():sub(1,8),
-                ({part:get_type()})[1],
-                ({part:get_type()})[2],
+                mtype, msubtype,
+                det_mtype, det_msubtype,
                 part:get_filename(),
+                part:get_detected_ext(),
                 part:get_length()))
       end
     end
@@ -367,6 +370,11 @@ local function extract_handler(opts)
 
         if part and opts.text and not part:is_html() then
           maybe_print_text_part_info(part, out_elts[fname])
+          maybe_print_mime_part_info(mime_part, out_elts[fname])
+          if not opts.json and not opts.ucl then
+            table.insert(out_elts[fname], '\n')
+          end
+
           if opts.words then
             local howw = opts['words_format'] or 'stem'
             table.insert(out_elts[fname], print_words(part:get_words(howw),
@@ -376,6 +384,11 @@ local function extract_handler(opts)
           end
         elseif part and opts.html and part:is_html() then
           maybe_print_text_part_info(part, out_elts[fname])
+          maybe_print_mime_part_info(mime_part, out_elts[fname])
+          if not opts.json and not opts.ucl then
+            table.insert(out_elts[fname], '\n')
+          end
+
           if opts.words then
             local howw = opts['words_format'] or 'stem'
             table.insert(out_elts[fname], print_words(part:get_words(howw),
@@ -384,25 +397,39 @@ local function extract_handler(opts)
             if opts.structure then
               local hc = part:get_html()
               local res = {}
-              process_func = function(k, v)
-                return rspamd_logger.slog("%s = %s", k, v)
+              process_func = function(elt)
+                local fun = require "fun"
+                if type(elt) == 'table' then
+                  return table.concat(fun.totable(
+                      fun.map(
+                          function(t)
+                            return rspamd_logger.slog("%s", t)
+                          end,
+                          elt)), '\n')
+                else
+                  return rspamd_logger.slog("%s", elt)
+                end
               end
 
               hc:foreach_tag('any', function(tag)
-                local elt = {}
-                local ex = tag:get_extra()
-                elt.tag = tag:get_type()
-                if ex then
-                  elt.extra = ex
-                end
-                local content = tag:get_content()
-                if content then
-                  elt.content = content
-                end
-                table.insert(res, elt)
+                  local elt = {}
+                  local ex = tag:get_extra()
+                  elt.tag = tag:get_type()
+                  if ex then
+                    elt.extra = ex
+                  end
+                  local content = tag:get_content()
+                  if content then
+                    elt.content = tostring(content)
+                  end
+                  local style = tag:get_style()
+                  if style then
+                    elt.style = style
+                  end
+                  table.insert(res, elt)
               end)
-              out_elts[fname] = res
-            else
+              table.insert(out_elts[fname], res)
+            else -- opts.structure
               table.insert(out_elts[fname], tostring(part:get_content(how)))
             end
           end
@@ -415,11 +442,12 @@ local function extract_handler(opts)
     end
 
     table.insert(out_elts[fname], "")
-
-    task:destroy() -- No automatic dtor
+    table.insert(tasks, task)
   end
 
   print_elts(out_elts, opts, process_func)
+  -- To avoid use after free we postpone tasks destruction
+  for _,task in ipairs(tasks) do task:destroy() end
 end
 
 local function stat_handler(opts)

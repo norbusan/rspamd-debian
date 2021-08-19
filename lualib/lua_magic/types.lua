@@ -222,6 +222,15 @@ local types = {
     ct = 'application/vnd.oasis.opendocument.presentation',
     type = 'office'
   },
+  -- https://en.wikipedia.org/wiki/Associated_Signature_Containers
+  asice = {
+    ct = 'application/vnd.etsi.asic-e+zip',
+    type = 'office'
+  },
+  asics = {
+    ct = 'application/vnd.etsi.asic-s+zip',
+    type = 'office'
+  },
   -- other
   pgp = {
     ct = 'application/encrypted',
@@ -275,6 +284,11 @@ local types = {
     ct = 'image/vnd.dwg',
   },
   -- Text
+  xml = {
+    ct = 'application/xml',
+    type = 'text',
+    no_text = true,
+  },
   txt = {
     type = 'text',
     ct = 'text/plain',
@@ -289,16 +303,19 @@ local types = {
     type = 'text',
     ct = 'text/csv',
     av_check = false,
+    no_text = true,
   },
   ics = {
     type = 'text',
     ct = 'text/calendar',
     av_check = false,
+    no_text = true,
   },
   vcf = {
     type = 'text',
     ct = 'text/vcard',
     av_check = false,
+    no_text = true,
   },
   eml = {
     type = 'message',

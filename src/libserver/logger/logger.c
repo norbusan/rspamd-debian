@@ -150,6 +150,7 @@ rspamd_log_open_emergency (rspamd_mempool_t *pool, gint flags)
 	logger->flags = flags;
 	logger->pool = pool;
 	logger->process_type = "main";
+	logger->pid = getpid ();
 
 	const struct rspamd_logger_funcs *funcs = &console_log_funcs;
 	memcpy (&logger->ops, funcs, sizeof (*funcs));
@@ -299,7 +300,7 @@ rspamd_log_on_fork (GQuark ptype, struct rspamd_config *cfg,
 	}
 }
 
-static inline gboolean
+inline gboolean
 rspamd_logger_need_log (rspamd_logger_t *rspamd_log, GLogLevelFlags log_level,
 		guint module_id)
 {
@@ -998,4 +999,28 @@ rspamd_log_line_need_escape (const guchar *src, gsize srclen)
 	}
 
 	return n;
+}
+
+const gchar *
+rspamd_get_log_severity_string (gint level_flags)
+{
+	unsigned int bitnum;
+	static const char *level_strs[G_LOG_LEVEL_USER_SHIFT] = {
+			"", /* G_LOG_FLAG_RECURSION */
+			"", /* G_LOG_FLAG_FATAL */
+			"crit",
+			"error",
+			"warn",
+			"notice",
+			"info",
+			"debug"
+	};
+	level_flags &= ((1u << G_LOG_LEVEL_USER_SHIFT) - 1u) & ~(G_LOG_FLAG_RECURSION|G_LOG_FLAG_FATAL);
+#ifdef __GNUC__
+	/* We assume gcc >= 3 and clang >= 5 anyway */
+	bitnum = __builtin_ffs (level_flags) - 1;
+#else
+	bitnum = ffs (level_flags) - 1;
+#endif
+	return level_strs[bitnum];
 }

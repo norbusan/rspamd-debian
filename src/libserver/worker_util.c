@@ -600,6 +600,30 @@ rspamd_controller_send_error (struct rspamd_http_connection_entry *entry,
 }
 
 void
+rspamd_controller_send_openmetrics (struct rspamd_http_connection_entry *entry,
+									rspamd_fstring_t *str)
+{
+	struct rspamd_http_message *msg;
+
+	msg = rspamd_http_new_message (HTTP_RESPONSE);
+	msg->date = time (NULL);
+	msg->code = 200;
+	msg->status = rspamd_fstring_new_init ("OK", 2);
+
+	rspamd_http_message_set_body_from_fstring_steal (msg,
+			rspamd_controller_maybe_compress (entry, str, msg));
+	rspamd_http_connection_reset (entry->conn);
+	rspamd_http_router_insert_headers (entry->rt, msg);
+	rspamd_http_connection_write_message (entry->conn,
+		msg,
+		NULL,
+		"application/openmetrics-text; version=1.0.0; charset=utf-8",
+		entry,
+		entry->rt->timeout);
+	entry->is_reply = TRUE;
+}
+
+void
 rspamd_controller_send_string (struct rspamd_http_connection_entry *entry,
 	const gchar *str)
 {
@@ -1676,7 +1700,8 @@ rspamd_check_termination_clause (struct rspamd_main *rspamd_main,
 {
 	gboolean need_refork = TRUE;
 
-	if (wrk->state != rspamd_worker_state_running || rspamd_main->wanna_die) {
+	if (wrk->state != rspamd_worker_state_running || rspamd_main->wanna_die ||
+			(wrk->flags & RSPAMD_WORKER_OLD_CONFIG)) {
 		/* Do not refork workers that are intended to be terminated */
 		need_refork = FALSE;
 	}
@@ -1684,20 +1709,29 @@ rspamd_check_termination_clause (struct rspamd_main *rspamd_main,
 	if (WIFEXITED (res) && WEXITSTATUS (res) == 0) {
 		/* Normal worker termination, do not fork one more */
 
-		if (wrk->hb.nbeats < 0 && rspamd_main->cfg->heartbeats_loss_max > 0 &&
-		        -(wrk->hb.nbeats) >= rspamd_main->cfg->heartbeats_loss_max) {
-			msg_info_main ("%s process %P terminated normally, but lost %L "
-				  "heartbeats, refork it",
-					g_quark_to_string (wrk->type),
-					wrk->pid,
-					-(wrk->hb.nbeats));
-			need_refork = TRUE;
-		}
-		else {
+		if (wrk->flags & RSPAMD_WORKER_OLD_CONFIG) {
+			/* Never re-fork old workers */
 			msg_info_main ("%s process %P terminated normally",
-					g_quark_to_string (wrk->type),
+					g_quark_to_string(wrk->type),
 					wrk->pid);
 			need_refork = FALSE;
+		}
+		else {
+			if (wrk->hb.nbeats < 0 && rspamd_main->cfg->heartbeats_loss_max > 0 &&
+				-(wrk->hb.nbeats) >= rspamd_main->cfg->heartbeats_loss_max) {
+				msg_info_main ("%s process %P terminated normally, but lost %L "
+							   "heartbeats, refork it",
+						g_quark_to_string(wrk->type),
+						wrk->pid,
+						-(wrk->hb.nbeats));
+				need_refork = TRUE;
+			}
+			else {
+				msg_info_main ("%s process %P terminated normally",
+						g_quark_to_string(wrk->type),
+						wrk->pid);
+				need_refork = FALSE;
+			}
 		}
 	}
 	else {

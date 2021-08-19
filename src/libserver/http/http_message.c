@@ -198,7 +198,7 @@ rspamd_http_message_set_body (struct rspamd_http_message *msg,
 			return FALSE;
 		}
 
-		if (len != 0 && len != ULLONG_MAX) {
+		if (len != 0 && len != G_MAXSIZE) {
 			if (ftruncate (storage->shared.shm_fd, len) == -1) {
 				return FALSE;
 			}
@@ -227,7 +227,7 @@ rspamd_http_message_set_body (struct rspamd_http_message *msg,
 		}
 	}
 	else {
-		if (len != 0 && len != ULLONG_MAX) {
+		if (len != 0 && len != G_MAXSIZE) {
 			if (data == NULL) {
 				storage->normal = rspamd_fstring_sized_new (len);
 				msg->body_buf.len = 0;
@@ -528,6 +528,11 @@ rspamd_http_message_add_header_len (struct rspamd_http_message *msg,
 		hdr = g_malloc0 (sizeof (struct rspamd_http_header));
 		nlen = strlen (name);
 		vlen = len;
+
+		if (g_ascii_strcasecmp (name, "host") == 0) {
+			msg->flags |= RSPAMD_HTTP_FLAG_HAS_HOST_HEADER;
+		}
+
 		hdr->combined = rspamd_fstring_sized_new (nlen + vlen + 4);
 		rspamd_printf_fstring (&hdr->combined, "%s: %*s\r\n", name, (gint)vlen,
 				value);

@@ -36,8 +36,12 @@
 #include "contrib/libottery/ottery.h"
 #include "contrib/fastutf8/fastutf8.h"
 
-#define ZSTD_STATIC_LINKING_ONLY
-#include "contrib/zstd/zstd.h"
+#ifdef SYS_ZSTD
+#  include "zstd.h"
+#else
+#  define ZSTD_STATIC_LINKING_ONLY
+#  include "contrib/zstd/zstd.h"
+#endif
 
 #ifdef HAVE_OPENSSL
 #include <openssl/rand.h>
@@ -53,6 +57,7 @@
 #include <sys/resource.h>
 #endif
 #include <math.h>
+#include "libserver/composites/composites.h"
 
 #include "blas-config.h"
 
@@ -196,8 +201,7 @@ rspamd_config_new (enum rspamd_config_init_flags flags)
 
 
 	rspamd_config_init_metric (cfg);
-	cfg->composite_symbols =
-		g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
+	cfg->composites_manager = rspamd_composites_manager_create(cfg);
 	cfg->classifiers_symbols = g_hash_table_new (rspamd_str_hash,
 			rspamd_str_equal);
 	cfg->cfg_params = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
@@ -274,6 +278,8 @@ rspamd_config_new (enum rspamd_config_init_flags flags)
 	cfg->c_modules = g_ptr_array_new ();
 	cfg->heartbeat_interval = 10.0;
 
+	cfg->enable_css_parser = true;
+
 	REF_INIT_RETAIN (cfg, rspamd_config_free);
 
 	return cfg;
@@ -319,8 +325,6 @@ rspamd_config_free (struct rspamd_config *cfg)
 	ucl_object_unref (cfg->config_comments);
 	ucl_object_unref (cfg->doc_strings);
 	ucl_object_unref (cfg->neighbours);
-	g_hash_table_remove_all (cfg->composite_symbols);
-	g_hash_table_unref (cfg->composite_symbols);
 	g_hash_table_remove_all (cfg->cfg_params);
 	g_hash_table_unref (cfg->cfg_params);
 	g_hash_table_unref (cfg->classifiers_symbols);
@@ -930,12 +934,12 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 		ret = rspamd_symcache_validate (cfg->cache, cfg, FALSE) && ret;
 	}
 
-	if (opts & RSPAMD_CONFIG_INIT_PRELOAD_MAPS) {
-		rspamd_map_preload (cfg);
-	}
-
 	if (opts & RSPAMD_CONFIG_INIT_POST_LOAD_LUA) {
 		rspamd_lua_run_config_post_init (cfg->lua_state, cfg);
+	}
+
+	if (opts & RSPAMD_CONFIG_INIT_PRELOAD_MAPS) {
+		rspamd_map_preload (cfg);
 	}
 
 	return ret;

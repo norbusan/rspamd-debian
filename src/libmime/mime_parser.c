@@ -25,6 +25,7 @@
 #include "contrib/uthash/utlist.h"
 #include <openssl/cms.h>
 #include <openssl/pkcs7.h>
+#include "contrib/fastutf8/fastutf8.h"
 
 struct rspamd_mime_parser_lib_ctx {
 	struct rspamd_multipattern *mp_boundary;
@@ -392,7 +393,7 @@ rspamd_mime_part_get_cte (struct rspamd_task *task,
 	enum rspamd_cte cte = RSPAMD_CTE_UNKNOWN;
 	gboolean parent_propagated = FALSE;
 
-	hdr = rspamd_message_get_header_from_hash (hdrs, "Content-Transfer-Encoding");
+	hdr = rspamd_message_get_header_from_hash(hdrs, "Content-Transfer-Encoding", FALSE);
 
 	if (hdr == NULL) {
 		if (part->parent_part && part->parent_part->cte != RSPAMD_CTE_UNKNOWN &&
@@ -471,8 +472,8 @@ rspamd_mime_part_get_cd (struct rspamd_task *task, struct rspamd_mime_part *part
 	rspamd_ftok_t srch;
 	struct rspamd_content_type_param *found;
 
-	hdr = rspamd_message_get_header_from_hash (part->raw_headers,
-			"Content-Disposition");
+	hdr = rspamd_message_get_header_from_hash(part->raw_headers,
+			"Content-Disposition", FALSE);
 
 
 	if (hdr == NULL) {
@@ -500,9 +501,9 @@ rspamd_mime_part_get_cd (struct rspamd_task *task, struct rspamd_mime_part *part
 			gsize hlen;
 			cd = NULL;
 
-			if (cur->decoded) {
-				hlen = strlen (cur->decoded);
-				cd = rspamd_content_disposition_parse (cur->decoded, hlen,
+			if (cur->value) {
+				hlen = strlen (cur->value);
+				cd = rspamd_content_disposition_parse (cur->value, hlen,
 						task->task_pool);
 			}
 
@@ -610,8 +611,20 @@ rspamd_mime_parse_normal_part (struct rspamd_task *task,
 				 * In theory, it is very unsafe to process it as a text part
 				 * as we unlikely get some sane result
 				 */
-				part->ct->flags &= ~RSPAMD_CONTENT_TYPE_TEXT;
-				part->ct->flags |= RSPAMD_CONTENT_TYPE_BROKEN;
+
+				/*
+				 * On the other hand, there is an evidence that some
+				 * emails actually rely on that.
+				 * So we apply an expensive hack here:
+				 * if there are no 8bit characters -OR- the content is valid
+				 * UTF8, we can still imply Content-Type == text/plain
+				 */
+
+				if (rspamd_str_has_8bit (part->raw_data.begin, part->raw_data.len) &&
+					!rspamd_fast_utf8_validate (part->raw_data.begin, part->raw_data.len)) {
+					part->ct->flags &= ~RSPAMD_CONTENT_TYPE_TEXT;
+					part->ct->flags |= RSPAMD_CONTENT_TYPE_BROKEN;
+				}
 			}
 		}
 
@@ -726,7 +739,7 @@ rspamd_mime_parse_normal_part (struct rspamd_task *task,
 
 						ct_nid =  OBJ_obj2nid (p7_signed_content->type);
 
-						if (ct_nid == NID_pkcs7_data) {
+						if (ct_nid == NID_pkcs7_data && p7_signed_content->d.data) {
 							int ret;
 
 							msg_debug_mime ("found an additional part inside of "
@@ -859,8 +872,8 @@ rspamd_mime_process_multipart_node (struct rspamd_task *task,
 			}
 		}
 
-		hdr = rspamd_message_get_header_from_hash (npart->raw_headers,
-				"Content-Type");
+		hdr = rspamd_message_get_header_from_hash(npart->raw_headers,
+				"Content-Type", FALSE);
 
 	}
 	else {
@@ -874,7 +887,7 @@ rspamd_mime_process_multipart_node (struct rspamd_task *task,
 	if (hdr != NULL) {
 
 		DL_FOREACH (hdr, cur) {
-			ct = rspamd_content_type_parse (cur->decoded, strlen (cur->decoded),
+			ct = rspamd_content_type_parse (cur->value, strlen (cur->value),
 					task->task_pool);
 
 			/* Here we prefer multipart content-type or any content-type */
@@ -1402,9 +1415,9 @@ rspamd_mime_parse_message (struct rspamd_task *task,
 				}
 			}
 
-			hdr = rspamd_message_get_header_from_hash (
+			hdr = rspamd_message_get_header_from_hash(
 					MESSAGE_FIELD (task, raw_headers),
-					"Content-Type");
+					"Content-Type", FALSE);
 		}
 		else {
 			/* First apply heuristic, maybe we have just headers */
@@ -1432,9 +1445,9 @@ rspamd_mime_parse_message (struct rspamd_task *task,
 					}
 				}
 
-				hdr = rspamd_message_get_header_from_hash (
+				hdr = rspamd_message_get_header_from_hash(
 						MESSAGE_FIELD (task, raw_headers),
-						"Content-Type");
+						"Content-Type", FALSE);
 				task->flags |= RSPAMD_TASK_FLAG_BROKEN_HEADERS;
 			}
 			else {
@@ -1488,8 +1501,8 @@ rspamd_mime_parse_message (struct rspamd_task *task,
 				}
 			}
 
-			hdr = rspamd_message_get_header_from_hash (npart->raw_headers,
-					"Content-Type");
+			hdr = rspamd_message_get_header_from_hash(npart->raw_headers,
+					"Content-Type", FALSE);
 		}
 		else {
 			body_pos = 0;
@@ -1508,7 +1521,7 @@ rspamd_mime_parse_message (struct rspamd_task *task,
 	}
 	else {
 		DL_FOREACH (hdr, cur) {
-			ct = rspamd_content_type_parse (cur->decoded, strlen (cur->decoded),
+			ct = rspamd_content_type_parse (cur->value, strlen (cur->value),
 					task->task_pool);
 
 			/* Here we prefer multipart content-type or any content-type */
