@@ -64,16 +64,16 @@ Forwarded: not-needed
 +install( TARGETS ${TARGETS} LIBRARY DESTINATION ${RSPAMD_LIBDIR})
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -177,6 +177,8 @@ ELSE()
- 			"${RAGEL_ragel_smtp_ip_OUTPUTS}")
- ENDIF()
+@@ -189,6 +189,8 @@ FOREACH(_DEP ${LIBSERVER_DEPENDS})
+ 	ADD_DEPENDENCIES(rspamd-server "${_DEP}")
+ ENDFOREACH()
  
 +SET_TARGET_PROPERTIES(rspamd-server PROPERTIES VERSION "${RSPAMD_VERSION}")
 +
  TARGET_LINK_LIBRARIES(rspamd-server rspamd-http-parser)
  TARGET_LINK_LIBRARIES(rspamd-server rspamd-fpconv)
  TARGET_LINK_LIBRARIES(rspamd-server rspamd-cdb)
-@@ -227,4 +229,4 @@ ENDIF(NOT DEBIAN_BUILD)
+@@ -240,4 +242,4 @@ ENDIF(NOT DEBIAN_BUILD)
  TARGET_LINK_LIBRARIES(rspamd rspamd-server)
  
  INSTALL(TARGETS rspamd RUNTIME DESTINATION bin)
