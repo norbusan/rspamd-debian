@@ -16,10 +16,10 @@ rspamd source: source-contains-prebuilt-javascript-object debian/missing-sources
 rspamd source: source-contains-prebuilt-javascript-object debian/missing-sources/solid.js line length is 733 characters (>512)
 rspamd source: very-long-line-length-in-source-file debian/missing-sources/fontawesome.js line length is 522 characters (>512)
 rspamd source: very-long-line-length-in-source-file debian/missing-sources/solid.js line length is 737 characters (>512)
-rspamd source: very-long-line-length-in-source-file interface/js/lib/prism.js line length is 7092 characters (>512)
+rspamd source: very-long-line-length-in-source-file interface/js/lib/prism.js line length is 7316 characters (>512)
 # Debian package libjs-d3 is ancient
 rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/d3.min.js
 # The Debian package node-prismjs depends on nodejs; installing nodejs binaries just for a single js file is bad
-rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/prism.js line length is 7092 characters (>512)
+rspamd source: source-contains-prebuilt-javascript-object interface/js/lib/prism.js line length is 7316 characters (>512)
 # only the upstream debian/ directory and the version control .hgtags file are excluded
 rspamd source: repackaged-source-not-advertised
