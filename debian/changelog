@@ -1,3 +1,10 @@
+rspamd (3.1-1~bpo10+np1) buster-backports; urgency=medium
+
+  * New upstream version 3.1
+  * Build for buster.
+
+ -- Norbert Preining <norbert@preining.info>  Thu, 04 Nov 2021 07:31:49 +0900
+
 rspamd (3.0-1) unstable; urgency=medium
 
   * New upstream version 3.0
