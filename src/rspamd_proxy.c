@@ -1544,11 +1544,21 @@ proxy_backend_master_error_handler (struct rspamd_http_connection *conn, GError 
 		msg_err_session ("cannot connect to upstream, maximum retries "
 				"has been reached: %d", session->retries);
 		/* Terminate session immediately */
-		proxy_client_write_error (session, err->code, err->message);
+		if (err) {
+			proxy_client_write_error(session, err->code, err->message);
+		}
+		else {
+			proxy_client_write_error(session, 503, "Unknown error after no retries left");
+		}
 	}
 	else {
 		if (!proxy_send_master_message (session)) {
-			proxy_client_write_error (session, err->code, err->message);
+			if (err) {
+				proxy_client_write_error(session, err->code, err->message);
+			}
+			else {
+				proxy_client_write_error(session, 503, "Unknown error on write");
+			}
 		}
 		else {
 			msg_info_session ("retry connection to: %s"
@@ -2185,7 +2195,7 @@ proxy_accept_socket (EV_P_ ev_io *w, int revents)
 {
 	struct rspamd_worker *worker = (struct rspamd_worker *)w->data;
 	struct rspamd_proxy_ctx *ctx;
-	rspamd_inet_addr_t *addr;
+	rspamd_inet_addr_t *addr = NULL;
 	struct rspamd_proxy_session *session;
 	gint nfd;
 
@@ -2199,6 +2209,7 @@ proxy_accept_socket (EV_P_ ev_io *w, int revents)
 	}
 	/* Check for EAGAIN */
 	if (nfd == 0) {
+		rspamd_inet_address_free (addr);
 		return;
 	}
 

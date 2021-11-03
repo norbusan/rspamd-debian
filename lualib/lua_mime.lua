@@ -519,7 +519,8 @@ exports.modify_headers = function(task, hdr_alterations)
   local remove = hdr_alterations.remove or {}
 
   local hdr_flattened = {} -- For C API
-  for hname,hdr in pairs(add) do
+
+  local function flatten_add_header(hname, hdr)
     if not hdr_flattened[hname] then
       hdr_flattened[hname] = {add = {}}
     end
@@ -532,6 +533,17 @@ exports.modify_headers = function(task, hdr_alterations)
       end
     end
   end
+  if hdr_alterations.order then
+    -- Get headers alterations ordered
+    for _,hname in ipairs(hdr_alterations.order) do
+      flatten_add_header(hname, add[hname])
+    end
+  else
+    for hname,hdr in pairs(add) do
+      flatten_add_header(hname, hdr)
+    end
+  end
+
 
   for hname,hdr in pairs(remove) do
     if not hdr_flattened[hname] then
@@ -558,6 +570,36 @@ exports.modify_headers = function(task, hdr_alterations)
   for hname,flat_rules in pairs(hdr_flattened) do
     task:modify_header(hname, flat_rules)
   end
+end
+
+--[[[
+-- @function lua_mime.message_to_ucl(task)
+-- Exports a message to an ucl object
+--]]
+exports.message_to_ucl = function(task)
+  local result = {}
+  result.size = task:get_size()
+  result.digest = task:get_digest()
+
+  result.headers = task:get_headers(true) or {}
+
+  local parts = task:get_parts() or {}
+  result.parts = {}
+  for _,part in ipairs(parts) do
+    local l = part:get_length()
+    if l > 0 then
+      local p = {}
+      p.size = l
+      p.type = string.format('%s/%s', part:get_type())
+      p.detected_type = string.format('%s/%s', part:get_detected_type())
+      p.filename = part:get_filename()
+      p.content = part:get_content()
+      p.headers = part:get_headers(true) or {}
+      table.insert(result.parts, p)
+    end
+  end
+
+  return result
 end
 
 return exports

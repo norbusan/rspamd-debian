@@ -178,7 +178,7 @@ read_cmd_line (gint *argc, gchar ***argv, struct rspamd_config *cfg)
 	if (!g_option_context_parse (context, argc, argv, &error)) {
 		fprintf (stderr, "option parsing failed: %s\n", error->message);
 		g_option_context_free (context);
-		exit (1);
+		exit (EXIT_FAILURE);
 	}
 
 	cfg->rspamd_user = rspamd_user;
@@ -1212,7 +1212,7 @@ static void
 rspamd_control_handler (EV_P_ ev_io *w, int revents)
 {
 	struct rspamd_main *rspamd_main = (struct rspamd_main *)w->data;
-	rspamd_inet_addr_t *addr;
+	rspamd_inet_addr_t *addr = NULL;
 	gint nfd;
 
 	if ((nfd =
@@ -1222,6 +1222,7 @@ rspamd_control_handler (EV_P_ ev_io *w, int revents)
 	}
 	/* Check for EAGAIN */
 	if (nfd == 0) {
+		rspamd_inet_address_free (addr);
 		return;
 	}
 

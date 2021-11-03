@@ -2,8 +2,8 @@
 #define REPLXX_UNICODESTRING_HXX_INCLUDED
 
 #include <vector>
-#include <string>
 #include <cstring>
+#include <string>
 
 #include "conversion.hxx"
 
@@ -24,6 +24,15 @@ public:
 	explicit UnicodeString( std::string const& src )
 		: _data() {
 		assign( src );
+	}
+
+	explicit UnicodeString( UnicodeString const& other, int offset, int len = -1 )
+		: _data() {
+		_data.insert(
+			_data.end(),
+			other._data.begin() + offset,
+			len > 0 ? other._data.begin() + offset + len : other._data.end()
+		);
 	}
 
 	explicit UnicodeString( char const* src )
@@ -55,15 +64,15 @@ public:
 	}
 
 	UnicodeString& assign( std::string const& str_ ) {
-		_data.resize( str_.length() );
+		_data.resize( static_cast<int>( str_.length() ) );
 		int len( 0 );
-		copyString8to32( _data.data(), str_.length(), len, str_.c_str() );
+		copyString8to32( _data.data(), static_cast<int>( str_.length() ), len, str_.c_str() );
 		_data.resize( len );
 		return *this;
 	}
 
 	UnicodeString& assign( char const* str_ ) {
-		size_t byteCount( strlen( str_ ) );
+		int byteCount( static_cast<int>( strlen( str_ ) ) );
 		_data.resize( byteCount );
 		int len( 0 );
 		copyString8to32( _data.data(), byteCount, len, str_ );
@@ -91,6 +100,10 @@ public:
 	UnicodeString& append( UnicodeString const& other ) {
 		_data.insert( _data.end(), other._data.begin(), other._data.end() );
 		return *this;
+	}
+
+	void push_back( char32_t c_ ) {
+		_data.push_back( c_ );
 	}
 
 	UnicodeString& append( char32_t const* src, int len ) {
@@ -146,6 +159,14 @@ public:
 		return (
 			( std::distance( first_, last_ ) <= length() )
 			&& ( std::equal( first_, last_, _data.begin() ) )
+		);
+	}
+
+	bool ends_with( data_buffer_t::const_iterator first_, data_buffer_t::const_iterator last_ ) const {
+		int len( static_cast<int>( std::distance( first_, last_ ) ) );
+		return (
+			( len <= length() )
+			&& ( std::equal( first_, last_, _data.end() - len ) )
 		);
 	}
 

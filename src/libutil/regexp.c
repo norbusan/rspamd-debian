@@ -66,11 +66,11 @@ struct rspamd_regexp_s {
 	gpointer ud;
 	gpointer re_class;
 	guint64 cache_id;
+	gsize match_limit;
 	guint max_hits;
 	gint flags;
 	gint pcre_flags;
 	gint ncaptures;
-	gint nbackref;
 };
 
 struct rspamd_regexp_cache {
@@ -515,23 +515,11 @@ fin:
 			&ncaptures) == 0) {
 		res->ncaptures = ncaptures;
 	}
-
-	/* Check number of backrefs */
-	if (pcre_fullinfo (res->raw_re, res->extra, PCRE_INFO_BACKREFMAX,
-			&ncaptures) == 0) {
-		res->nbackref = ncaptures;
-	}
 #else
 	/* Check number of captures */
 	if (pcre2_pattern_info (res->raw_re, PCRE2_INFO_CAPTURECOUNT,
 			&ncaptures) == 0) {
 		res->ncaptures = ncaptures;
-	}
-
-	/* Check number of backrefs */
-	if (pcre2_pattern_info (res->raw_re, PCRE2_INFO_BACKREFMAX,
-			&ncaptures) == 0) {
-		res->nbackref = ncaptures;
 	}
 #endif
 
@@ -565,6 +553,10 @@ rspamd_regexp_search (const rspamd_regexp_t *re, const gchar *text, gsize len,
 
 	if (len == 0) {
 		len = strlen (text);
+	}
+
+	if (re->match_limit > 0 && len > re->match_limit) {
+		len = re->match_limit;
 	}
 
 	if (end != NULL && *end != NULL) {
@@ -701,6 +693,10 @@ rspamd_regexp_search (const rspamd_regexp_t *re, const gchar *text, gsize len,
 		len = strlen (text);
 	}
 
+	if (re->match_limit > 0 && len > re->match_limit) {
+		len = re->match_limit;
+	}
+
 	if (end != NULL && *end != NULL) {
 		/* Incremental search */
 		mt = (*end);
@@ -833,22 +829,6 @@ rspamd_regexp_get_pcre_flags (const rspamd_regexp_t *re)
 	return re->pcre_flags;
 }
 
-gint
-rspamd_regexp_get_nbackrefs (const rspamd_regexp_t *re)
-{
-	g_assert (re != NULL);
-
-	return re->nbackref;
-}
-
-gint
-rspamd_regexp_get_ncaptures (const rspamd_regexp_t *re)
-{
-	g_assert (re != NULL);
-
-	return re->ncaptures;
-}
-
 guint
 rspamd_regexp_get_maxhits (const rspamd_regexp_t *re)
 {
@@ -885,6 +865,26 @@ rspamd_regexp_set_cache_id (rspamd_regexp_t *re, guint64 id)
 	g_assert (re != NULL);
 	old = re->cache_id;
 	re->cache_id = id;
+
+	return old;
+}
+
+gsize
+rspamd_regexp_get_match_limit (const rspamd_regexp_t *re)
+{
+	g_assert (re != NULL);
+
+	return re->match_limit;
+}
+
+gsize
+rspamd_regexp_set_match_limit (rspamd_regexp_t *re, gsize lim)
+{
+	gsize old;
+
+	g_assert (re != NULL);
+	old = re->match_limit;
+	re->match_limit = lim;
 
 	return old;
 }

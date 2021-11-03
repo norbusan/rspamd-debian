@@ -1862,12 +1862,19 @@ struct rspamd_re_cache_hs_compile_cbdata {
 
 static void
 rspamd_re_cache_compile_err (EV_P_ ev_timer *w, GError *err,
-		struct rspamd_re_cache_hs_compile_cbdata *cbdata)
+		struct rspamd_re_cache_hs_compile_cbdata *cbdata, bool is_fatal)
 {
-	ev_timer_stop (EV_A_ w);
 	cbdata->cb (cbdata->total, err, cbdata->cbd);
-	g_free (w);
-	g_free (cbdata);
+
+	if (is_fatal) {
+		ev_timer_stop(EV_A_ w);
+		g_free(w);
+		g_free(cbdata);
+	}
+	else {
+		/* Continue compilation */
+		ev_timer_again(EV_A_ w);
+	}
 	g_error_free (err);
 }
 
@@ -1885,11 +1892,11 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 	rspamd_cryptobox_fast_hash_state_t crc_st;
 	guint64 crc;
 	rspamd_regexp_t *re;
-	hs_compile_error_t *hs_errors;
+	hs_compile_error_t *hs_errors = NULL;
 	guint *hs_flags = NULL;
 	const hs_expr_ext_t **hs_exts = NULL;
 	gchar **hs_pats = NULL;
-	gchar *hs_serialized;
+	gchar *hs_serialized = NULL;
 	gsize serialized_len;
 	struct iovec iov[7];
 	struct rspamd_re_cache *cache;
@@ -1918,7 +1925,7 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 
 		/* Read number of regexps */
 		g_assert (fd != -1);
-		lseek (fd, RSPAMD_HS_MAGIC_LEN + sizeof (cache->plt), SEEK_SET);
+		g_assert (lseek (fd, RSPAMD_HS_MAGIC_LEN + sizeof (cache->plt), SEEK_SET) != -1);
 		g_assert (read (fd, &n, sizeof (n)) == sizeof (n));
 		close (fd);
 
@@ -1954,7 +1961,7 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 	if (fd == -1) {
 		err = g_error_new (rspamd_re_cache_quark (), errno,
 				"cannot open file %s: %s", path, strerror (errno));
-		rspamd_re_cache_compile_err (EV_A_ w, err, cbdata);
+		rspamd_re_cache_compile_err (EV_A_ w, err, cbdata, false);
 		return;
 	}
 
@@ -2045,8 +2052,24 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 	/* Adjust real re number */
 	n = i;
 
+#define CLEANUP_ALLOCATED(is_err) do {    \
+    g_free (hs_flags);                    \
+    g_free (hs_ids);                    \
+    for (guint j = 0; j < i; j ++) {    \
+        g_free (hs_pats[j]);            \
+    }                                    \
+    g_free (hs_pats);                    \
+    g_free (hs_exts);                    \
+    if (is_err) {                         \
+        close (fd);                            \
+        unlink (path);                        \
+        if (hs_errors) hs_free_compile_error (hs_errors); \
+    }                                        \
+} while(0)
+
 	if (n > 0) {
 		/* Create the hs tree */
+		hs_errors = NULL;
 		if (hs_compile_ext_multi ((const char **)hs_pats,
 				hs_flags,
 				hs_ids,
@@ -2057,34 +2080,14 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 				&test_db,
 				&hs_errors) != HS_SUCCESS) {
 
-
-			g_free (hs_flags);
-			g_free (hs_ids);
-
-			for (guint j = 0; j < i; j ++) {
-				g_free (hs_pats[j]);
-			}
-
-			g_free (hs_pats);
-			g_free (hs_exts);
-			close (fd);
-			unlink (path);
-			hs_free_compile_error (hs_errors);
-
 			err = g_error_new (rspamd_re_cache_quark (), EINVAL,
 					"cannot create tree of regexp when processing '%s': %s",
 					hs_pats[hs_errors->expression], hs_errors->message);
-			rspamd_re_cache_compile_err (EV_A_ w, err, cbdata);
+			CLEANUP_ALLOCATED(true);
+			rspamd_re_cache_compile_err (EV_A_ w, err, cbdata, false);
 
 			return;
 		}
-
-		for (guint j = 0; j < i; j ++) {
-			g_free (hs_pats[j]);
-		}
-
-		g_free (hs_pats);
-		g_free (hs_exts);
 
 		if (hs_serialize_database (test_db, &hs_serialized,
 				&serialized_len) != HS_SUCCESS) {
@@ -2093,13 +2096,9 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 					"cannot serialize tree of regexp for %s",
 					re_class->hash);
 
-			close (fd);
-			unlink (path);
-			g_free (hs_ids);
-			g_free (hs_flags);
+			CLEANUP_ALLOCATED(true);
 			hs_free_database (test_db);
-
-			rspamd_re_cache_compile_err (EV_A_ w, err, cbdata);
+			rspamd_re_cache_compile_err (EV_A_ w, err, cbdata, false);
 			return;
 		}
 
@@ -2150,13 +2149,11 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 					errno,
 					"cannot serialize tree of regexp to %s: %s",
 					path, strerror (errno));
-			close (fd);
-			unlink (path);
-			g_free (hs_ids);
-			g_free (hs_flags);
+
+			CLEANUP_ALLOCATED(true);
 			g_free (hs_serialized);
 
-			rspamd_re_cache_compile_err (EV_A_ w, err, cbdata);
+			rspamd_re_cache_compile_err (EV_A_ w, err, cbdata, false);
 			return;
 		}
 
@@ -2180,10 +2177,7 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 		}
 
 		cbdata->total += n;
-
-		g_free (hs_serialized);
-		g_free (hs_ids);
-		g_free (hs_flags);
+		CLEANUP_ALLOCATED(false);
 
 		/* Now rename temporary file to the new .hs file */
 		rspamd_snprintf (npath, sizeof (npath), "%s%c%s.hs", cbdata->cache_dir,
@@ -2197,7 +2191,7 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 			unlink (path);
 			close (fd);
 
-			rspamd_re_cache_compile_err (EV_A_ w, err, cbdata);
+			rspamd_re_cache_compile_err (EV_A_ w, err, cbdata, false);
 			return;
 		}
 
@@ -2212,9 +2206,8 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 				(gint)g_hash_table_size (re_class->re),
 				path);
 
-		unlink (path);
-		close (fd);
-		rspamd_re_cache_compile_err (EV_A_ w, err, cbdata);
+		CLEANUP_ALLOCATED(true);
+		rspamd_re_cache_compile_err (EV_A_ w, err, cbdata, false);
 
 		return;
 	}

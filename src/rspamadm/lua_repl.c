@@ -385,7 +385,9 @@ rspamadm_lua_exec_handler (lua_State *L, gint argc, gchar **argv)
 			return;
 		}
 
-		lua_repl_thread_call (thread, 0, argv[i], lua_thread_str_error_cb);
+		if (lua_repl_thread_call (thread, 0, argv[i], lua_thread_str_error_cb) != 0) {
+			return;
+		}
 	}
 }
 
@@ -721,7 +723,7 @@ rspamadm_lua_accept_cb (EV_P_ ev_io *w, int revents)
 {
 	struct rspamadm_lua_repl_context *ctx =
 			(struct rspamadm_lua_repl_context *)w->data;
-	rspamd_inet_addr_t *addr;
+	rspamd_inet_addr_t *addr = NULL;
 	struct rspamadm_lua_repl_session *session;
 	gint nfd;
 
@@ -732,6 +734,7 @@ rspamadm_lua_accept_cb (EV_P_ ev_io *w, int revents)
 	}
 	/* Check for EAGAIN */
 	if (nfd == 0) {
+		rspamd_inet_address_free (addr);
 		return;
 	}
 
@@ -868,7 +871,7 @@ rspamadm_lua (gint argc, gchar **argv, const struct rspamadm_command *cmd)
 		fprintf (stderr, "option parsing failed: %s\n", error->message);
 		g_error_free (error);
 		g_option_context_free (context);
-		exit (1);
+		exit (EXIT_FAILURE);
 	}
 
 	g_option_context_free (context);

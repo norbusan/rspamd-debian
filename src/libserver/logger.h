@@ -89,6 +89,8 @@ rspamd_logger_t * rspamd_log_open_specific (rspamd_mempool_t *pool,
  * @param level
  */
 void rspamd_log_set_log_level (rspamd_logger_t *logger, gint level);
+gint rspamd_log_get_log_level (rspamd_logger_t *logger);
+const gchar *rspamd_get_log_severity_string(gint level_flags);
 /**
  * Set log flags (from enum rspamd_log_flags)
  * @param logger
@@ -148,20 +150,20 @@ bool rspamd_common_logv (rspamd_logger_t *logger, gint level_flags,
  * @param mod
  * @return
  */
-guint rspamd_logger_add_debug_module (const gchar *mod);
+gint rspamd_logger_add_debug_module (const gchar *mod);
 
 /*
  * Macro to use for faster debug modules
  */
 #define INIT_LOG_MODULE(mname) \
-    static guint rspamd_##mname##_log_id = (guint)-1; \
+    static gint rspamd_##mname##_log_id = -1; \
     RSPAMD_CONSTRUCTOR(rspamd_##mname##_log_init) { \
         rspamd_##mname##_log_id = rspamd_logger_add_debug_module(#mname); \
 }
 
 
 #define INIT_LOG_MODULE_PUBLIC(mname) \
-    guint rspamd_##mname##_log_id = (guint)-1; \
+    gint rspamd_##mname##_log_id = -1; \
     RSPAMD_CONSTRUCTOR(rspamd_##mname##_log_init) { \
         rspamd_##mname##_log_id = rspamd_logger_add_debug_module(#mname); \
 }
@@ -177,17 +179,17 @@ bool rspamd_conditional_debug (rspamd_logger_t *logger,
 
 bool rspamd_conditional_debug_fast (rspamd_logger_t *logger,
 									rspamd_inet_addr_t *addr,
-									guint mod_id,
+									gint mod_id,
 									const gchar *module, const gchar *id,
 									const gchar *function, const gchar *fmt, ...);
 bool rspamd_conditional_debug_fast_num_id (rspamd_logger_t *logger,
 									rspamd_inet_addr_t *addr,
-									guint mod_id,
+									gint mod_id,
 									const gchar *module, guint64 id,
 									const gchar *function, const gchar *fmt, ...);
 gboolean rspamd_logger_need_log (rspamd_logger_t *rspamd_log,
 								 GLogLevelFlags log_level,
-								 guint module_id);
+								 gint module_id);
 
 /**
  * Function with variable number of arguments support that uses static default logger

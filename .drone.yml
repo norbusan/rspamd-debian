@@ -194,7 +194,7 @@ steps:
       - >
         for core in $core_files;
         do
-        exe=$(gdb --batch -ex 'info proc mappings' -c $core | awk 'h {print $5; exit}; /objfile/ {h=1}');
+        exe=$(gdb --batch -ex 'info proc mappings' -c $core | tail -1 | awk '{print $5}');
         gdb --batch -ex 'bt' -c $core $exe; echo '---';
         done
       - exit $EXIT_CODE
@@ -227,17 +227,17 @@ steps:
       # don't send coverage report for pull request
       event: [push, tag]
 
-  - name: eslint
-    image: node:10-alpine
-    pull: if-not-exists
-    commands:
-      - npm install
-      - ./node_modules/.bin/eslint -v
-      - ./node_modules/.bin/eslint ./
-      # Run stylelint checks
-      - ./node_modules/.bin/stylelint -v
-      - npm show stylelint-config-standard version
-      - ./node_modules/.bin/stylelint ./**/*.css ./**/*.html ./**/*.js
+#  - name: eslint
+#    image: node:17-alpine
+#    pull: if-not-exists
+#    commands:
+#      - npm install
+#      - ./node_modules/.bin/eslint -v
+#      - ./node_modules/.bin/eslint ./
+#      # Run stylelint checks
+#      - ./node_modules/.bin/stylelint -v
+#      - npm show stylelint-config-standard version
+#      - ./node_modules/.bin/stylelint ./**/*.css ./**/*.html ./**/*.js
 
   - name: perl-tidyall
     # https://github.com/rspamd/rspamd-build-docker/blob/master/perl-tidyall/Dockerfile
@@ -257,7 +257,7 @@ steps:
       - test-fedora-clang
       - functional
       - send-coverage
-      - eslint
+      #- eslint
       - perl-tidyall
     settings:
       from: noreply@rspamd.com
@@ -276,6 +276,6 @@ trigger:
 
 ---
 kind: signature
-hmac: 7f1350e32f77ea7aa01751106c0af66f5795edf3d592f408ede548349e0a270c
+hmac: 7eaf784102771243c4c36503d303e6323c9239e673a97d33a65ef4110dad24f2
 
 ...

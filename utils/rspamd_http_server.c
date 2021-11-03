@@ -145,6 +145,7 @@ rspamd_server_accept (gint fd, short what, void *arg)
 		}
 		/* Check for EAGAIN */
 		if (nfd == 0) {
+			rspamd_inet_address_free (addr);
 			return;
 		}
 
@@ -264,7 +265,7 @@ main (int argc, gchar **argv)
 	if (!g_option_context_parse (context, &argc, &argv, &error)) {
 		rspamd_fprintf (stderr, "option parsing failed: %s\n", error->message);
 		g_error_free (error);
-		exit (1);
+		exit (EXIT_FAILURE);
 	}
 
 	maps = g_hash_table_new (g_int_hash, g_int_equal);

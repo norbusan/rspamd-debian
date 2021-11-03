@@ -201,15 +201,22 @@ LUA_FUNCTION_DEF (config, get_classifier);
  * - `callback`: function to be called for symbol's check (can be absent for virtual symbols)
  * - `weight`: weight of symbol (should normally be 1 or missing)
  * - `priority`: priority of symbol (normally 0 or missing)
- * - `type`: type of symbol: `normal` (default), `virtual` or `callback`
+ * - `type`: type of symbol:
+ *   + `normal`: executed after prefilters, according to dependency graph or in undefined order
+ *   + `callback`: a check that merely inserts virtual symbols
+ *   + `connfilter`: executed early; before message body is available
+ *   + `idempotent`: cannot change result in any way; executed last
+ *   + `postfilter`: executed after most other checks
+ *   + `prefilter`: executed before most other checks
+ *   + `virtual`: a symbol inserted by its parent check
  * - `flags`: various flags split by commas or spaces:
- *     + `nice` if symbol can produce negative score;
- *     + `empty` if symbol can be called for empty messages
- *     + `skip` if symbol should be skipped now
- *     + `nostat` if symbol should be excluded from stat tokens
- *     + `trivial` symbol is trivial (e.g. no network requests)
- *     + `explicit_disable` requires explicit disabling (e.g. via settings)
- *     + `ignore_passthrough` executed even if passthrough result has been set
+ *   + `nice` if symbol can produce negative score;
+ *   + `empty` if symbol can be called for empty messages
+ *   + `skip` if symbol should be skipped now
+ *   + `nostat` if symbol should be excluded from stat tokens
+ *   + `trivial` symbol is trivial (e.g. no network requests)
+ *   + `explicit_disable` requires explicit disabling (e.g. via settings)
+ *   + `ignore_passthrough` executed even if passthrough result has been set
  * - `parent`: id of parent symbol (useful for virtual symbols)
  *
  * @return {number} id of symbol registered
@@ -247,11 +254,11 @@ LUA_FUNCTION_DEF (config, register_callback_symbol);
 LUA_FUNCTION_DEF (config, register_callback_symbol_priority);
 
 /***
- * @method rspamd_config:register_dependency(id, dep)
- * Create a dependency between symbol identified by `id` and a symbol identified
- * by some symbolic name `dep`
+ * @method rspamd_config:register_dependency(id|name, depname)
+ * Create a dependency on symbol identified by name for symbol identified by ID or name.
+ * This affects order of checks only (a symbol is still checked if its dependencys are disabled).
  * @param {number|string} id id or name of source (numeric id is returned by all register_*_symbol)
- * @param {string} dep dependency name
+ * @param {string} depname dependency name
  * @example
 local function cb(task)
 ...
@@ -260,7 +267,8 @@ end
 local id = rspamd_config:register_symbol('SYM', 1.0, cb)
 rspamd_config:register_dependency(id, 'OTHER_SYM')
 -- Alternative form
-rspamd_config:register_dependency('SYMBOL_FROM', 'SYMBOL_TO')
+-- Symbol MY_RULE needs result from SPF_CHECK
+rspamd_config:register_dependency('MY_RULE', 'SPF_CHECK')
  */
 LUA_FUNCTION_DEF (config, register_dependency);
 
@@ -305,9 +313,9 @@ LUA_FUNCTION_DEF (config, register_re_selector);
  * - `one_shot`: turn off multiple hits for a symbol (boolean, optional)
  * - `one_param`: turn off multiple options for a symbol (boolean, optional)
  * - `flags`: comma separated string of flags:
- *    + `ignore`: do not strictly check validity of symbol and corresponding rule
- *    + `one_shot`: turn off multiple hits for a symbol
- *    + `one_param`: allow only one parameter for a symbol
+ *   + `ignore`: do not strictly check validity of symbol and corresponding rule
+ *   + `one_shot`: turn off multiple hits for a symbol
+ *   + `one_param`: allow only one parameter for a symbol
  * - `priority`: priority of symbol's definition
  */
 LUA_FUNCTION_DEF (config, set_metric_symbol);
@@ -332,8 +340,8 @@ LUA_FUNCTION_DEF (config, set_metric_action);
  * - `group`: name of group for symbol (string, optional)
  * - `one_shot`: turn off multiple hits for a symbol (boolean, optional)
  * - `flags`: comma separated string of flags:
- *    + `ignore`: do not strictly check validity of symbol and corresponding rule
- *    + `one_shot`: turn off multiple hits for a symbol
+ *   + `ignore`: do not strictly check validity of symbol and corresponding rule
+ *   + `one_shot`: turn off multiple hits for a symbol
  *
  * @param {string} name name of symbol
  * @return {table} symbol's definition or nil in case of undefined symbol
@@ -1092,13 +1100,18 @@ lua_config_get_ucl (lua_State * L)
 			lua_rawgeti (L, LUA_REGISTRYINDEX, cached->ref);
 		}
 		else {
-			ucl_object_push_lua (L, cfg->rcl_obj, true);
-			lua_pushvalue (L, -1);
-			cached = rspamd_mempool_alloc (cfg->cfg_pool, sizeof (*cached));
-			cached->L = L;
-			cached->ref = luaL_ref (L, LUA_REGISTRYINDEX);
-			rspamd_mempool_set_variable (cfg->cfg_pool, "ucl_cached",
-					cached, lua_config_ucl_dtor);
+			if (cfg->rcl_obj) {
+				ucl_object_push_lua(L, cfg->rcl_obj, true);
+				lua_pushvalue(L, -1);
+				cached = rspamd_mempool_alloc (cfg->cfg_pool, sizeof(*cached));
+				cached->L = L;
+				cached->ref = luaL_ref(L, LUA_REGISTRYINDEX);
+				rspamd_mempool_set_variable(cfg->cfg_pool, "ucl_cached",
+						cached, lua_config_ucl_dtor);
+			}
+			else {
+				lua_pushnil (L);
+			}
 		}
 	}
 	else {
@@ -1601,9 +1614,9 @@ rspamd_register_symbol_fromlua (lua_State *L,
 
 			rspamd_symcache_set_allowed_settings_ids (cfg->cache, name,
 					ids, nids);
-
-			g_free (ids);
 		}
+
+		g_free (ids);
 	}
 
 	if (forbidden_ids) {
@@ -1623,9 +1636,9 @@ rspamd_register_symbol_fromlua (lua_State *L,
 
 			rspamd_symcache_set_forbidden_settings_ids (cfg->cache, name,
 					ids, nids);
-
-			g_free (ids);
 		}
+
+		g_free (ids);
 	}
 
 	return ret;
@@ -4404,9 +4417,10 @@ lua_config_init_subsystem (lua_State *L)
 				rspamd_symcache_init (cfg->cache);
 			}
 			else {
+				int ret = luaL_error (L, "invalid param: %s", parts[i]);
 				g_strfreev (parts);
 
-				return luaL_error (L, "invalid param: %s", parts[i]);
+				return ret;
 			}
 		}
 

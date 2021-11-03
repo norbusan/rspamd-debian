@@ -1001,10 +1001,10 @@ rspamd_lua_init (bool wipe_mem)
 
 	/* Set PRNG */
 	lua_getglobal (L, "math");
-	lua_pushstring (L, "randomseed");
+	lua_pushstring (L, "randomseed"); /* Push math.randomseed function on top of the stack */
 	lua_gettable (L, -2);
 	lua_pushinteger (L, ottery_rand_uint64 ());
-	lua_pcall (L, 1, 0, 0);
+	g_assert (lua_pcall (L, 1, 0, 0) == 0);
 	lua_pop (L, 1); /* math table */
 
 	/* Modules state */
@@ -2292,6 +2292,60 @@ rspamd_lua_require_function (lua_State *L, const gchar *modname,
 	return FALSE;
 }
 
+gint
+rspamd_lua_function_ref_from_str (lua_State *L, const gchar *str, gsize slen,
+								  const gchar *modname, GError **err)
+{
+	gint err_idx, ref_idx;
+
+	lua_pushcfunction (L, &rspamd_lua_traceback);
+	err_idx = lua_gettop (L);
+
+	/* Load file */
+	if (luaL_loadbuffer (L, str, slen, modname) != 0) {
+		g_set_error (err,
+				lua_error_quark(),
+				EINVAL,
+				"%s: cannot load lua script: %s",
+				modname,
+				lua_tostring (L, -1));
+		lua_settop (L, err_idx - 1); /* Error function */
+
+		return LUA_NOREF;
+	}
+
+	/* Now call it */
+	if (lua_pcall (L, 0, 1, err_idx) != 0) {
+		g_set_error (err,
+				lua_error_quark(),
+				EINVAL,
+				"%s: cannot init lua script: %s",
+				modname,
+				lua_tostring (L, -1));
+		lua_settop (L, err_idx - 1);
+
+		return LUA_NOREF;
+	}
+
+	if (!lua_isfunction (L, -1)) {
+		g_set_error (err,
+				lua_error_quark(),
+				EINVAL,
+				"%s: cannot init lua script: "
+				"must return function not %s",
+				modname,
+				lua_typename (L, lua_type (L, -1)));
+		lua_settop (L, err_idx - 1);
+
+		return LUA_NOREF;
+	}
+
+	ref_idx = luaL_ref (L, LUA_REGISTRYINDEX);
+	lua_settop (L, err_idx - 1);
+
+	return ref_idx;
+}
+
 
 gboolean
 rspamd_lua_try_load_redis (lua_State *L, const ucl_object_t *obj,
@@ -2569,6 +2623,7 @@ rspamd_lua_universal_pcall (lua_State *L, gint cbref, const gchar* strloc,
 			g_set_error (err, lua_error_quark (), EINVAL,
 					"invalid argument character: %c at %s",
 					*argp, argp);
+			va_end (ap);
 
 			return false;
 		}
@@ -2581,6 +2636,7 @@ rspamd_lua_universal_pcall (lua_State *L, gint cbref, const gchar* strloc,
 				"error when calling lua function from %s: %s",
 				strloc, lua_tostring (L, -1));
 		lua_settop (L, err_idx - 1);
+		va_end (ap);
 
 		return false;
 	}

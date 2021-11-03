@@ -55,16 +55,20 @@ set(
 	src/escape.cxx
 	src/history.cxx
 	src/replxx_impl.cxx
-	src/io.cxx
 	src/prompt.cxx
 	src/replxx.cxx
 	src/util.cxx
 	src/wcwidth.cpp
+	src/terminal.cxx
 	src/windows.cxx
 )
 
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
-add_library(rspamd-replxx SHARED ${REPLXX_SOURCES})
+if(ENABLE_STATIC MATCHES "ON")
+	add_library(rspamd-replxx STATIC ${REPLXX_SOURCES})
+else()
+	add_library(rspamd-replxx SHARED ${REPLXX_SOURCES})
+endif()
 
 target_include_directories(
 	rspamd-replxx

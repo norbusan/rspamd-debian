@@ -24,166 +24,269 @@
 #include "cryptobox.h"
 #include "logger.h"
 
-struct rspamd_redis_pool_elt;
+#include <list>
+#include "contrib/robin-hood/robin_hood.h"
 
-enum rspamd_redis_pool_connection_state {
+namespace rspamd {
+class redis_pool_elt;
+class redis_pool;
+
+#define msg_debug_rpool(...)  rspamd_conditional_debug_fast (NULL, NULL, \
+        rspamd_redis_pool_log_id, "redis_pool", conn->tag, \
+        __FUNCTION__, \
+        __VA_ARGS__)
+
+INIT_LOG_MODULE(redis_pool)
+
+enum class rspamd_redis_pool_connection_state : std::uint8_t {
 	RSPAMD_REDIS_POOL_CONN_INACTIVE = 0,
 	RSPAMD_REDIS_POOL_CONN_ACTIVE,
 	RSPAMD_REDIS_POOL_CONN_FINALISING
 };
 
-struct rspamd_redis_pool_connection {
+struct redis_pool_connection {
+	using redis_pool_connection_ptr = std::unique_ptr<redis_pool_connection>;
+	using conn_iter_t = std::list<redis_pool_connection_ptr>::iterator;
 	struct redisAsyncContext *ctx;
-	struct rspamd_redis_pool_elt *elt;
-	GList *entry;
+	redis_pool_elt *elt;
+	redis_pool *pool;
+	conn_iter_t elt_pos;
 	ev_timer timeout;
-	enum rspamd_redis_pool_connection_state state;
 	gchar tag[MEMPOOL_UID_LEN];
-	ref_entry_t ref;
+	rspamd_redis_pool_connection_state state;
+
+	auto schedule_timeout() -> void;
+	~redis_pool_connection();
+
+	explicit redis_pool_connection(redis_pool *_pool,
+								   redis_pool_elt *_elt,
+								   const std::string &db,
+								   const std::string &password,
+								   struct redisAsyncContext *_ctx);
+
+private:
+	static auto redis_conn_timeout_cb(EV_P_ ev_timer *w, int revents) -> void;
+	static auto redis_quit_cb(redisAsyncContext *c, void *r, void *priv) -> void;
+	static auto redis_on_disconnect(const struct redisAsyncContext *ac, int status) -> auto;
 };
 
-struct rspamd_redis_pool_elt {
-	struct rspamd_redis_pool *pool;
-	guint64 key;
-	GQueue *active;
-	GQueue *inactive;
-};
 
-struct rspamd_redis_pool {
-	struct ev_loop *event_loop;
-	struct rspamd_config *cfg;
-	GHashTable *elts_by_key;
-	GHashTable *elts_by_ctx;
-	gdouble timeout;
-	guint max_conns;
-};
+using redis_pool_key_t = std::uint64_t;
+class redis_pool;
 
-static const gdouble default_timeout = 10.0;
-static const guint default_max_conns = 100;
+class redis_pool_elt {
+	using redis_pool_connection_ptr = std::unique_ptr<redis_pool_connection>;
+	redis_pool *pool;
+	/*
+	 * These lists owns connections, so if an element is removed from both
+	 * lists, it is destructed
+	 */
+	std::list<redis_pool_connection_ptr> active;
+	std::list<redis_pool_connection_ptr> inactive;
+	std::list<redis_pool_connection_ptr> terminating;
+	std::string ip;
+	std::string db;
+	std::string password;
+	int port;
+	redis_pool_key_t key;
+	bool is_unix;
+public:
+	explicit redis_pool_elt(redis_pool *_pool,
+							const gchar *_db, const gchar *_password,
+							const char *_ip, int _port)
+			: pool(_pool), ip(_ip), port(_port),
+			  key(redis_pool_elt::make_key(_db, _password, _ip, _port))
+	{
+		is_unix = ip[0] == '.' || ip[0] == '/';
 
-#define msg_err_rpool(...) rspamd_default_log_function (G_LOG_LEVEL_CRITICAL, \
-		"redis_pool", conn->tag, \
-        G_STRFUNC, \
-        __VA_ARGS__)
-#define msg_warn_rpool(...)   rspamd_default_log_function (G_LOG_LEVEL_WARNING, \
-		"redis_pool", conn->tag, \
-        G_STRFUNC, \
-        __VA_ARGS__)
-#define msg_info_rpool(...)   rspamd_default_log_function (G_LOG_LEVEL_INFO, \
-		"redis_pool", conn->tag, \
-        G_STRFUNC, \
-        __VA_ARGS__)
-#define msg_debug_rpool(...)  rspamd_conditional_debug_fast (NULL, NULL, \
-        rspamd_redis_pool_log_id, "redis_pool", conn->tag, \
-        G_STRFUNC, \
-        __VA_ARGS__)
-
-INIT_LOG_MODULE(redis_pool)
-
-static inline guint64
-rspamd_redis_pool_get_key (const gchar *db, const gchar *password,
-		const char *ip, int port)
-{
-	rspamd_cryptobox_fast_hash_state_t st;
-
-	rspamd_cryptobox_fast_hash_init (&st, rspamd_hash_seed ());
-
-	if (db) {
-		rspamd_cryptobox_fast_hash_update (&st, db, strlen (db));
-	}
-	if (password) {
-		rspamd_cryptobox_fast_hash_update (&st, password, strlen (password));
+		if (_db) {
+			db = _db;
+		}
+		if (_password) {
+			password = _password;
+		}
 	}
 
-	rspamd_cryptobox_fast_hash_update (&st, ip, strlen (ip));
-	rspamd_cryptobox_fast_hash_update (&st, &port, sizeof (port));
+	auto new_connection() -> redisAsyncContext *;
 
-	return rspamd_cryptobox_fast_hash_final (&st);
-}
+	auto release_connection(const redis_pool_connection *conn) -> void
+	{
+		switch(conn->state) {
+		case rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_ACTIVE:
+			active.erase(conn->elt_pos);
+			break;
+		case rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_INACTIVE:
+			inactive.erase(conn->elt_pos);
+			break;
+		case rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_FINALISING:
+			terminating.erase(conn->elt_pos);
+			break;
+		}
+	}
 
+	auto move_to_inactive(redis_pool_connection *conn) -> void
+	{
+		inactive.splice(std::end(inactive), active, conn->elt_pos);
+		conn->elt_pos = std::prev(std::end(inactive));
+	}
 
-static void
-rspamd_redis_pool_conn_dtor (struct rspamd_redis_pool_connection *conn)
-{
-	if (conn->state == RSPAMD_REDIS_POOL_CONN_ACTIVE) {
-		msg_debug_rpool ("active connection removed");
+	auto move_to_terminating(redis_pool_connection *conn) -> void
+	{
+		terminating.splice(std::end(terminating), inactive, conn->elt_pos);
+		conn->elt_pos = std::prev(std::end(terminating));
+	}
 
-		if (conn->ctx) {
-			if (!(conn->ctx->c.flags & REDIS_FREEING)) {
-				redisAsyncContext *ac = conn->ctx;
+	inline static auto make_key(const gchar *db, const gchar *password,
+								const char *ip, int port) -> redis_pool_key_t
+	{
+		rspamd_cryptobox_fast_hash_state_t st;
 
-				conn->ctx = NULL;
-				g_hash_table_remove (conn->elt->pool->elts_by_ctx, ac);
-				ac->onDisconnect = NULL;
-				redisAsyncFree (ac);
-			}
+		rspamd_cryptobox_fast_hash_init(&st, rspamd_hash_seed());
+
+		if (db) {
+			rspamd_cryptobox_fast_hash_update(&st, db, strlen(db));
+		}
+		if (password) {
+			rspamd_cryptobox_fast_hash_update(&st, password, strlen(password));
 		}
 
-		if (conn->entry) {
-			g_queue_unlink (conn->elt->active, conn->entry);
+		rspamd_cryptobox_fast_hash_update(&st, ip, strlen(ip));
+		rspamd_cryptobox_fast_hash_update(&st, &port, sizeof(port));
+
+		return rspamd_cryptobox_fast_hash_final(&st);
+	}
+
+	auto num_active() const -> auto
+	{
+		return active.size();
+	}
+
+	~redis_pool_elt() {
+		rspamd_explicit_memzero(password.data(), password.size());
+	}
+
+private:
+	auto redis_async_new() -> redisAsyncContext *
+	{
+		struct redisAsyncContext *ctx;
+
+		if (is_unix) {
+			ctx = redisAsyncConnectUnix(ip.c_str());
+		}
+		else {
+			ctx = redisAsyncConnect(ip.c_str(), port);
+		}
+
+		if (ctx && ctx->err != REDIS_OK) {
+			msg_err("cannot connect to redis %s (port %d): %s", ip.c_str(), port,
+					ctx->errstr);
+			redisAsyncFree(ctx);
+
+			return nullptr;
+		}
+
+		return ctx;
+	}
+};
+
+class redis_pool final {
+	static constexpr const double default_timeout = 10.0;
+	static constexpr const unsigned default_max_conns = 100;
+
+	/* We want to have references integrity */
+	robin_hood::unordered_flat_map<redisAsyncContext *,
+			redis_pool_connection *> conns_by_ctx;
+	robin_hood::unordered_node_map<redis_pool_key_t, redis_pool_elt> elts_by_key;
+	bool wanna_die = false; /* Hiredis is 'clever' so we can call ourselves from destructor */
+public:
+	double timeout = default_timeout;
+	unsigned max_conns = default_max_conns;
+	struct ev_loop *event_loop;
+	struct rspamd_config *cfg;
+
+public:
+	explicit redis_pool() : event_loop(nullptr), cfg(nullptr)
+	{
+		conns_by_ctx.reserve(max_conns);
+	}
+
+	/* Legacy stuff */
+	auto do_config(struct ev_loop *_loop, struct rspamd_config *_cfg) -> void
+	{
+		event_loop = _loop;
+		cfg = _cfg;
+	}
+
+	auto new_connection(const gchar *db, const gchar *password,
+						const char *ip, int port) -> redisAsyncContext *;
+
+	auto release_connection(redisAsyncContext *ctx,
+							enum rspamd_redis_pool_release_type how) -> void;
+
+	auto unregister_context(redisAsyncContext *ctx) -> void
+	{
+		conns_by_ctx.erase(ctx);
+	}
+
+	auto register_context(redisAsyncContext *ctx, redis_pool_connection *conn)
+	{
+		conns_by_ctx.emplace(ctx, conn);
+	}
+
+	~redis_pool() {
+		/*
+		 * XXX: this will prevent hiredis to unregister connections that
+		 * are already destroyed during redisAsyncFree...
+		 */
+		wanna_die = true;
+	}
+};
+
+
+redis_pool_connection::~redis_pool_connection()
+{
+	const auto *conn = this; /* For debug */
+
+	if (state == rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_ACTIVE) {
+		msg_debug_rpool ("active connection destructed: %p", ctx);
+
+		if (ctx) {
+			pool->unregister_context(ctx);
+
+			if (!(ctx->c.flags & REDIS_FREEING)) {
+				auto *ac = ctx;
+				ctx = nullptr;
+				ac->onDisconnect = nullptr;
+				redisAsyncFree(ac);
+			}
 		}
 	}
 	else {
-		msg_debug_rpool ("inactive connection removed");
+		msg_debug_rpool("inactive connection destructed: %p", ctx);
 
-		ev_timer_stop (conn->elt->pool->event_loop, &conn->timeout);
+		ev_timer_stop(pool->event_loop, &timeout);
+		if (ctx) {
+			pool->unregister_context(ctx);
 
-		if (conn->ctx && !(conn->ctx->c.flags & REDIS_FREEING)) {
-			redisAsyncContext *ac = conn->ctx;
-
-			/* To prevent on_disconnect here */
-			conn->state = RSPAMD_REDIS_POOL_CONN_FINALISING;
-			g_hash_table_remove (conn->elt->pool->elts_by_ctx, ac);
-			conn->ctx = NULL;
-			ac->onDisconnect = NULL;
-			redisAsyncFree (ac);
-		}
-
-		if (conn->entry) {
-			g_queue_unlink (conn->elt->inactive, conn->entry);
+			if (!(ctx->c.flags & REDIS_FREEING)) {
+				auto *ac = ctx;
+				/* To prevent on_disconnect here */
+				ctx = nullptr;
+				ac->onDisconnect = nullptr;
+				redisAsyncFree(ac);
+			}
 		}
 	}
-
-
-	if (conn->entry) {
-		g_list_free (conn->entry);
-	}
-
-	g_free (conn);
 }
 
-static void
-rspamd_redis_pool_elt_dtor (gpointer p)
+auto
+redis_pool_connection::redis_quit_cb(redisAsyncContext *c, void *r, void *priv) -> void
 {
-	GList *cur;
-	struct rspamd_redis_pool_elt *elt = (struct rspamd_redis_pool_elt *)p;
-	struct rspamd_redis_pool_connection *c;
+	struct redis_pool_connection *conn =
+			(struct redis_pool_connection *) priv;
 
-	for (cur = elt->active->head; cur != NULL; cur = g_list_next (cur)) {
-		c = (struct rspamd_redis_pool_connection *)cur->data;
-		c->entry = NULL;
-		REF_RELEASE (c);
-	}
-
-	for (cur = elt->inactive->head; cur != NULL; cur = g_list_next (cur)) {
-		c = (struct rspamd_redis_pool_connection *)cur->data;
-		c->entry = NULL;
-		REF_RELEASE (c);
-	}
-
-	g_queue_free (elt->active);
-	g_queue_free (elt->inactive);
-	g_free (elt);
-}
-
-static void
-rspamd_redis_on_quit (redisAsyncContext *c, gpointer r, gpointer priv)
-{
-	struct rspamd_redis_pool_connection *conn =
-			(struct rspamd_redis_pool_connection *)priv;
-
-	msg_debug_rpool ("quit command reply for the connection %p, refcount: %d",
-			conn->ctx, conn->ref.refcount);
+	msg_debug_rpool("quit command reply for the connection %p",
+			conn->ctx);
 	/*
 	 * The connection will be freed by hiredis itself as we are here merely after
 	 * quit command has succeeded and we have timer being set already.
@@ -199,349 +302,311 @@ rspamd_redis_on_quit (redisAsyncContext *c, gpointer r, gpointer priv)
 	 */
 }
 
-static void
-rspamd_redis_conn_timeout (EV_P_ ev_timer *w, int revents)
+/*
+ * Called for inactive connections that due to be removed
+ */
+auto
+redis_pool_connection::redis_conn_timeout_cb(EV_P_ ev_timer *w, int revents) -> void
 {
-	struct rspamd_redis_pool_connection *conn =
-			(struct rspamd_redis_pool_connection *)w->data;
+	auto *conn = (struct redis_pool_connection *) w->data;
 
-	g_assert (conn->state != RSPAMD_REDIS_POOL_CONN_ACTIVE);
+	g_assert (conn->state != rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_ACTIVE);
 
-	if (conn->state == RSPAMD_REDIS_POOL_CONN_INACTIVE) {
-		msg_debug_rpool ("scheduled soft removal of connection %p, refcount: %d",
-				conn->ctx, conn->ref.refcount);
-		/* Prevent reusing */
-		if (conn->entry) {
-			g_queue_delete_link (conn->elt->inactive, conn->entry);
-			conn->entry = NULL;
-		}
-
-		conn->state = RSPAMD_REDIS_POOL_CONN_FINALISING;
-		ev_timer_again (EV_A_ w);
-		redisAsyncCommand (conn->ctx, rspamd_redis_on_quit, conn, "QUIT");
+	if (conn->state == rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_INACTIVE) {
+		msg_debug_rpool("scheduled soft removal of connection %p",
+				conn->ctx);
+		conn->state = rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_FINALISING;
+		ev_timer_again(EV_A_ w);
+		redisAsyncCommand(conn->ctx, redis_pool_connection::redis_quit_cb, conn, "QUIT");
+		conn->elt->move_to_terminating(conn);
 	}
 	else {
 		/* Finalising by timeout */
-		ev_timer_stop (EV_A_ w);
-		msg_debug_rpool ("final removal of connection %p, refcount: %d",
-				conn->ctx, conn->ref.refcount);
-		REF_RELEASE (conn);
+		ev_timer_stop(EV_A_ w);
+		msg_debug_rpool("final removal of connection %p, refcount: %d",
+				conn->ctx);
+
+		/* Erasure of shared pointer will cause it to be removed */
+		conn->elt->release_connection(conn);
 	}
 
 }
 
-static void
-rspamd_redis_pool_schedule_timeout (struct rspamd_redis_pool_connection *conn)
+auto
+redis_pool_connection::redis_on_disconnect(const struct redisAsyncContext *ac, int status) -> auto
 {
-	gdouble real_timeout;
-	guint active_elts;
-
-	active_elts = g_queue_get_length (conn->elt->active);
-
-	if (active_elts > conn->elt->pool->max_conns) {
-		real_timeout = conn->elt->pool->timeout / 2.0;
-		real_timeout = rspamd_time_jitter (real_timeout, real_timeout / 4.0);
-	}
-	else {
-		real_timeout = conn->elt->pool->timeout;
-		real_timeout = rspamd_time_jitter (real_timeout, real_timeout / 2.0);
-	}
-
-	msg_debug_rpool ("scheduled connection %p cleanup in %.1f seconds",
-			conn->ctx, real_timeout);
-
-	conn->timeout.data = conn;
-	ev_timer_init (&conn->timeout,
-			rspamd_redis_conn_timeout,
-			real_timeout, real_timeout / 2.0);
-	ev_timer_start (conn->elt->pool->event_loop, &conn->timeout);
-}
-
-static void
-rspamd_redis_pool_on_disconnect (const struct redisAsyncContext *ac, int status)
-{
-	struct rspamd_redis_pool_connection *conn = (struct rspamd_redis_pool_connection *)ac->data;
+	auto *conn = (struct redis_pool_connection *) ac->data;
 
 	/*
 	 * Here, we know that redis itself will free this connection
 	 * so, we need to do something very clever about it
 	 */
-	if (conn->state != RSPAMD_REDIS_POOL_CONN_ACTIVE) {
+	if (conn->state != rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_ACTIVE) {
 		/* Do nothing for active connections as it is already handled somewhere */
 		if (conn->ctx) {
-			msg_debug_rpool ("inactive connection terminated: %s, refs: %d",
-				conn->ctx->errstr, conn->ref.refcount);
+			msg_debug_rpool("inactive connection terminated: %s",
+					conn->ctx->errstr);
 		}
 
-		REF_RELEASE (conn);
+		/* Erasure of shared pointer will cause it to be removed */
+		conn->elt->release_connection(conn);
 	}
 }
 
-static struct rspamd_redis_pool_connection *
-rspamd_redis_pool_new_connection (struct rspamd_redis_pool *pool,
-		struct rspamd_redis_pool_elt *elt,
-		const char *db,
-		const char *password,
-		const char *ip,
-		gint port)
+auto
+redis_pool_connection::schedule_timeout() -> void
 {
-	struct rspamd_redis_pool_connection *conn;
-	struct redisAsyncContext *ctx;
+	const auto *conn = this; /* For debug */
+	double real_timeout;
+	auto active_elts = elt->num_active();
 
-	if (*ip == '/' || *ip == '.') {
-		ctx = redisAsyncConnectUnix (ip);
+	if (active_elts > pool->max_conns) {
+		real_timeout = pool->timeout / 2.0;
+		real_timeout = rspamd_time_jitter(real_timeout, real_timeout / 4.0);
 	}
 	else {
-		ctx = redisAsyncConnect (ip, port);
+		real_timeout = pool->timeout;
+		real_timeout = rspamd_time_jitter(real_timeout, real_timeout / 2.0);
 	}
 
-	if (ctx) {
+	msg_debug_rpool("scheduled connection %p cleanup in %.1f seconds",
+			ctx, real_timeout);
 
-		if (ctx->err != REDIS_OK) {
-			msg_err ("cannot connect to redis %s (port %d): %s", ip, port, ctx->errstr);
-			redisAsyncFree (ctx);
+	timeout.data = this;
+	/* Restore in case if these fields have been modified externally */
+	ctx->data = this;
+	redisAsyncSetDisconnectCallback(ctx, redis_pool_connection::redis_on_disconnect);
+	ev_timer_init(&timeout,
+			redis_pool_connection::redis_conn_timeout_cb,
+			real_timeout, real_timeout / 2.0);
+	ev_timer_start(pool->event_loop, &timeout);
+}
 
-			return NULL;
-		}
-		else {
-			conn = (struct rspamd_redis_pool_connection *)g_malloc0 (sizeof (*conn));
-			conn->entry = g_list_prepend (NULL, conn);
-			conn->elt = elt;
-			conn->state = RSPAMD_REDIS_POOL_CONN_ACTIVE;
 
-			g_hash_table_insert (elt->pool->elts_by_ctx, ctx, conn);
-			g_queue_push_head_link (elt->active, conn->entry);
-			conn->ctx = ctx;
-			ctx->data = conn;
-			rspamd_random_hex ((guchar *)conn->tag, sizeof (conn->tag));
-			REF_INIT_RETAIN (conn, rspamd_redis_pool_conn_dtor);
-			msg_debug_rpool ("created new connection to %s:%d: %p", ip, port, ctx);
+redis_pool_connection::redis_pool_connection(redis_pool *_pool,
+											 redis_pool_elt *_elt,
+											 const std::string &db,
+											 const std::string &password,
+											 struct redisAsyncContext *_ctx)
+		: ctx(_ctx), elt(_elt), pool(_pool)
+{
 
-			redisLibevAttach (pool->event_loop, ctx);
-			redisAsyncSetDisconnectCallback (ctx, rspamd_redis_pool_on_disconnect);
+	state = rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_ACTIVE;
 
-			if (password) {
-				redisAsyncCommand (ctx, NULL, NULL,
-						"AUTH %s", password);
-			}
-			if (db) {
-				redisAsyncCommand (ctx, NULL, NULL,
-						"SELECT %s", db);
-			}
-		}
+	pool->register_context(ctx, this);
+	ctx->data = this;
+	memset(tag, 0, sizeof(tag));
+	rspamd_random_hex((guchar *)tag, sizeof(tag) - 1);
 
-		return conn;
+	redisLibevAttach(pool->event_loop, ctx);
+	redisAsyncSetDisconnectCallback(ctx, redis_pool_connection::redis_on_disconnect);
+
+	if (!password.empty()) {
+		redisAsyncCommand(ctx, nullptr, nullptr,
+				"AUTH %s", password.c_str());
 	}
-
-	return NULL;
+	if (!db.empty()) {
+		redisAsyncCommand(ctx, nullptr, nullptr,
+				"SELECT %s", db.c_str());
+	}
 }
 
-static struct rspamd_redis_pool_elt *
-rspamd_redis_pool_new_elt (struct rspamd_redis_pool *pool)
+auto
+redis_pool_elt::new_connection() -> redisAsyncContext *
 {
-	struct rspamd_redis_pool_elt *elt;
+	if (!inactive.empty()) {
+		decltype(inactive)::value_type conn;
+		conn.swap(inactive.back());
+		inactive.pop_back();
 
-	elt = (struct rspamd_redis_pool_elt *)g_malloc0 (sizeof (*elt));
-	elt->active = g_queue_new ();
-	elt->inactive = g_queue_new ();
-	elt->pool = pool;
+		g_assert (conn->state != rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_ACTIVE);
+		if (conn->ctx->err == REDIS_OK) {
+			/* Also check SO_ERROR */
+			gint err;
+			socklen_t len = sizeof(gint);
 
-	return elt;
-}
+			if (getsockopt(conn->ctx->c.fd, SOL_SOCKET, SO_ERROR,
+					(void *) &err, &len) == -1) {
+				err = errno;
+			}
 
-struct rspamd_redis_pool *
-rspamd_redis_pool_init (void)
-{
-	struct rspamd_redis_pool *pool;
-
-	pool = (struct rspamd_redis_pool *)g_malloc0 (sizeof (*pool));
-	pool->elts_by_key = g_hash_table_new_full (g_int64_hash, g_int64_equal,
-			NULL, rspamd_redis_pool_elt_dtor);
-	pool->elts_by_ctx = g_hash_table_new (g_direct_hash, g_direct_equal);
-
-	return pool;
-}
-
-void
-rspamd_redis_pool_config (struct rspamd_redis_pool *pool,
-		struct rspamd_config *cfg,
-		struct ev_loop *ev_base)
-{
-	g_assert (pool != NULL);
-
-	pool->event_loop = ev_base;
-	pool->cfg = cfg;
-	pool->timeout = default_timeout;
-	pool->max_conns = default_max_conns;
-}
-
-
-struct redisAsyncContext*
-rspamd_redis_pool_connect (struct rspamd_redis_pool *pool,
-		const gchar *db, const gchar *password,
-		const char *ip, int port)
-{
-	guint64 key;
-	struct rspamd_redis_pool_elt *elt;
-	GList *conn_entry;
-	struct rspamd_redis_pool_connection *conn;
-
-	g_assert (pool != NULL);
-	g_assert (pool->event_loop != NULL);
-	g_assert (ip != NULL);
-
-	key = rspamd_redis_pool_get_key (db, password, ip, port);
-	elt = (struct rspamd_redis_pool_elt *)g_hash_table_lookup (pool->elts_by_key, &key);
-
-	if (elt) {
-		if (g_queue_get_length (elt->inactive) > 0) {
-			conn_entry = g_queue_pop_head_link (elt->inactive);
-			conn = (struct rspamd_redis_pool_connection *)conn_entry->data;
-			g_assert (conn->state != RSPAMD_REDIS_POOL_CONN_ACTIVE);
-
-			if (conn->ctx->err == REDIS_OK) {
-				/* Also check SO_ERROR */
-				gint err;
-				socklen_t len = sizeof (gint);
-
-				if (getsockopt (conn->ctx->c.fd, SOL_SOCKET, SO_ERROR,
-						(void *) &err, &len) == -1) {
-					err = errno;
-				}
-
-				if (err != 0) {
-					g_list_free (conn->entry);
-					conn->entry = NULL;
-					REF_RELEASE (conn);
-					conn = rspamd_redis_pool_new_connection (pool, elt,
-							db, password, ip, port);
-				}
-				else {
-
-					ev_timer_stop (elt->pool->event_loop, &conn->timeout);
-					conn->state = RSPAMD_REDIS_POOL_CONN_ACTIVE;
-					g_queue_push_tail_link (elt->active, conn_entry);
-					msg_debug_rpool ("reused existing connection to %s:%d: %p",
-							ip, port, conn->ctx);
-				}
+			if (err != 0) {
+				/*
+				 * We cannot reuse connection, so we just recursively call
+				 * this function one more time
+				 */
+				return new_connection();
 			}
 			else {
-				g_list_free (conn->entry);
-				conn->entry = NULL;
-				REF_RELEASE (conn);
-				conn = rspamd_redis_pool_new_connection (pool, elt,
-						db, password, ip, port);
-			}
+				/* Reuse connection */
+				ev_timer_stop(pool->event_loop, &conn->timeout);
+				conn->state = rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_ACTIVE;
+				msg_debug_rpool("reused existing connection to %s:%d: %p",
+						ip.c_str(), port, conn->ctx);
+				active.emplace_front(std::move(conn));
+				active.front()->elt_pos = active.begin();
 
+				return active.front()->ctx;
+			}
 		}
 		else {
-			/* Need to create connection */
-			conn = rspamd_redis_pool_new_connection (pool, elt,
-					db, password, ip, port);
+			auto *nctx = redis_async_new();
+			if (nctx) {
+				active.emplace_front(std::make_unique<redis_pool_connection>(pool, this,
+						db.c_str(), password.c_str(), nctx));
+				active.front()->elt_pos = active.begin();
+			}
+
+			return nctx;
 		}
 	}
 	else {
-		/* Need to create a pool */
-		elt = rspamd_redis_pool_new_elt (pool);
-		elt->key = key;
-		g_hash_table_insert (pool->elts_by_key, &elt->key, elt);
+		auto *nctx = redis_async_new();
+		if (nctx) {
+			active.emplace_front(std::make_unique<redis_pool_connection>(pool, this,
+					db.c_str(), password.c_str(), nctx));
+			active.front()->elt_pos = active.begin();
+		}
 
-		conn = rspamd_redis_pool_new_connection (pool, elt,
-				db, password, ip, port);
+		return nctx;
 	}
 
-	if (!conn) {
-		return NULL;
+	RSPAMD_UNREACHABLE;
+}
+
+auto
+redis_pool::new_connection(const gchar *db, const gchar *password,
+						   const char *ip, int port) -> redisAsyncContext *
+{
+
+	if (!wanna_die) {
+		auto key = redis_pool_elt::make_key(db, password, ip, port);
+		auto found_elt = elts_by_key.find(key);
+
+		if (found_elt != elts_by_key.end()) {
+			auto &elt = found_elt->second;
+
+			return elt.new_connection();
+		}
+		else {
+			/* Need to create a pool */
+			auto nelt = elts_by_key.emplace(std::piecewise_construct,
+					std::forward_as_tuple(key),
+					std::forward_as_tuple(this, db, password, ip, port));
+
+			return nelt.first->second.new_connection();
+		}
 	}
 
-	REF_RETAIN (conn);
+	return nullptr;
+}
 
-	return conn->ctx;
+auto redis_pool::release_connection(redisAsyncContext *ctx,
+									enum rspamd_redis_pool_release_type how) -> void
+{
+	if (!wanna_die) {
+		auto conn_it = conns_by_ctx.find(ctx);
+		if (conn_it != conns_by_ctx.end()) {
+			auto *conn = conn_it->second;
+			g_assert (conn->state == rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_ACTIVE);
+
+			if (ctx->err != REDIS_OK) {
+				/* We need to terminate connection forcefully */
+				msg_debug_rpool ("closed connection %p due to an error", conn->ctx);
+			}
+			else {
+				if (how == RSPAMD_REDIS_RELEASE_DEFAULT) {
+					/* Ensure that there are no callbacks attached to this conn */
+					if (ctx->replies.head == nullptr && (ctx->c.flags & REDIS_CONNECTED)) {
+						/* Just move it to the inactive queue */
+						conn->state = rspamd_redis_pool_connection_state::RSPAMD_REDIS_POOL_CONN_INACTIVE;
+						conn->elt->move_to_inactive(conn);
+						conn->schedule_timeout();
+						msg_debug_rpool("mark connection %p inactive", conn->ctx);
+
+						return;
+					}
+					else {
+						msg_debug_rpool("closed connection %p due to callbacks left",
+								conn->ctx);
+					}
+				}
+				else {
+					if (how == RSPAMD_REDIS_RELEASE_FATAL) {
+						msg_debug_rpool("closed connection %p due to an fatal termination",
+								conn->ctx);
+					}
+					else {
+						msg_debug_rpool("closed connection %p due to explicit termination",
+								conn->ctx);
+					}
+				}
+			}
+
+			conn->elt->release_connection(conn);
+		}
+		else {
+			msg_err("fatal internal error, connection with ctx %p is not found in the Redis pool",
+					ctx);
+			RSPAMD_UNREACHABLE;
+		}
+	}
+}
+
+}
+
+void *
+rspamd_redis_pool_init(void)
+{
+	return new rspamd::redis_pool{};
+}
+
+void
+rspamd_redis_pool_config(void *p,
+						 struct rspamd_config *cfg,
+						 struct ev_loop *ev_base)
+{
+	g_assert (p != NULL);
+	auto *pool = reinterpret_cast<class rspamd::redis_pool *>(p);
+
+	pool->do_config(ev_base, cfg);
+}
+
+
+struct redisAsyncContext *
+rspamd_redis_pool_connect(void *p,
+						  const gchar *db, const gchar *password,
+						  const char *ip, int port)
+{
+	g_assert (p != NULL);
+	auto *pool = reinterpret_cast<class rspamd::redis_pool *>(p);
+
+	return pool->new_connection(db, password, ip, port);
 }
 
 
 void
-rspamd_redis_pool_release_connection (struct rspamd_redis_pool *pool,
-		struct redisAsyncContext *ctx, enum rspamd_redis_pool_release_type how)
+rspamd_redis_pool_release_connection(void *p,
+									 struct redisAsyncContext *ctx, enum rspamd_redis_pool_release_type how)
 {
-	struct rspamd_redis_pool_connection *conn;
-
-	g_assert (pool != NULL);
+	g_assert (p != NULL);
 	g_assert (ctx != NULL);
+	auto *pool = reinterpret_cast<class rspamd::redis_pool *>(p);
 
-	conn = (struct rspamd_redis_pool_connection *)g_hash_table_lookup (pool->elts_by_ctx, ctx);
-	if (conn != NULL) {
-		g_assert (conn->state == RSPAMD_REDIS_POOL_CONN_ACTIVE);
-
-		if (ctx->err != REDIS_OK) {
-			/* We need to terminate connection forcefully */
-			msg_debug_rpool ("closed connection %p due to an error", conn->ctx);
-			REF_RELEASE (conn);
-		}
-		else {
-			if (how == RSPAMD_REDIS_RELEASE_DEFAULT) {
-				/* Ensure that there are no callbacks attached to this conn */
-				if (ctx->replies.head == NULL) {
-					/* Just move it to the inactive queue */
-					g_queue_unlink (conn->elt->active, conn->entry);
-					g_queue_push_head_link (conn->elt->inactive, conn->entry);
-					conn->state = RSPAMD_REDIS_POOL_CONN_INACTIVE;
-					rspamd_redis_pool_schedule_timeout (conn);
-					msg_debug_rpool ("mark connection %p inactive", conn->ctx);
-				}
-				else {
-					msg_debug_rpool ("closed connection %p due to callbacks left",
-							conn->ctx);
-					REF_RELEASE (conn);
-				}
-			}
-			else {
-				if (how == RSPAMD_REDIS_RELEASE_FATAL) {
-					msg_debug_rpool ("closed connection %p due to an fatal termination",
-							conn->ctx);
-				}
-				else {
-					msg_debug_rpool ("closed connection %p due to explicit termination",
-							conn->ctx);
-				}
-
-				REF_RELEASE (conn);
-			}
-		}
-
-		REF_RELEASE (conn);
-	}
-	else {
-		g_assert_not_reached ();
-	}
+	pool->release_connection(ctx, how);
 }
 
 
 void
-rspamd_redis_pool_destroy (struct rspamd_redis_pool *pool)
+rspamd_redis_pool_destroy(void *p)
 {
-	struct rspamd_redis_pool_elt *elt;
-	GHashTableIter it;
-	gpointer k, v;
+	auto *pool = reinterpret_cast<class rspamd::redis_pool *>(p);
 
-	g_assert (pool != NULL);
-
-	g_hash_table_iter_init (&it, pool->elts_by_key);
-
-	while (g_hash_table_iter_next (&it, &k, &v)) {
-		elt = (struct rspamd_redis_pool_elt *)v;
-		rspamd_redis_pool_elt_dtor (elt);
-		g_hash_table_iter_steal (&it);
-	}
-
-	g_hash_table_unref (pool->elts_by_ctx);
-	g_hash_table_unref (pool->elts_by_key);
-
-	g_free (pool);
+	delete pool;
 }
 
-const gchar*
-rspamd_redis_type_to_string (int type)
+const gchar *
+rspamd_redis_type_to_string(int type)
 {
 	const gchar *ret = "unknown";
 
