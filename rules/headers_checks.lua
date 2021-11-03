@@ -214,7 +214,7 @@ local check_replyto_id = rspamd_config:register_symbol({
     end
 
     -- See if Reply-To matches From in some way
-    local from = task:get_from(2)
+    local from = task:get_from{'mime', 'orig'}
     local from_h = get_raw_header(task, 'From')
     if not (from and from[1]) then
       return false
@@ -576,15 +576,8 @@ rspamd_config.MISSING_FROM = {
 rspamd_config.MULTIPLE_FROM = {
   callback = function(task)
     local from = task:get_from('mime')
-    if from and from[1] then
-      if #from > 1 then
-        return true,1.0,table.concat(
-            fun.totable(
-                fun.map(function(a) return a.addr end,
-                    fun.filter(function(a) return a.addr and a.addr ~= '' end,
-                        from))),
-            ',')
-      end
+    if from and from[2] then
+      return true, 1.0, fun.totable(fun.map(function(a) return a.raw end, from))
     end
     return false
   end,
@@ -1004,14 +997,19 @@ rspamd_config.CTYPE_MIXED_BOGUS = {
     if (not ct:lower():match('^multipart/mixed')) then return false end
     local found = false
     -- Check each part and look for a part that isn't multipart/* or text/plain or text/html
+    local ntext_parts = 0
     for _,p in ipairs(parts) do
-      local pct = p:get_header('Content-Type')
-      if (pct) then
-        pct = pct:lower()
-        if not ((pct:match('^multipart/') or
-            pct:match('^text/plain') or
-            pct:match('^text/html'))) then
+      local mtype,_ = p:get_type()
+      if mtype then
+        if mtype == 'text' and not p:is_attachment() then
+          ntext_parts = ntext_parts + 1
+          if ntext_parts > 2 then
+            found = true
+            break
+          end
+        elseif mtype ~= 'multipart' then
           found = true
+          break
         end
       end
     end

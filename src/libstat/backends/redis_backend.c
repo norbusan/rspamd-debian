@@ -153,15 +153,17 @@ rspamd_redis_expand_object (const gchar *pattern,
 	gint err_idx;
 
 	g_assert (ctx != NULL);
+	g_assert (task != NULL);
 	stcf = ctx->stcf;
 
 	L = task->cfg->lua_state;
+	g_assert (L != NULL);
 
 	if (ctx->enable_users) {
 		if (ctx->cbref_user == -1) {
 			rcpt = rspamd_task_get_principal_recipient (task);
 		}
-		else if (L) {
+		else {
 			/* Execute lua function to get userdata */
 			lua_pushcfunction (L, &rspamd_lua_traceback);
 			err_idx = lua_gettop (L);
@@ -269,7 +271,7 @@ rspamd_redis_expand_object (const gchar *pattern,
 	}
 
 
-	if (target == NULL || task == NULL) {
+	if (target == NULL) {
 		return -1;
 	}
 
@@ -1212,8 +1214,14 @@ rspamd_redis_processed (redisAsyncContext *c, gpointer r, gpointer priv)
 				}
 			}
 			else {
-				msg_err_task_check ("got invalid reply from redis: %s, array expected",
-						rspamd_redis_type_to_string (reply->type));
+				if (reply->type == REDIS_REPLY_ERROR) {
+					msg_err_task_check ("cannot learn %s: redis error: \"%s\"",
+							rt->stcf->symbol, reply->str);
+				}
+				else {
+					msg_err_task_check ("got invalid reply from redis: %s, array expected",
+							rspamd_redis_type_to_string(reply->type));
+				}
 			}
 
 			msg_debug_stat_redis ("received tokens for %s: %d processed, %d found",
@@ -1264,9 +1272,15 @@ rspamd_redis_connected (redisAsyncContext *c, gpointer r, gpointer priv)
 			}
 			else {
 				if (reply->type != REDIS_REPLY_NIL) {
-					msg_err_task ("bad learned type for %s: %s, nil expected",
-						rt->stcf->symbol,
-						rspamd_redis_type_to_string (reply->type));
+					if (reply->type == REDIS_REPLY_ERROR) {
+						msg_err_task ("cannot learn %s: redis error: \"%s\"",
+								rt->stcf->symbol, reply->str);
+					}
+					else {
+						msg_err_task ("bad learned type for %s: %s, nil expected",
+								rt->stcf->symbol,
+								rspamd_redis_type_to_string(reply->type));
+					}
 				}
 
 				val = 0;
@@ -1602,6 +1616,39 @@ rspamd_redis_init (struct rspamd_stat_ctx *ctx,
 	return (gpointer)backend;
 }
 
+/*
+ * This callback is called when Redis is disconnected somehow, and the structure
+ * itself is usually freed by hiredis itself
+ */
+static void
+rspamd_stat_redis_on_disconnect(const struct redisAsyncContext *ac, int status)
+{
+	struct redis_stat_runtime *rt = (struct redis_stat_runtime *)ac->data;
+
+	if (ev_can_stop (&rt->timeout_event)) {
+		ev_timer_stop (rt->task->event_loop, &rt->timeout_event);
+	}
+	rt->redis = NULL;
+}
+
+static void
+rspamd_stat_redis_on_connect(const struct redisAsyncContext *ac, int status)
+{
+	struct redis_stat_runtime *rt = (struct redis_stat_runtime *)ac->data;
+
+
+	if (status == REDIS_ERR) {
+		/*
+		 * We also need to reset rt->redis as it will be subsequently freed without
+		 * calling for redis_on_disconnect callback...
+		 */
+		if (ev_can_stop (&rt->timeout_event)) {
+			ev_timer_stop (rt->task->event_loop, &rt->timeout_event);
+		}
+		rt->redis = NULL;
+	}
+}
+
 gpointer
 rspamd_redis_runtime (struct rspamd_task *task,
 		struct rspamd_statfile_config *stcf,
@@ -1694,6 +1741,9 @@ rspamd_redis_runtime (struct rspamd_task *task,
 
 	redisLibevAttach (task->event_loop, rt->redis);
 	rspamd_redis_maybe_auth (ctx, rt->redis);
+	rt->redis->data = rt;
+	redisAsyncSetDisconnectCallback (rt->redis, rspamd_stat_redis_on_disconnect);
+	redisAsyncSetConnectCallback (rt->redis, rspamd_stat_redis_on_connect);
 
 	rspamd_mempool_add_destructor (task->task_pool, rspamd_redis_fin, rt);
 

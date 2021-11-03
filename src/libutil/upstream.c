@@ -59,6 +59,7 @@ struct upstream {
 	gchar *name;
 	ev_timer ev;
 	gdouble last_fail;
+	gdouble last_resolve;
 	gpointer ud;
 	enum rspamd_upstream_flag flags;
 	struct upstream_list *ls;
@@ -125,6 +126,10 @@ struct upstream_ctx {
 
 #define msg_debug_upstream(...)  rspamd_conditional_debug_fast (NULL, NULL, \
         rspamd_upstream_log_id, "upstream", upstream->uid, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+#define msg_info_upstream(...)   rspamd_default_log_function (G_LOG_LEVEL_INFO, \
+        "upstream", upstream->uid, \
         G_STRFUNC, \
         __VA_ARGS__)
 
@@ -623,41 +628,63 @@ rspamd_upstream_revive_cb (struct ev_loop *loop, ev_timer *w, int revents)
 
 static void
 rspamd_upstream_resolve_addrs (const struct upstream_list *ls,
-		struct upstream *up)
+		struct upstream *upstream)
 {
-	if (up->ctx->res != NULL &&
-			up->ctx->configured &&
-			up->dns_requests == 0 &&
-			!(up->flags & RSPAMD_UPSTREAM_FLAG_NORESOLVE)) {
+	/* XXX: maybe make it configurable */
+	static const gdouble min_resolve_interval = 60.0;
+
+	if (upstream->ctx->res != NULL &&
+		upstream->ctx->configured &&
+		upstream->dns_requests == 0 &&
+		!(upstream->flags & RSPAMD_UPSTREAM_FLAG_NORESOLVE)) {
+
+		gdouble now = ev_now (upstream->ctx->event_loop);
+
+		if (now - upstream->last_resolve < min_resolve_interval) {
+			msg_info_upstream ("do not resolve upstream %s as it was checked %.0f "
+					  "seconds ago (%.0f is minimum)",
+					upstream->name, now - upstream->last_resolve,
+					min_resolve_interval);
+
+			return;
+		}
+
 		/* Resolve name of the upstream one more time */
-		if (up->name[0] != '/') {
-			if (up->flags & RSPAMD_UPSTREAM_FLAG_SRV_RESOLVE) {
-				if (rdns_make_request_full (up->ctx->res,
-						rspamd_upstream_dns_srv_cb, up,
+		if (upstream->name[0] != '/') {
+			upstream->last_resolve = now;
+
+			if (upstream->flags & RSPAMD_UPSTREAM_FLAG_SRV_RESOLVE) {
+				if (rdns_make_request_full (upstream->ctx->res,
+						rspamd_upstream_dns_srv_cb, upstream,
 						ls->limits->dns_timeout, ls->limits->dns_retransmits,
-						1, up->name, RDNS_REQUEST_SRV) != NULL) {
-					up->dns_requests++;
-					REF_RETAIN (up);
+						1, upstream->name, RDNS_REQUEST_SRV) != NULL) {
+					upstream->dns_requests++;
+					REF_RETAIN (upstream);
 				}
 			}
 			else {
-				if (rdns_make_request_full (up->ctx->res,
-						rspamd_upstream_dns_cb, up,
+				if (rdns_make_request_full (upstream->ctx->res,
+						rspamd_upstream_dns_cb, upstream,
 						ls->limits->dns_timeout, ls->limits->dns_retransmits,
-						1, up->name, RDNS_REQUEST_A) != NULL) {
-					up->dns_requests++;
-					REF_RETAIN (up);
+						1, upstream->name, RDNS_REQUEST_A) != NULL) {
+					upstream->dns_requests++;
+					REF_RETAIN (upstream);
 				}
 
-				if (rdns_make_request_full (up->ctx->res,
-						rspamd_upstream_dns_cb, up,
+				if (rdns_make_request_full (upstream->ctx->res,
+						rspamd_upstream_dns_cb, upstream,
 						ls->limits->dns_timeout, ls->limits->dns_retransmits,
-						1, up->name, RDNS_REQUEST_AAAA) != NULL) {
-					up->dns_requests++;
-					REF_RETAIN (up);
+						1, upstream->name, RDNS_REQUEST_AAAA) != NULL) {
+					upstream->dns_requests++;
+					REF_RETAIN (upstream);
 				}
 			}
 		}
+	}
+	else if (upstream->dns_requests != 0) {
+		msg_info_upstream ("do not resolve upstream %s as another request for "
+					 "resolving has been already issued",
+					 upstream->name);
 	}
 }
 
@@ -748,7 +775,7 @@ rspamd_upstream_fail (struct upstream *upstream,
 			upstream->name,
 			reason);
 
-	if (upstream->ctx && upstream->active_idx != -1) {
+	if (upstream->ctx && upstream->active_idx != -1 && upstream->ls) {
 		sec_cur = rspamd_get_ticks (FALSE);
 
 		RSPAMD_UPSTREAM_LOCK (upstream);
@@ -756,6 +783,11 @@ rspamd_upstream_fail (struct upstream *upstream,
 			/* We have the first error */
 			upstream->last_fail = sec_cur;
 			upstream->errors = 1;
+
+			if (upstream->ls && upstream->dns_requests == 0) {
+				/* Try to re-resolve address immediately */
+				rspamd_upstream_resolve_addrs (upstream->ls, upstream);
+			}
 
 			DL_FOREACH (upstream->ls->watchers, w) {
 				if (w->events_mask & RSPAMD_UPSTREAM_WATCH_FAILURE) {
@@ -853,7 +885,7 @@ rspamd_upstream_ok (struct upstream *upstream)
 	struct upstream_list_watcher *w;
 
 	RSPAMD_UPSTREAM_LOCK (upstream);
-	if (upstream->errors > 0 && upstream->active_idx != -1) {
+	if (upstream->errors > 0 && upstream->active_idx != -1 && upstream->ls) {
 		/* We touch upstream if and only if it is active */
 		msg_debug_upstream ("reset errors on upstream %s (was %ud)", upstream->name, upstream->errors);
 		upstream->errors = 0;
@@ -1378,13 +1410,20 @@ rspamd_upstream_get_round_robin (struct upstream_list *ups,
 			}
 		}
 
-		if (up->checked * (up->errors + 1) < min_checked) {
+		/*
+		 * This code is used when all upstreams have zero weight
+		 * The logic is to select least currently used upstream and penalise
+		 * upstream with errors. The error penalty should no be too high
+		 * to avoid sudden traffic drop in this case.
+		 */
+		if (up->checked + up->errors * 2 < min_checked) {
 			min_checked_sel = up;
 			min_checked = up->checked;
 		}
 	}
 
 	if (max_weight == 0) {
+		/* All upstreams have zero weight */
 		if (min_checked > G_MAXUINT / 2) {
 			/* Reset all checked counters to avoid overflow */
 			for (i = 0; i < ups->alive->len; i ++) {
@@ -1674,4 +1713,17 @@ void rspamd_upstreams_add_watch_callback (struct upstream_list *ups,
 	nw->dtor = dtor;
 
 	DL_APPEND (ups->watchers, nw);
+}
+
+struct upstream*
+rspamd_upstream_ref (struct upstream *up)
+{
+	REF_RETAIN (up);
+	return up;
+}
+
+void
+rspamd_upstream_unref (struct upstream *up)
+{
+	REF_RELEASE (up);
 }

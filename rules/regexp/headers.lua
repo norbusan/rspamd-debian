@@ -147,7 +147,7 @@ reconf['R_RCVD_SPAMBOTS'] = {
 reconf['R_MISSING_CHARSET'] = {
   re = string.format('!is_empty_body() & content_type_is_type(text) & content_type_is_subtype(plain) & !content_type_has_param(charset) & !%s',
     'compare_transfer_encoding(7bit)'),
-  score = 2.5,
+  score = 0.5,
   description = 'Charset is missing in a message',
   group = 'headers',
   mime_only = true,
@@ -445,7 +445,7 @@ local user_agent_mozilla	= string.format('(%s) & !(%s) & !(%s) & !(%s)', user_ag
 -- Mozilla based common Message-ID template
 local mozilla_msgid_common	= 'Message-ID=/^\\s*<[\\dA-F]{8}\\.\\d{1,7}\\@([^>\\.]+\\.)+[^>\\.]+>$/H'
 local mozilla_msgid_common_sec	= 'Message-ID=/^\\s*<[\\da-f]{8}-([\\da-f]{4}-){3}[\\da-f]{12}\\@([^>\\.]+\\.)+[^>\\.]+>$/H'
-local mozilla_msgid		= 'Message-ID=/^\\s*<(3[3-9A-F]|4[\\dA-F]|5[\\dA-F])[\\dA-F]{6}\\.(\\d0){1,4}\\d\\@([^>\\.]+\\.)+[^>\\.]+>$/H'
+local mozilla_msgid		= 'Message-ID=/^\\s*<(3[3-9A-F]|[4-9A-F][\\dA-F])[\\dA-F]{6}\\.(\\d0){1,4}\\d\\@([^>\\.]+\\.)+[^>\\.]+>$/H'
 -- Summary rule for forged Mozilla Mail Message-ID header
 reconf['FORGED_MUA_MOZILLA_MAIL_MSGID'] = {
   re = string.format('(%s) & (%s) & !(%s) & !(%s)', user_agent_mozilla, mozilla_msgid_common, mozilla_msgid, unusable_msgid),
@@ -962,9 +962,10 @@ local old_x_mailers = {
   [[Microsoft Outlook IMO, Build 9\.0\.]],
   -- Outlook 2002 (Office XP)
   [[Microsoft Outlook, Build 10\.]],
-  -- Some old Apple iOS version are used on old devices, so instead of matching
-  -- all old versions, match only versions seen in spam
-  [[i(Phone|Pad) Mail \((?:12[A-Z]|13E)]],
+  -- Some old Apple iOS versions are used on old devices, match only very old
+  -- versions (iOS 4.3.5 buid 8L1 was supported until 2013) and less old
+  -- versions frequently seen in spam
+  [[i(Phone|Pad) Mail \((?:[1-8][A-L]|12H|13E)]],
 }
 
 reconf['OLD_X_MAILER'] = {
@@ -983,14 +984,21 @@ local bad_x_mailers = {
   -- Mozilla Thunderbird 1.0.2 (Windows/20050317)
   -- Thunderbird 2.0.0.23 (X11/20090812)
   [[(?:Mozilla )?Thunderbird \d]],
-  -- Was used by Yahoo Groups in 2000s
+  -- Was used by Yahoo Groups in 2000s, no one expected to use this in 2020s
   [[eGroups Message Poster]],
+  -- Regexp for genuene iOS X-Mailer is below, anything which doesn't match it,
+  -- but starts with 'iPhone Mail' or 'iPad Mail' is likely fake
+  [[i(?:Phone|Pad) Mail]],
 }
+-- Apple iPhone/iPad Mail X-Mailer contains iOS build number, e. g. 9B206, 16H5, 18G5023c
+-- https://en.wikipedia.org/wiki/IOS_version_history
+local apple_ios_x_mailer = [[i(?:Phone|Pad) Mail \((?:1[AC]|[34][AB]|5[ABCFGH]|7[A-E]|8[ABCEFGHJKL]|9[AB]|\d{2}[A-Z])\d+[a-z]?\)]]
 
 reconf['FORGED_X_MAILER'] = {
   description = 'Forged X-Mailer header',
-  re = string.format('X-Mailer=/^(?:%s)/{header}', table.concat(bad_x_mailers, '|')),
-  score = 4.0,
+  re = string.format('X-Mailer=/^(?:%s)/{header} && !X-Mailer=/^%s/{header}',
+    table.concat(bad_x_mailers, '|'), apple_ios_x_mailer),
+  score = 4.5,
   group = 'headers',
 }
 

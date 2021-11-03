@@ -33,7 +33,7 @@ local nrows = 0
 local used_memory = 0
 local last_collection = 0
 local final_call = false -- If the final collection has been started
-local schema_version = 8 -- Current schema version
+local schema_version = 9 -- Current schema version
 
 local settings = {
   limits = { -- Collection limits
@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS rspamd
     `Attachments.Digest` Array(FixedString(16)) COMMENT 'First 16 characters of hash returned by mime_part:get_digest()',
     `Urls.Tld` Array(String) COMMENT 'Effective second level domain part of the URL host',
     `Urls.Url` Array(String) COMMENT 'Full URL if `full_urls` module option enabled, host part of URL otherwise',
+    `Urls.Flags` Array(UInt32) COMMENT 'Corresponding url flags, see `enum rspamd_url_flags` in libserver/url.h for details',
     Emails Array(String) COMMENT 'List of emails extracted from the message',
     ASN UInt32 COMMENT 'BGP AS number for SMTP client IP (returned by asn.rspamd.com or asn6.rspamd.com)',
     Country FixedString(2) COMMENT 'Country for SMTP client IP (returned by asn.rspamd.com or asn6.rspamd.com)',
@@ -246,6 +247,14 @@ local migrations = {
     -- New version
     [[INSERT INTO rspamd_version (Version) Values (8)]],
   },
+  [8] = {
+    -- Add new columns
+    [[ALTER TABLE rspamd
+      ADD COLUMN IF NOT EXISTS `Urls.Flags` Array(UInt32) AFTER `Urls.Url`
+    ]],
+    -- New version
+    [[INSERT INTO rspamd_version (Version) Values (9)]],
+  },
 }
 
 local predefined_actions = {
@@ -314,6 +323,7 @@ local function clickhouse_urls_row(res)
   local fields = {
     'Urls.Tld',
     'Urls.Url',
+    'Urls.Flags',
   }
   for _,v in ipairs(fields) do table.insert(res, v) end
 end
@@ -480,7 +490,7 @@ local function clickhouse_collect(task)
   local from_domain = ''
   local from_user = ''
   if task:has_from('smtp') then
-    local from = task:get_from('smtp')[1]
+    local from = task:get_from({'smtp','orig'})[1]
 
     if from then
       from_domain = from['domain']:lower()
@@ -633,7 +643,12 @@ local function clickhouse_collect(task)
   end
 
   local nurls = 0
-  local task_urls = task:get_urls(false) or {}
+  local task_urls = task:get_urls({
+   content = true,
+   images = true,
+   emails = false,
+   sort = true,
+  }) or {}
 
   nurls = #task_urls
 
@@ -748,34 +763,75 @@ local function clickhouse_collect(task)
     table.insert(row, {})
   end
 
-  local flatten_urls = function(f, ...)
-    return fun.totable(fun.map(function(k,v) return f(k,v) end, ...))
-  end
-
   -- Urls step
   local urls_urls = {}
+  local urls_tlds = {}
+  local urls_flags = {}
 
-  for _,u in ipairs(task_urls) do
-    if settings['full_urls'] then
-      urls_urls[u:get_text()] = u
-    else
-      urls_urls[u:get_host()] = u
+  if settings.full_urls then
+    for i,u in ipairs(task_urls) do
+      urls_urls[i] = u:get_text()
+      urls_tlds[i] = u:get_tld() or u:get_host()
+      urls_flags[i] = u:get_flags_num()
+    end
+  else
+    -- We need to store unique
+    local mt = {
+      ord_tbl = {}, -- ordered list of urls
+      idx_tbl = {}, -- indexed by host + flags, reference to an index in ord_tbl
+      __newindex = function(t, k, v)
+        local idx = getmetatable(t).idx_tbl
+        local ord =  getmetatable(t).ord_tbl
+        local key = k:get_host() .. tostring(k:get_flags_num())
+        if idx[key] then
+          ord[idx[key]] = v -- replace
+        else
+          ord[#ord + 1] = v
+          idx[key] = #ord
+        end
+      end,
+      __index = function(t, k)
+        local ord = getmetatable(t).ord_tbl
+        if type(k) == 'number' then
+          return ord[k]
+        else
+          local idx = getmetatable(t).idx_tbl
+          local key = k:get_host() .. tostring(k:get_flags_num())
+          if idx[key] then
+            return ord[idx[key]]
+          end
+        end
+      end,
+    }
+    -- Extra index needed for making this unique
+    local urls_idx = {}
+    setmetatable(urls_idx, mt)
+    for _,u in ipairs(task_urls) do
+      if not urls_idx[u] then
+        urls_idx[u] = u
+        urls_urls[#urls_urls + 1] = u:get_host()
+        urls_tlds[#urls_tlds + 1] = u:get_tld() or u:get_host()
+        urls_flags[#urls_flags + 1] = u:get_flags_num()
+      end
     end
   end
 
+
   -- Get tlds
-  table.insert(row, flatten_urls(function(_, u)
-    return u:get_tld() or u:get_host()
-  end, urls_urls))
+  table.insert(row, urls_tlds)
   -- Get hosts/full urls
-  table.insert(row, flatten_urls(function(k, _) return k end, urls_urls))
+  table.insert(row, urls_urls)
+  -- Numeric flags
+  table.insert(row, urls_flags)
 
   -- Emails step
   if task:has_urls(true) then
-    table.insert(row, flatten_urls(function(k, _) return k end,
-        fun.map(function(u)
-          return string.format('%s@%s', u:get_user(), u:get_host()),true
-        end, task:get_emails())))
+    local emails = task:get_emails() or {}
+    local emails_formatted = {}
+    for i,u in ipairs(emails) do
+      emails_formatted[i] = string.format('%s@%s', u:get_user(), u:get_host())
+    end
+    table.insert(row, emails_formatted)
   else
     table.insert(row, {})
   end
@@ -902,21 +958,11 @@ end
 ]]
 local function get_last_removal_ago()
   local ts_file = string.format('%s/%s', rspamd_paths['DBDIR'], 'clickhouse_retention_run')
-  local f, err = io.open(ts_file, 'r')
-  local write_file
   local last_ts
-
-  if err then
-    lua_util.debugm(N, rspamd_config, 'Failed to open %s: %s', ts_file, err)
-  else
-    last_ts = tonumber(f:read('*number'))
-    f:close()
-  end
-
   local current_ts = os.time()
 
-  if last_ts == nil or (last_ts + settings.retention.period) <= current_ts then
-    write_file, err = io.open(ts_file, 'w')
+  local function write_ts_to_file()
+    local write_file, err = io.open(ts_file, 'w')
     if err then
       rspamd_logger.errx(rspamd_config, 'Failed to open %s, will not perform retention: %s', ts_file, err)
       return nil
@@ -925,11 +971,33 @@ local function get_last_removal_ago()
     local res
     res, err = write_file:write(tostring(current_ts))
     if err or res == nil then
+      write_file:close()
       rspamd_logger.errx(rspamd_config, 'Failed to write %s, will not perform retention: %s', ts_file, err)
       return nil
     end
     write_file:close()
-    return 0
+
+    return true
+  end
+
+  local f, err = io.open(ts_file, 'r')
+  if err then
+    lua_util.debugm(N, rspamd_config, 'Failed to open %s: %s', ts_file, err)
+  else
+    last_ts = tonumber(f:read('*number'))
+    f:close()
+  end
+
+  if last_ts > current_ts then
+    -- Clock skew detected, overwrite last_ts with current_ts and wait for the next
+    -- retention period
+    rspamd_logger.errx(rspamd_config, 'Last collection time is in future: %s; overwrite it with %s in %s',
+        last_ts, current_ts, ts_file)
+    return write_ts_to_file() and -1
+  end
+
+  if last_ts == nil or (last_ts + settings.retention.period) <= current_ts then
+    return write_ts_to_file() and 0
   end
 
   return (last_ts + settings.retention.period) - current_ts

@@ -16,8 +16,8 @@ SET(ASM_CODE "
 	")
 ASM_OP(HAVE_DOLLARMACRO "dollar macro convention")
 
-# For now we support only x86_64 architecture with optimizations
-IF("${ARCH}" STREQUAL "x86_64")
+# For now we support only x86_64/i386 architecture with optimizations
+IF("${ARCH}" STREQUAL "x86_64" OR "${ARCH}" STREQUAL "i386")
     IF(NOT HAVE_SLASHMACRO AND NOT HAVE_DOLLARMACRO)
         MESSAGE(FATAL_ERROR "Your assembler cannot compile macros, please check your CMakeFiles/CMakeError.log")
     ENDIF()
@@ -93,6 +93,7 @@ IF ("${ARCH}" STREQUAL "x86_64")
     MESSAGE(STATUS "Enable sse2 on x86_64 architecture")
     IF((CMAKE_C_COMPILER_ID MATCHES "GNU") OR (CMAKE_C_COMPILER_ID MATCHES "Clang"))
         ADD_COMPILE_OPTIONS(-msse2)
+        ADD_COMPILE_OPTIONS(-m64)
     ELSEIF(CMAKE_C_COMPILER_ID MATCHES "Intel")
         ADD_COMPILE_OPTIONS(/QxSSE2)
     ELSEIF((CMAKE_C_COMPILER_ID MATCHES "MSVC"))

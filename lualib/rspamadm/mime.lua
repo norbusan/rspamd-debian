@@ -41,7 +41,9 @@ parser:mutex(
     parser:flag "-j --json"
           :description "JSON output",
     parser:flag "-U --ucl"
-          :description "UCL output"
+          :description "UCL output",
+    parser:flag "-M --messagepack"
+        :description "MessagePack output"
 )
 parser:flag "-C --compact"
       :description "Use compact format"
@@ -77,6 +79,8 @@ extract:flag "-p --part"
        :description "Show part info"
 extract:flag "-s --structure"
        :description "Show structure info (e.g. HTML tags)"
+extract:flag "-i --invisible"
+       :description "Show invisible content for HTML parts"
 extract:option "-F --words-format"
        :description "Words format ('stem', 'norm', 'raw', 'full')"
        :argname("<type>")
@@ -192,6 +196,22 @@ sign:option "-o --output"
     }
     :default 'message'
 
+local dump = parser:command "dump"
+                   :description "Dumps a raw message in different formats"
+dump:argument "file"
+    :description "File to process"
+    :argname "<file>"
+    :args "+"
+-- Duplicate format for convenience
+dump:mutex(
+    parser:flag "-j --json"
+          :description "JSON output",
+    parser:flag "-U --ucl"
+          :description "UCL output",
+    parser:flag "-M --messagepack"
+          :description "MessagePack output"
+)
+
 local function load_config(opts)
   local _r,err = rspamd_config:load_ucl(opts['config'])
 
@@ -237,16 +257,22 @@ local function maybe_print_fname(opts, fname)
   end
 end
 
+local function output_fmt(opts)
+  local fmt = 'json'
+  if opts.compact then fmt = 'json-compact' end
+  if opts.ucl then fmt = 'ucl' end
+  if opts.messagepack then fmt = 'msgpack' end
+
+  return fmt
+end
+
 -- Print elements in form
 -- filename -> table of elements
 local function print_elts(elts, opts, func)
   local fun = require "fun"
 
   if opts.json or opts.ucl then
-    local fmt = 'json'
-    if opts.compact then fmt = 'json-compact' end
-    if opts.ucl then fmt = 'ucl' end
-    io.write(ucl.to_format(elts, fmt))
+    io.write(ucl.to_format(elts, output_fmt(opts)))
   else
     fun.each(function(fname, elt)
 
@@ -266,6 +292,7 @@ end
 
 local function extract_handler(opts)
   local out_elts = {}
+  local tasks = {}
   local process_func
 
   if opts.words then
@@ -300,7 +327,6 @@ local function extract_handler(opts)
                 return string.format('%s:%s', k,v)
               end
             end, '', part:get_stats())))
-        table.insert(out, '\n')
       end
     end
   end
@@ -309,12 +335,15 @@ local function extract_handler(opts)
     if opts.part then
 
       if not opts.json and not opts.ucl then
+        local mtype,msubtype = part:get_type()
+        local det_mtype,det_msubtype = part:get_detected_type()
         table.insert(out,
-            rspamd_logger.slog('Mime Part: %s: %s/%s, filename: %s, size: %s',
+            rspamd_logger.slog('Mime Part: %s: %s/%s (%s/%s detected), filename: %s (%s detected ext), size: %s',
                 part:get_digest():sub(1,8),
-                ({part:get_type()})[1],
-                ({part:get_type()})[2],
+                mtype, msubtype,
+                det_mtype, det_msubtype,
                 part:get_filename(),
+                part:get_detected_ext(),
                 part:get_length()))
       end
     end
@@ -367,6 +396,11 @@ local function extract_handler(opts)
 
         if part and opts.text and not part:is_html() then
           maybe_print_text_part_info(part, out_elts[fname])
+          maybe_print_mime_part_info(mime_part, out_elts[fname])
+          if not opts.json and not opts.ucl then
+            table.insert(out_elts[fname], '\n')
+          end
+
           if opts.words then
             local howw = opts['words_format'] or 'stem'
             table.insert(out_elts[fname], print_words(part:get_words(howw),
@@ -376,6 +410,11 @@ local function extract_handler(opts)
           end
         elseif part and opts.html and part:is_html() then
           maybe_print_text_part_info(part, out_elts[fname])
+          maybe_print_mime_part_info(mime_part, out_elts[fname])
+          if not opts.json and not opts.ucl then
+            table.insert(out_elts[fname], '\n')
+          end
+
           if opts.words then
             local howw = opts['words_format'] or 'stem'
             table.insert(out_elts[fname], print_words(part:get_words(howw),
@@ -384,26 +423,45 @@ local function extract_handler(opts)
             if opts.structure then
               local hc = part:get_html()
               local res = {}
-              process_func = function(k, v)
-                return rspamd_logger.slog("%s = %s", k, v)
+              process_func = function(elt)
+                local fun = require "fun"
+                if type(elt) == 'table' then
+                  return table.concat(fun.totable(
+                      fun.map(
+                          function(t)
+                            return rspamd_logger.slog("%s", t)
+                          end,
+                          elt)), '\n')
+                else
+                  return rspamd_logger.slog("%s", elt)
+                end
               end
 
               hc:foreach_tag('any', function(tag)
-                local elt = {}
-                local ex = tag:get_extra()
-                elt.tag = tag:get_type()
-                if ex then
-                  elt.extra = ex
-                end
-                local content = tag:get_content()
-                if content then
-                  elt.content = content
-                end
-                table.insert(res, elt)
+                  local elt = {}
+                  local ex = tag:get_extra()
+                  elt.tag = tag:get_type()
+                  if ex then
+                    elt.extra = ex
+                  end
+                  local content = tag:get_content()
+                  if content then
+                    elt.content = tostring(content)
+                  end
+                  local style = tag:get_style()
+                  if style then
+                    elt.style = style
+                  end
+                  table.insert(res, elt)
               end)
-              out_elts[fname] = res
-            else
+              table.insert(out_elts[fname], res)
+            else -- opts.structure
               table.insert(out_elts[fname], tostring(part:get_content(how)))
+            end
+            if opts.invisible then
+              local hc = part:get_html()
+              table.insert(out_elts[fname], string.format('invisible content: %s',
+                  tostring(hc:get_invisible())))
             end
           end
         end
@@ -415,11 +473,12 @@ local function extract_handler(opts)
     end
 
     table.insert(out_elts[fname], "")
-
-    task:destroy() -- No automatic dtor
+    table.insert(tasks, task)
   end
 
   print_elts(out_elts, opts, process_func)
+  -- To avoid use after free we postpone tasks destruction
+  for _,task in ipairs(tasks) do task:destroy() end
 end
 
 local function stat_handler(opts)
@@ -814,6 +873,24 @@ local function sign_handler(opts)
   end
 end
 
+local function dump_handler(opts)
+  load_config(opts)
+  rspamd_url.init(rspamd_config:get_tld_path())
+
+  for _,fname in ipairs(opts.file) do
+    local task = load_task(opts, fname)
+
+    if opts.ucl or opts.json or opts.messagepack then
+      local ucl_object = lua_mime.message_to_ucl(task)
+      io.write(ucl.to_format(ucl_object, output_fmt(opts)))
+    else
+      task:get_content():save_in_file(1)
+    end
+
+    task:destroy() -- No automatic dtor
+  end
+end
+
 local function handler(args)
   local opts = parser:parse(args)
 
@@ -835,6 +912,8 @@ local function handler(args)
     modify_handler(opts)
   elseif command == 'sign' then
     sign_handler(opts)
+  elseif command == 'dump' then
+    dump_handler(opts)
   else
     parser:error('command %s is not implemented', command)
   end

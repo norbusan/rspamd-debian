@@ -178,7 +178,7 @@ read_cmd_line (gint *argc, gchar ***argv, struct rspamd_config *cfg)
 	if (!g_option_context_parse (context, argc, argv, &error)) {
 		fprintf (stderr, "option parsing failed: %s\n", error->message);
 		g_option_context_free (context);
-		exit (1);
+		exit (EXIT_FAILURE);
 	}
 
 	cfg->rspamd_user = rspamd_user;
@@ -781,13 +781,12 @@ static void
 mark_old_workers (gpointer key, gpointer value, gpointer unused)
 {
 	struct rspamd_worker *w = value;
-	struct rspamd_main __attribute__ ((unused)) *rspamd_main;
-
-	rspamd_main = w->srv;
 
 	if (w->state == rspamd_worker_state_running) {
 		w->state = rspamd_worker_state_wanna_die;
 	}
+
+	w->flags |= RSPAMD_WORKER_OLD_CONFIG;
 }
 
 static void
@@ -1213,7 +1212,7 @@ static void
 rspamd_control_handler (EV_P_ ev_io *w, int revents)
 {
 	struct rspamd_main *rspamd_main = (struct rspamd_main *)w->data;
-	rspamd_inet_addr_t *addr;
+	rspamd_inet_addr_t *addr = NULL;
 	gint nfd;
 
 	if ((nfd =
@@ -1223,6 +1222,7 @@ rspamd_control_handler (EV_P_ ev_io *w, int revents)
 	}
 	/* Check for EAGAIN */
 	if (nfd == 0) {
+		rspamd_inet_address_free (addr);
 		return;
 	}
 
@@ -1317,8 +1317,9 @@ rspamd_main_daemon (struct rspamd_main *rspamd_main)
 		}
 	}
 
-	msg_info_main ("daemonized successfully; old pid %P, new pid %P",
-			old_pid, getpid ());
+	msg_info_main ("daemonized successfully; old pid %P, new pid %P; pid file: %s",
+			old_pid, getpid (),
+			rspamd_main->cfg->pid_file);
 
 	return TRUE;
 }
@@ -1334,6 +1335,14 @@ main (gint argc, gchar **argv, gchar **env)
 	struct ev_loop *event_loop;
 	struct rspamd_main *rspamd_main;
 	gboolean skip_pid = FALSE;
+	sigset_t control_signals;
+
+	/* Block special signals on loading */
+	sigemptyset (&control_signals);
+	sigaddset (&control_signals, SIGHUP);
+	sigaddset (&control_signals, SIGUSR1);
+	sigaddset (&control_signals, SIGUSR2);
+	sigprocmask (SIG_BLOCK, &control_signals, NULL);
 
 	rspamd_main = (struct rspamd_main *) g_malloc0 (sizeof (struct rspamd_main));
 
@@ -1409,6 +1418,11 @@ main (gint argc, gchar **argv, gchar **env)
 	g_set_printerr_handler (rspamd_glib_printerr_function);
 
 	detect_priv (rspamd_main);
+
+	msg_notice_main ("rspamd "
+			RVERSION
+			" is loading configuration, build id: "
+			RID);
 
 	pworker = &workers[0];
 	while (*pworker) {
@@ -1494,7 +1508,6 @@ main (gint argc, gchar **argv, gchar **env)
 		exit (-errno);
 	}
 
-	/* Block signals to use sigsuspend in future */
 	sigprocmask (SIG_BLOCK, &signals.sa_mask, NULL);
 
 	/* Set title */
@@ -1526,9 +1539,11 @@ main (gint argc, gchar **argv, gchar **env)
 			rspamd_main->cfg->history_file);
 	}
 
-	/* Spawn workers */
+	/* Init workers hash */
 	rspamd_main->workers = g_hash_table_new (g_direct_hash, g_direct_equal);
 
+	/* Unblock control signals */
+	sigprocmask (SIG_UNBLOCK, &control_signals, NULL);
 	/* Init event base */
 	event_loop = ev_default_loop (rspamd_config_ev_backend_get (rspamd_main->cfg));
 	rspamd_main->event_loop = event_loop;
@@ -1605,6 +1620,10 @@ main (gint argc, gchar **argv, gchar **env)
 	if (rspamd_main->cfg->history_file) {
 		rspamd_roll_history_save (rspamd_main->history,
 			rspamd_main->cfg->history_file);
+	}
+
+	if (rspamd_main->cfg->cache) {
+		rspamd_symcache_save(rspamd_main->cfg->cache);
 	}
 
 	msg_info_main ("terminating...");

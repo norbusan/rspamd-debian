@@ -36,11 +36,13 @@
 #include "libutil/ref.h"
 
 #include <stdalign.h>
+#include <openssl/hmac.h>
 
 
 enum lua_cryptobox_hash_type {
 	LUA_CRYPTOBOX_HASH_BLAKE2 = 0,
 	LUA_CRYPTOBOX_HASH_SSL,
+	LUA_CRYPTOBOX_HASH_HMAC,
 	LUA_CRYPTOBOX_HASH_XXHASH64,
 	LUA_CRYPTOBOX_HASH_XXHASH32,
 	LUA_CRYPTOBOX_HASH_MUM,
@@ -51,6 +53,7 @@ struct rspamd_lua_cryptobox_hash {
 	union {
 		rspamd_cryptobox_hash_state_t *h;
 		EVP_MD_CTX *c;
+		HMAC_CTX *hmac_c;
 		rspamd_cryptobox_fast_hash_state_t *fh;
 	} content;
 
@@ -83,6 +86,7 @@ LUA_FUNCTION_DEF (cryptobox_signature, base64);
 LUA_FUNCTION_DEF (cryptobox_signature, bin);
 LUA_FUNCTION_DEF (cryptobox_hash, create);
 LUA_FUNCTION_DEF (cryptobox_hash, create_specific);
+LUA_FUNCTION_DEF (cryptobox_hash, create_specific_keyed);
 LUA_FUNCTION_DEF (cryptobox_hash, create_keyed);
 LUA_FUNCTION_DEF (cryptobox_hash, update);
 LUA_FUNCTION_DEF (cryptobox_hash, reset);
@@ -178,6 +182,7 @@ static const struct luaL_reg cryptoboxhashlib_f[] = {
 	LUA_INTERFACE_DEF (cryptobox_hash, create),
 	LUA_INTERFACE_DEF (cryptobox_hash, create_keyed),
 	LUA_INTERFACE_DEF (cryptobox_hash, create_specific),
+	LUA_INTERFACE_DEF (cryptobox_hash, create_specific_keyed),
 	{NULL, NULL}
 };
 
@@ -701,6 +706,9 @@ lua_cryptobox_signature_load (lua_State *L)
 						alg = RSPAMD_CRYPTOBOX_MODE_25519;
 					}
 					else {
+						munmap (data, st.st_size);
+						close (fd);
+
 						return luaL_error (L, "invalid keypair algorithm: %s", str);
 					}
 				}
@@ -964,6 +972,9 @@ rspamd_lua_hash_update (struct rspamd_lua_cryptobox_hash *h,
 		case LUA_CRYPTOBOX_HASH_SSL:
 			EVP_DigestUpdate (h->content.c, p, len);
 			break;
+		case LUA_CRYPTOBOX_HASH_HMAC:
+			HMAC_Update (h->content.hmac_c, p, len);
+			break;
 		case LUA_CRYPTOBOX_HASH_XXHASH64:
 		case LUA_CRYPTOBOX_HASH_XXHASH32:
 		case LUA_CRYPTOBOX_HASH_MUM:
@@ -986,6 +997,14 @@ lua_cryptobox_hash_dtor (struct rspamd_lua_cryptobox_hash *h)
 		EVP_MD_CTX_reset (h->content.c);
 #endif
 		EVP_MD_CTX_destroy (h->content.c);
+	}
+	else if (h->type == LUA_CRYPTOBOX_HASH_HMAC) {
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
+		HMAC_CTX_cleanup (h->content.hmac_c);
+		g_free (h->content.hmac_c);
+#else
+		HMAC_CTX_free (h->content.hmac_c);
+#endif
 	}
 	else if (h->type == LUA_CRYPTOBOX_HASH_BLAKE2) {
 		rspamd_explicit_memzero (h->content.h, sizeof (*h->content.h));
@@ -1013,6 +1032,50 @@ rspamd_lua_hash_init_default (struct rspamd_lua_cryptobox_hash *h,
 	h->out_len = rspamd_cryptobox_HASHBYTES;
 }
 
+static void
+rspamd_lua_ssl_hash_create (struct rspamd_lua_cryptobox_hash *h, const EVP_MD *htype,
+		bool insecure)
+{
+	h->type = LUA_CRYPTOBOX_HASH_SSL;
+	h->content.c = EVP_MD_CTX_create ();
+	h->out_len = EVP_MD_size (htype);
+
+	if (insecure) {
+		/* Should never ever be used for crypto/security purposes! */
+#ifdef EVP_MD_CTX_FLAG_NON_FIPS_ALLOW
+		EVP_MD_CTX_set_flags(h->content.c, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
+#endif
+	}
+
+	EVP_DigestInit_ex (h->content.c, htype, NULL);
+}
+
+static void
+rspamd_lua_ssl_hmac_create (struct rspamd_lua_cryptobox_hash *h, const EVP_MD *htype,
+							const gchar *key, gsize keylen,
+							bool insecure)
+{
+	h->type = LUA_CRYPTOBOX_HASH_HMAC;
+
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
+	h->content.hmac_c = g_malloc0 (sizeof(*h->content.hmac_c));
+#else
+	h->content.hmac_c = HMAC_CTX_new ();
+#endif
+	h->out_len = EVP_MD_size (htype);
+
+#if OPENSSL_VERSION_NUMBER > 0x10100000L
+	if (insecure) {
+		/* Should never ever be used for crypto/security purposes! */
+#ifdef EVP_MD_CTX_FLAG_NON_FIPS_ALLOW
+		HMAC_CTX_set_flags(h->content.hmac_c, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
+#endif
+	}
+#endif
+
+	HMAC_Init_ex (h->content.hmac_c, key, keylen, htype, NULL);
+}
+
 static struct rspamd_lua_cryptobox_hash *
 rspamd_lua_hash_create (const gchar *type, const gchar *key, gsize keylen)
 {
@@ -1023,43 +1086,45 @@ rspamd_lua_hash_create (const gchar *type, const gchar *key, gsize keylen)
 
 	if (type) {
 		if (g_ascii_strcasecmp (type, "md5") == 0) {
-			h->type = LUA_CRYPTOBOX_HASH_SSL;
-			h->content.c = EVP_MD_CTX_create ();
-			h->out_len = EVP_MD_size (EVP_md5 ());
-			/* Should never ever be used for crypto/security purposes! */
-#ifdef EVP_MD_CTX_FLAG_NON_FIPS_ALLOW
-			EVP_MD_CTX_set_flags (h->content.c, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
-#endif
-			EVP_DigestInit_ex (h->content.c, EVP_md5 (), NULL);
+			if (keylen > 0) {
+				rspamd_lua_ssl_hmac_create(h, EVP_md5(), key, keylen, true);
+			}
+			else {
+				rspamd_lua_ssl_hash_create(h, EVP_md5(), true);
+			}
 		}
 		else if (g_ascii_strcasecmp (type, "sha1") == 0 ||
 					g_ascii_strcasecmp (type, "sha") == 0) {
-			h->type = LUA_CRYPTOBOX_HASH_SSL;
-			h->content.c = EVP_MD_CTX_create ();
-			h->out_len = EVP_MD_size (EVP_sha1 ());
-			/* Should never ever be used for crypto/security purposes! */
-#ifdef EVP_MD_CTX_FLAG_NON_FIPS_ALLOW
-			EVP_MD_CTX_set_flags (h->content.c, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
-#endif
-			EVP_DigestInit_ex (h->content.c, EVP_sha1 (), NULL);
+			if (keylen > 0) {
+				rspamd_lua_ssl_hmac_create(h, EVP_sha1(), key, keylen, true);
+			}
+			else {
+				rspamd_lua_ssl_hash_create(h, EVP_sha1(), true);
+			}
 		}
 		else if (g_ascii_strcasecmp (type, "sha256") == 0) {
-			h->type = LUA_CRYPTOBOX_HASH_SSL;
-			h->content.c = EVP_MD_CTX_create ();
-			h->out_len = EVP_MD_size (EVP_sha256 ());
-			EVP_DigestInit (h->content.c, EVP_sha256 ());
+			if (keylen > 0) {
+				rspamd_lua_ssl_hmac_create(h, EVP_sha256(), key, keylen, true);
+			}
+			else {
+				rspamd_lua_ssl_hash_create(h, EVP_sha256(), true);
+			}
 		}
 		else if (g_ascii_strcasecmp (type, "sha512") == 0) {
-			h->type = LUA_CRYPTOBOX_HASH_SSL;
-			h->content.c = EVP_MD_CTX_create ();
-			h->out_len = EVP_MD_size (EVP_sha512 ());
-			EVP_DigestInit (h->content.c, EVP_sha512 ());
+			if (keylen > 0) {
+				rspamd_lua_ssl_hmac_create(h, EVP_sha512(), key, keylen, true);
+			}
+			else {
+				rspamd_lua_ssl_hash_create(h, EVP_sha512(), true);
+			}
 		}
 		else if (g_ascii_strcasecmp (type, "sha384") == 0) {
-			h->type = LUA_CRYPTOBOX_HASH_SSL;
-			h->content.c = EVP_MD_CTX_create ();
-			h->out_len = EVP_MD_size (EVP_sha384 ());
-			EVP_DigestInit (h->content.c, EVP_sha384 ());
+			if (keylen > 0) {
+				rspamd_lua_ssl_hmac_create(h, EVP_sha384(), key, keylen, true);
+			}
+			else {
+				rspamd_lua_ssl_hash_create(h, EVP_sha384(), true);
+			}
 		}
 		else if (g_ascii_strcasecmp (type, "xxh64") == 0) {
 			h->type = LUA_CRYPTOBOX_HASH_XXHASH64;
@@ -1130,6 +1195,7 @@ lua_cryptobox_hash_create (lua_State *L)
 		t = lua_check_text (L, 1);
 
 		if (!t) {
+			REF_RELEASE (h);
 			return luaL_error (L, "invalid arguments");
 		}
 
@@ -1181,6 +1247,7 @@ lua_cryptobox_hash_create_specific (lua_State *L)
 		t = lua_check_text (L, 2);
 
 		if (!t) {
+			REF_RELEASE (h);
 			return luaL_error (L, "invalid arguments");
 		}
 
@@ -1227,6 +1294,7 @@ lua_cryptobox_hash_create_keyed (lua_State *L)
 			t = lua_check_text (L, 2);
 
 			if (!t) {
+				REF_RELEASE (h);
 				return luaL_error (L, "invalid arguments");
 			}
 
@@ -1235,7 +1303,63 @@ lua_cryptobox_hash_create_keyed (lua_State *L)
 		}
 
 		if (s) {
-			rspamd_cryptobox_hash_update (h->content.h, s, len);
+			rspamd_lua_hash_update (h, s, len);
+		}
+
+		ph = lua_newuserdata (L, sizeof (void *));
+		*ph = h;
+		rspamd_lua_setclass (L, "rspamd{cryptobox_hash}", -1);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+/***
+ * @function rspamd_cryptobox_hash.create_specific_keyed(key, type, [string])
+ * Creates new hash context with specified key
+ * @param {string} key key
+ * @return {cryptobox_hash} hash object
+ */
+static gint
+lua_cryptobox_hash_create_specific_keyed (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_cryptobox_hash *h, **ph;
+	const gchar *key, *s = NULL, *type = luaL_checkstring (L, 2);
+	struct rspamd_lua_text *t;
+	gsize len = 0;
+	gsize keylen;
+
+	key = luaL_checklstring (L, 1, &keylen);
+
+	if (key != NULL && type != NULL) {
+		h = rspamd_lua_hash_create (type, key, keylen);
+
+		if (h == NULL) {
+			return luaL_error (L, "invalid hash type: %s", type);
+		}
+
+		if (lua_type (L, 3) == LUA_TSTRING) {
+			s = lua_tolstring (L, 3, &len);
+		}
+		else if (lua_type (L, 3) == LUA_TUSERDATA) {
+			t = lua_check_text (L, 3);
+
+			if (!t) {
+				REF_RELEASE (h);
+
+				return luaL_error (L, "invalid arguments");
+			}
+
+			s = t->start;
+			len = t->len;
+		}
+
+		if (s) {
+			rspamd_lua_hash_update (h, s, len);
 		}
 
 		ph = lua_newuserdata (L, sizeof (void *));
@@ -1327,6 +1451,14 @@ lua_cryptobox_hash_reset (lua_State *L)
 		case LUA_CRYPTOBOX_HASH_SSL:
 			EVP_DigestInit (h->content.c, EVP_MD_CTX_md (h->content.c));
 			break;
+		case LUA_CRYPTOBOX_HASH_HMAC:
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
+			/* Old openssl is awesome... */
+			HMAC_Init_ex (h->content.hmac_c, NULL, 0, h->content.hmac_c->md, NULL);
+#else
+			HMAC_CTX_reset (h->content.hmac_c);
+#endif
+			break;
 		case LUA_CRYPTOBOX_HASH_XXHASH64:
 			rspamd_cryptobox_fast_hash_init_specific (h->content.fh,
 					RSPAMD_CRYPTOBOX_XXHASH64, 0);
@@ -1374,6 +1506,12 @@ lua_cryptobox_hash_finish (struct rspamd_lua_cryptobox_hash *h)
 		break;
 	case LUA_CRYPTOBOX_HASH_SSL:
 		EVP_DigestFinal_ex (h->content.c, out, &ssl_outlen);
+		h->out_len = ssl_outlen;
+		g_assert (ssl_outlen <= sizeof (h->out));
+		memcpy (h->out, out, ssl_outlen);
+		break;
+	case LUA_CRYPTOBOX_HASH_HMAC:
+		HMAC_Final (h->content.hmac_c, out, &ssl_outlen);
 		h->out_len = ssl_outlen;
 		g_assert (ssl_outlen <= sizeof (h->out));
 		memcpy (h->out, out, ssl_outlen);
@@ -1836,6 +1974,7 @@ lua_cryptobox_encrypt_memory (lua_State *L)
 	struct rspamd_lua_text *t, *res;
 	gsize len = 0, outlen = 0;
 	GError *err = NULL;
+	bool owned_pk = false;
 
 	if (lua_type (L, 1) == LUA_TUSERDATA) {
 		if (rspamd_lua_check_udata_maybe (L, 1, "rspamd{cryptobox_keypair}")) {
@@ -1853,13 +1992,14 @@ lua_cryptobox_encrypt_memory (lua_State *L)
 		pk = rspamd_pubkey_from_base32 (b32, blen, RSPAMD_KEYPAIR_KEX,
 				lua_toboolean (L, 3) ?
 				RSPAMD_CRYPTOBOX_MODE_NIST : RSPAMD_CRYPTOBOX_MODE_25519);
+		owned_pk = true;
 	}
 
 	if (lua_isuserdata (L, 2)) {
 		t = lua_check_text (L, 2);
 
 		if (!t) {
-			return luaL_error (L, "invalid arguments");
+			goto err;
 		}
 
 		data = t->start;
@@ -1871,7 +2011,7 @@ lua_cryptobox_encrypt_memory (lua_State *L)
 
 
 	if (!(kp || pk) || !data) {
-		return luaL_error (L, "invalid arguments");
+		goto err;
 	}
 
 	if (kp) {
@@ -1879,13 +2019,21 @@ lua_cryptobox_encrypt_memory (lua_State *L)
 			gint ret = luaL_error (L, "cannot encrypt data: %s", err->message);
 			g_error_free (err);
 
+			if (owned_pk) {
+				rspamd_pubkey_unref (pk);
+			}
+
 			return ret;
 		}
 	}
-	else if (pk) {
+	else {
 		if (!rspamd_pubkey_encrypt (pk, data, len, &out, &outlen, &err)) {
 			gint ret = luaL_error (L, "cannot encrypt data: %s", err->message);
 			g_error_free (err);
+
+			if (owned_pk) {
+				rspamd_pubkey_unref (pk);
+			}
 
 			return ret;
 		}
@@ -1897,7 +2045,18 @@ lua_cryptobox_encrypt_memory (lua_State *L)
 	res->len = outlen;
 	rspamd_lua_setclass (L, "rspamd{text}", -1);
 
+	if (owned_pk) {
+		rspamd_pubkey_unref (pk);
+	}
+
 	return 1;
+err:
+
+	if (owned_pk) {
+		rspamd_pubkey_unref (pk);
+	}
+
+	return luaL_error (L, "invalid arguments");
 }
 
 /***
@@ -1914,11 +2073,12 @@ lua_cryptobox_encrypt_file (lua_State *L)
 	struct rspamd_cryptobox_keypair *kp = NULL;
 	struct rspamd_cryptobox_pubkey *pk = NULL;
 	const gchar *filename;
-	gchar *data;
+	gchar *data = NULL;
 	guchar *out = NULL;
 	struct rspamd_lua_text *res;
 	gsize len = 0, outlen = 0;
 	GError *err = NULL;
+	bool own_pk = false;
 
 	if (lua_type (L, 1) == LUA_TUSERDATA) {
 		if (rspamd_lua_check_udata_maybe (L, 1, "rspamd{cryptobox_keypair}")) {
@@ -1936,13 +2096,14 @@ lua_cryptobox_encrypt_file (lua_State *L)
 		pk = rspamd_pubkey_from_base32 (b32, blen, RSPAMD_KEYPAIR_KEX,
 				lua_toboolean (L, 3) ?
 				RSPAMD_CRYPTOBOX_MODE_NIST : RSPAMD_CRYPTOBOX_MODE_25519);
+		own_pk = true;
 	}
 
 	filename = luaL_checkstring (L, 2);
 	data = rspamd_file_xmap (filename, PROT_READ, &len, TRUE);
 
 	if (!(kp || pk) || !data) {
-		return luaL_error (L, "invalid arguments");
+		goto err;
 	}
 
 	if (kp) {
@@ -1951,6 +2112,9 @@ lua_cryptobox_encrypt_file (lua_State *L)
 					err->message);
 			g_error_free (err);
 			munmap (data, len);
+			if (own_pk) {
+				rspamd_pubkey_unref (pk);
+			}
 
 			return ret;
 		}
@@ -1962,6 +2126,10 @@ lua_cryptobox_encrypt_file (lua_State *L)
 			g_error_free (err);
 			munmap (data, len);
 
+			if (own_pk) {
+				rspamd_pubkey_unref (pk);
+			}
+
 			return ret;
 		}
 	}
@@ -1972,8 +2140,20 @@ lua_cryptobox_encrypt_file (lua_State *L)
 	res->len = outlen;
 	rspamd_lua_setclass (L, "rspamd{text}", -1);
 	munmap (data, len);
+	if (own_pk) {
+		rspamd_pubkey_unref (pk);
+	}
 
 	return 1;
+
+err:
+	if (data) {
+		munmap (data, len);
+	}
+	if (own_pk) {
+		rspamd_pubkey_unref (pk);
+	}
+	return luaL_error (L, "invalid arguments");
 }
 
 /***
@@ -2052,12 +2232,15 @@ lua_cryptobox_decrypt_file (lua_State *L)
 	GError *err = NULL;
 
 	kp = lua_check_cryptobox_keypair (L, 1);
+	if (!kp) {
+		return luaL_error (L, "invalid arguments; keypair is expected");
+	}
+
 	filename = luaL_checkstring (L, 2);
 	data = rspamd_file_xmap (filename, PROT_READ, &len, TRUE);
-
-
-	if (!kp || !data) {
-		return luaL_error (L, "invalid arguments");
+	if (!data) {
+		return luaL_error (L, "invalid arguments; cannot mmap %s: %s",
+				filename, strerror(errno));
 	}
 
 	if (!rspamd_keypair_decrypt (kp, data, len, &out, &outlen, &err)) {
@@ -2320,6 +2503,7 @@ lua_cryptobox_pbkdf (lua_State *L)
 
 	if (pwlen == 0) {
 		lua_pushnil (L);
+		g_free (password);
 
 		return 1;
 	}

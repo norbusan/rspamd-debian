@@ -48,8 +48,8 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
     var neighbours = []; // list of clusters
     var checked_server = "All SERVERS";
     var timer_id = [];
+    var locale = null;
     var selData = null; // Graph's dataset selector state
-    var symbolDescriptions = {};
 
     NProgress.configure({
         minimum: 0.01,
@@ -209,17 +209,6 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         }, (id === "#autoRefresh") ? 0 : 1000);
     }
 
-    function drawTooltips() {
-        // Update symbol description tooltips
-        $.each(symbolDescriptions, function (key, description) {
-            $("abbr[data-sym-key=" + key + "]").tooltip({
-                placement: "bottom",
-                html: true,
-                title: description
-            });
-        });
-    }
-
     function getPassword() {
         return sessionStorage.getItem("Password");
     }
@@ -273,7 +262,9 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
 
     function unix_time_format(tm) {
         var date = new Date(tm ? tm * 1000 : 0);
-        return date.toLocaleString();
+        return (locale)
+            ? date.toLocaleString(locale)
+            : date.toLocaleString();
     }
 
     function displayUI() {
@@ -295,21 +286,22 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                 });
                 if (!ui.read_only) tab_selectors.displayUI(ui);
             },
+            complete: function () {
+                if (ui.read_only) {
+                    $(".ro-disable").attr("disabled", true);
+                    $(".ro-hide").hide();
+                } else {
+                    $(".ro-disable").removeAttr("disabled", true);
+                    $(".ro-hide").show();
+                }
+
+                $("#preloader").addClass("d-none");
+                $("#navBar, #mainUI").removeClass("d-none");
+                $(".nav-tabs-sticky").stickyTabs({initialTab:"#status_nav"});
+            },
             errorMessage: "Cannot get server status",
             server: "All SERVERS"
         });
-
-        if (ui.read_only) {
-            $(".ro-disable").attr("disabled", true);
-            $(".ro-hide").hide();
-        } else {
-            $(".ro-disable").removeAttr("disabled", true);
-            $(".ro-hide").show();
-        }
-
-        $("#preloader").addClass("d-none");
-        $("#navBar, #mainUI").removeClass("d-none");
-        $(".nav-tabs-sticky").stickyTabs({initialTab:"#status_nav"});
     }
 
     function alertMessage(alertClass, alertText) {
@@ -406,6 +398,91 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
     // Public functions
     ui.alertMessage = alertMessage;
     ui.setup = function () {
+        (function initSettings() {
+            var selected_locale = null;
+            var custom_locale = null;
+            var localeTextbox = ".popover #settings-popover #locale";
+
+            function validateLocale(saveToLocalStorage) {
+                function toggle_form_group_class(remove, add) {
+                    $(localeTextbox).removeClass("is-" + remove).addClass("is-" + add);
+                }
+
+                var now = new Date();
+
+                if (custom_locale.length) {
+                    try {
+                        now.toLocaleString(custom_locale);
+
+                        if (saveToLocalStorage) localStorage.setItem("custom_locale", custom_locale);
+                        locale = (selected_locale === "custom") ? custom_locale : null;
+                        toggle_form_group_class("invalid", "valid");
+                    } catch (err) {
+                        locale = null;
+                        toggle_form_group_class("valid", "invalid");
+                    }
+                } else {
+                    if (saveToLocalStorage) localStorage.setItem("custom_locale", null);
+                    locale = null;
+                    $(localeTextbox).removeClass("is-valid is-invalid");
+                }
+
+                // Display date example
+                $(".popover #settings-popover #date-example").text(
+                    (locale)
+                        ? now.toLocaleString(locale)
+                        : now.toLocaleString()
+                );
+            }
+
+            $("#settings").popover({
+                container: "body",
+                placement: "bottom",
+                html: true,
+                sanitize: false,
+                content: function () {
+                    // Using .clone() has the side-effect of producing elements with duplicate id attributes.
+                    return $("#settings-popover").clone();
+                }
+            // Restore the tooltip of the element that the popover is attached to.
+            }).attr("title", function () {
+                return $(this).attr("data-original-title");
+            });
+            $("#settings").on("click", function (e) {
+                e.preventDefault();
+            });
+            $("#settings").on("inserted.bs.popover", function () {
+                selected_locale = localStorage.getItem("selected_locale") || "browser";
+                custom_locale = localStorage.getItem("custom_locale") || "";
+                validateLocale();
+
+                $('.popover #settings-popover input:radio[name="locale"]').val([selected_locale]);
+                $(localeTextbox).val(custom_locale);
+            });
+            $(document).on("change", '.popover #settings-popover input:radio[name="locale"]', function () {
+                selected_locale = this.value;
+                localStorage.setItem("selected_locale", selected_locale);
+                validateLocale();
+            });
+            $(document).on("input", ".popover #settings-popover #locale", function () {
+                custom_locale = $(localeTextbox).val();
+                validateLocale(true);
+            });
+
+            // Dismiss Bootstrap popover by clicking outside
+            $("body").on("click", function (e) {
+                $(".popover").each(function () {
+                    if (
+                        // Popover's descendant
+                        $(this).has(e.target).length ||
+                        // Button (or icon within a button) that triggers the popover.
+                        $(e.target).closest("button").attr("aria-describedby") === this.id
+                    ) return;
+                    $(this).popover("hide");
+                });
+            });
+        }());
+
         $("#selData").change(function () {
             selData = this.value;
             tabClick("#throughput_nav");
@@ -424,12 +501,12 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
             }, 1000);
         });
 
-        $('a[data-toggle="tab"]').on("shown.bs.tab", function (e) {
-            tabClick("#" + $(e.target).attr("id"));
+        $('a[data-toggle="tab"]').on("shown.bs.tab", function () {
+            tabClick("#" + $(this).attr("id"));
         });
         $("#refresh, #disconnect").on("click", function (e) {
             e.preventDefault();
-            tabClick("#" + $(e.target).attr("id"));
+            tabClick("#" + $(this).attr("id"));
         });
         $(".dropdown-menu a").click(function (e) {
             e.preventDefault();
@@ -468,7 +545,6 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         $.ajax({
             type: "GET",
             url: "stat",
-            async: false,
             success: function () {
                 displayUI();
             },
@@ -691,7 +767,6 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
 
     // Scan and History shared functions
 
-    ui.drawTooltips = drawTooltips;
     ui.unix_time_format = unix_time_format;
     ui.set_page_size = set_page_size;
 
@@ -703,7 +778,6 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                 var cell_val = sort_symbols(ui.symbols[table][i], compare_function);
                 row.cells[symbolsCol].val(cell_val, false, true);
             });
-            drawTooltips();
         }
 
         $("#selSymOrder_" + table).unbind().change(function () {
@@ -810,10 +884,6 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                 filtering: FooTable.actionFilter
             },
             on: {
-                "ready.ft.table": drawTooltips,
-                "after.ft.sorting": drawTooltips,
-                "after.ft.paging": drawTooltips,
-                "after.ft.filtering": drawTooltips,
                 "expand.ft.row": function (e, ft, row) {
                     setTimeout(function () {
                         var detail_row = row.$el.next();
@@ -947,18 +1017,15 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                 }
 
                 rspamd.preprocess_item(rspamd, item);
-                Object.keys(item.symbols).forEach(function (key) {
-                    var sym = item.symbols[key];
+                Object.values(item.symbols).forEach(function (sym) {
                     sym.str = '<span class="symbol-default ' + get_symbol_class(sym.name, sym.score) + '"><strong>';
 
                     if (sym.description) {
-                        sym.str += '<abbr data-sym-key="' + key + '">' +
-                            sym.name + "</abbr></strong> (" + sym.score + ")</span>";
-                        // Store description for tooltip
-                        symbolDescriptions[key] = sym.description;
+                        sym.str += '<abbr title="' + sym.description + '">' + sym.name + "</abbr>";
                     } else {
-                        sym.str += sym.name + "</strong> (" + sym.score + ")</span>";
+                        sym.str += sym.name;
                     }
+                    sym.str += "</strong> (" + sym.score + ")</span>";
 
                     if (sym.options) {
                         sym.str += " [" + sym.options.join(",") + "]";

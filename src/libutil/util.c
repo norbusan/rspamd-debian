@@ -1059,9 +1059,6 @@ rspamd_file_lock (gint fd, gboolean async)
 		if (async && (errno == EAGAIN || errno == EACCES)) {
 			return FALSE;
 		}
-		if (errno != ENOTSUP) {
-			msg_warn ("lock on file failed: %s", strerror (errno));
-		}
 
 		return FALSE;
 	}
@@ -1084,9 +1081,6 @@ rspamd_file_unlock (gint fd, gboolean async)
 			return FALSE;
 		}
 
-		if (errno != ENOTSUP) {
-			msg_warn ("unlock on file failed: %s", strerror (errno));
-		}
 		return FALSE;
 	}
 
@@ -1364,10 +1358,7 @@ read_pass_tmp_sig_handler (int s)
 gint
 rspamd_read_passphrase (gchar *buf, gint size, gint rwflag, gpointer key)
 {
-#ifdef HAVE_PASSPHRASE_H
-	gint len = 0;
-	gchar pass[BUFSIZ];
-
+#ifdef HAVE_READPASSPHRASE_H
 	if (readpassphrase ("Enter passphrase: ", buf, size, RPP_ECHO_OFF |
 		RPP_REQUIRE_TTY) == NULL) {
 		return 0;
@@ -1766,7 +1757,19 @@ rspamd_random_double (void)
 }
 
 
-static guint64 xorshifto_seed[4];
+static guint64*
+xorshifto_seed (void)
+{
+	static guint64 xorshifto_seed[4];
+	static bool initialized = false;
+
+	if (G_UNLIKELY(!initialized)) {
+		ottery_rand_bytes((void *)xorshifto_seed, sizeof (xorshifto_seed));
+		initialized = true;
+	}
+
+	return xorshifto_seed;
+}
 
 static inline guint64
 xoroshiro_rotl (const guint64 x, int k) {
@@ -1776,7 +1779,7 @@ xoroshiro_rotl (const guint64 x, int k) {
 gdouble
 rspamd_random_double_fast (void)
 {
-	return rspamd_random_double_fast_seed (xorshifto_seed);
+	return rspamd_random_double_fast_seed (xorshifto_seed());
 }
 
 /* xoshiro256+ */
@@ -1822,13 +1825,13 @@ rspamd_random_uint64_fast_seed (guint64 seed[4])
 guint64
 rspamd_random_uint64_fast (void)
 {
-	return rspamd_random_uint64_fast_seed (xorshifto_seed);
+	return rspamd_random_uint64_fast_seed (xorshifto_seed());
 }
 
 void
 rspamd_random_seed_fast (void)
 {
-	ottery_rand_bytes (xorshifto_seed, sizeof (xorshifto_seed));
+	(void)xorshifto_seed();
 }
 
 gdouble
@@ -1912,9 +1915,11 @@ rspamd_file_xopen (const char *fname, int oflags, guint mode,
 #endif
 
 #ifndef HAVE_OCLOEXEC
+	int serrno;
 	if (fcntl (fd, F_SETFD, FD_CLOEXEC) == -1) {
-		msg_warn ("fcntl failed: %d, '%s'", errno, strerror (errno));
+		serrno = errno;
 		close (fd);
+		errno = serrno;
 
 		return -1;
 	}
@@ -2414,12 +2419,12 @@ rspamd_set_counter (struct rspamd_counter_data *cd, gdouble value)
 	return cd->mean;
 }
 
-double
+float
 rspamd_set_counter_ema (struct rspamd_counter_data *cd,
-		gdouble value,
-		gdouble alpha)
+		float value,
+		float alpha)
 {
-	gdouble diff, incr;
+	float diff, incr;
 
 	/* Cumulative moving average using per-process counter data */
 	if (cd->number == 0) {
@@ -2430,7 +2435,7 @@ rspamd_set_counter_ema (struct rspamd_counter_data *cd,
 	diff = value - cd->mean;
 	incr = diff * alpha;
 	cd->mean += incr;
-	cd->stddev = (1 - alpha) * (cd->stddev + diff * incr);
+	cd->stddev = (1.0f - alpha) * (cd->stddev + diff * incr);
 	cd->number ++;
 
 	return cd->mean;

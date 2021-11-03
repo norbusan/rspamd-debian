@@ -17,7 +17,7 @@
 #include "util.h"
 #include "rspamd.h"
 #include "message.h"
-#include "html.h"
+#include "libserver/html/html.h"
 #include "images.h"
 #include "archives.h"
 #include "tokenizers/tokenizers.h"
@@ -39,6 +39,7 @@
 #include "lua/lua_common.h"
 #include "contrib/uthash/utlist.h"
 #include "contrib/t1ha/t1ha.h"
+#include "received.h"
 
 #define GTUBE_SYMBOL "GTUBE"
 
@@ -229,7 +230,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 		struct rspamd_mime_text_part *part)
 {
 	const gchar *p = begin, *c = begin;
-	gboolean crlf_added = FALSE;
+	gboolean crlf_added = FALSE, is_utf = IS_TEXT_PART_UTF (part);
 	gboolean url_open_bracket = FALSE;
 	UChar32 uc;
 
@@ -240,7 +241,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 	} state = normal_char;
 
 	while (p < pe) {
-		if (IS_TEXT_PART_UTF (part)) {
+		if (U8_IS_LEAD(*p) && is_utf) {
 			gint32 off = p - begin;
 			U8_NEXT (begin, off, pe - begin, uc);
 
@@ -284,7 +285,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 			 */
 			break;
 		}
-		else if (G_UNLIKELY (*p) == '\r') {
+		else if (*p == '\r') {
 			switch (state) {
 			case normal_char:
 				state = seen_cr;
@@ -321,7 +322,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 
 			p ++;
 		}
-		else if (G_UNLIKELY (*p == '\n')) {
+		else if (*p == '\n') {
 			switch (state) {
 			case normal_char:
 				state = seen_lf;
@@ -392,7 +393,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 
 			switch (state) {
 			case normal_char:
-				if (G_UNLIKELY (*p) == ' ') {
+				if (*p == ' ') {
 					part->spaces ++;
 
 					if (p > begin && *(p - 1) == ' ') {
@@ -402,7 +403,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 				else {
 					part->non_spaces ++;
 
-					if (G_UNLIKELY (*p & 0x80)) {
+					if ((*p) & 0x80) {
 						part->non_ascii_chars ++;
 					}
 					else {
@@ -427,7 +428,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 				}
 
 				/* Skip initial spaces */
-				if (G_UNLIKELY (*p == ' ')) {
+				if (*p == ' ') {
 					if (!crlf_added) {
 						g_byte_array_append (part->utf_stripped_content,
 								(const guint8 *)" ", 1);
@@ -445,7 +446,7 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 				}
 
 				state = normal_char;
-				break;
+				continue;
 			}
 
 			p ++;
@@ -464,17 +465,17 @@ rspamd_strip_newlines_parse (struct rspamd_task *task,
 					(const guint8 *)c, p - c);
 
 			while (c < p) {
-				if (G_UNLIKELY (*c) == ' ') {
+				if (*c == ' ') {
 					part->spaces ++;
 
-					if (*(c - 1) == ' ') {
+					if (c > begin && *(c - 1) == ' ') {
 						part->double_spaces ++;
 					}
 				}
 				else {
 					part->non_spaces ++;
 
-					if (G_UNLIKELY (*c & 0x80)) {
+					if ((*c) & 0x80) {
 						part->non_ascii_chars ++;
 					}
 					else {
@@ -522,10 +523,10 @@ rspamd_normalize_text_part (struct rspamd_task *task,
 		part->utf_stripped_content = g_byte_array_new ();
 	}
 	else {
-		part->utf_stripped_content = g_byte_array_sized_new (part->utf_content->len);
+		part->utf_stripped_content = g_byte_array_sized_new (part->utf_content.len);
 
-		p = (const gchar *)part->utf_content->data;
-		end = p + part->utf_content->len;
+		p = (const gchar *)part->utf_content.begin;
+		end = p + part->utf_content.len;
 
 		rspamd_strip_newlines_parse (task, p, end, part);
 
@@ -668,10 +669,10 @@ rspamd_check_gtube (struct rspamd_task *task, struct rspamd_mime_text_part *part
 		g_assert (rspamd_multipattern_compile (gtube_matcher, NULL));
 	}
 
-	if (part->utf_content && part->utf_content->len >= sizeof (gtube_pattern_reject) &&
-			part->utf_content->len <= max_check_size) {
-		if ((ret = rspamd_multipattern_lookup (gtube_matcher, part->utf_content->data,
-				part->utf_content->len,
+	if (part->utf_content.len >= sizeof (gtube_pattern_reject) &&
+			part->utf_content.len <= max_check_size) {
+		if ((ret = rspamd_multipattern_lookup (gtube_matcher, part->utf_content.begin,
+				part->utf_content.len,
 				rspamd_multipattern_gtube_cb, task, NULL)) > 0) {
 
 			switch (ret) {
@@ -696,9 +697,9 @@ rspamd_check_gtube (struct rspamd_task *task, struct rspamd_mime_text_part *part
 				task->flags |= RSPAMD_TASK_FLAG_SKIP;
 				task->flags |= RSPAMD_TASK_FLAG_GTUBE;
 				msg_info_task (
-						"gtube %s pattern has been found in part of length %ud",
+						"gtube %s pattern has been found in part of length %uz",
 						rspamd_action_to_str (act),
-						part->utf_content->len);
+						part->utf_content.len);
 			}
 		}
 	}
@@ -728,13 +729,16 @@ rspamd_message_process_plain_text_part (struct rspamd_task *task,
 
 	if (text_part->utf_raw_content != NULL) {
 		/* Just have the same content */
-		text_part->utf_content = text_part->utf_raw_content;
+		text_part->utf_content.begin = (const gchar *)text_part->utf_raw_content->data;
+		text_part->utf_content.len = text_part->utf_raw_content->len;
 	}
 	else {
 		/*
 		 * We ignore unconverted parts from now as it is dangerous
 		 * to treat them as text parts
 		 */
+		text_part->utf_content.begin = NULL;
+		text_part->utf_content.len = 0;
 
 		return FALSE;
 	}
@@ -760,24 +764,19 @@ rspamd_message_process_html_text_part (struct rspamd_task *task,
 		return FALSE;
 	}
 
-	text_part->html = rspamd_mempool_alloc0 (task->task_pool,
-			sizeof (*text_part->html));
-	text_part->flags |= RSPAMD_MIME_TEXT_PART_FLAG_BALANCED;
-	text_part->utf_content = rspamd_html_process_part_full (
+
+	text_part->html = rspamd_html_process_part_full (
 			task->task_pool,
-			text_part->html,
 			text_part->utf_raw_content,
 			&text_part->exceptions,
 			MESSAGE_FIELD (task, urls),
-			text_part->mime_part->urls);
+			text_part->mime_part->urls,
+			task->cfg ? task->cfg->enable_css_parser : true);
+	rspamd_html_get_parsed_content(text_part->html, &text_part->utf_content);
 
-	if (text_part->utf_content->len == 0) {
+	if (text_part->utf_content.len == 0) {
 		text_part->flags |= RSPAMD_MIME_TEXT_PART_FLAG_EMPTY;
 	}
-
-	rspamd_mempool_add_destructor (task->task_pool,
-			(rspamd_mempool_destruct_t) free_byte_array_callback,
-			text_part->utf_content);
 
 	return TRUE;
 }
@@ -1116,7 +1115,6 @@ rspamd_message_new (struct rspamd_task *task)
 gboolean
 rspamd_message_parse (struct rspamd_task *task)
 {
-	struct rspamd_received_header *recv, *trecv;
 	const gchar *p;
 	gsize len;
 	guint i;
@@ -1223,86 +1221,7 @@ rspamd_message_parse (struct rspamd_task *task)
 		task->queue_id = "undef";
 	}
 
-	if (MESSAGE_FIELD (task, received)) {
-		gboolean need_recv_correction = FALSE;
-		rspamd_inet_addr_t *raddr;
-
-		recv = MESSAGE_FIELD (task, received);
-		/*
-		 * For the first header we must ensure that
-		 * received is consistent with the IP that we obtain through
-		 * client.
-		 */
-
-		raddr = recv->addr;
-		if (recv->real_ip == NULL || (task->cfg && task->cfg->ignore_received)) {
-			need_recv_correction = TRUE;
-		}
-		else if (!(task->flags & RSPAMD_TASK_FLAG_NO_IP) && task->from_addr) {
-			if (!raddr) {
-				need_recv_correction = TRUE;
-			}
-			else {
-				if (rspamd_inet_address_compare (raddr, task->from_addr, FALSE) != 0) {
-					need_recv_correction = TRUE;
-				}
-			}
-		}
-
-		if (need_recv_correction && !(task->flags & RSPAMD_TASK_FLAG_NO_IP)
-				&& task->from_addr) {
-			msg_debug_task ("the first received seems to be"
-					" not ours, prepend it with fake one");
-
-			trecv = rspamd_mempool_alloc0 (task->task_pool,
-					sizeof (struct rspamd_received_header));
-			trecv->flags |= RSPAMD_RECEIVED_FLAG_ARTIFICIAL;
-
-			if (task->flags & RSPAMD_TASK_FLAG_SSL) {
-				trecv->flags |= RSPAMD_RECEIVED_FLAG_SSL;
-			}
-
-			if (task->user) {
-				trecv->flags |= RSPAMD_RECEIVED_FLAG_AUTHENTICATED;
-			}
-
-			trecv->real_ip = rspamd_mempool_strdup (task->task_pool,
-					rspamd_inet_address_to_string (task->from_addr));
-			trecv->from_ip = trecv->real_ip;
-			trecv->by_hostname = rspamd_mempool_get_variable (task->task_pool,
-					RSPAMD_MEMPOOL_MTA_NAME);
-			trecv->addr = rspamd_inet_address_copy (task->from_addr);
-			rspamd_mempool_add_destructor (task->task_pool,
-					(rspamd_mempool_destruct_t)rspamd_inet_address_free,
-					trecv->addr);
-
-			if (task->hostname) {
-				trecv->real_hostname = task->hostname;
-				trecv->from_hostname = trecv->real_hostname;
-			}
-
-			DL_PREPEND (MESSAGE_FIELD (task, received), trecv);
-		}
-	}
-
-	/* Extract data from received header if we were not given IP */
-	if (MESSAGE_FIELD (task, received) && (task->flags & RSPAMD_TASK_FLAG_NO_IP) &&
-			(task->cfg && !task->cfg->ignore_received)) {
-		recv = MESSAGE_FIELD (task, received);
-		if (recv->real_ip) {
-			if (!rspamd_parse_inet_address (&task->from_addr,
-					recv->real_ip,
-					strlen (recv->real_ip),
-					RSPAMD_INET_ADDRESS_PARSE_NO_UNIX)) {
-				msg_warn_task ("cannot get IP from received header: '%s'",
-						recv->real_ip);
-				task->from_addr = NULL;
-			}
-		}
-		if (recv->real_hostname) {
-			task->hostname = recv->real_hostname;
-		}
-	}
+	rspamd_received_maybe_fix_task(task);
 
 	struct rspamd_mime_part *part;
 
@@ -1448,6 +1367,19 @@ rspamd_message_process (struct rspamd_task *task)
 						part->detected_type = rspamd_mempool_strdup (task->task_pool,
 								lua_tostring (L, -1));
 					}
+
+					lua_pop (L, 1);
+
+					lua_pushstring (L, "no_text");
+					lua_gettable (L, -2);
+
+					if (lua_isboolean (L, -1)) {
+						if (!!lua_toboolean (L, -1)) {
+							part->flags |= RSPAMD_MIME_PART_NO_TEXT_EXTRACTION;
+						}
+					}
+
+					lua_pop (L, 1);
 				}
 			}
 
@@ -1481,7 +1413,8 @@ rspamd_message_process (struct rspamd_task *task)
 		rspamd_images_process_mime_part_maybe (task, part);
 
 		/* Still no content detected, try text heuristic */
-		if (part->part_type == RSPAMD_MIME_PART_UNDEFINED) {
+		if (part->part_type == RSPAMD_MIME_PART_UNDEFINED &&
+				!(part->flags & RSPAMD_MIME_PART_NO_TEXT_EXTRACTION)) {
 			rspamd_message_process_text_part_maybe (task, part);
 		}
 	}
@@ -1545,7 +1478,7 @@ rspamd_message_process (struct rspamd_task *task)
 						sel = p2;
 					}
 					else {
-						if (p1->utf_content->len > p2->utf_content->len) {
+						if (p1->utf_content.len > p2->utf_content.len) {
 							sel = p1;
 						}
 						else {

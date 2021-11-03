@@ -1051,27 +1051,26 @@ exports.shallowcopy = function(orig)
 end
 
 -- Debugging support
-local unconditional_debug = false
+local logger = require "rspamd_logger"
+local unconditional_debug = logger.log_level() == 'debug'
 local debug_modules = {}
 local debug_aliases = {}
 local log_level = 384 -- debug + forced (1 << 7 | 1 << 8)
 
 
 exports.init_debug_logging = function(config)
-  local logger = require "rspamd_logger"
   -- Fill debug modules from the config
-  local logging = config:get_all_opt('logging')
-  if logging then
-    local log_level_str = logging.level
-    if log_level_str then
-      if log_level_str == 'debug' then
-        unconditional_debug = true
+  if not unconditional_debug then
+    local log_config = config:get_all_opt('logging')
+    if log_config then
+      local log_level_str = log_config.level
+      if log_level_str then
+        if log_level_str == 'debug' then
+          unconditional_debug = true
+        end
       end
-    end
-
-    if not unconditional_debug then
-      if logging.debug_modules then
-        for _,m in ipairs(logging.debug_modules) do
+      if log_config.debug_modules then
+        for _,m in ipairs(log_config.debug_modules) do
           debug_modules[m] = true
           logger.infox(config, 'enable debug for Lua module %s', m)
         end
@@ -1094,6 +1093,12 @@ exports.enable_debug_logging = function()
   unconditional_debug = true
 end
 
+exports.enable_debug_modules = function(...)
+  for _,m in ipairs({...}) do
+    debug_modules[m] = true
+  end
+end
+
 exports.disable_debug_logging = function()
   unconditional_debug = false
 end
@@ -1103,7 +1108,6 @@ end
 -- Performs fast debug log for a specific module
 --]]
 exports.debugm = function(mod, obj_or_fmt, fmt_or_something, ...)
-  local logger = require "rspamd_logger"
   if unconditional_debug or debug_modules[mod] then
     if type(obj_or_fmt) == 'string' then
       logger.logx(log_level, mod, '', 2, obj_or_fmt, fmt_or_something, ...)
@@ -1118,7 +1122,6 @@ end
 -- Add debugging alias so logging to `alias` will be treated as logging to `mod`
 --]]
 exports.add_debug_alias = function(mod, alias)
-  local logger = require "rspamd_logger"
   debug_aliases[alias] = mod
 
   if debug_modules[mod] then
@@ -1453,6 +1456,21 @@ exports.maybe_smtp_quote_value = function(str)
   end
 
   return str
+end
+
+---[[[
+-- @function lua_util.shuffle(table)
+-- Performs in-place shuffling of a table
+-- @param {table} tbl table to shuffle
+-- @return {table} same table
+--]]]
+exports.shuffle = function(tbl)
+  local size = #tbl
+  for i = size, 1, -1 do
+    local rand = math.random(size)
+    tbl[i], tbl[rand] = tbl[rand], tbl[i]
+  end
+  return tbl
 end
 
 return exports

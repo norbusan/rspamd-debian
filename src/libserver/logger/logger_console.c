@@ -28,6 +28,7 @@ static const gchar lf_chr = '\n';
 struct rspamd_console_logger_priv {
 	gint fd;
 	gint crit_fd;
+	gboolean log_severity;
 	gboolean log_color;
 	gboolean log_rspamadm;
 	gboolean log_tty;
@@ -63,6 +64,7 @@ rspamd_log_console_init (rspamd_logger_t *logger, struct rspamd_config *cfg,
 
 	priv = g_malloc0 (sizeof (*priv));
 	priv->log_color = (logger->flags & RSPAMD_LOG_FLAG_COLOR);
+	priv->log_severity = (logger->flags & RSPAMD_LOG_FLAG_SEVERITY);
 	priv->log_rspamadm = (logger->flags & RSPAMD_LOG_FLAG_RSPAMADM);
 
 	if (priv->log_rspamadm) {
@@ -165,7 +167,12 @@ rspamd_log_console_log (const gchar *module, const gchar *id,
 		fd = priv->crit_fd;
 	}
 	else {
-		fd = priv->fd;
+		if (priv->log_rspamadm && (level_flags & G_LOG_LEVEL_WARNING)) {
+			fd = priv->crit_fd;
+		}
+		else {
+			fd = priv->fd;
+		}
 	}
 
 #ifndef DISABLE_PTHREAD_MUTEX
@@ -219,12 +226,23 @@ rspamd_log_console_log (const gchar *module, const gchar *id,
 	}
 	else {
 		if (!(rspamd_log->flags & RSPAMD_LOG_FLAG_SYSTEMD)) {
-			r += rspamd_snprintf (tmpbuf + r,
-					sizeof (tmpbuf) - r,
-					"%s #%P(%s) ",
-					timebuf,
-					rspamd_log->pid,
-					rspamd_log->process_type);
+			if (priv->log_severity) {
+				r += rspamd_snprintf(tmpbuf + r,
+						sizeof(tmpbuf) - r,
+						"%s [%s] #%P(%s) ",
+						timebuf,
+						rspamd_get_log_severity_string (level_flags),
+						rspamd_log->pid,
+						rspamd_log->process_type);
+			}
+			else {
+				r += rspamd_snprintf(tmpbuf + r,
+						sizeof(tmpbuf) - r,
+						"%s #%P(%s) ",
+						timebuf,
+						rspamd_log->pid,
+						rspamd_log->process_type);
+			}
 		} else {
 			r += rspamd_snprintf (tmpbuf + r,
 					sizeof (tmpbuf) - r,
@@ -259,6 +277,11 @@ rspamd_log_console_log (const gchar *module, const gchar *id,
 			mr = rspamd_snprintf (m, mremain, ": ");
 			m += mr;
 			mremain -= mr;
+		}
+
+		/* Ensure that we have a space at the end */
+		if (m > modulebuf && *(m - 1) != ' ') {
+			*(m - 1) = ' ';
 		}
 
 		iov[niov].iov_base = tmpbuf;

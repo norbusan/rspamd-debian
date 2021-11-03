@@ -21,7 +21,7 @@ local ansicolors = require "ansicolors"
 local bit = require "bit"
 
 local parser = argparse()
-    :name "rspamadm dns_tool"
+    :name "rspamadm dnstool"
     :description "DNS tools provided by Rspamd"
     :help_description_margin(30)
     :command_target("command")
@@ -34,7 +34,7 @@ parser:option "-c --config"
 
 local spf = parser:command "spf"
                       :description "Extracts spf records"
-parser:mutex(
+spf:mutex(
     spf:option "-d --domain"
        :description "Domain to use"
        :argname("<domain>"),
@@ -95,6 +95,8 @@ local function spf_handler(opts)
   if opts.ip then
     opts.ip = rspamd_ip.fromstring(opts.ip)
     task:set_from_ip(opts.ip)
+  else
+    opts.all = true
   end
 
   if opts.from then

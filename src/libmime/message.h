@@ -26,14 +26,14 @@ extern "C" {
 
 struct rspamd_task;
 struct controller_session;
-struct html_content;
 struct rspamd_image;
 struct rspamd_archive;
 
 enum rspamd_mime_part_flags {
-	RSPAMD_MIME_PART_ATTACHEMENT = (1 << 1),
-	RSPAMD_MIME_PART_BAD_CTE = (1 << 4),
-	RSPAMD_MIME_PART_MISSING_CTE = (1 << 5),
+	RSPAMD_MIME_PART_ATTACHEMENT = (1u << 1u),
+	RSPAMD_MIME_PART_BAD_CTE = (1u << 4u),
+	RSPAMD_MIME_PART_MISSING_CTE = (1u << 5u),
+	RSPAMD_MIME_PART_NO_TEXT_EXTRACTION = (1u << 6u),
 };
 
 enum rspamd_mime_part_type {
@@ -113,14 +113,11 @@ struct rspamd_mime_part {
 };
 
 #define RSPAMD_MIME_TEXT_PART_FLAG_UTF (1 << 0)
-#define RSPAMD_MIME_TEXT_PART_FLAG_BALANCED (1 << 1)
-#define RSPAMD_MIME_TEXT_PART_FLAG_EMPTY (1 << 2)
-#define RSPAMD_MIME_TEXT_PART_FLAG_HTML (1 << 3)
-#define RSPAMD_MIME_TEXT_PART_FLAG_8BIT_RAW (1 << 4)
-#define RSPAMD_MIME_TEXT_PART_FLAG_8BIT_ENCODED (1 << 5)
-#define RSPAMD_MIME_TEXT_PART_HAS_SUBNORMAL (1 << 6)
-#define RSPAMD_MIME_TEXT_PART_NORMALISED (1 << 7)
-#define RSPAMD_MIME_TEXT_PART_ATTACHMENT (1 << 8)
+#define RSPAMD_MIME_TEXT_PART_FLAG_EMPTY (1 << 1)
+#define RSPAMD_MIME_TEXT_PART_FLAG_HTML (1 << 2)
+#define RSPAMD_MIME_TEXT_PART_FLAG_8BIT_RAW (1 << 3)
+#define RSPAMD_MIME_TEXT_PART_FLAG_8BIT_ENCODED (1 << 4)
+#define RSPAMD_MIME_TEXT_PART_ATTACHMENT (1 << 5)
 
 #define IS_TEXT_PART_EMPTY(part) ((part)->flags & RSPAMD_MIME_TEXT_PART_FLAG_EMPTY)
 #define IS_TEXT_PART_UTF(part) ((part)->flags & RSPAMD_MIME_TEXT_PART_FLAG_UTF)
@@ -138,7 +135,7 @@ struct rspamd_mime_text_part {
 	rspamd_ftok_t parsed; /* decoded from mime encodings */
 
 	/* UTF8 content */
-	GByteArray *utf_content; /* utf8 encoded processed content */
+	rspamd_ftok_t utf_content; /* utf8 encoded processed content */
 	GByteArray *utf_raw_content; /* utf raw content */
 	GByteArray *utf_stripped_content; /* utf content with no newlines */
 	GArray *normalized_hashes; /* Array of guint64 */
@@ -146,7 +143,7 @@ struct rspamd_mime_text_part {
 	UText utf_stripped_text; /* Used by libicu to represent the utf8 content */
 
 	GPtrArray *newlines;    /**< positions of newlines in text, relative to content*/
-	struct html_content *html;
+	void *html;
 	GList *exceptions;    /**< list of offsets of urls						*/
 	struct rspamd_mime_part *mime_part;
 
@@ -177,7 +174,7 @@ struct rspamd_message {
 	GPtrArray *parts;				/**< list of parsed parts							*/
 	GPtrArray *text_parts;			/**< list of text parts								*/
 	struct rspamd_message_raw_headers_content raw_headers_content;
-	struct rspamd_received_header *received;	/**< list of received headers						*/
+	void *received_headers;			/**< list of received headers						*/
 	khash_t (rspamd_url_hash) *urls;
 	struct rspamd_mime_headers_table *raw_headers;	/**< list of raw headers						*/
 	struct rspamd_mime_header *headers_order;	/**< order of raw headers							*/

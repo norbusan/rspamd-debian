@@ -20,7 +20,7 @@
 #include "rspamd.h"
 #include "message.h"
 #include "mime_expressions.h"
-#include "html.h"
+#include "libserver/html/html.h"
 #include "lua/lua_common.h"
 #include "utlist.h"
 
@@ -1060,28 +1060,34 @@ rspamd_mime_expr_priority (rspamd_expression_atom_t *atom)
 	switch (mime_atom->type) {
 	case MIME_ATOM_INTERNAL_FUNCTION:
 		/* Prioritize internal functions slightly */
-		ret = 50;
+		ret = RSPAMD_EXPRESSION_MAX_PRIORITY - RSPAMD_EXPRESSION_MAX_PRIORITY / 8;
 		break;
 	case MIME_ATOM_LUA_FUNCTION:
 	case MIME_ATOM_LOCAL_LUA_FUNCTION:
-		ret = 50;
+		ret = RSPAMD_EXPRESSION_MAX_PRIORITY - RSPAMD_EXPRESSION_MAX_PRIORITY / 4;
 		break;
 	case MIME_ATOM_REGEXP:
 		switch (mime_atom->d.re->type) {
 		case RSPAMD_RE_HEADER:
 		case RSPAMD_RE_RAWHEADER:
-			ret = 100;
+			ret = RSPAMD_EXPRESSION_MAX_PRIORITY - RSPAMD_EXPRESSION_MAX_PRIORITY / 16;
 			break;
 		case RSPAMD_RE_URL:
 		case RSPAMD_RE_EMAIL:
-			ret = 90;
+			ret = RSPAMD_EXPRESSION_MAX_PRIORITY - RSPAMD_EXPRESSION_MAX_PRIORITY / 8;
+			break;
+		case RSPAMD_RE_SELECTOR:
+			ret = RSPAMD_EXPRESSION_MAX_PRIORITY - RSPAMD_EXPRESSION_MAX_PRIORITY / 8;
 			break;
 		case RSPAMD_RE_MIME:
 		case RSPAMD_RE_RAWMIME:
-			ret = 10;
+			ret = RSPAMD_EXPRESSION_MAX_PRIORITY - RSPAMD_EXPRESSION_MAX_PRIORITY / 2;
 			break;
+		case RSPAMD_RE_WORDS:
+		case RSPAMD_RE_RAWWORDS:
+		case RSPAMD_RE_STEMWORDS:
 		default:
-			/* For message regexp */
+			/* For expensive regexps */
 			ret = 0;
 			break;
 		}
@@ -1264,8 +1270,8 @@ rspamd_header_exists (struct rspamd_task * task, GArray * args, void *unused)
 		return FALSE;
 	}
 
-	rh = rspamd_message_get_header_array (task,
-			(gchar *)arg->data);
+	rh = rspamd_message_get_header_array(task,
+			(gchar *) arg->data, FALSE);
 
 	debug_task ("try to get header %s: %d", (gchar *)arg->data,
 			(rh != NULL));
@@ -1564,24 +1570,8 @@ rspamd_compare_transfer_encoding (struct rspamd_task * task,
 gboolean
 rspamd_is_html_balanced (struct rspamd_task * task, GArray * args, void *unused)
 {
-	struct rspamd_mime_text_part *p;
-	guint i;
-	gboolean res = TRUE;
-
-	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, text_parts), i, p) {
-		if (IS_TEXT_PART_HTML (p)) {
-			if (p->flags & RSPAMD_MIME_TEXT_PART_FLAG_BALANCED) {
-				res = TRUE;
-			}
-			else {
-				res = FALSE;
-				break;
-			}
-		}
-	}
-
-	return res;
-
+	/* Totally broken but seems to be never used */
+	return TRUE;
 }
 
 gboolean
@@ -1625,7 +1615,7 @@ rspamd_has_fake_html (struct rspamd_task * task, GArray * args, void *unused)
 	gboolean res = FALSE;
 
 	PTR_ARRAY_FOREACH (MESSAGE_FIELD (task, text_parts), i, p) {
-		if (IS_TEXT_PART_HTML (p) && (p->html == NULL || p->html->html_tags == NULL)) {
+		if (IS_TEXT_PART_HTML (p) && (rspamd_html_get_tags_count(p->html) < 2)) {
 			res = TRUE;
 		}
 
@@ -1653,7 +1643,7 @@ rspamd_raw_header_exists (struct rspamd_task *task, GArray * args, void *unused)
 		return FALSE;
 	}
 
-	return rspamd_message_get_header_array (task, arg->data) != NULL;
+	return rspamd_message_get_header_array(task, arg->data, FALSE) != NULL;
 }
 
 static gboolean

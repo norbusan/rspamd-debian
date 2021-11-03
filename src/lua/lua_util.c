@@ -15,7 +15,7 @@
  */
 #include "lua_common.h"
 #include "unix-std.h"
-#include "contrib/zstd/zstd.h"
+#include "lua_compress.h"
 #include "libmime/email_addr.h"
 #include "libmime/content_type.h"
 #include "libmime/mime_headers.h"
@@ -29,7 +29,6 @@
 
 #include <math.h>
 #include <glob.h>
-#include <zlib.h>
 
 #include "unicode/uspoof.h"
 #include "unicode/uscript.h"
@@ -240,26 +239,27 @@ LUA_FUNCTION_DEF (util, strlen_utf8);
  */
 LUA_FUNCTION_DEF (util, lower_utf8);
 
-
-/***
- * @function util.strcasecmp(str1, str2)
- * Compares two ascii strings regardless of their case. Return value >0, 0 and <0
- * if `str1` is more, equal or less than `str2`
- * @param {string} str1 plain string
- * @param {string} str2 plain string
- * @return {number} result of comparison
- */
-LUA_FUNCTION_DEF (util, strcasecmp_ascii);
-
 /***
  * @function util.strequal_caseless(str1, str2)
- * Compares two utf8 strings regardless of their case. Return `true` if `str1` is
- * equal to `str2`
+ * Compares two strings regardless of their case using ascii comparison.
+ * Returns `true` if `str1` is equal to `str2`
  * @param {string} str1 utf8 encoded string
  * @param {string} str2 utf8 encoded string
  * @return {bool} result of comparison
  */
 LUA_FUNCTION_DEF (util, strequal_caseless);
+
+
+/***
+ * @function util.strequal_caseless_utf8(str1, str2)
+ * Compares two utf8 strings regardless of their case using utf8 collation rules.
+ * Returns `true` if `str1` is equal to `str2`
+ * @param {string} str1 utf8 encoded string
+ * @param {string} str2 utf8 encoded string
+ * @return {bool} result of comparison
+ */
+LUA_FUNCTION_DEF (util, strequal_caseless_utf8);
+
 
 /***
  * @function util.get_ticks()
@@ -401,7 +401,7 @@ LUA_FUNCTION_DEF (util, gzip_decompress);
 LUA_FUNCTION_DEF (util, inflate);
 
 /***
- * @function util.gzip_compress(data)
+ * @function util.gzip_compress(data, [level=1])
  * Compresses input using gzip compression
  *
  * @param {string/rspamd_text} data input data
@@ -672,8 +672,8 @@ static const struct luaL_reg utillib_f[] = {
 	LUA_INTERFACE_DEF (util, parse_mail_address),
 	LUA_INTERFACE_DEF (util, strlen_utf8),
 	LUA_INTERFACE_DEF (util, lower_utf8),
-	LUA_INTERFACE_DEF (util, strcasecmp_ascii),
 	LUA_INTERFACE_DEF (util, strequal_caseless),
+	LUA_INTERFACE_DEF (util, strequal_caseless_utf8),
 	LUA_INTERFACE_DEF (util, get_ticks),
 	LUA_INTERFACE_DEF (util, get_time),
 	LUA_INTERFACE_DEF (util, time_to_string),
@@ -716,9 +716,14 @@ static const struct luaL_reg utillib_f[] = {
 };
 
 LUA_FUNCTION_DEF (int64, tostring);
+LUA_FUNCTION_DEF (int64, fromstring);
 LUA_FUNCTION_DEF (int64, tonumber);
 LUA_FUNCTION_DEF (int64, hex);
 
+static const struct luaL_reg int64lib_f[] = {
+		LUA_INTERFACE_DEF (int64, fromstring),
+		{NULL, NULL}
+};
 static const struct luaL_reg int64lib_m[] = {
 	LUA_INTERFACE_DEF (int64, tostring),
 	LUA_INTERFACE_DEF (int64, tonumber),
@@ -1501,7 +1506,13 @@ lua_util_glob (lua_State *L)
 		pattern = luaL_checkstring (L, i);
 
 		if (pattern) {
-			glob (pattern, flags, NULL, &gl);
+			if (glob (pattern, flags, NULL, &gl) != 0) {
+				/* There is no way to return error here, so just create an table */
+				lua_createtable (L, 0, 0);
+				globfree (&gl);
+
+				return 1;
+			}
 		}
 	}
 
@@ -1527,17 +1538,16 @@ static gint
 lua_util_strlen_utf8 (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	const gchar *str;
-	gsize len;
+	struct rspamd_lua_text *t;
 
-	str = lua_tolstring (L, 1, &len);
+	t = lua_check_text_or_string (L, 1);
 
-	if (str) {
+	if (t) {
 		gint32 i = 0, nchars = 0;
 		UChar32 uc;
 
-		while (i < len) {
-			U8_NEXT ((guint8 *) str, i, len, uc);
+		while (i < t->len) {
+			U8_NEXT ((guint8 *)t->start, i, t->len, uc);
 			nchars ++;
 		}
 
@@ -1554,59 +1564,38 @@ static gint
 lua_util_lower_utf8 (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	const gchar *str;
+	struct rspamd_lua_text *t;
+
 	gchar *dst;
-	gsize len;
 	UChar32 uc;
 	UBool err = 0;
 	gint32 i = 0, j = 0;
 
-	str = lua_tolstring (L, 1, &len);
+	t = lua_check_text_or_string (L, 1);
 
-	if (str) {
-		dst = g_malloc (len);
+	if (t) {
+		dst = g_malloc (t->len);
 
-		while (i < len && err == 0) {
-			U8_NEXT ((guint8 *) str, i, len, uc);
+		while (i < t->len && err == 0) {
+			U8_NEXT ((guint8 *) t->start, i, t->len, uc);
 			uc = u_tolower (uc);
-			U8_APPEND (dst, j, len, uc, err);
+			U8_APPEND (dst, j, t->len, uc, err);
 		}
 
-		lua_pushlstring (L, dst, j);
-		g_free (dst);
-	}
-	else {
-		return luaL_error (L, "invalid arguments");
-	}
-
-	return 1;
-}
-
-static gint
-lua_util_strcasecmp_ascii (lua_State *L)
-{
-	LUA_TRACE_POINT;
-	const gchar *str1, *str2;
-	gsize len1, len2;
-	gint ret = -1;
-
-	str1 = lua_tolstring (L, 1, &len1);
-	str2 = lua_tolstring (L, 2, &len2);
-
-	if (str1 && str2) {
-
-		if (len1 == len2) {
-			ret = g_ascii_strncasecmp (str1, str2, len1);
+		if (lua_isstring (L, 1)) {
+			lua_pushlstring (L, dst, j);
+			g_free (dst);
 		}
 		else {
-			ret = len1 - len2;
+			t = lua_new_text (L, dst, j, FALSE);
+			/* We have actually allocated text data before */
+			t->flags |= RSPAMD_TEXT_FLAG_OWN;
 		}
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
 	}
 
-	lua_pushinteger (L, ret);
 	return 1;
 }
 
@@ -1614,20 +1603,19 @@ static gint
 lua_util_strequal_caseless (lua_State *L)
 {
 	LUA_TRACE_POINT;
-	const gchar *str1, *str2;
-	gsize len1, len2;
+	struct rspamd_lua_text *t1, *t2;
 	gint ret = -1;
 
-	str1 = lua_tolstring (L, 1, &len1);
-	str2 = lua_tolstring (L, 2, &len2);
+	t1 = lua_check_text_or_string (L, 1);
+	t2 = lua_check_text_or_string (L, 2);
 
-	if (str1 && str2) {
+	if (t1 && t2) {
 
-		if (len1 == len2) {
-			ret = rspamd_lc_cmp (str1, str2, len1);
+		if (t1->len == t2->len) {
+			ret = rspamd_lc_cmp (t1->start, t2->start, t1->len);
 		}
 		else {
-			ret = len1 - len2;
+			ret = t1->len - t2->len;
 		}
 	}
 	else {
@@ -1635,6 +1623,28 @@ lua_util_strequal_caseless (lua_State *L)
 	}
 
 	lua_pushboolean (L, (ret == 0) ? true : false);
+	return 1;
+}
+
+static gint
+lua_util_strequal_caseless_utf8 (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_text *t1, *t2;
+	gint ret = -1;
+
+	t1 = lua_check_text_or_string (L, 1);
+	t2 = lua_check_text_or_string (L, 2);
+
+	if (t1 && t2) {
+		ret = rspamd_utf8_strcmp_sizes(t1->start, t1->len, t2->start, t2->len);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	lua_pushboolean (L, (ret == 0) ? true : false);
+
 	return 1;
 }
 
@@ -1950,339 +1960,31 @@ lua_util_random_hex (lua_State *L)
 static gint
 lua_util_zstd_compress (lua_State *L)
 {
-	LUA_TRACE_POINT;
-	struct rspamd_lua_text *t = NULL, *res, tmp;
-	gsize sz, r;
-	gint comp_level = 1;
-
-	if (lua_type (L, 1) == LUA_TSTRING) {
-		t = &tmp;
-		t->start = lua_tolstring (L, 1, &sz);
-		t->len = sz;
-	}
-	else {
-		t = lua_check_text (L, 1);
-	}
-
-	if (t == NULL || t->start == NULL) {
-		return luaL_error (L, "invalid arguments");
-	}
-
-	if (lua_type (L, 2) == LUA_TNUMBER) {
-		comp_level = lua_tointeger (L, 2);
-	}
-
-	sz = ZSTD_compressBound (t->len);
-
-	if (ZSTD_isError (sz)) {
-		msg_err ("cannot compress data: %s", ZSTD_getErrorName (sz));
-		lua_pushnil (L);
-
-		return 1;
-	}
-
-	res = lua_newuserdata (L, sizeof (*res));
-	res->start = g_malloc (sz);
-	res->flags = RSPAMD_TEXT_FLAG_OWN;
-	rspamd_lua_setclass (L, "rspamd{text}", -1);
-	r = ZSTD_compress ((void *)res->start, sz, t->start, t->len, comp_level);
-
-	if (ZSTD_isError (r)) {
-		msg_err ("cannot compress data: %s", ZSTD_getErrorName (r));
-		lua_pop (L, 1); /* Text will be freed here */
-		lua_pushnil (L);
-
-		return 1;
-	}
-
-	res->len = r;
-
-	return 1;
+	return lua_compress_zstd_compress (L);
 }
 
 static gint
 lua_util_zstd_decompress (lua_State *L)
 {
-	LUA_TRACE_POINT;
-	struct rspamd_lua_text *t = NULL, *res;
-	gsize outlen, sz, r;
-	ZSTD_DStream *zstream;
-	ZSTD_inBuffer zin;
-	ZSTD_outBuffer zout;
-	gchar *out;
-
-	if (lua_type (L, 1) == LUA_TSTRING) {
-		t = g_alloca (sizeof (*t));
-		t->start = lua_tolstring (L, 1, &sz);
-		t->len = sz;
-	}
-	else {
-		t = lua_check_text (L, 1);
-	}
-
-	if (t == NULL || t->start == NULL) {
-		return luaL_error (L, "invalid arguments");
-	}
-
-	zstream = ZSTD_createDStream ();
-	ZSTD_initDStream (zstream);
-
-	zin.pos = 0;
-	zin.src = t->start;
-	zin.size = t->len;
-
-	if ((outlen = ZSTD_getDecompressedSize (zin.src, zin.size)) == 0) {
-		outlen = ZSTD_DStreamOutSize ();
-	}
-
-	out = g_malloc (outlen);
-
-	zout.dst = out;
-	zout.pos = 0;
-	zout.size = outlen;
-
-	while (zin.pos < zin.size) {
-		r = ZSTD_decompressStream (zstream, &zout, &zin);
-
-		if (ZSTD_isError (r)) {
-			msg_err ("cannot decompress data: %s", ZSTD_getErrorName (r));
-			ZSTD_freeDStream (zstream);
-			g_free (out);
-			lua_pushstring (L, ZSTD_getErrorName (r));
-			lua_pushnil (L);
-
-			return 2;
-		}
-
-		if (zin.pos < zin.size && zout.pos == zout.size) {
-			/* We need to extend output buffer */
-			zout.size = zout.size * 2;
-			out = g_realloc (zout.dst, zout.size);
-			zout.dst = out;
-		}
-	}
-
-	ZSTD_freeDStream (zstream);
-	lua_pushnil (L); /* Error */
-	res = lua_newuserdata (L, sizeof (*res));
-	res->start = out;
-	res->flags = RSPAMD_TEXT_FLAG_OWN;
-	rspamd_lua_setclass (L, "rspamd{text}", -1);
-	res->len = zout.pos;
-
-	return 2;
+	return lua_compress_zstd_decompress (L);
 }
 
 static gint
 lua_util_gzip_compress (lua_State *L)
 {
-	LUA_TRACE_POINT;
-	struct rspamd_lua_text *t = NULL, *res, tmp;
-	gsize sz;
-	z_stream strm;
-	gint rc;
-	guchar *p;
-	gsize remain;
-
-	if (lua_type (L, 1) == LUA_TSTRING) {
-		t = &tmp;
-		t->start = lua_tolstring (L, 1, &sz);
-		t->len = sz;
-	}
-	else {
-		t = lua_check_text (L, 1);
-	}
-
-	if (t == NULL || t->start == NULL) {
-		return luaL_error (L, "invalid arguments");
-	}
-
-
-	memset (&strm, 0, sizeof (strm));
-	rc = deflateInit2 (&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
-			MAX_WBITS + 16, MAX_MEM_LEVEL - 1, Z_DEFAULT_STRATEGY);
-
-	if (rc != Z_OK) {
-		return luaL_error (L, "cannot init zlib: %s", zError (rc));
-	}
-
-	sz = deflateBound (&strm, t->len);
-
-	strm.avail_in = t->len;
-	strm.next_in = (guchar *) t->start;
-
-	res = lua_newuserdata (L, sizeof (*res));
-	res->start = g_malloc (sz);
-	res->flags = RSPAMD_TEXT_FLAG_OWN;
-	rspamd_lua_setclass (L, "rspamd{text}", -1);
-
-	p = (guchar *) res->start;
-	remain = sz;
-
-	while (strm.avail_in != 0) {
-		strm.avail_out = remain;
-		strm.next_out = p;
-
-		rc = deflate (&strm, Z_FINISH);
-
-		if (rc != Z_OK && rc != Z_BUF_ERROR) {
-			if (rc == Z_STREAM_END) {
-				break;
-			}
-			else {
-				msg_err ("cannot compress data: %s (last error: %s)",
-						zError (rc), strm.msg);
-				lua_pop (L, 1); /* Text will be freed here */
-				lua_pushnil (L);
-				deflateEnd (&strm);
-
-				return 1;
-			}
-		}
-
-		res->len = strm.total_out;
-
-		if (strm.avail_out == 0 && strm.avail_in != 0) {
-			/* Need to allocate more */
-			remain = res->len;
-			res->start = g_realloc ((gpointer) res->start, strm.avail_in + sz);
-			sz = strm.avail_in + sz;
-			p = (guchar *) res->start + remain;
-			remain = sz - remain;
-		}
-	}
-
-	deflateEnd (&strm);
-	res->len = strm.total_out;
-
-	return 1;
+	return lua_compress_zlib_compress (L);
 }
 
-
-static gint
-lua_util_zlib_inflate (lua_State *L, int windowBits)
-{
-	LUA_TRACE_POINT;
-	struct rspamd_lua_text *t = NULL, *res, tmp;
-	gsize sz;
-	z_stream strm;
-	gint rc;
-	guchar *p;
-	gsize remain;
-	gssize size_limit = -1;
-
-	if (lua_type (L, 1) == LUA_TSTRING) {
-		t = &tmp;
-		t->start = lua_tolstring (L, 1, &sz);
-		t->len = sz;
-	}
-	else {
-		t = lua_check_text (L, 1);
-	}
-
-	if (t == NULL || t->start == NULL) {
-		return luaL_error (L, "invalid arguments");
-	}
-
-	if (lua_type (L, 2) == LUA_TNUMBER) {
-		size_limit = lua_tointeger (L, 2);
-		if (size_limit <= 0) {
-			return luaL_error (L, "invalid arguments (size_limit)");
-		}
-
-		sz = MIN (t->len * 2, size_limit);
-	}
-	else {
-		sz = t->len * 2;
-	}
-
-	memset (&strm, 0, sizeof (strm));
-	/* windowBits +16 to decode gzip, zlib 1.2.0.4+ */
-
-	/* Here are dragons to distinguish between raw deflate and zlib */
-	if (windowBits == MAX_WBITS && t->len > 0) {
-		if ((int)(unsigned char)((t->start[0] << 4)) != 0x80) {
-			/* Assume raw deflate */
-			windowBits = -windowBits;
-		}
-	}
-
-	rc = inflateInit2 (&strm, windowBits);
-
-	if (rc != Z_OK) {
-		return luaL_error (L, "cannot init zlib");
-	}
-
-	strm.avail_in = t->len;
-	strm.next_in = (guchar *)t->start;
-
-	res = lua_newuserdata (L, sizeof (*res));
-	res->start = g_malloc (sz);
-	res->flags = RSPAMD_TEXT_FLAG_OWN;
-	rspamd_lua_setclass (L, "rspamd{text}", -1);
-
-	p = (guchar *)res->start;
-	remain = sz;
-
-	while (strm.avail_in != 0) {
-		strm.avail_out = remain;
-		strm.next_out = p;
-
-		rc = inflate (&strm, Z_NO_FLUSH);
-
-		if (rc != Z_OK && rc != Z_BUF_ERROR) {
-			if (rc == Z_STREAM_END) {
-				break;
-			}
-			else {
-				msg_err ("cannot decompress data: %s (last error: %s)",
-						zError (rc), strm.msg);
-				lua_pop (L, 1); /* Text will be freed here */
-				lua_pushnil (L);
-				inflateEnd (&strm);
-
-				return 1;
-			}
-		}
-
-		res->len = strm.total_out;
-
-		if (strm.avail_out == 0 && strm.avail_in != 0) {
-
-			if (size_limit > 0 || res->len >= G_MAXUINT32 / 2) {
-				if (res->len > size_limit || res->len >= G_MAXUINT32 / 2) {
-					lua_pop (L, 1); /* Text will be freed here */
-					lua_pushnil (L);
-					inflateEnd (&strm);
-
-					return 1;
-				}
-			}
-
-			/* Need to allocate more */
-			remain = res->len;
-			res->start = g_realloc ((gpointer)res->start, res->len * 2);
-			sz = res->len * 2;
-			p = (guchar *)res->start + remain;
-			remain = sz - remain;
-		}
-	}
-
-	inflateEnd (&strm);
-	res->len = strm.total_out;
-
-	return 1;
-}
 static gint
 lua_util_gzip_decompress (lua_State *L)
 {
-	return lua_util_zlib_inflate (L, MAX_WBITS + 16);
+	return lua_compress_zlib_decompress (L, true);
 }
 
 static gint
 lua_util_inflate (lua_State *L)
 {
-	return lua_util_zlib_inflate (L, MAX_WBITS);
+	return lua_compress_zlib_decompress (L, false);
 }
 
 static gint
@@ -3738,6 +3440,16 @@ lua_load_util (lua_State * L)
 	return 1;
 }
 
+static gint
+lua_load_int64 (lua_State * L)
+{
+	lua_newtable (L);
+	luaL_register (L, NULL, int64lib_f);
+
+	return 1;
+}
+
+
 void
 luaopen_util (lua_State * L)
 {
@@ -3746,6 +3458,7 @@ luaopen_util (lua_State * L)
 	rspamd_lua_new_class (L, "rspamd{int64}", int64lib_m);
 	lua_pop (L, 1);
 	rspamd_lua_add_preload (L, "rspamd_util", lua_load_util);
+	rspamd_lua_add_preload (L, "rspamd_int64", lua_load_int64);
 }
 
 static int
@@ -3753,9 +3466,65 @@ lua_int64_tostring (lua_State *L)
 {
 	gint64 n = lua_check_int64 (L, 1);
 	gchar buf[32];
+	bool is_signed = false;
 
-	rspamd_snprintf (buf, sizeof (buf), "%uL", n);
+	if (lua_isboolean (L, 2)) {
+		is_signed = lua_toboolean (L, 2);
+	}
+
+	if (is_signed) {
+		rspamd_snprintf(buf, sizeof(buf), "%L", n);
+	}
+	else {
+		rspamd_snprintf(buf, sizeof(buf), "%uL", n);
+	}
 	lua_pushstring (L, buf);
+
+	return 1;
+}
+
+static int
+lua_int64_fromstring (lua_State *L)
+{
+	struct rspamd_lua_text *t = lua_check_text_or_string (L, 1);
+
+	if (t && t->len > 0) {
+		guint64 u64;
+		const char *p = t->start;
+		gsize len = t->len;
+		bool neg = false;
+
+		/*
+		 * We use complicated negation to allow both signed and unsinged values to
+		 * fit into result.
+		 * So we read int64 as unsigned and copy it to signed number.
+		 * If we wanted u64 this allows to have the same memory representation of
+		 * signed and unsigned.
+		 * If we wanted signed i64 we still can use -1000500 and it will be parsed
+		 * properly
+		 */
+		if (*p == '-') {
+			neg = true;
+			p ++;
+			len --;
+		}
+		if (!rspamd_strtou64(p, len, &u64)) {
+			lua_pushnil (L);
+			lua_pushstring (L, "invalid number");
+			return 2;
+		}
+
+		gint64* i64_p = lua_newuserdata (L, sizeof (gint64));
+		rspamd_lua_setclass (L, "rspamd{int64}", -1);
+		memcpy (i64_p, &u64, sizeof(u64));
+
+		if (neg) {
+			*i64_p = -(*i64_p);
+		}
+	}
+	else {
+
+	}
 
 	return 1;
 }
@@ -3767,7 +3536,7 @@ lua_int64_tonumber (lua_State *L)
 	gdouble d;
 
 	d = n;
-	lua_pushnumber (L, d);
+	lua_pushinteger (L, d);
 
 	return 1;
 }

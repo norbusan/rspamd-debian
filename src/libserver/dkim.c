@@ -1117,7 +1117,7 @@ rspamd_create_dkim_context (const gchar *sig,
 			}
 			else {
 				msg_info_dkim ("dkim parse failed: unknown error when parsing %c tag",
-						*tag);
+						tag ? *tag : '?');
 				return NULL;
 			}
 			break;
@@ -1371,8 +1371,9 @@ rspamd_dkim_make_key (const gchar *keydata,
 			g_set_error (err,
 					DKIM_ERROR,
 					DKIM_SIGERROR_KEYFAIL,
-					"DKIM key is has invalid length %d for eddsa",
-					(gint)key->decoded_len);
+					"DKIM key is has invalid length %d for eddsa; expected %d",
+					(gint)key->decoded_len,
+					rspamd_cryptobox_pk_sig_bytes (RSPAMD_CRYPTOBOX_MODE_25519));
 			REF_RELEASE (key);
 
 			return NULL;
@@ -1700,7 +1701,7 @@ rspamd_dkim_relaxed_body_step (struct rspamd_dkim_common_ctx *ctx, EVP_MD_CTX *c
 	gchar *t;
 	guint len, inlen;
 	gssize octets_remain;
-	gboolean got_sp;
+	gboolean got_sp, ret = TRUE;
 	gchar buf[1024];
 
 	len = size;
@@ -1710,7 +1711,7 @@ rspamd_dkim_relaxed_body_step (struct rspamd_dkim_common_ctx *ctx, EVP_MD_CTX *c
 	got_sp = FALSE;
 	octets_remain = *remain;
 
-	while (len > 0 && inlen > 0 && (octets_remain != 0)) {
+	while (len > 0 && inlen > 0 && (octets_remain > 0)) {
 
 		if (*h == '\r' || *h == '\n') {
 			if (got_sp) {
@@ -1765,6 +1766,16 @@ rspamd_dkim_relaxed_body_step (struct rspamd_dkim_common_ctx *ctx, EVP_MD_CTX *c
 		octets_remain --;
 	}
 
+	if (octets_remain < 0) {
+		/* Absurdic l tag value, but we still need to rewind the t pointer back */
+		while (t > buf && octets_remain < 0) {
+			t --;
+			octets_remain ++;
+		}
+
+		ret = FALSE;
+	}
+
 	*start = h;
 
 	if (t - buf > 0) {
@@ -1776,10 +1787,9 @@ rspamd_dkim_relaxed_body_step (struct rspamd_dkim_common_ctx *ctx, EVP_MD_CTX *c
 				"(%z size, %z -> %z remain)",
 						cklen, *remain, octets_remain);
 		*remain = octets_remain;
-
 	}
 
-	return ((len != 0) && (octets_remain != 0));
+	return ret && ((len > 0) && (octets_remain > 0));
 }
 
 static gboolean
@@ -2027,7 +2037,7 @@ rspamd_dkim_canonize_body (struct rspamd_dkim_common_ctx *ctx,
 	gboolean sign)
 {
 	const gchar *p;
-	gssize remain = ctx->len ? ctx->len : -1;
+	gssize remain = ctx->len ? ctx->len : G_MAXSSIZE;
 	guint total_len = end - start;
 	gboolean need_crlf = FALSE;
 
@@ -2317,15 +2327,21 @@ rspamd_dkim_canonize_header_relaxed (struct rspamd_dkim_common_ctx *ctx,
 
 static gboolean
 rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
-	struct rspamd_task *task,
-	const gchar *header_name,
-	gint count,
-	const gchar *dkim_header,
-	const gchar *dkim_domain)
+							 struct rspamd_task *task,
+							 const gchar *header_name,
+							 gint count,
+							 const gchar *dkim_header,
+							 const gchar *dkim_domain)
 {
 	struct rspamd_mime_header *rh, *cur, *sel = NULL;
 	gint hdr_cnt = 0;
-	bool use_idx = false;
+	bool use_idx = false, is_sign = ctx->is_sign;
+
+	/*
+	 * TODO:
+	 * Temporary hack to prevent linked list being misused until refactored
+	 */
+	const guint max_list_iters = 1000;
 
 	if (count < 0) {
 		use_idx = true;
@@ -2333,7 +2349,8 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 	}
 
 	if (dkim_header == NULL) {
-		rh = rspamd_message_get_header_array (task, header_name);
+		rh = rspamd_message_get_header_array (task, header_name,
+				is_sign);
 
 		if (rh) {
 			/* Check uniqueness of the header but we count from the bottom to top */
@@ -2345,7 +2362,7 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 
 					hdr_cnt++;
 
-					if (cur == rh) {
+					if (cur == rh || hdr_cnt >= max_list_iters) {
 						/* Cycle */
 						break;
 					}
@@ -2375,13 +2392,17 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 				}
 			}
 			else {
+				/*
+				 * This branch is used for ARC headers, and it orders them based on
+				 * i=<number> string and not their real order in the list of headers
+				 */
 				gchar idx_buf[16];
-				gint id_len;
+				gint id_len, i;
 
 				id_len = rspamd_snprintf (idx_buf, sizeof (idx_buf), "i=%d;",
 						count);
 
-				for (cur = rh->prev; ; cur = cur->prev) {
+				for (cur = rh->prev, i = 0; i < max_list_iters; cur = cur->prev, i ++) {
 					if (cur->decoded &&
 						rspamd_substring_search (cur->decoded, strlen (cur->decoded),
 								idx_buf, id_len) != -1) {
@@ -2412,7 +2433,7 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 						count, (gint)sel->raw_len, sel->raw_value);
 			}
 			else {
-				if (ctx->is_sign && (sel->flags & RSPAMD_HEADER_FROM)) {
+				if (is_sign && (sel->flags & RSPAMD_HEADER_FROM)) {
 					/* Special handling of the From handling when rewrite is done */
 					gboolean has_rewrite = FALSE;
 					guint i;
@@ -2450,7 +2471,7 @@ rspamd_dkim_canonize_header (struct rspamd_dkim_common_ctx *ctx,
 		/* For signature check just use the saved dkim header */
 		if (ctx->header_canon_type == DKIM_CANON_SIMPLE) {
 			/* We need to find our own signature and use it */
-			rh = rspamd_message_get_header_array (task, header_name);
+			rh = rspamd_message_get_header_array (task, header_name, is_sign);
 
 			if (rh) {
 				/* We need to find our own signature */
@@ -2628,7 +2649,8 @@ rspamd_dkim_check (rspamd_dkim_context_t *ctx,
 	}
 
 
-	if (ctx->common.type != RSPAMD_DKIM_ARC_SEAL) {
+	/* Use cached BH for all but arc seal, if it is not NULL we are not in arc seal mode */
+	if (cached_bh != NULL) {
 		if (!cached_bh->digest_normal) {
 			/* Copy md_ctx to deal with broken CRLF at the end */
 			cpy_ctx = EVP_MD_CTX_create ();
@@ -3286,7 +3308,7 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 			/* Do oversigning */
 			guint count = 0;
 
-			rh = rspamd_message_get_header_array (task, dh->name);
+			rh = rspamd_message_get_header_array(task, dh->name, FALSE);
 
 			if (rh) {
 				DL_FOREACH (rh, cur) {
@@ -3314,7 +3336,7 @@ rspamd_dkim_sign (struct rspamd_task *task, const gchar *selector,
 			}
 		}
 		else {
-			rh = rspamd_message_get_header_array (task, dh->name);
+			rh = rspamd_message_get_header_array(task, dh->name, FALSE);
 
 			if (rh) {
 				if (hstat.s.count > 0) {

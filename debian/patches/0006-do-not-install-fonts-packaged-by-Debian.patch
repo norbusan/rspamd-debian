@@ -9,7 +9,7 @@ Forwarded: not-needed
 
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -756,7 +756,9 @@ INSTALL(PROGRAMS "utils/rspamd_stats.pl"
+@@ -774,7 +774,9 @@ INSTALL(PROGRAMS "utils/rspamd_stats.pl"
  
  # Install webui
  IF(INSTALL_WEBUI MATCHES "ON")

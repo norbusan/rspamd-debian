@@ -16,7 +16,7 @@
 #include "lua_common.h"
 #include "libmime/message.h"
 #include "libutil/expression.h"
-#include "libserver/composites.h"
+#include "src/libserver/composites/composites.h"
 #include "libserver/cfg_file_private.h"
 #include "libmime/lang_detection.h"
 #include "lua/lua_map.h"
@@ -201,15 +201,22 @@ LUA_FUNCTION_DEF (config, get_classifier);
  * - `callback`: function to be called for symbol's check (can be absent for virtual symbols)
  * - `weight`: weight of symbol (should normally be 1 or missing)
  * - `priority`: priority of symbol (normally 0 or missing)
- * - `type`: type of symbol: `normal` (default), `virtual` or `callback`
+ * - `type`: type of symbol:
+ *   + `normal`: executed after prefilters, according to dependency graph or in undefined order
+ *   + `callback`: a check that merely inserts virtual symbols
+ *   + `connfilter`: executed early; before message body is available
+ *   + `idempotent`: cannot change result in any way; executed last
+ *   + `postfilter`: executed after most other checks
+ *   + `prefilter`: executed before most other checks
+ *   + `virtual`: a symbol inserted by its parent check
  * - `flags`: various flags split by commas or spaces:
- *     + `nice` if symbol can produce negative score;
- *     + `empty` if symbol can be called for empty messages
- *     + `skip` if symbol should be skipped now
- *     + `nostat` if symbol should be excluded from stat tokens
- *     + `trivial` symbol is trivial (e.g. no network requests)
- *     + `explicit_disable` requires explicit disabling (e.g. via settings)
- *     + `ignore_passthrough` executed even if passthrough result has been set
+ *   + `nice` if symbol can produce negative score;
+ *   + `empty` if symbol can be called for empty messages
+ *   + `skip` if symbol should be skipped now
+ *   + `nostat` if symbol should be excluded from stat tokens
+ *   + `trivial` symbol is trivial (e.g. no network requests)
+ *   + `explicit_disable` requires explicit disabling (e.g. via settings)
+ *   + `ignore_passthrough` executed even if passthrough result has been set
  * - `parent`: id of parent symbol (useful for virtual symbols)
  *
  * @return {number} id of symbol registered
@@ -247,11 +254,11 @@ LUA_FUNCTION_DEF (config, register_callback_symbol);
 LUA_FUNCTION_DEF (config, register_callback_symbol_priority);
 
 /***
- * @method rspamd_config:register_dependency(id, dep)
- * Create a dependency between symbol identified by `id` and a symbol identified
- * by some symbolic name `dep`
+ * @method rspamd_config:register_dependency(id|name, depname)
+ * Create a dependency on symbol identified by name for symbol identified by ID or name.
+ * This affects order of checks only (a symbol is still checked if its dependencys are disabled).
  * @param {number|string} id id or name of source (numeric id is returned by all register_*_symbol)
- * @param {string} dep dependency name
+ * @param {string} depname dependency name
  * @example
 local function cb(task)
 ...
@@ -260,7 +267,8 @@ end
 local id = rspamd_config:register_symbol('SYM', 1.0, cb)
 rspamd_config:register_dependency(id, 'OTHER_SYM')
 -- Alternative form
-rspamd_config:register_dependency('SYMBOL_FROM', 'SYMBOL_TO')
+-- Symbol MY_RULE needs result from SPF_CHECK
+rspamd_config:register_dependency('MY_RULE', 'SPF_CHECK')
  */
 LUA_FUNCTION_DEF (config, register_dependency);
 
@@ -305,9 +313,9 @@ LUA_FUNCTION_DEF (config, register_re_selector);
  * - `one_shot`: turn off multiple hits for a symbol (boolean, optional)
  * - `one_param`: turn off multiple options for a symbol (boolean, optional)
  * - `flags`: comma separated string of flags:
- *    + `ignore`: do not strictly check validity of symbol and corresponding rule
- *    + `one_shot`: turn off multiple hits for a symbol
- *    + `one_param`: allow only one parameter for a symbol
+ *   + `ignore`: do not strictly check validity of symbol and corresponding rule
+ *   + `one_shot`: turn off multiple hits for a symbol
+ *   + `one_param`: allow only one parameter for a symbol
  * - `priority`: priority of symbol's definition
  */
 LUA_FUNCTION_DEF (config, set_metric_symbol);
@@ -332,8 +340,8 @@ LUA_FUNCTION_DEF (config, set_metric_action);
  * - `group`: name of group for symbol (string, optional)
  * - `one_shot`: turn off multiple hits for a symbol (boolean, optional)
  * - `flags`: comma separated string of flags:
- *    + `ignore`: do not strictly check validity of symbol and corresponding rule
- *    + `one_shot`: turn off multiple hits for a symbol
+ *   + `ignore`: do not strictly check validity of symbol and corresponding rule
+ *   + `one_shot`: turn off multiple hits for a symbol
  *
  * @param {string} name name of symbol
  * @return {table} symbol's definition or nil in case of undefined symbol
@@ -1092,13 +1100,18 @@ lua_config_get_ucl (lua_State * L)
 			lua_rawgeti (L, LUA_REGISTRYINDEX, cached->ref);
 		}
 		else {
-			ucl_object_push_lua (L, cfg->rcl_obj, true);
-			lua_pushvalue (L, -1);
-			cached = rspamd_mempool_alloc (cfg->cfg_pool, sizeof (*cached));
-			cached->L = L;
-			cached->ref = luaL_ref (L, LUA_REGISTRYINDEX);
-			rspamd_mempool_set_variable (cfg->cfg_pool, "ucl_cached",
-					cached, lua_config_ucl_dtor);
+			if (cfg->rcl_obj) {
+				ucl_object_push_lua(L, cfg->rcl_obj, true);
+				lua_pushvalue(L, -1);
+				cached = rspamd_mempool_alloc (cfg->cfg_pool, sizeof(*cached));
+				cached->L = L;
+				cached->ref = luaL_ref(L, LUA_REGISTRYINDEX);
+				rspamd_mempool_set_variable(cfg->cfg_pool, "ucl_cached",
+						cached, lua_config_ucl_dtor);
+			}
+			else {
+				lua_pushnil (L);
+			}
 		}
 	}
 	else {
@@ -1601,9 +1614,9 @@ rspamd_register_symbol_fromlua (lua_State *L,
 
 			rspamd_symcache_set_allowed_settings_ids (cfg->cache, name,
 					ids, nids);
-
-			g_free (ids);
 		}
+
+		g_free (ids);
 	}
 
 	if (forbidden_ids) {
@@ -1623,9 +1636,9 @@ rspamd_register_symbol_fromlua (lua_State *L,
 
 			rspamd_symcache_set_forbidden_settings_ids (cfg->cache, name,
 					ids, nids);
-
-			g_free (ids);
 		}
+
+		g_free (ids);
 	}
 
 	return ret;
@@ -2600,47 +2613,22 @@ lua_config_add_composite (lua_State * L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
-	struct rspamd_expression *expr;
 	gchar *name;
 	const gchar *expr_str;
 	struct rspamd_composite *composite;
-	gboolean ret = FALSE, new = TRUE;
-	GError *err = NULL;
+	gboolean ret = FALSE;
 
 	if (cfg) {
 		name = rspamd_mempool_strdup (cfg->cfg_pool, luaL_checkstring (L, 2));
 		expr_str = luaL_checkstring (L, 3);
 
 		if (name && expr_str) {
-			if (!rspamd_parse_expression (expr_str, 0, &composite_expr_subr,
-					NULL, cfg->cfg_pool, &err, &expr)) {
-				msg_err_config ("cannot parse composite expression %s: %e",
-						expr_str,
-						err);
-				g_error_free (err);
-			}
-			else {
-				if (g_hash_table_lookup (cfg->composite_symbols, name) != NULL) {
-					msg_warn_config ("composite %s is redefined", name);
-					new = FALSE;
-				}
+			composite = rspamd_composites_manager_add_from_string(cfg->composites_manager,
+					name, expr_str);
 
-				composite = rspamd_mempool_alloc0 (cfg->cfg_pool,
-						sizeof (struct rspamd_composite));
-				composite->expr = expr;
-				composite->id = g_hash_table_size (cfg->composite_symbols);
-				composite->str_expr = rspamd_mempool_strdup (cfg->cfg_pool,
-						expr_str);
-				composite->sym = name;
-				g_hash_table_insert (cfg->composite_symbols,
-						(gpointer)name,
-						composite);
-
-				if (new) {
-					rspamd_symcache_add_symbol (cfg->cache, name,
-							0, NULL, composite, SYMBOL_TYPE_COMPOSITE, -1);
-				}
-
+			if (composite) {
+				rspamd_symcache_add_symbol (cfg->cache, name,
+						0, NULL, composite, SYMBOL_TYPE_COMPOSITE, -1);
 				ret = TRUE;
 			}
 		}
@@ -3170,6 +3158,8 @@ lua_config_add_post_init (lua_State *L)
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	struct rspamd_config_cfg_lua_script *sc;
 	guint priority = 0;
+	lua_Debug d;
+	gchar tmp[256], *p;
 
 	if (cfg == NULL || lua_type (L, 2) != LUA_TFUNCTION) {
 		return luaL_error (L, "invalid arguments");
@@ -3179,10 +3169,30 @@ lua_config_add_post_init (lua_State *L)
 		priority = lua_tointeger (L , 3);
 	}
 
+	if (lua_getstack (L, 1, &d) == 1) {
+		(void) lua_getinfo (L, "Sl", &d);
+		if ((p = strrchr (d.short_src, '/')) == NULL) {
+			p = d.short_src;
+		}
+		else {
+			p++;
+		}
+
+		if (strlen (p) > 200) {
+			rspamd_snprintf (tmp, sizeof (tmp), "%10s...]:%d", p,
+					d.currentline);
+		}
+		else {
+			rspamd_snprintf (tmp, sizeof (tmp), "%s:%d", p,
+					d.currentline);
+		}
+	}
+
 	sc = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*sc));
 	lua_pushvalue (L, 2);
 	sc->cbref = luaL_ref (L, LUA_REGISTRYINDEX);
 	sc->priority = priority;
+	sc->lua_src_pos = rspamd_mempool_strdup (cfg->cfg_pool, tmp);
 	DL_APPEND (cfg->post_init_scripts, sc);
 	DL_SORT (cfg->post_init_scripts, rspamd_post_init_sc_sort);
 
@@ -3195,14 +3205,36 @@ lua_config_add_config_unload (lua_State *L)
 	LUA_TRACE_POINT;
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	struct rspamd_config_cfg_lua_script *sc;
+	lua_Debug d;
+	gchar tmp[256], *p;
 
 	if (cfg == NULL || lua_type (L, 2) != LUA_TFUNCTION) {
 		return luaL_error (L, "invalid arguments");
 	}
 
+	if (lua_getstack (L, 1, &d) == 1) {
+		(void) lua_getinfo (L, "Sl", &d);
+		if ((p = strrchr (d.short_src, '/')) == NULL) {
+			p = d.short_src;
+		}
+		else {
+			p++;
+		}
+
+		if (strlen (p) > 20) {
+			rspamd_snprintf (tmp, sizeof (tmp), "%10s...]:%d", p,
+					d.currentline);
+		}
+		else {
+			rspamd_snprintf (tmp, sizeof (tmp), "%s:%d", p,
+					d.currentline);
+		}
+	}
+
 	sc = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (*sc));
 	lua_pushvalue (L, 2);
 	sc->cbref = luaL_ref (L, LUA_REGISTRYINDEX);
+	sc->lua_src_pos = rspamd_mempool_strdup (cfg->cfg_pool, tmp);
 	DL_APPEND (cfg->config_unload_scripts, sc);
 
 	return 0;
@@ -4381,10 +4413,14 @@ lua_config_init_subsystem (lua_State *L)
 					return luaL_error (L, "no event base specified");
 				}
 			}
+			else if (strcmp (parts[i], "symcache") == 0) {
+				rspamd_symcache_init (cfg->cache);
+			}
 			else {
+				int ret = luaL_error (L, "invalid param: %s", parts[i]);
 				g_strfreev (parts);
 
-				return luaL_error (L, "invalid param: %s", parts[i]);
+				return ret;
 			}
 		}
 

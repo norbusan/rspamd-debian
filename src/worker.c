@@ -271,12 +271,13 @@ rspamd_worker_error_handler (struct rspamd_http_connection *conn, GError *err)
 			rspamd_printf_fstring (&reply, "{\"error\":\"%V\"}", msg->status);
 			rspamd_http_message_set_body_from_fstring_steal (msg, reply);
 			rspamd_http_connection_reset (task->http_conn);
+			/* Use a shorter timeout for writing reply */
 			rspamd_http_connection_write_message (task->http_conn,
 					msg,
 					NULL,
 					"application/json",
 					task,
-					1.0);
+					session->ctx->timeout / 10.0);
 		}
 	}
 	else {
@@ -341,7 +342,7 @@ accept_socket (EV_P_ ev_io *w, int revents)
 	struct rspamd_worker *worker = (struct rspamd_worker *) w->data;
 	struct rspamd_worker_ctx *ctx;
 	struct rspamd_worker_session *session;
-	rspamd_inet_addr_t *addr;
+	rspamd_inet_addr_t *addr = NULL;
 	gint nfd, http_opts = 0;
 
 	ctx = worker->ctx;
@@ -361,6 +362,8 @@ accept_socket (EV_P_ ev_io *w, int revents)
 	}
 	/* Check for EAGAIN */
 	if (nfd == 0) {
+		rspamd_inet_address_free (addr);
+
 		return;
 	}
 

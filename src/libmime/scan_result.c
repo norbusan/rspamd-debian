@@ -39,7 +39,7 @@ static void
 rspamd_scan_result_dtor (gpointer d)
 {
 	struct rspamd_scan_result *r = (struct rspamd_scan_result *)d;
-	struct rspamd_symbol_result sres;
+	struct rspamd_symbol_result *sres;
 
 	rspamd_set_counter_ema (&symbols_count, kh_size (r->symbols), 0.5);
 
@@ -48,8 +48,8 @@ rspamd_scan_result_dtor (gpointer d)
 	}
 
 	kh_foreach_value (r->symbols, sres, {
-		if (sres.options) {
-			kh_destroy (rspamd_options_hash, sres.options);
+		if (sres->options) {
+			kh_destroy (rspamd_options_hash, sres->options);
 		}
 	});
 	kh_destroy (rspamd_symbols_hash, r->symbols);
@@ -194,7 +194,8 @@ insert_metric_result (struct rspamd_task *task,
 					  double weight,
 					  const gchar *opt,
 					  struct rspamd_scan_result *metric_res,
-					  enum rspamd_symbol_insert_flags flags)
+					  enum rspamd_symbol_insert_flags flags,
+					  bool *new_sym)
 {
 	struct rspamd_symbol_result *s = NULL;
 	gdouble final_score, *gr_score = NULL, next_gf = 1.0, diff;
@@ -278,7 +279,7 @@ insert_metric_result (struct rspamd_task *task,
 	k = kh_get (rspamd_symbols_hash, metric_res->symbols, symbol);
 	if (k != kh_end (metric_res->symbols)) {
 		/* Existing metric score */
-		s = &kh_value (metric_res->symbols, k);
+		s = kh_value (metric_res->symbols, k);
 		if (single) {
 			max_shots = 1;
 		}
@@ -390,12 +391,16 @@ insert_metric_result (struct rspamd_task *task,
 	}
 	else {
 		/* New result */
+		if (new_sym) {
+			*new_sym = true;
+		}
+
 		sym_cpy = rspamd_mempool_strdup (task->task_pool, symbol);
 		k = kh_put (rspamd_symbols_hash, metric_res->symbols,
 				sym_cpy, &ret);
 		g_assert (ret > 0);
-		s = &kh_value (metric_res->symbols, k);
-		memset (s, 0, sizeof (*s));
+		s = rspamd_mempool_alloc0 (task->task_pool, sizeof (*s));
+		kh_value (metric_res->symbols, k) = s;
 
 		/* Handle grow factor */
 		if (metric_res->grow_factor && final_score > 0) {
@@ -530,12 +535,15 @@ rspamd_task_insert_result_full (struct rspamd_task *task,
 				}
 			}
 
+			bool new_symbol = false;
+
 			s = insert_metric_result (task,
 					symbol,
 					weight,
 					opt,
 					mres,
-					flags);
+					flags,
+					&new_symbol);
 
 			if (mres->name == NULL) {
 				/* Default result */
@@ -547,6 +555,10 @@ rspamd_task_insert_result_full (struct rspamd_task *task,
 							s->sym->cache_item);
 				}
 			}
+			else if (new_symbol) {
+				/* O(N) but we normally don't have any shadow results */
+				LL_APPEND (ret, s);
+			}
 		}
 	}
 	else {
@@ -556,7 +568,8 @@ rspamd_task_insert_result_full (struct rspamd_task *task,
 				weight,
 				opt,
 				result,
-				flags);
+				flags,
+				NULL);
 		ret = s;
 
 		if (result->name == NULL) {
@@ -679,54 +692,75 @@ rspamd_task_add_result_option (struct rspamd_task *task,
 	gsize cpy_len;
 	khiter_t k;
 	gint r;
+	struct rspamd_symbol_result *cur;
 
 	if (s && val) {
-		if (s->opts_len < 0) {
-			/* Cannot add more options, give up */
-			msg_debug_task ("cannot add more options to symbol %s when adding option %s",
-					s->name, val);
-			return FALSE;
-		}
-
-		if (!s->options) {
-			s->options = kh_init (rspamd_options_hash);
-		}
-
-		if (vlen + s->opts_len > task->cfg->max_opts_len) {
-			/* Add truncated option */
-			msg_info_task ("cannot add more options to symbol %s when adding option %s",
-					s->name, val);
-			val = "...";
-			vlen = 3;
-			s->opts_len = -1;
-		}
-
-		if (!(s->sym && (s->sym->flags & RSPAMD_SYMBOL_FLAG_ONEPARAM)) &&
-				kh_size (s->options) < task->cfg->default_max_shots) {
-			opt_cpy = rspamd_task_option_safe_copy (task, val, vlen, &cpy_len);
-			/* Append new options */
-			srch.option = (gchar *)opt_cpy;
-			srch.optlen = cpy_len;
-			k = kh_get (rspamd_options_hash, s->options, &srch);
-
-			if (k == kh_end (s->options)) {
-				opt = rspamd_mempool_alloc0 (task->task_pool, sizeof (*opt));
-				opt->optlen = cpy_len;
-				opt->option = opt_cpy;
-
-				kh_put (rspamd_options_hash, s->options, opt, &r);
-				DL_APPEND (s->opts_head, opt);
-
-				ret = TRUE;
+		/*
+		 * Here we assume that this function is all the time called with the
+		 * symbol from the default result, not some shadow result, or
+		 * the option insertion will be wrong
+		 */
+		LL_FOREACH (s, cur) {
+			if (cur->opts_len < 0) {
+				/* Cannot add more options, give up */
+				msg_debug_task ("cannot add more options to symbol %s when adding option %s",
+						cur->name, val);
+				ret = FALSE;
+				continue;
 			}
-		}
-		else {
-			/* Skip addition */
-			ret = FALSE;
-		}
 
-		if (ret && s->opts_len >= 0) {
-			s->opts_len += vlen;
+			if (!cur->options) {
+				cur->options = kh_init (rspamd_options_hash);
+			}
+
+			if (vlen + cur->opts_len > task->cfg->max_opts_len) {
+				/* Add truncated option */
+				msg_info_task ("cannot add more options to symbol %s when adding option %s",
+						cur->name, val);
+				val = "...";
+				vlen = 3;
+				cur->opts_len = -1;
+			}
+
+			if (!(cur->sym && (cur->sym->flags & RSPAMD_SYMBOL_FLAG_ONEPARAM)) &&
+				kh_size (cur->options) < task->cfg->default_max_shots) {
+
+				srch.option = (gchar *) val;
+				srch.optlen = vlen;
+				k = kh_get (rspamd_options_hash, cur->options, &srch);
+
+				if (k == kh_end (cur->options)) {
+					opt_cpy = rspamd_task_option_safe_copy (task, val, vlen, &cpy_len);
+					if (cpy_len != vlen) {
+						srch.option = (gchar *) opt_cpy;
+						srch.optlen = cpy_len;
+						k = kh_get (rspamd_options_hash, cur->options, &srch);
+					}
+					/* Append new options */
+					if (k == kh_end (cur->options)) {
+						opt = rspamd_mempool_alloc0 (task->task_pool, sizeof(*opt));
+						opt->optlen = cpy_len;
+						opt->option = opt_cpy;
+
+						kh_put (rspamd_options_hash, cur->options, opt, &r);
+						DL_APPEND (cur->opts_head, opt);
+
+						if (s == cur) {
+							ret = TRUE;
+						}
+					}
+				}
+			}
+			else {
+				/* Skip addition */
+				if (s == cur) {
+					ret = FALSE;
+				}
+			}
+
+			if (ret && cur->opts_len >= 0) {
+				cur->opts_len += vlen;
+			}
 		}
 	}
 	else if (!val) {
@@ -887,10 +921,10 @@ rspamd_task_find_symbol_result (struct rspamd_task *task, const char *sym,
 		result = task->result;
 	}
 
-	k = kh_get (rspamd_symbols_hash, result->symbols, sym);
+	k = kh_get(rspamd_symbols_hash, result->symbols, sym);
 
 	if (k != kh_end (result->symbols)) {
-		res = &kh_value (result->symbols, k);
+		res = kh_value (result->symbols, k);
 	}
 
 	return res;
@@ -912,7 +946,7 @@ struct rspamd_symbol_result* rspamd_task_remove_symbol_result (
 	k = kh_get (rspamd_symbols_hash, result->symbols, symbol);
 
 	if (k != kh_end (result->symbols)) {
-		res = &kh_value (result->symbols, k);
+		res = kh_value (result->symbols, k);
 
 		if (!isnan (res->score)) {
 			/* Remove score from the result */
@@ -955,7 +989,7 @@ rspamd_task_symbol_result_foreach (struct rspamd_task *task,
 								   gpointer ud)
 {
 	const gchar *kk;
-	struct rspamd_symbol_result res;
+	struct rspamd_symbol_result *res;
 
 	if (result == NULL) {
 		/* Use default result */
@@ -964,7 +998,7 @@ rspamd_task_symbol_result_foreach (struct rspamd_task *task,
 
 	if (func) {
 		kh_foreach (result->symbols, kk, res, {
-			func ((gpointer)kk, (gpointer)&res, ud);
+			func ((gpointer)kk, (gpointer)res, ud);
 		});
 	}
 }

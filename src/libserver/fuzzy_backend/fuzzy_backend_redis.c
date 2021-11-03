@@ -58,6 +58,7 @@ struct rspamd_fuzzy_backend_redis {
 	struct rspamd_redis_pool *pool;
 	gdouble timeout;
 	gint conf_ref;
+	bool terminated;
 	ref_entry_t ref;
 };
 
@@ -163,16 +164,15 @@ rspamd_fuzzy_redis_session_dtor (struct rspamd_fuzzy_redis_session *session,
 	rspamd_fuzzy_redis_session_free_args (session);
 
 	REF_RELEASE (session->backend);
+	rspamd_upstream_unref (session->up);
 	g_free (session);
 }
 
 static void
 rspamd_fuzzy_backend_redis_dtor (struct rspamd_fuzzy_backend_redis *backend)
 {
-	lua_State *L = backend->L;
-
-	if (backend->conf_ref) {
-		luaL_unref (L, LUA_REGISTRYINDEX, backend->conf_ref);
+	if (!backend->terminated && backend->conf_ref != -1) {
+		luaL_unref (backend->L, LUA_REGISTRYINDEX, backend->conf_ref);
 	}
 
 	if (backend->id) {
@@ -341,7 +341,7 @@ rspamd_fuzzy_redis_shingles_callback (redisAsyncContext *c, gpointer r,
 	ev_timer_stop (session->event_loop, &session->timeout);
 	memset (&rep, 0, sizeof (rep));
 
-	if (c->err == 0) {
+	if (c->err == 0 && reply != NULL) {
 		rspamd_upstream_ok (session->up);
 
 		if (reply->type == REDIS_REPLY_ARRAY &&
@@ -446,6 +446,10 @@ rspamd_fuzzy_redis_shingles_callback (redisAsyncContext *c, gpointer r,
 				}
 			}
 		}
+		else if (reply->type == REDIS_REPLY_ERROR) {
+			msg_err_redis_session ("fuzzy backend redis error: \"%s\"",
+					reply->str);
+		}
 
 		if (session->callback.cb_check) {
 			session->callback.cb_check (&rep, session->cbdata);
@@ -458,9 +462,8 @@ rspamd_fuzzy_redis_shingles_callback (redisAsyncContext *c, gpointer r,
 
 		if (c->errstr) {
 			msg_err_redis_session ("error getting shingles: %s", c->errstr);
+			rspamd_upstream_fail (session->up, FALSE,  c->errstr);
 		}
-
-		rspamd_upstream_fail (session->up, FALSE,  strerror (errno));
 	}
 
 	rspamd_fuzzy_redis_session_dtor (session, FALSE);
@@ -537,7 +540,7 @@ rspamd_fuzzy_redis_check_callback (redisAsyncContext *c, gpointer r,
 	ev_timer_stop (session->event_loop, &session->timeout);
 	memset (&rep, 0, sizeof (rep));
 
-	if (c->err == 0) {
+	if (c->err == 0 && reply != NULL) {
 		rspamd_upstream_ok (session->up);
 
 		if (reply->type == REDIS_REPLY_ARRAY && reply->elements >= 2) {
@@ -572,6 +575,10 @@ rspamd_fuzzy_redis_check_callback (redisAsyncContext *c, gpointer r,
 				}
 			}
 		}
+		else if (reply->type == REDIS_REPLY_ERROR) {
+			msg_err_redis_session ("fuzzy backend redis error: \"%s\"",
+					reply->str);
+		}
 
 		if (found_elts < 2) {
 			if (session->cmd->shingles_count > 0 && !session->shingles_checked) {
@@ -601,9 +608,8 @@ rspamd_fuzzy_redis_check_callback (redisAsyncContext *c, gpointer r,
 			msg_err_redis_session ("error getting hashes on %s: %s",
 					rspamd_inet_address_to_string_pretty (rspamd_upstream_addr_cur (session->up)),
 					c->errstr);
+			rspamd_upstream_fail (session->up, FALSE, c->errstr);
 		}
-
-		rspamd_upstream_fail (session->up, FALSE,  strerror (errno));
 	}
 
 	rspamd_fuzzy_redis_session_dtor (session, FALSE);
@@ -672,7 +678,7 @@ rspamd_fuzzy_backend_check_redis (struct rspamd_fuzzy_backend *bk,
 			NULL,
 			0);
 
-	session->up = up;
+	session->up = rspamd_upstream_ref (up);
 	addr = rspamd_upstream_addr_next (up);
 	g_assert (addr != NULL);
 	session->ctx = rspamd_redis_pool_connect (backend->pool,
@@ -722,7 +728,7 @@ rspamd_fuzzy_redis_count_callback (redisAsyncContext *c, gpointer r,
 
 	ev_timer_stop (session->event_loop, &session->timeout);
 
-	if (c->err == 0) {
+	if (c->err == 0 && reply != NULL) {
 		rspamd_upstream_ok (session->up);
 
 		if (reply->type == REDIS_REPLY_INTEGER) {
@@ -738,6 +744,10 @@ rspamd_fuzzy_redis_count_callback (redisAsyncContext *c, gpointer r,
 			}
 		}
 		else {
+			if (reply->type == REDIS_REPLY_ERROR) {
+				msg_err_redis_session ("fuzzy backend redis error: \"%s\"",
+						reply->str);
+			}
 			if (session->callback.cb_count) {
 				session->callback.cb_count (0, session->cbdata);
 			}
@@ -752,9 +762,9 @@ rspamd_fuzzy_redis_count_callback (redisAsyncContext *c, gpointer r,
 			msg_err_redis_session ("error getting count on %s: %s",
 					rspamd_inet_address_to_string_pretty (rspamd_upstream_addr_cur (session->up)),
 					c->errstr);
+			rspamd_upstream_fail (session->up, FALSE, c->errstr);
 		}
 
-		rspamd_upstream_fail (session->up, FALSE,  strerror (errno));
 	}
 
 	rspamd_fuzzy_redis_session_dtor (session, FALSE);
@@ -808,7 +818,7 @@ rspamd_fuzzy_backend_count_redis (struct rspamd_fuzzy_backend *bk,
 			NULL,
 			0);
 
-	session->up = up;
+	session->up = rspamd_upstream_ref (up);
 	addr = rspamd_upstream_addr_next (up);
 	g_assert (addr != NULL);
 	session->ctx = rspamd_redis_pool_connect (backend->pool,
@@ -856,7 +866,7 @@ rspamd_fuzzy_redis_version_callback (redisAsyncContext *c, gpointer r,
 
 	ev_timer_stop (session->event_loop, &session->timeout);
 
-	if (c->err == 0) {
+	if (c->err == 0 && reply != NULL) {
 		rspamd_upstream_ok (session->up);
 
 		if (reply->type == REDIS_REPLY_INTEGER) {
@@ -872,6 +882,10 @@ rspamd_fuzzy_redis_version_callback (redisAsyncContext *c, gpointer r,
 			}
 		}
 		else {
+			if (reply->type == REDIS_REPLY_ERROR) {
+				msg_err_redis_session ("fuzzy backend redis error: \"%s\"",
+						reply->str);
+			}
 			if (session->callback.cb_version) {
 				session->callback.cb_version (0, session->cbdata);
 			}
@@ -886,9 +900,8 @@ rspamd_fuzzy_redis_version_callback (redisAsyncContext *c, gpointer r,
 			msg_err_redis_session ("error getting version on %s: %s",
 					rspamd_inet_address_to_string_pretty (rspamd_upstream_addr_cur (session->up)),
 					c->errstr);
+			rspamd_upstream_fail (session->up, FALSE,  c->errstr);
 		}
-
-		rspamd_upstream_fail (session->up, FALSE,  strerror (errno));
 	}
 
 	rspamd_fuzzy_redis_session_dtor (session, FALSE);
@@ -943,7 +956,7 @@ rspamd_fuzzy_backend_version_redis (struct rspamd_fuzzy_backend *bk,
 			NULL,
 			0);
 
-	session->up = up;
+	session->up = rspamd_upstream_ref (up);
 	addr = rspamd_upstream_addr_next (up);
 	g_assert (addr != NULL);
 	session->ctx = rspamd_redis_pool_connect (backend->pool,
@@ -1358,7 +1371,7 @@ rspamd_fuzzy_redis_update_callback (redisAsyncContext *c, gpointer r,
 
 	ev_timer_stop (session->event_loop, &session->timeout);
 
-	if (c->err == 0) {
+	if (c->err == 0 && reply != NULL) {
 		rspamd_upstream_ok (session->up);
 
 		if (reply->type == REDIS_REPLY_ARRAY) {
@@ -1373,6 +1386,10 @@ rspamd_fuzzy_redis_update_callback (redisAsyncContext *c, gpointer r,
 			}
 		}
 		else {
+			if (reply->type == REDIS_REPLY_ERROR) {
+				msg_err_redis_session ("fuzzy backend redis error: \"%s\"",
+						reply->str);
+			}
 			if (session->callback.cb_update) {
 				session->callback.cb_update (FALSE, 0, 0, 0, 0, session->cbdata);
 			}
@@ -1387,9 +1404,8 @@ rspamd_fuzzy_redis_update_callback (redisAsyncContext *c, gpointer r,
 			msg_err_redis_session ("error sending update to redis %s: %s",
 					rspamd_inet_address_to_string_pretty (rspamd_upstream_addr_cur (session->up)),
 					c->errstr);
+			rspamd_upstream_fail (session->up, FALSE,  c->errstr);
 		}
-
-		rspamd_upstream_fail (session->up, FALSE,  strerror (errno));
 	}
 
 	rspamd_fuzzy_redis_session_dtor (session, FALSE);
@@ -1514,7 +1530,7 @@ rspamd_fuzzy_backend_update_redis (struct rspamd_fuzzy_backend *bk,
 			NULL,
 			0);
 
-	session->up = up;
+	session->up = rspamd_upstream_ref (up);
 	addr = rspamd_upstream_addr_next (up);
 	g_assert (addr != NULL);
 	session->ctx = rspamd_redis_pool_connect (backend->pool,
@@ -1624,5 +1640,17 @@ rspamd_fuzzy_backend_close_redis (struct rspamd_fuzzy_backend *bk,
 
 	g_assert (backend != NULL);
 
+	/*
+	 * XXX: we leak lua registry element there to avoid crashing
+	 * due to chicken-egg problem between lua state termination and
+	 * redis pool termination.
+	 * Here, we assume that redis pool is destroyed AFTER lua_state,
+	 * so all connections pending will release references but due to
+	 * `terminated` hack they will not try to access Lua stuff
+	 * This is enabled merely if we have connections pending (e.g. refcount > 1)
+	 */
+	if (backend->ref.refcount > 1) {
+		backend->terminated = true;
+	}
 	REF_RELEASE (backend);
 }

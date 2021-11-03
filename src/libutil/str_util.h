@@ -44,6 +44,14 @@ gint rspamd_lc_cmp (const gchar *s, const gchar *d, gsize l);
 guint rspamd_str_lc (gchar *str, guint size);
 
 /**
+ * Performs ascii copy & lowercase
+ * @param src
+ * @param size
+ * @return
+ */
+gsize rspamd_str_copy_lc (const gchar *src, gchar *dst, gsize size);
+
+/**
  * Convert string to lowercase in-place using utf (limited) conversion
  */
 guint rspamd_str_lc_utf8 (gchar *str, guint size);
@@ -130,9 +138,15 @@ rspamd_null_safe_copy (const gchar *src, gsize srclen,
 gboolean rspamd_strtol (const gchar *s, gsize len, glong *value);
 
 /*
- * Try to convert string of length to unsigned long
+ * Try to convert a string of length to unsigned long
  */
 gboolean rspamd_strtoul (const gchar *s, gsize len, gulong *value);
+gboolean rspamd_strtou64 (const gchar *s, gsize len, guint64 *value);
+
+/*
+ * Try to convert a hex string of length to unsigned long
+ */
+gboolean rspamd_xstrtoul (const gchar *s, gsize len, gulong *value);
 
 /**
  * Utility function to provide mem_pool copy for rspamd_hash_table_copy function
@@ -470,23 +484,7 @@ struct UNormalizer2;
 
 const struct UNormalizer2 *rspamd_get_unicode_normalizer (void);
 
-enum rspamd_normalise_result {
-	RSPAMD_UNICODE_NORM_NORMAL = 0,
-	RSPAMD_UNICODE_NORM_UNNORMAL = (1 << 0),
-	RSPAMD_UNICODE_NORM_ZERO_SPACES = (1 << 1),
-	RSPAMD_UNICODE_NORM_ERROR = (1 << 2),
-	RSPAMD_UNICODE_NORM_OVERFLOW = (1 << 3)
-};
 
-/**
- * Gets a string in UTF8 and normalises it to NFKC_Casefold form
- * @param pool optional memory pool used for logging purposes
- * @param start
- * @param len
- * @return TRUE if a string has been normalised
- */
-enum rspamd_normalise_result rspamd_normalise_unicode_inplace (rspamd_mempool_t *pool,
-															   gchar *start, guint *len);
 
 enum rspamd_regexp_escape_flags {
 	RSPAMD_REGEXP_ESCAPE_ASCII = 0,
@@ -505,7 +503,7 @@ enum rspamd_regexp_escape_flags {
  */
 gchar *
 rspamd_str_regexp_escape (const gchar *pattern, gsize slen,
-						  gsize *dst_len, enum rspamd_regexp_escape_flags flags);
+						  gsize *dst_len, enum rspamd_regexp_escape_flags flags) G_GNUC_WARN_UNUSED_RESULT;
 
 /**
  * Returns copy of src (zero terminated) where all unicode is made valid or replaced
@@ -515,7 +513,8 @@ rspamd_str_regexp_escape (const gchar *pattern, gsize slen,
  * @param dstelen
  * @return
  */
-gchar *rspamd_str_make_utf_valid (const guchar *src, gsize slen, gsize *dstlen, rspamd_mempool_t *pool);
+gchar *rspamd_str_make_utf_valid (const guchar *src, gsize slen, gsize *dstlen,
+								  rspamd_mempool_t *pool) G_GNUC_WARN_UNUSED_RESULT;
 
 /**
  * Strips characters in `strip_chars` from start and end of the GString
@@ -530,7 +529,7 @@ gsize rspamd_gstring_strip (GString *s, const gchar *strip_chars);
  * @param strip_chars
  */
 const gchar *rspamd_string_len_strip (const gchar *in,
-									  gsize *len, const gchar *strip_chars);
+									  gsize *len, const gchar *strip_chars) G_GNUC_WARN_UNUSED_RESULT;
 
 /**
  * Returns a NULL terminated list of zero terminated strings based on splitting of

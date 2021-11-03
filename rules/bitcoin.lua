@@ -176,14 +176,16 @@ local function is_segwit_bech32_address(task, word)
 end
 
 local normal_wallet_re = [[/\b[13LM][1-9A-Za-z]{25,34}\b/AL{sa_body}]]
-local btc_bleach_re = [[/\b(?:[a-zA-Z]\w+:)?[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{14,}\b/AL{sa_body}]]
+local btc_bleach_re = [[/\b(?:(?:[a-zA-Z]\w+:)|(?:bc1))?[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{14,}\b/AL{sa_body}]]
 
 config.regexp['BITCOIN_ADDR'] = {
   description = 'Message has a valid bitcoin wallet address',
-  re = string.format('(%s) || (%s)', normal_wallet_re, btc_bleach_re),
+  -- Use + operator to ensure that each expression is always evaluated
+  re = string.format('(%s) + (%s) > 0', normal_wallet_re, btc_bleach_re),
   re_conditions = {
     [normal_wallet_re] = function(task, txt, s, e)
-      if e - s <= 2 then
+      local len = e - s
+      if len <= 2 or len > 1024 then
         return false
       end
 
@@ -204,7 +206,8 @@ config.regexp['BITCOIN_ADDR'] = {
       end
     end,
     [btc_bleach_re] = function(task, txt, s, e)
-      if e - s <= 2 then
+      local len = e - s
+      if len <= 2 or len > 1024 then
         return false
       end
 

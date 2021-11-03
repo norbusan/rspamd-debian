@@ -199,7 +199,7 @@ rspamd_email_address_parse_heuristic (const char *data, size_t len,
 	return ret;
 }
 
-static inline gboolean
+static inline int
 rspamd_email_address_check_and_add (const gchar *start, gsize len,
 									GPtrArray *res,
 									rspamd_mempool_t *pool,
@@ -215,7 +215,7 @@ rspamd_email_address_check_and_add (const gchar *start, gsize len,
 				max_elements,
 				ns);
 
-		return FALSE;
+		return -1;
 	}
 
 	/* The whole email is likely address */
@@ -231,14 +231,14 @@ rspamd_email_address_check_and_add (const gchar *start, gsize len,
 				len, &addr)) {
 			rspamd_email_address_add (pool, res, &addr, ns);
 
-			return TRUE;
+			return 1;
 		}
 		else {
-			return FALSE;
+			return 0;
 		}
 	}
 
-	return TRUE;
+	return 1;
 }
 
 GPtrArray *
@@ -248,7 +248,7 @@ rspamd_email_address_from_mime (rspamd_mempool_t *pool, const gchar *hdr,
 								gint max_elements)
 {
 	GPtrArray *res = src;
-	gboolean seen_at = FALSE;
+	gboolean seen_at = FALSE, seen_obrace = FALSE;
 
 	const gchar *p = hdr, *end = hdr + len, *c = hdr, *t;
 	GString *ns, *cpy;
@@ -388,9 +388,15 @@ rspamd_email_address_from_mime (rspamd_mempool_t *pool, const gchar *hdr,
 						t --;
 					}
 
-					if (!rspamd_email_address_check_and_add (c, t - c + 1,
-							res, pool, ns, max_elements)) {
+					int check = rspamd_email_address_check_and_add (c, t - c + 1,
+							res, pool, ns, max_elements);
+
+					if (check == 0 && res->len == 0) {
+						/* Insert fake address */
 						rspamd_email_address_add (pool, res, NULL, ns);
+					}
+					else if (check != 1) {
+						goto end;
 					}
 
 					/* Cleanup for the next use */
@@ -428,13 +434,24 @@ rspamd_email_address_from_mime (rspamd_mempool_t *pool, const gchar *hdr,
 				state = skip_spaces;
 				next_state = parse_name;
 			}
+			else if (*p == '@' && seen_obrace) {
+				seen_at = TRUE;
+			}
+			else if (*p == '<') {
+				seen_obrace = TRUE;
+			}
 			p ++;
 			break;
 		case parse_addr:
 			if (*p == '>') {
-				if (!rspamd_email_address_check_and_add (c, p - c + 1,
-						res, pool, ns, max_elements)) {
+				int check = rspamd_email_address_check_and_add (c, p - c + 1,
+						res, pool, ns, max_elements);
+				if (check == 0 && res->len == 0) {
+					/* Insert a fake address */
 					rspamd_email_address_add (pool, res, NULL, ns);
+				}
+				else if (check != 1) {
+					goto end;
 				}
 
 				/* Cleanup for the next use */
@@ -472,11 +489,14 @@ rspamd_email_address_from_mime (rspamd_mempool_t *pool, const gchar *hdr,
 			if (p > c) {
 				if (seen_at) {
 					/* The whole email is likely address */
-					if (!rspamd_email_address_check_and_add (c, p - c,
-							res, pool, ns, max_elements)) {
-						if (res->len == 0) {
-							rspamd_email_address_add (pool, res, NULL, ns);
-						}
+					int check = rspamd_email_address_check_and_add (c, p - c,
+							res, pool, ns, max_elements);
+					if (check == 0 && res->len == 0) {
+						/* Insert a fake address */
+						rspamd_email_address_add (pool, res, NULL, ns);
+					}
+					else if (check != 1) {
+						goto end;
 					}
 				} else {
 					/* No @ seen */
@@ -494,8 +514,8 @@ rspamd_email_address_from_mime (rspamd_mempool_t *pool, const gchar *hdr,
 		break;
 	case parse_addr:
 		if (p > c) {
-			if (!rspamd_email_address_check_and_add (c, p - c,
-					res, pool, ns, max_elements)) {
+			if (rspamd_email_address_check_and_add (c, p - c,
+					res, pool, ns, max_elements) == 0) {
 				if (res->len == 0) {
 					rspamd_email_address_add (pool, res, NULL, ns);
 				}
@@ -504,12 +524,23 @@ rspamd_email_address_from_mime (rspamd_mempool_t *pool, const gchar *hdr,
 		break;
 	case parse_quoted:
 		/* Unfinished quoted string or a comment */
+		/* If we have seen obrace + at, then we still can try to resolve address */
+		if (seen_at && seen_obrace) {
+			p = rspamd_memrchr (cpy->str, '<', cpy->len);
+			g_assert (p != NULL);
+			if (rspamd_email_address_check_and_add (p, end - p,
+					res, pool, ns, max_elements) == 0) {
+				if (res->len == 0) {
+					rspamd_email_address_add (pool, res, NULL, ns);
+				}
+			}
+		}
 		break;
 	default:
 		/* Do nothing */
 		break;
 	}
-
+end:
 	rspamd_mempool_notify_alloc (pool, cpy->len);
 	g_string_free (ns, TRUE);
 

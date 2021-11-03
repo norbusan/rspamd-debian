@@ -142,6 +142,8 @@ rspamd_mempool_t *rspamd_mempool_new_ (gsize size, const gchar *tag, gint flags,
 
 #define rspamd_mempool_new(size, tag, flags) \
 	rspamd_mempool_new_((size), (tag), (flags), G_STRLOC)
+#define rspamd_mempool_new_default(tag, flags) \
+	rspamd_mempool_new_(rspamd_mempool_suggest_size_(G_STRLOC), (tag), (flags), G_STRLOC)
 
 /**
  * Get memory from pool
@@ -150,10 +152,13 @@ rspamd_mempool_t *rspamd_mempool_new_ (gsize size, const gchar *tag, gint flags,
  * @return pointer to allocated object
  */
 void *rspamd_mempool_alloc_ (rspamd_mempool_t *pool, gsize size, const gchar *loc)
-RSPAMD_ATTR_ALLOC_SIZE(2) RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT) RSPAMD_ATTR_RETURNS_NONNUL;
+	RSPAMD_ATTR_ALLOC_SIZE(2) RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT) RSPAMD_ATTR_RETURNS_NONNUL;
 #define rspamd_mempool_alloc(pool, size) \
-	rspamd_mempool_alloc_((pool), (size), G_STRLOC)
-
+	rspamd_mempool_alloc_((pool), (size), (G_STRLOC))
+#define rspamd_mempool_alloc_type(pool, type) \
+	(type *)(rspamd_mempool_alloc_((pool), sizeof(type), (G_STRLOC)))
+#define rspamd_mempool_alloc_buffer(pool, buflen) \
+	(char *)(rspamd_mempool_alloc_((pool), sizeof(char) * (buflen), (G_STRLOC)))
 /**
  * Notify external memory usage for memory pool
  * @param pool
@@ -162,7 +167,7 @@ RSPAMD_ATTR_ALLOC_SIZE(2) RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT) RSPAMD_ATTR
  */
 void rspamd_mempool_notify_alloc_ (rspamd_mempool_t *pool, gsize size, const gchar *loc);
 #define rspamd_mempool_notify_alloc(pool, size) \
-	rspamd_mempool_notify_alloc_((pool), (size), G_STRLOC)
+	rspamd_mempool_notify_alloc_((pool), (size), (G_STRLOC))
 
 /**
  * Get memory and set it to zero
@@ -171,9 +176,11 @@ void rspamd_mempool_notify_alloc_ (rspamd_mempool_t *pool, gsize size, const gch
  * @return pointer to allocated object
  */
 void *rspamd_mempool_alloc0_ (rspamd_mempool_t *pool, gsize size, const gchar *loc)
-RSPAMD_ATTR_ALLOC_SIZE(2) RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT) RSPAMD_ATTR_RETURNS_NONNUL;
+	RSPAMD_ATTR_ALLOC_SIZE(2) RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT) RSPAMD_ATTR_RETURNS_NONNUL;
 #define rspamd_mempool_alloc0(pool, size) \
-	rspamd_mempool_alloc0_((pool), (size), G_STRLOC)
+	rspamd_mempool_alloc0_((pool), (size), (G_STRLOC))
+#define rspamd_mempool_alloc0_type(pool, type) \
+	(type *)(rspamd_mempool_alloc0_((pool), sizeof(type), (G_STRLOC)))
 
 /**
  * Make a copy of string in pool
@@ -182,9 +189,9 @@ RSPAMD_ATTR_ALLOC_SIZE(2) RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT) RSPAMD_ATTR
  * @return pointer to newly created string that is copy of src
  */
 gchar *rspamd_mempool_strdup_ (rspamd_mempool_t *pool, const gchar *src, const gchar *loc)
-RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT);
+	RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT);
 #define rspamd_mempool_strdup(pool, src) \
-	rspamd_mempool_strdup_ ((pool), (src), G_STRLOC)
+	rspamd_mempool_strdup_ ((pool), (src), (G_STRLOC))
 
 /**
  * Make a copy of fixed string in pool as null terminated string
@@ -212,7 +219,7 @@ gchar *rspamd_mempool_ftokdup_ (rspamd_mempool_t *pool,
 								const gchar *loc)
 RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT);
 #define rspamd_mempool_ftokdup(pool, src) \
-	rspamd_mempool_ftokdup_ ((pool), (src), G_STRLOC)
+	rspamd_mempool_ftokdup_ ((pool), (src), (G_STRLOC))
 
 /**
  * Allocate piece of shared memory
@@ -220,14 +227,14 @@ RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT);
  * @param size bytes to allocate
  */
 void *rspamd_mempool_alloc_shared_ (rspamd_mempool_t *pool, gsize size, const gchar *loc)
-RSPAMD_ATTR_ALLOC_SIZE(2) RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT) RSPAMD_ATTR_RETURNS_NONNUL;
+	RSPAMD_ATTR_ALLOC_SIZE(2) RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT) RSPAMD_ATTR_RETURNS_NONNUL;
 #define rspamd_mempool_alloc_shared(pool, size) \
-	rspamd_mempool_alloc_shared_((pool), (size), G_STRLOC)
+	rspamd_mempool_alloc_shared_((pool), (size), (G_STRLOC))
 
 void *rspamd_mempool_alloc0_shared_ (rspamd_mempool_t *pool, gsize size, const gchar *loc)
-RSPAMD_ATTR_ALLOC_SIZE(2) RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT) RSPAMD_ATTR_RETURNS_NONNUL;
+	RSPAMD_ATTR_ALLOC_SIZE(2) RSPAMD_ATTR_ALLOC_ALIGN(MIN_MEM_ALIGNMENT) RSPAMD_ATTR_RETURNS_NONNUL;
 #define rspamd_mempool_alloc0_shared(pool, size) \
-	rspamd_mempool_alloc0_shared_((pool), (size), G_STRLOC)
+	rspamd_mempool_alloc0_shared_((pool), (size), (G_STRLOC))
 
 /**
  * Add destructor callback to pool
@@ -243,7 +250,7 @@ void rspamd_mempool_add_destructor_full (rspamd_mempool_t *pool,
 
 /* Macros for common usage */
 #define rspamd_mempool_add_destructor(pool, func, data) \
-    rspamd_mempool_add_destructor_full (pool, func, data, G_STRFUNC, G_STRLOC)
+    rspamd_mempool_add_destructor_full (pool, func, data, (G_STRFUNC), (G_STRLOC))
 
 /**
  * Replace destructor callback to pool for specified pointer
@@ -253,7 +260,8 @@ void rspamd_mempool_add_destructor_full (rspamd_mempool_t *pool,
  * @param new_data pointer to data that would be passed to destructor
  */
 void rspamd_mempool_replace_destructor (rspamd_mempool_t *pool,
-										rspamd_mempool_destruct_t func, void *old_data, void *new_data);
+										rspamd_mempool_destruct_t func,
+										void *old_data, void *new_data);
 
 /**
  * Calls all destructors associated with the specific memory pool without removing
@@ -388,6 +396,37 @@ GList *rspamd_mempool_glist_append (rspamd_mempool_t *pool,
 									GList *l, gpointer p) G_GNUC_WARN_UNUSED_RESULT;
 
 #ifdef  __cplusplus
+}
+#endif
+
+#ifdef  __cplusplus
+#include <stdexcept> /* For std::runtime_error */
+
+namespace rspamd {
+
+template<class T>
+class mempool_allocator {
+public:
+	typedef T value_type;
+
+	mempool_allocator() = delete;
+	template<class U>
+	mempool_allocator(const mempool_allocator<U> &other) : pool(other.pool) {}
+	mempool_allocator(rspamd_mempool_t *_pool) : pool(_pool) {}
+	[[nodiscard]] constexpr T* allocate(std::size_t n)
+	{
+		if (G_MAXSIZE / 2 / sizeof(T) > n) {
+			throw std::runtime_error("integer overflow");
+		}
+		return reinterpret_cast<T*>(rspamd_mempool_alloc(pool, n * sizeof(T)));
+	}
+	constexpr void deallocate(T* p, std::size_t n) {
+		/* Do nothing */
+	}
+private:
+	rspamd_mempool_t *pool;
+};
+
 }
 #endif
 

@@ -22,8 +22,8 @@ end
 
 local rules = {}
 local rspamd_logger = require "rspamd_logger"
-local util = require "rspamd_util"
-local regexp = require "rspamd_regexp"
+local rspamd_util = require "rspamd_util"
+local rspamd_regexp = require "rspamd_regexp"
 local rspamd_expression = require "rspamd_expression"
 local rspamd_ip = require "rspamd_ip"
 local lua_util = require "lua_util"
@@ -93,10 +93,10 @@ end
 
 local function apply_hostname_filter(task, filter, hostname, r)
   if filter == 'tld' then
-    local tld = util.get_tld(hostname)
+    local tld = rspamd_util.get_tld(hostname)
     return tld
   elseif filter == 'top' then
-    local tld = util.get_tld(hostname)
+    local tld = rspamd_util.get_tld(hostname)
     return tld:match('[^.]*$') or tld
   else
     if not r['re_filter'] then
@@ -105,13 +105,13 @@ local function apply_hostname_filter(task, filter, hostname, r)
         rspamd_logger.errx(task, 'bad search filter: %s', filter)
         return
       end
-      r['re_filter'] = regexp.create(pat)
+      r['re_filter'] = rspamd_regexp.create_cached(pat)
       if not r['re_filter'] then
         rspamd_logger.errx(task, 'couldnt create regex: %s', pat)
         return
       end
     end
-    local tld = util.get_tld(hostname)
+    local tld = rspamd_util.get_tld(hostname)
     local res = r['re_filter']:search(tld)
     if res then
       return res[1]
@@ -168,7 +168,7 @@ local function apply_url_filter(task, filter, url, r)
     if not r['re_filter'] then
       local type,pat = string.match(filter, '(regexp:)(.+)')
       if type and pat then
-        r['re_filter'] = regexp.create(pat)
+        r['re_filter'] = rspamd_regexp.create_cached(pat)
       end
     end
 
@@ -186,7 +186,7 @@ local function apply_url_filter(task, filter, url, r)
     if not r['re_filter'] then
       local type,pat = string.match(filter, '(regexp:)(.+)')
       if type and pat then
-        r['re_filter'] = regexp.create(pat)
+        r['re_filter'] = rspamd_regexp.create_cached(pat)
       end
     end
 
@@ -204,7 +204,7 @@ local function apply_url_filter(task, filter, url, r)
     if not r['re_filter'] then
       local type,pat = string.match(filter, '(regexp:)(.+)')
       if type and pat then
-        r['re_filter'] = regexp.create(pat)
+        r['re_filter'] = rspamd_regexp.create_cached(pat)
       end
     end
 
@@ -233,27 +233,27 @@ end
 
 local function apply_addr_filter(task, filter, input, rule)
   if filter == 'email:addr' or filter == 'email' then
-    local addr = util.parse_mail_address(input, task:get_mempool())
+    local addr = rspamd_util.parse_mail_address(input, task:get_mempool(), 1024)
     if addr and addr[1] then
       return fun.totable(fun.map(function(a) return a.addr end, addr))
     end
   elseif filter == 'email:user' then
-    local addr = util.parse_mail_address(input, task:get_mempool())
+    local addr = rspamd_util.parse_mail_address(input, task:get_mempool(), 1024)
     if addr and addr[1] then
       return fun.totable(fun.map(function(a) return a.user end, addr))
     end
   elseif filter == 'email:domain' then
-    local addr = util.parse_mail_address(input, task:get_mempool())
+    local addr = rspamd_util.parse_mail_address(input, task:get_mempool(), 1024)
     if addr and addr[1] then
       return fun.totable(fun.map(function(a) return a.domain end, addr))
     end
   elseif filter == 'email:domain:tld' then
-    local addr = util.parse_mail_address(input, task:get_mempool())
+    local addr = rspamd_util.parse_mail_address(input, task:get_mempool(), 1024)
     if addr and addr[1] then
-      return fun.totable(fun.map(function(a) return util.get_tld(a.domain) end, addr))
+      return fun.totable(fun.map(function(a) return rspamd_util.get_tld(a.domain) end, addr))
     end
   elseif filter == 'email:name' then
-    local addr = util.parse_mail_address(input, task:get_mempool())
+    local addr = rspamd_util.parse_mail_address(input, task:get_mempool(), 1024)
     if addr and addr[1] then
       return fun.totable(fun.map(function(a) return a.name end, addr))
     end
@@ -268,7 +268,7 @@ local function apply_addr_filter(task, filter, input, rule)
     if not rule['re_filter'] then
       local type,pat = string.match(filter, '(regexp:)(.+)')
       if type and pat then
-        rule['re_filter'] = regexp.create(pat)
+        rule['re_filter'] = rspamd_regexp.create_cached(pat)
       end
     end
 
@@ -291,7 +291,7 @@ local function apply_filename_filter(task, filter, fn, r)
     if not r['re_filter'] then
       local type,pat = string.match(filter, '(regexp:)(.+)')
       if type and pat then
-        r['re_filter'] = regexp.create(pat)
+        r['re_filter'] = rspamd_regexp.create_cached(pat)
       end
     end
 
@@ -315,7 +315,7 @@ local function apply_regexp_filter(task, filter, fn, r)
     if not r['re_filter'] then
       local type,pat = string.match(filter, '(regexp:)(.+)')
       if type and pat then
-        r['re_filter'] = regexp.create(pat)
+        r['re_filter'] = rspamd_regexp.create_cached(pat)
       end
     end
 
@@ -473,6 +473,9 @@ local function multimap_callback(task, rule)
       ret = r.hash:get_key(value)
     end
 
+    lua_util.debugm(N, task, 'found return "%s" for multimap %s', ret,
+    rule.symbol)
+
     if ret then
       if type(ret) == 'table' then
         for _,elt in ipairs(ret) do
@@ -576,7 +579,6 @@ local function multimap_callback(task, rule)
     else
       symbol = rule.symbol
     end
-
 
     if opt then
       if type(opt) == 'table' then
@@ -739,7 +741,7 @@ local function multimap_callback(task, rule)
         end
       else
         if use_tld and type(v) == 'string' then
-          v = util.get_tld(v)
+          v = rspamd_util.get_tld(v)
         end
         match_rule(r, v)
       end
@@ -1097,14 +1099,14 @@ local function add_multimap_rule(key, newrule)
       ret = true
     end
   elseif type(newrule['map']) == 'string' and
-      string.find(newrule['map'], '^redis+selector://.*$') then
+      string.find(newrule['map'], '^redis%+selector://.*$') then
     if not redis_params then
       rspamd_logger.infox(rspamd_config, 'no redis servers are specified, ' ..
           'cannot add redis map %s: %s', newrule['symbol'], newrule['map'])
       return nil
     end
 
-    local selector_str = string.match(newrule['map'], '^redis+selector://(.*)$')
+    local selector_str = string.match(newrule['map'], '^redis%+selector://(.*)$')
     local selector = lua_selectors.create_selector_closure(
         rspamd_config, selector_str, newrule['delimiter'] or "")
 

@@ -29,7 +29,6 @@
 
 #define MIN_RESORT_EVALS 50
 #define MAX_RESORT_EVALS 150
-#define DOUBLE_EPSILON 1e-9
 
 enum rspamd_expression_elt_type {
 	ELT_OP = 0,
@@ -87,6 +86,15 @@ struct rspamd_expr_process_data {
         rspamd_expression_log_id, "expression", e->log_id, \
         G_STRFUNC, \
         __VA_ARGS__)
+
+#ifdef DEBUG_EXPRESSIONS
+#define msg_debug_expression_verbose(...)  rspamd_conditional_debug_fast (NULL, NULL, \
+        rspamd_expression_log_id, "expression", e->log_id, \
+        G_STRFUNC, \
+        __VA_ARGS__)
+#else
+#define msg_debug_expression_verbose(...) do {} while(0)
+#endif
 
 INIT_LOG_MODULE(expression)
 
@@ -364,11 +372,11 @@ rspamd_expr_is_operation (struct rspamd_expression *e,
 						NULL,
 						FALSE,
 						NULL)) {
-					msg_debug_expression ("found divide operation");
+					msg_debug_expression_verbose("found divide operation");
 					return TRUE;
 				}
 
-				msg_debug_expression ("false divide operation");
+				msg_debug_expression_verbose("false divide operation");
 				/* Fallback to PARSE_ATOM state */
 			}
 			else if (*p == '-') {
@@ -381,7 +389,7 @@ rspamd_expr_is_operation (struct rspamd_expression *e,
 					return TRUE;
 				}
 				/* Fallback to PARSE_ATOM state */
-				msg_debug_expression ("false minus operation");
+				msg_debug_expression_verbose("false minus operation");
 			}
 			else {
 				/* Generic operation */
@@ -730,15 +738,14 @@ rspamd_ast_priority_traverse (GNode *node, gpointer d)
 						expr->subr->priority (elt->p.atom);
 			}
 			elt->p.atom->hits = 0;
-			elt->p.atom->avg_ticks = 0.0;
 		}
 	}
 
 	return FALSE;
 }
 
-#define ATOM_PRIORITY(a) ((a)->p.atom->hits / ((a)->p.atom->avg_ticks > 0 ?	\
-				(a)->p.atom->avg_ticks * 10000000 : 1.0))
+#define ATOM_PRIORITY(a) ((a)->p.atom->hits / ((a)->p.atom->exec_time.mean > 0 ?	\
+				(a)->p.atom->exec_time.mean * 10000000 : 1.0))
 
 static gint
 rspamd_ast_priority_cmp (GNode *a, GNode *b)
@@ -760,7 +767,6 @@ rspamd_ast_priority_cmp (GNode *a, GNode *b)
 		w2 = ATOM_PRIORITY (eb);
 
 		ea->p.atom->hits = 0;
-		ea->p.atom->avg_ticks = 0.0;
 
 		return w1 - w2;
 	}
@@ -1127,7 +1133,7 @@ rspamd_parse_expression (const gchar *line, gsize len,
 						"rewind stack; op: %s",
 				e->expression_stack->len,
 				operand_stack->len,
-				rspamd_expr_op_to_str (op));
+				rspamd_expr_op_to_str (op_stack));
 
 		if (op_stack != OP_OBRACE) {
 			elt.type = ELT_OP;
@@ -1177,7 +1183,9 @@ rspamd_parse_expression (const gchar *line, gsize len,
 	return TRUE;
 
 error_label:
-	msg_debug_expression ("fatal error: %e", *err);
+	if (err && *err) {
+		msg_debug_expression ("fatal expression parse error: %e", *err);
+	}
 
 	while ((tmp = rspamd_expr_stack_elt_pop (operand_stack)) != NULL) {
 		g_node_destroy (tmp);
@@ -1225,7 +1233,7 @@ rspamd_ast_do_unary_op (struct rspamd_expression_elt *elt, gdouble operand)
 
 	switch (elt->p.op.op) {
 	case OP_NOT:
-		ret = fabs (operand) > DOUBLE_EPSILON ? 0.0 : 1.0;
+		ret = fabs (operand) > DBL_EPSILON ? 0.0 : 1.0;
 		break;
 	default:
 		g_assert_not_reached ();
@@ -1299,10 +1307,10 @@ rspamd_ast_do_nary_op (struct rspamd_expression_elt *elt, gdouble val, gdouble a
 		ret = acc * val;
 		break;
 	case OP_AND:
-		ret = (acc * val);
+		ret = (fabs(acc) > DBL_EPSILON) && (fabs(val) > DBL_EPSILON);
 		break;
 	case OP_OR:
-		ret = (acc + val);
+		ret = (fabs(acc) > DBL_EPSILON) || (fabs(val) > DBL_EPSILON);
 		break;
 	default:
 	case OP_NOT:
@@ -1328,7 +1336,8 @@ rspamd_ast_process_node (struct rspamd_expression *e, GNode *node,
 	struct rspamd_expression_elt *elt;
 	GNode *cld;
 	gdouble acc = NAN;
-	gdouble t1, t2, val;
+	float t1, t2;
+	gdouble val;
 	gboolean calc_ticks = FALSE;
 	const gchar *op_name = NULL;
 
@@ -1337,21 +1346,17 @@ rspamd_ast_process_node (struct rspamd_expression *e, GNode *node,
 	switch (elt->type) {
 	case ELT_ATOM:
 		if (!(elt->flags & RSPAMD_EXPR_FLAG_PROCESSED)) {
-
 			/*
-			 * Sometimes get ticks for this expression. 'Sometimes' here means
-			 * that we get lowest 5 bits of the counter `evals` and 5 bits
-			 * of some shifted address to provide some sort of jittering for
-			 * ticks evaluation
+			 * Check once per 256 evaluations approx
 			 */
-			if ((e->evals & 0x1F) == (GPOINTER_TO_UINT (node) >> 4 & 0x1F)) {
-				calc_ticks = TRUE;
+			calc_ticks = (rspamd_random_uint64_fast() & 0xff) == 0xff;
+			if (calc_ticks) {
 				t1 = rspamd_get_ticks (TRUE);
 			}
 
 			elt->value = process_data->process_closure (process_data->ud, elt->p.atom);
 
-			if (fabs (elt->value) > 1e-9) {
+			if (fabs (elt->value) > DBL_EPSILON) {
 				elt->p.atom->hits ++;
 
 				if (process_data->trace) {
@@ -1361,40 +1366,39 @@ rspamd_ast_process_node (struct rspamd_expression *e, GNode *node,
 
 			if (calc_ticks) {
 				t2 = rspamd_get_ticks (TRUE);
-				elt->p.atom->avg_ticks += ((t2 - t1) - elt->p.atom->avg_ticks) /
-						(e->evals);
+				rspamd_set_counter_ema(&elt->p.atom->exec_time, (t2 - t1), 0.5f);
 			}
 
 			elt->flags |= RSPAMD_EXPR_FLAG_PROCESSED;
 		}
 
 		acc = elt->value;
-		msg_debug_expression ("atom: elt=%s; acc=%.1f", elt->p.atom->str, acc);
+		msg_debug_expression_verbose ("atom: elt=%s; acc=%.1f", elt->p.atom->str, acc);
 		break;
 	case ELT_LIMIT:
 
 		acc = elt->p.lim;
-		msg_debug_expression ("limit: lim=%.1f; acc=%.1f;", elt->p.lim, acc);
+		msg_debug_expression_verbose ("limit: lim=%.1f; acc=%.1f;", elt->p.lim, acc);
 		break;
 	case ELT_OP:
 		g_assert (node->children != NULL);
 		op_name = rspamd_expr_op_to_str (elt->p.op.op);
 
 		if (elt->p.op.op_flags & RSPAMD_EXPRESSION_NARY) {
-			msg_debug_expression ("proceed nary operation %s", op_name);
+			msg_debug_expression_verbose ("proceed nary operation %s", op_name);
 			/* Proceed all ops in chain */
 			DL_FOREACH (node->children, cld) {
 				val = rspamd_ast_process_node (e, cld, process_data);
-				msg_debug_expression ("before op: op=%s; acc=%.1f; val = %.2f", op_name,
+				msg_debug_expression_verbose ("before op: op=%s; acc=%.1f; val = %.2f", op_name,
 						acc, val);
 				acc = rspamd_ast_do_nary_op (elt, val, acc);
-				msg_debug_expression ("after op: op=%s; acc=%.1f; val = %.2f", op_name,
+				msg_debug_expression_verbose ("after op: op=%s; acc=%.1f; val = %.2f", op_name,
 						acc, val);
 
 				/* Check if we need to process further */
 				if (!(process_data->flags & RSPAMD_EXPRESSION_FLAG_NOOPT)) {
 					if (rspamd_ast_node_done (elt, acc)) {
-						msg_debug_expression ("optimizer: done");
+						msg_debug_expression_verbose ("optimizer: done");
 						return acc;
 					}
 				}
@@ -1407,15 +1411,15 @@ rspamd_ast_process_node (struct rspamd_expression *e, GNode *node,
 			g_assert (c2->next == NULL);
 			gdouble val1, val2;
 
-			msg_debug_expression ("proceed binary operation %s",
+			msg_debug_expression_verbose ("proceed binary operation %s",
 					op_name);
 			val1 = rspamd_ast_process_node (e, c1, process_data);
 			val2 = rspamd_ast_process_node (e, c2, process_data);
 
-			msg_debug_expression ("before op: op=%s; op1 = %.1f, op2 = %.1f",
+			msg_debug_expression_verbose ("before op: op=%s; op1 = %.1f, op2 = %.1f",
 					op_name, val1, val2);
 			acc = rspamd_ast_do_binary_op (elt, val1, val2);
-			msg_debug_expression ("after op: op=%s; res=%.1f",
+			msg_debug_expression_verbose ("after op: op=%s; res=%.1f",
 					op_name, acc);
 		}
 		else if (elt->p.op.op_flags & RSPAMD_EXPRESSION_UNARY) {
@@ -1423,14 +1427,14 @@ rspamd_ast_process_node (struct rspamd_expression *e, GNode *node,
 
 			g_assert (c1->next == NULL);
 
-			msg_debug_expression ("proceed unary operation %s",
+			msg_debug_expression_verbose ("proceed unary operation %s",
 					op_name);
 			val = rspamd_ast_process_node (e, c1, process_data);
 
-			msg_debug_expression ("before op: op=%s; op1 = %.1f",
+			msg_debug_expression_verbose ("before op: op=%s; op1 = %.1f",
 					op_name, val);
 			acc = rspamd_ast_do_unary_op (elt, val);
-			msg_debug_expression ("after op: op=%s; res=%.1f",
+			msg_debug_expression_verbose ("after op: op=%s; res=%.1f",
 					op_name, acc);
 		}
 		break;

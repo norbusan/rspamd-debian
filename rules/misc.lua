@@ -22,6 +22,9 @@ local util = require "rspamd_util"
 local rspamd_parsers = require "rspamd_parsers"
 local rspamd_regexp = require "rspamd_regexp"
 local rspamd_lua_utils = require "lua_util"
+local bit = require "bit"
+local rspamd_url = require "rspamd_url"
+local url_flags_tab = rspamd_url.flags
 
 -- Different text parts
 rspamd_config.R_PARTS_DIFFER = {
@@ -123,15 +126,18 @@ rspamd_config:register_symbol({
 
 local obscured_id = rspamd_config:register_symbol{
   callback = function(task)
-    local urls = task:get_urls()
+    local susp_urls = task:get_urls_filtered({ 'obscured', 'zw_spaces'})
 
-    if urls then
-      for _,u in ipairs(urls) do
-        local fl = u:get_flags()
-        if fl.obscured then
+    if susp_urls and susp_urls[1] then
+      local obs_flag = url_flags_tab.obscured
+      local zw_flag = url_flags_tab.zw_spaces
+
+      for _,u in ipairs(susp_urls) do
+        local fl = u:get_flags_num()
+        if bit.band(fl, obs_flag) ~= 0 then
           task:insert_result('R_SUSPICIOUS_URL', 1.0, u:get_host())
         end
-        if fl.zw_spaces then
+        if bit.band(fl, zw_flag) ~= 0 then
           task:insert_result('ZERO_WIDTH_SPACE_URL', 1.0, u:get_host())
         end
       end
@@ -142,7 +148,7 @@ local obscured_id = rspamd_config:register_symbol{
   name = 'R_SUSPICIOUS_URL',
   score = 5.0,
   one_shot = true,
-  description = 'Obfusicated or suspicious URL has been found in a message',
+  description = 'Obfuscated or suspicious URL has been found in a message',
   group = 'url'
 }
 
@@ -399,7 +405,10 @@ rspamd_config.OMOGRAPH_URL = {
         if u:is_phished() then
 
           local h1 = u:get_host()
-          local h2 = u:get_phished():get_host()
+          local h2 = u:get_phished()
+          if h2 then -- Due to changes of the phished flag in 2.8
+            h2 = h2:get_host()
+          end
           if h1 and h2 then
             local selt = string.format('%s->%s', h1, h2)
             if not seen[selt] and util.is_utf_spoofed(h1, h2) then
@@ -503,7 +512,7 @@ local aliases_id = rspamd_config:register_symbol{
         end
 
         if modified then
-          task:set_recipients(type, addrs)
+          task:set_recipients(type, addrs, 'alias')
           task:insert_result('TAGGED_RCPT', 1.0, all_tags)
         end
       end

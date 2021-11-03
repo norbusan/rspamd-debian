@@ -435,7 +435,7 @@ main (gint argc, gchar **argv, gchar **env)
 		fprintf (stderr, "option parsing failed: %s\n", error->message);
 		g_error_free (error);
 		g_option_context_free (context);
-		exit (1);
+		exit (EXIT_FAILURE);
 	}
 
 
@@ -451,7 +451,7 @@ main (gint argc, gchar **argv, gchar **env)
 		rspamd_log_set_log_level (rspamd_main->logger, G_LOG_LEVEL_MESSAGE);
 	}
 
-	rspamd_main->event_loop = ev_default_loop (EVFLAG_SIGNALFD|EVBACKEND_ALL);
+	rspamd_main->event_loop = ev_default_loop (rspamd_config_ev_backend_get (cfg));
 
 	resolver = rspamd_dns_resolver_init (rspamd_main->logger,
 			rspamd_main->event_loop,

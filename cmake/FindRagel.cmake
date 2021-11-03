@@ -41,9 +41,6 @@
 # /usr/share/cmake/Modules/FindFLEX.cmake
 # /usr/share/cmake/Modules/FindBISON.cmake
 
-# uses some features which are not available in 2.6
-cmake_minimum_required(VERSION 2.8)
-
 find_program(RAGEL_EXECUTABLE NAMES ragel DOC "path to the ragel executable")
 mark_as_advanced(RAGEL_EXECUTABLE)
 
@@ -73,7 +70,7 @@ ${RAGEL_version_error}")
     CMAKE_PARSE_ARGUMENTS(RAGEL "" "OUTPUT"
 		"INPUTS;DEPENDS;COMPILE_FLAGS" ${ARGN})
 
-    file(RELATIVE_PATH RAGEL_OUTPUT_RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+    file(RELATIVE_PATH RAGEL_OUTPUT_RELATIVE "${CMAKE_CURRENT_BINARY_DIR}"
          "${RAGEL_OUTPUT}")
     file(RELATIVE_PATH RAGEL_INPUTS_RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
          "${RAGEL_INPUTS}")
@@ -81,11 +78,14 @@ ${RAGEL_version_error}")
     add_custom_command(OUTPUT ${RAGEL_OUTPUT}
       COMMAND ${RAGEL_EXECUTABLE}
       ARGS    ${RAGEL_COMPILE_FLAGS}
-              -o${RAGEL_OUTPUT_RELATIVE} ${RAGEL_INPUTS_RELATIVE}
+              -o${RAGEL_OUTPUT} ${RAGEL_INPUTS}
       DEPENDS ${RAGEL_INPUTS} ${RAGEL_DEPENDS}
       COMMENT
-          "[RAGEL][${Name}] Compiling state machine with Ragel ${RAGEL_VERSION}"
+          "[RAGEL][${Name}] Compiling state machine with Ragel ${RAGEL_VERSION} -> ${RAGEL_OUTPUT}"
       WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    get_filename_component(src_target ${RAGEL_INPUTS} NAME_WE)
+    add_custom_target(ragel_${src_target} DEPENDS ${RAGEL_OUTPUT})
+    set_source_files_properties(${RAGEL_OUTPUT} PROPERTIES GENERATED TRUE)
 
     set(RAGEL_${Name}_DEFINED       TRUE)
     set(RAGEL_${Name}_OUTPUTS       ${RAGEL_OUTPUT})

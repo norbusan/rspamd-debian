@@ -781,7 +781,9 @@ rspamd_control_ignore_io_handler (int fd, short what, void *ud)
 	struct rspamd_control_reply rep;
 
 	/* At this point we just ignore replies from the workers */
-	(void) !read (fd, &rep, sizeof (rep));
+	if (read (fd, &rep, sizeof (rep)) == -1) {
+		msg_debug("cannot read %d bytes: %s", (int)sizeof(rep), strerror(errno));
+	}
 	rspamd_control_stop_pending (elt);
 }
 
@@ -848,6 +850,31 @@ rspamd_control_handle_on_fork (struct rspamd_srv_command *cmd,
 		g_hash_table_insert (srv->workers,
 				GSIZE_TO_POINTER (cmd->cmd.on_fork.cpid), child);
 	}
+}
+
+static void
+rspamd_fill_health_reply (struct rspamd_main *srv, struct rspamd_srv_reply *rep)
+{
+	GHashTableIter it;
+	gpointer k, v;
+
+	memset (&rep->reply.health, 0, sizeof (rep->reply));
+	g_hash_table_iter_init (&it, srv->workers);
+
+	while (g_hash_table_iter_next (&it, &k, &v)) {
+		struct rspamd_worker *wrk = (struct rspamd_worker *)v;
+
+		if (wrk->hb.nbeats < 0) {
+			rep->reply.health.workers_hb_lost ++;
+		}
+		else if (rspamd_worker_is_scanner (wrk)) {
+			rep->reply.health.scanners_count ++;
+		}
+
+		rep->reply.health.workers_count ++;
+	}
+
+	rep->reply.status = (g_hash_table_size (srv->workers) > 0);
 }
 
 
@@ -978,6 +1005,9 @@ rspamd_srv_handler (EV_P_ ev_io *w, int revents)
 			case RSPAMD_SRV_HEARTBEAT:
 				worker->hb.last_event = ev_time ();
 				rdata->rep.reply.heartbeat.status = 0;
+				break;
+			case RSPAMD_SRV_HEALTH:
+				rspamd_fill_health_reply (srv, &rdata->rep);
 				break;
 			default:
 				msg_err ("unknown command type: %d", cmd.type);

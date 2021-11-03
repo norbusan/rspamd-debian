@@ -338,25 +338,33 @@ rspamd_sqlite3_open_or_create (rspamd_mempool_t *pool, const gchar *path, const
 	rspamd_snprintf (lock_path, sizeof (lock_path), "%s.lock", path);
 	lock_fd = open (lock_path, O_WRONLY|O_CREAT|O_EXCL, 00600);
 
-	if (lock_fd == -1 && (errno == EEXIST || errno == EBUSY)) {
-		msg_debug_pool_check ("checking %s to wait for db being initialized", lock_path);
+	if (lock_fd == -1) {
+		if (errno == EEXIST || errno == EBUSY) {
+			msg_debug_pool_check ("checking %s to wait for db being initialized", lock_path);
 
-		if (!rspamd_sqlite3_wait (pool, lock_path)) {
-			g_set_error (err, rspamd_sqlite3_quark (),
-					errno, "cannot create sqlite file %s: %s",
-					path, strerror (errno));
+			if (!rspamd_sqlite3_wait(pool, lock_path)) {
+				g_set_error(err, rspamd_sqlite3_quark(),
+						errno, "cannot create sqlite file %s: %s",
+						path, strerror(errno));
 
-			return NULL;
+				return NULL;
+			}
+
+
+			/* At this point we have database created */
+			create = FALSE;
+			has_lock = FALSE;
 		}
-
-		/* At this point we have database created */
-		create = FALSE;
-		has_lock = FALSE;
+		else {
+			g_set_error(err, rspamd_sqlite3_quark(),
+					errno, "cannot lock sqlite file %s: %s",
+					path, strerror(errno));
+		}
 	}
 	else {
 		pid_t myself = getpid ();
 		msg_debug_pool_check ("locking %s to block other processes", lock_path);
-		(void) !write (lock_fd, &myself, sizeof (myself));
+		(void)write (lock_fd, &myself, sizeof (myself));
 
 		g_assert (rspamd_file_lock (lock_fd, FALSE));
 		has_lock = TRUE;

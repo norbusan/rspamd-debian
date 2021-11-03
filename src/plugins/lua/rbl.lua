@@ -22,6 +22,7 @@ end
 local hash = require 'rspamd_cryptobox_hash'
 local rspamd_logger = require 'rspamd_logger'
 local rspamd_util = require 'rspamd_util'
+local rspamd_ip = require "rspamd_ip"
 local fun = require 'fun'
 local lua_util = require 'lua_util'
 local selectors = require "lua_selectors"
@@ -538,12 +539,27 @@ local function gen_rbl_callback(rule)
     local urls = lua_util.extract_specific_urls(ex_params)
 
     for _,u in ipairs(urls) do
-      local url_tld = u:get_tld()
-      if rule.url_compose_map then
-        url_tld = rule.url_compose_map:process_url(task, url_tld, u:get_host())
+      local flags = u:get_flags()
+
+      if flags.numeric then
+        -- For numeric urls we convert data to the ip address and
+        -- reverse octets. See #3948 for details
+        local to_resolve = u:get_host()
+        local addr = rspamd_ip.from_string(to_resolve)
+
+        if addr then
+          to_resolve = table.concat(addr:inversed_str_octets(), ".")
+        end
+        add_dns_request(task, to_resolve, false,
+            false, requests_table, 'url', whitelist)
+      else
+        local url_tld = u:get_tld()
+        if rule.url_compose_map then
+          url_tld = rule.url_compose_map:process_url(task, url_tld, u:get_host())
+        end
+        add_dns_request(task, url_tld, false,
+            false, requests_table, 'url', whitelist)
       end
-      add_dns_request(task, url_tld, false,
-          false, requests_table, 'url', whitelist)
     end
 
     return true
@@ -600,11 +616,14 @@ local function gen_rbl_callback(rule)
     for selector_label, selector in pairs(rule.selectors) do
       local res = selector(task)
 
-      if res then
-        for _,r in ipairs(res) do
-          add_dns_request(task, r, false, false, requests_table,
-              selector_label, whitelist)
-        end
+      if res and type(res) == 'table' then
+          for _,r in ipairs(res) do
+            add_dns_request(task, r, false, false, requests_table,
+                    selector_label, whitelist)
+          end
+      elseif res then
+        add_dns_request(task, res, false, false,
+                requests_table, selector_label, whitelist)
       end
     end
 
@@ -904,8 +923,13 @@ local function add_rbl(key, rbl, global_opts)
             known_selectors[selector].id)
         rbl.selectors[selector_label] = known_selectors[selector].selector
       else
-        -- Create a new flattened closure
-        local sel = selectors.create_selector_closure(rspamd_config, selector, '', true)
+
+        if type(rbl.selector_flatten) ~= 'boolean' then
+          -- Fail-safety
+          rbl.selector_flatten = true
+        end
+        local sel = selectors.create_selector_closure(rspamd_config, selector, '',
+                rbl.selector_flatten)
 
         if not sel then
           rspamd_logger.errx('invalid selector for rbl rule %s: %s', key, selector)

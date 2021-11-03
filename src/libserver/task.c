@@ -21,11 +21,10 @@
 #include "message.h"
 #include "lua/lua_common.h"
 #include "email_addr.h"
-#include "composites.h"
+#include "src/libserver/composites/composites.h"
 #include "stat_api.h"
 #include "unix-std.h"
 #include "utlist.h"
-#include "contrib/zstd/zstd.h"
 #include "libserver/mempool_vars_internal.h"
 #include "libserver/cfg_file_private.h"
 #include "libmime/lang_detection.h"
@@ -40,6 +39,12 @@
 #endif
 
 #include <math.h>
+
+#ifdef SYS_ZSTD
+#  include "zstd.h"
+#else
+#  include "contrib/zstd/zstd.h"
+#endif
 
 __KHASH_IMPL (rspamd_req_headers_hash, static inline,
 		rspamd_ftok_t *, struct rspamd_request_header_chain *, 1,
@@ -125,7 +130,7 @@ rspamd_task_new (struct rspamd_worker *worker,
 static void
 rspamd_task_reply (struct rspamd_task *task)
 {
-	const ev_tstamp write_timeout = 2.0;
+	const ev_tstamp write_timeout = 5.0;
 
 	if (task->fin_callback) {
 		task->fin_callback (task, task->fin_arg);
@@ -1120,7 +1125,7 @@ rspamd_task_log_metric_res (struct rspamd_task *task,
 			symbuf = rspamd_fstring_sized_new (128);
 			sorted_symbols = g_ptr_array_sized_new (kh_size (mres->symbols));
 
-			kh_foreach_value_ptr (mres->symbols, sym, {
+			kh_foreach_value (mres->symbols, sym, {
 				if (!(sym->flags & RSPAMD_SYMBOL_RESULT_IGNORED)) {
 					g_ptr_array_add (sorted_symbols, (gpointer)sym);
 				}

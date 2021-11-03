@@ -26,6 +26,7 @@ local function make_subj_bounce_keywords_re()
     'delivery failed',
     'delivery failure',
     'delivery report',
+    'delivery status',
     'delivery warning',
     'failure delivery',
     'failure notice',
@@ -42,7 +43,7 @@ config.regexp.SUBJ_BOUNCE_WORDS = {
   re = make_subj_bounce_keywords_re(),
   group = 'headers',
   score = 0.0,
-  description = 'Words/phrases typical for DNS'
+  description = 'Words/phrases typical for DSN'
 }
 
 rspamd_config.BOUNCE = {
@@ -52,7 +53,7 @@ rspamd_config.BOUNCE = {
       -- RFC 3464:
       -- Whenever an SMTP transaction is used to send a DSN, the MAIL FROM
       -- command MUST use a NULL return address, i.e., "MAIL FROM:<>"
-      -- In practise it is almost always the case for DNS
+      -- In practise it is almost always the case for DSN
       return false
     end
 
@@ -74,7 +75,7 @@ rspamd_config.BOUNCE = {
       -- Check common bounce senders
       if (from_user == 'postmaster' or from_user == 'mailer-daemon') then
         bounce_sender = from_user
-      -- MDaemon >= 14.5 sends multipart/report (RFC 3464) DNS covered above,
+      -- MDaemon >= 14.5 sends multipart/report (RFC 3464) DSN covered above,
       -- but older versions send non-standard bounces with localized subjects and they
       -- are still around
       elseif from_user == 'mdaemon' and task:has_header('X-MDDSN-Message') then

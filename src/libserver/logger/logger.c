@@ -48,9 +48,21 @@ rspamd_log_emergency_logger (void)
 void
 rspamd_log_set_log_level (rspamd_logger_t *logger, gint level)
 {
-	g_assert (logger != NULL);
+	if (logger == NULL) {
+		logger = default_logger;
+	}
 
 	logger->log_level = level;
+}
+
+gint
+rspamd_log_get_log_level (rspamd_logger_t *logger)
+{
+	if (logger == NULL) {
+		logger = default_logger;
+	}
+
+	return logger->log_level;
 }
 
 void
@@ -150,6 +162,7 @@ rspamd_log_open_emergency (rspamd_mempool_t *pool, gint flags)
 	logger->flags = flags;
 	logger->pool = pool;
 	logger->process_type = "main";
+	logger->pid = getpid ();
 
 	const struct rspamd_logger_funcs *funcs = &console_log_funcs;
 	memcpy (&logger->ops, funcs, sizeof (*funcs));
@@ -214,16 +227,21 @@ rspamd_log_open_specific (rspamd_mempool_t *pool,
 
 	const struct rspamd_logger_funcs *funcs = NULL;
 
-	switch (cfg->log_type) {
-	case RSPAMD_LOG_CONSOLE:
+	if (cfg) {
+		switch (cfg->log_type) {
+		case RSPAMD_LOG_CONSOLE:
+			funcs = &console_log_funcs;
+			break;
+		case RSPAMD_LOG_SYSLOG:
+			funcs = &syslog_log_funcs;
+			break;
+		case RSPAMD_LOG_FILE:
+			funcs = &file_log_funcs;
+			break;
+		}
+	}
+	else {
 		funcs = &console_log_funcs;
-		break;
-	case RSPAMD_LOG_SYSLOG:
-		funcs = &syslog_log_funcs;
-		break;
-	case RSPAMD_LOG_FILE:
-		funcs = &file_log_funcs;
-		break;
 	}
 
 	g_assert (funcs != NULL);
@@ -299,9 +317,9 @@ rspamd_log_on_fork (GQuark ptype, struct rspamd_config *cfg,
 	}
 }
 
-static inline gboolean
+inline gboolean
 rspamd_logger_need_log (rspamd_logger_t *rspamd_log, GLogLevelFlags log_level,
-		guint module_id)
+		gint module_id)
 {
 	g_assert (rspamd_log != NULL);
 
@@ -310,7 +328,7 @@ rspamd_logger_need_log (rspamd_logger_t *rspamd_log, GLogLevelFlags log_level,
 		return TRUE;
 	}
 
-	if (module_id != (guint)-1 && isset (log_modules->bitset, module_id)) {
+	if (module_id != -1 && isset (log_modules->bitset, module_id)) {
 		return TRUE;
 	}
 
@@ -431,18 +449,6 @@ rspamd_common_logv (rspamd_logger_t *rspamd_log, gint level_flags,
 		/* Just fprintf message to stderr */
 		if (level >= G_LOG_LEVEL_INFO) {
 			end = rspamd_vsnprintf (logbuf, sizeof (logbuf), fmt, args);
-
-			if (!(rspamd_log->flags & RSPAMD_LOG_FLAG_RSPAMADM)) {
-				if ((nescaped = rspamd_log_line_need_escape (logbuf, end - logbuf)) != 0) {
-					gsize unsecaped_len = end - logbuf;
-					gchar *logbuf_escaped = g_alloca (unsecaped_len + nescaped * 4);
-					log_line = logbuf_escaped;
-
-					end = rspamd_log_line_hex_escape (logbuf, unsecaped_len,
-							logbuf_escaped, unsecaped_len + nescaped * 4);
-				}
-			}
-
 			rspamd_fprintf (stderr, "%*s\n", (gint)(end - log_line),
 					log_line);
 		}
@@ -576,7 +582,7 @@ rspamd_conditional_debug (rspamd_logger_t *rspamd_log,
 	static gchar logbuf[LOGBUF_LEN];
 	va_list vp;
 	gchar *end;
-	guint mod_id;
+	gint mod_id;
 
 	if (rspamd_log == NULL) {
 		rspamd_log = default_logger;
@@ -612,7 +618,7 @@ rspamd_conditional_debug (rspamd_logger_t *rspamd_log,
 bool
 rspamd_conditional_debug_fast (rspamd_logger_t *rspamd_log,
 		rspamd_inet_addr_t *addr,
-		guint mod_id, const gchar *module, const gchar *id,
+		gint mod_id, const gchar *module, const gchar *id,
 		const gchar *function, const gchar *fmt, ...)
 {
 	static gchar logbuf[LOGBUF_LEN];
@@ -651,7 +657,7 @@ rspamd_conditional_debug_fast (rspamd_logger_t *rspamd_log,
 bool
 rspamd_conditional_debug_fast_num_id (rspamd_logger_t *rspamd_log,
 							   rspamd_inet_addr_t *addr,
-							   guint mod_id, const gchar *module, guint64 id,
+							   gint mod_id, const gchar *module, guint64 id,
 							   const gchar *function, const gchar *fmt, ...)
 {
 	static gchar logbuf[LOGBUF_LEN], idbuf[64];
@@ -841,13 +847,13 @@ RSPAMD_DESTRUCTOR (rspamd_debug_modules_dtor)
 	}
 }
 
-guint
+gint
 rspamd_logger_add_debug_module (const gchar *mname)
 {
 	struct rspamd_log_module *m;
 
 	if (mname == NULL) {
-		return (guint)-1;
+		return -1;
 	}
 
 	if (log_modules == NULL) {
@@ -998,4 +1004,28 @@ rspamd_log_line_need_escape (const guchar *src, gsize srclen)
 	}
 
 	return n;
+}
+
+const gchar *
+rspamd_get_log_severity_string (gint level_flags)
+{
+	unsigned int bitnum;
+	static const char *level_strs[G_LOG_LEVEL_USER_SHIFT] = {
+			"", /* G_LOG_FLAG_RECURSION */
+			"", /* G_LOG_FLAG_FATAL */
+			"crit",
+			"error",
+			"warn",
+			"notice",
+			"info",
+			"debug"
+	};
+	level_flags &= ((1u << G_LOG_LEVEL_USER_SHIFT) - 1u) & ~(G_LOG_FLAG_RECURSION|G_LOG_FLAG_FATAL);
+#ifdef __GNUC__
+	/* We assume gcc >= 3 and clang >= 5 anyway */
+	bitnum = __builtin_ffs (level_flags) - 1;
+#else
+	bitnum = ffs (level_flags) - 1;
+#endif
+	return level_strs[bitnum];
 }

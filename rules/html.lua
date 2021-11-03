@@ -15,6 +15,8 @@
 
 local reconf = config['regexp']
 
+local rspamd_regexp = require "rspamd_regexp"
+
 -- Messages that have only HTML part
 reconf['MIME_HTML_ONLY'] = {
   re = 'has_only_html_part()',
@@ -54,7 +56,7 @@ local function check_html_image(task, min, max)
             if tag then
               if has_anchor_parent(tag) then
                 -- do not trigger on small and unknown size images
-                if i['height'] + i['width'] >= 210 or not i['embedded'] then
+                if i['height'] + i['width'] >= 210 and i['embedded'] then
                   return true
                 end
               end
@@ -180,7 +182,6 @@ local vis_check_id = rspamd_config:register_symbol{
     --local logger = require "rspamd_logger"
     local tp = task:get_text_parts() -- get text parts in a message
     local ret = false
-    local diff = 0.0
     local transp_rate = 0
     local invisible_blocks = 0
     local zero_size_blocks = 0
@@ -195,47 +196,30 @@ local vis_check_id = rspamd_config:register_symbol{
         local hc = p:get_html() -- we get HTML context
 
         hc:foreach_tag({'font', 'span', 'div', 'p', 'td'}, function(tag, clen, is_leaf)
-          local bl = tag:get_extra()
+          local bl = tag:get_style()
           if bl then
-            if not bl['visible'] and is_leaf then
+            if not bl.visible and clen > 0 and is_leaf then
               invisible_blocks = invisible_blocks + 1
             end
 
-            if bl['font_size'] and bl['font_size'] == 0 and is_leaf then
+            if (bl.font_size or 12) == 0 and clen > 0 and is_leaf then
               zero_size_blocks = zero_size_blocks + 1
             end
 
-            if bl['bgcolor'] and bl['color'] and bl['visible'] and is_leaf then
-
-              local color = bl['color']
-              local bgcolor = bl['bgcolor']
-              -- Should use visual approach here some day
-              local diff_r = math.abs(color[1] - bgcolor[1])
-              local diff_g = math.abs(color[2] - bgcolor[2])
-              local diff_b = math.abs(color[3] - bgcolor[3])
-              local r_avg = (color[1] + bgcolor[1]) / 2.0
-              -- Square
-              diff_r = diff_r * diff_r
-              diff_g = diff_g * diff_g
-              diff_b = diff_b * diff_b
-
-              diff = math.sqrt(2*diff_r + 4*diff_g + 3 * diff_b +
-                  (r_avg * (diff_r - diff_b) / 256.0))
-              diff = diff / 256.0
-
-              if diff < 0.1 then
-                ret = true
-                invisible_blocks = invisible_blocks + 1 -- This block is invisible
-                transp_len = transp_len + clen * (0.1 - diff) * 10.0
-                normal_len = normal_len - clen
-                local tr = transp_len / (normal_len + transp_len)
-                if tr > transp_rate then
-                  transp_rate = tr
-                  arg = string.format('%s color #%x%x%x bgcolor #%x%x%x',
-                    tostring(tag:get_type()),
-                    color[1], color[2], color[3],
-                    bgcolor[1], bgcolor[2], bgcolor[3])
-                end
+            if bl.transparent and is_leaf then
+              ret = true
+              invisible_blocks = invisible_blocks + 1 -- This block is invisible
+              transp_len = transp_len + clen
+              normal_len = normal_len - clen
+              local tr = transp_len / (normal_len + transp_len)
+              if tr > transp_rate then
+                transp_rate = tr
+                if not bl.color then bl.color = {0, 0, 0} end
+                if not bl.bgcolor then bl.bgcolor = {0, 0, 0} end
+                arg = string.format('%s color #%x%x%x bgcolor #%x%x%x',
+                    tag:get_type(),
+                    bl.color[1], bl.color[2], bl.color[3],
+                    bl.bgcolor[1], bl.bgcolor[2], bl.bgcolor[3])
               end
             end
           end
@@ -366,36 +350,46 @@ rspamd_config.EXT_CSS = {
   description = 'Message contains external CSS reference'
 }
 
+local https_re = rspamd_regexp.create_cached('/^https:/i')
+
 rspamd_config.HTTP_TO_HTTPS = {
   callback = function(task)
-    local tp = task:get_text_parts()
-    if (not tp) then return false end
+    local found_opts
+    local tp = task:get_text_parts() or {}
+
     for _,p in ipairs(tp) do
       if p:is_html() then
         local hc = p:get_html()
         if (not hc) then return false end
+
         local found = false
-        hc:foreach_tag('a', function (tag, length)
+
+        hc:foreach_tag('a', function (tag, _)
           -- Skip this loop if we already have a match
           if (found) then return true end
+
           local c = tag:get_content()
           if (c) then
-            c = tostring(c):lower()
-            if (not c:match('^http')) then return false end
+            if (not https_re:match(c)) then return false end
+
             local u = tag:get_extra()
             if (not u) then return false end
-            u = tostring(u):lower()
-            if (not u:match('^http')) then return false end
-            if ((c:match('^http:') and u:match('^https:')) or
-                (c:match('^https:') and u:match('^http:')))
-            then
-              found = true
-              return true
-            end
+            local url_proto = u:get_protocol()
+
+            if url_proto ~= 'http' then return false end
+            -- Capture matches for http in href to https in visible part only
+            found = true
+            found_opts = u:get_host()
+            return true
           end
+
           return false
         end)
-        if (found) then return true end
+
+        if (found) then
+          return true,1.0,found_opts
+        end
+
         return false
       end
     end

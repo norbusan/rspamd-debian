@@ -17,7 +17,7 @@
 #include "lua_common.h"
 #include "tokenizers/tokenizers.h"
 #include "contrib/uthash/utlist.h"
-#include "libserver/html.h"
+#include "libserver/html/html.h"
 #include "libmime/email_addr.h"
 #include "libmime/content_type.h"
 #include "libmime/mime_headers.h"
@@ -206,9 +206,9 @@ lua_parsers_parse_html (lua_State *L)
 	struct rspamd_lua_text *t;
 	const gchar *start = NULL;
 	gsize len;
-	GByteArray *res, *in;
+	GByteArray *in;
 	rspamd_mempool_t *pool;
-	struct html_content *hc;
+	void *hc;
 
 	if (lua_type (L, 1) == LUA_TUSERDATA) {
 		t = lua_check_text (L, 1);
@@ -224,19 +224,15 @@ lua_parsers_parse_html (lua_State *L)
 
 	if (start != NULL) {
 		pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), NULL, 0);
-		hc = rspamd_mempool_alloc0 (pool, sizeof (*hc));
 		in = g_byte_array_sized_new (len);
 		g_byte_array_append (in, start, len);
 
-		res = rspamd_html_process_part (pool, hc, in);
+		hc = rspamd_html_process_part(pool, in);
 
-		t = lua_newuserdata (L, sizeof (*t));
-		rspamd_lua_setclass (L, "rspamd{text}", -1);
-		t->start = res->data;
-		t->len = res->len;
-		t->flags = RSPAMD_TEXT_FLAG_OWN;
+		rspamd_ftok_t res;
+		rspamd_html_get_parsed_content(hc, &res);
+		lua_new_text(L, res.begin, res.len, TRUE);
 
-		g_byte_array_free (res, FALSE);
 		g_byte_array_free (in, TRUE);
 		rspamd_mempool_delete (pool);
 	}
@@ -254,6 +250,7 @@ lua_parsers_parse_mail_address (lua_State *L)
 	GPtrArray *addrs;
 	gsize len;
 	const gchar *str = luaL_checklstring (L, 1, &len);
+	gint max_addrs = luaL_optinteger(L, 3, 10240);
 	rspamd_mempool_t *pool;
 	gboolean own_pool = FALSE;
 
@@ -272,7 +269,7 @@ lua_parsers_parse_mail_address (lua_State *L)
 			own_pool = TRUE;
 		}
 
-		addrs = rspamd_email_address_from_mime (pool, str, len, NULL, -1);
+		addrs = rspamd_email_address_from_mime (pool, str, len, NULL, max_addrs);
 
 		if (addrs == NULL) {
 			lua_pushnil (L);

@@ -27,6 +27,10 @@
 #endif
 #include <math.h>
 
+#ifdef __x86_64__
+#include <immintrin.h>
+#endif
+
 #include "contrib/fastutf8/fastutf8.h"
 
 const guchar lc_map[256] = {
@@ -96,6 +100,44 @@ rspamd_str_lc (gchar *str, guint size)
 	}
 
 	return size;
+}
+
+gsize
+rspamd_str_copy_lc (const gchar *src, gchar *dst, gsize size)
+{
+	gchar *d = dst;
+
+	/* Find aligned start */
+	while ((0xf & (uintptr_t)src) && size > 0) {
+		*d++ = lc_map[(guchar)*src++];
+		size --;
+	}
+
+	/* Aligned start in src */
+#ifdef __x86_64__
+	while (size >= 16) {
+		__m128i sv = _mm_load_si128((const __m128i*)src);
+		/* From A */
+		__m128i rangeshift = _mm_sub_epi8(sv, _mm_set1_epi8((char)('A'+128)));
+		/* To Z */
+		__m128i nomodify = _mm_cmpgt_epi8(rangeshift, _mm_set1_epi8(-128 + 25));
+		/* ^ ' ' */
+		__m128i flip  = _mm_andnot_si128(nomodify, _mm_set1_epi8(0x20));
+		__m128i uc = _mm_xor_si128(sv, flip);
+		_mm_storeu_si128((__m128i*)d, uc);
+		d += 16;
+		src += 16;
+		size -= 16;
+	}
+#endif
+
+	/* Leftover */
+	while (size > 0) {
+		*d++ = lc_map[(guchar)*src++];
+		size --;
+	}
+
+	return (d - dst);
 }
 
 gint
@@ -484,6 +526,28 @@ rspamd_strtol (const gchar *s, gsize len, glong *value)
 /*
  * Try to convert string of length to long
  */
+#define CONV_STR_LIM_DECIMAL(max_num) do { \
+    while (p < end) { \
+        c = *p; \
+        if (c >= '0' && c <= '9') { \
+            c -= '0'; \
+            if (v > cutoff || (v == cutoff && (guint8)c > cutlim)) { \
+                *value = (max_num); \
+                return FALSE; \
+            } \
+            else { \
+                v *= 10; \
+                v += c; \
+            } \
+        } \
+        else { \
+            *value = v; \
+            return FALSE; \
+        } \
+    p++; \
+    } \
+} while(0)
+
 gboolean
 rspamd_strtoul (const gchar *s, gsize len, gulong *value)
 {
@@ -493,8 +557,38 @@ rspamd_strtoul (const gchar *s, gsize len, gulong *value)
 	const gulong cutoff = G_MAXULONG / 10, cutlim = G_MAXULONG % 10;
 
 	/* Some preparations for range errors */
+	CONV_STR_LIM_DECIMAL(G_MAXULONG);
+
+	*value = v;
+	return TRUE;
+}
+
+gboolean
+rspamd_strtou64 (const gchar *s, gsize len, guint64 *value)
+{
+	const gchar *p = s, *end = s + len;
+	gchar c;
+	guint64 v = 0;
+	const guint64 cutoff = G_MAXUINT64 / 10, cutlim = G_MAXUINT64 % 10;
+
+	/* Some preparations for range errors */
+	CONV_STR_LIM_DECIMAL(G_MAXUINT64);
+
+	*value = v;
+	return TRUE;
+}
+
+gboolean
+rspamd_xstrtoul (const gchar *s, gsize len, gulong *value)
+{
+	const gchar *p = s, *end = s + len;
+	gchar c;
+	gulong v = 0;
+	const gulong cutoff = G_MAXULONG / 10, cutlim = G_MAXULONG % 10;
+
+	/* Some preparations for range errors */
 	while (p < end) {
-		c = *p;
+		c = g_ascii_tolower (*p);
 		if (c >= '0' && c <= '9') {
 			c -= '0';
 			if (v > cutoff || (v == cutoff && (guint8)c > cutlim)) {
@@ -503,7 +597,19 @@ rspamd_strtoul (const gchar *s, gsize len, gulong *value)
 				return FALSE;
 			}
 			else {
-				v *= 10;
+				v *= 16;
+				v += c;
+			}
+		}
+		else if (c >= 'a' || c <= 'f') {
+			c = c - 'a' + 10;
+			if (v > cutoff || (v == cutoff && (guint8)c > cutlim)) {
+				/* Range error */
+				*value = G_MAXULONG;
+				return FALSE;
+			}
+			else {
+				v *= 16;
 				v += c;
 			}
 		}
@@ -2338,9 +2444,15 @@ decode:
 			remain --;
 			ret = 0;
 
-			if      (c >= '0' && c <= '9') { ret = c - '0'; }
-			else if (c >= 'A' && c <= 'F') { ret = c - 'A' + 10; }
-			else if (c >= 'a' && c <= 'f') { ret = c - 'a' + 10; }
+			if (c >= '0' && c <= '9') {
+				ret = c - '0';
+			}
+			else if (c >= 'A' && c <= 'F') {
+				ret = c - 'A' + 10;
+			}
+			else if (c >= 'a' && c <= 'f') {
+				ret = c - 'a' + 10;
+			}
 			else if (c == '\r') {
 				/* Eat one more endline */
 				if (remain > 0 && *p == '\n') {
@@ -2356,8 +2468,12 @@ decode:
 			}
 			else {
 				/* Hack, hack, hack, treat =<garbadge> as =<garbadge> */
-				if (remain > 0) {
+				if (end - o > 1) {
+					*o++ = '=';
 					*o++ = *(p - 1);
+				}
+				else {
+					return (-1);
 				}
 
 				continue;
@@ -2366,10 +2482,30 @@ decode:
 			if (remain > 0) {
 				c = *p++;
 				ret *= 16;
+				remain --;
 
-				if      (c >= '0' && c <= '9') { ret += c - '0'; }
-				else if (c >= 'A' && c <= 'F') { ret += c - 'A' + 10; }
-				else if (c >= 'a' && c <= 'f') { ret += c - 'a' + 10; }
+				if (c >= '0' && c <= '9') {
+					ret += c - '0';
+				}
+				else if (c >= 'A' && c <= 'F') {
+					ret += c - 'A' + 10;
+				}
+				else if (c >= 'a' && c <= 'f') {
+					ret += c - 'a' + 10;
+				}
+				else {
+					/* Treat =<good><rubbish> as =<good><rubbish> */
+					if (end - o > 2) {
+						*o++ = '=';
+						*o++ = *(p - 2);
+						*o++ = *(p - 1);
+					}
+					else {
+						return (-1);
+					}
+
+					continue;
+				}
 
 				if (end - o > 0) {
 					*o++ = (gchar)ret;
@@ -2377,8 +2513,6 @@ decode:
 				else {
 					return (-1);
 				}
-
-				remain --;
 			}
 		}
 		else {
@@ -2970,135 +3104,6 @@ rspamd_get_unicode_normalizer (void)
 #else
 	/* Old libicu */
 	return NULL;
-#endif
-}
-
-
-enum rspamd_normalise_result
-rspamd_normalise_unicode_inplace (rspamd_mempool_t *pool, gchar *start,
-		guint *len)
-{
-#if U_ICU_VERSION_MAJOR_NUM >= 44
-	UErrorCode uc_err = U_ZERO_ERROR;
-	UConverter *utf8_conv = rspamd_get_utf8_converter ();
-	const UNormalizer2 *norm = rspamd_get_unicode_normalizer ();
-	gint32 nsym, end;
-	UChar *src = NULL, *dest = NULL;
-	enum rspamd_normalise_result ret = 0;
-	gboolean has_invisible = FALSE;
-
-	/* We first need to convert data to UChars :( */
-	src = g_malloc ((*len + 1) * sizeof (*src));
-	nsym = ucnv_toUChars (utf8_conv, src, *len + 1,
-			start, *len, &uc_err);
-
-	if (!U_SUCCESS (uc_err)) {
-		msg_warn_pool_check ("cannot normalise URL, cannot convert to unicode: %s",
-				u_errorName (uc_err));
-		ret |= RSPAMD_UNICODE_NORM_ERROR;
-		goto out;
-	}
-
-	/* We can now check if we need to decompose */
-	end = unorm2_spanQuickCheckYes (norm, src, nsym, &uc_err);
-
-	if (!U_SUCCESS (uc_err)) {
-		msg_warn_pool_check ("cannot normalise URL, cannot check normalisation: %s",
-				u_errorName (uc_err));
-		ret |= RSPAMD_UNICODE_NORM_ERROR;
-		goto out;
-	}
-
-	for (gint32 i = 0; i < nsym; i ++) {
-		if (IS_ZERO_WIDTH_SPACE (src[i])) {
-			has_invisible = TRUE;
-			break;
-		}
-	}
-
-	uc_err = U_ZERO_ERROR;
-
-	if (end != nsym) {
-		/* No normalisation needed, but we may still have invisible spaces */
-		/* We copy sub(src, 0, end) to dest and normalise the rest */
-		ret |= RSPAMD_UNICODE_NORM_UNNORMAL;
-		dest = g_malloc (nsym * sizeof (*dest));
-		memcpy (dest, src, end * sizeof (*dest));
-		nsym = unorm2_normalizeSecondAndAppend (norm, dest, end, nsym,
-				src + end, nsym - end, &uc_err);
-
-		if (!U_SUCCESS (uc_err)) {
-			if (uc_err != U_BUFFER_OVERFLOW_ERROR) {
-				msg_warn_pool_check ("cannot normalise URL: %s",
-						u_errorName (uc_err));
-				ret |= RSPAMD_UNICODE_NORM_ERROR;
-			}
-
-			goto out;
-		}
-	}
-	else if (!has_invisible) {
-		goto out;
-	}
-	else {
-		dest = src;
-		src = NULL;
-	}
-
-	if (has_invisible) {
-		/* Also filter zero width spaces */
-		gint32 new_len = 0;
-		UChar *t = dest, *h = dest;
-
-		ret |= RSPAMD_UNICODE_NORM_ZERO_SPACES;
-
-		for (gint32 i = 0; i < nsym; i ++) {
-			if (!IS_ZERO_WIDTH_SPACE (*h)) {
-				*t++ = *h++;
-				new_len ++;
-			}
-			else {
-				h ++;
-			}
-		}
-
-		nsym = new_len;
-	}
-
-	/* We now convert it back to utf */
-	nsym = ucnv_fromUChars (utf8_conv, start, *len, dest, nsym, &uc_err);
-
-	if (!U_SUCCESS (uc_err)) {
-		msg_warn_pool_check ("cannot normalise URL, cannot convert to UTF8: %s"
-					   " input length: %d chars, unicode length: %d utf16 symbols",
-				u_errorName (uc_err), (gint)*len, (gint)nsym);
-
-		if (uc_err == U_BUFFER_OVERFLOW_ERROR) {
-			ret |= RSPAMD_UNICODE_NORM_OVERFLOW;
-		}
-		else {
-			ret |= RSPAMD_UNICODE_NORM_ERROR;
-		}
-
-		goto out;
-	}
-
-	*len = nsym;
-
-out:
-
-	if (src) {
-		g_free (src);
-	}
-
-	if (dest) {
-		g_free (dest);
-	}
-
-	return ret;
-#else
-	/* Kill that with fire please */
-	return FALSE;
 #endif
 }
 

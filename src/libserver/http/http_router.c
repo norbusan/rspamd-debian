@@ -199,6 +199,7 @@ rspamd_http_router_try_file (struct rspamd_http_connection_entry *entry,
 	rspamd_http_router_insert_headers (entry->rt, reply_msg);
 
 	if (!rspamd_http_message_set_body_from_fd (reply_msg, fd)) {
+		rspamd_http_message_free (reply_msg);
 		close (fd);
 		return FALSE;
 	}
@@ -291,7 +292,7 @@ rspamd_http_router_finish_handler (struct rspamd_http_connection *conn,
 			http_parser_parse_url (msg->url->str, msg->url->len, TRUE, &u);
 
 			if (u.field_set & (1 << UF_PATH)) {
-				guint unnorm_len;
+				gsize unnorm_len;
 
 				pathbuf = g_malloc (u.field_data[UF_PATH].len);
 				memcpy (pathbuf, msg->url->str + u.field_data[UF_PATH].off,

@@ -46,10 +46,13 @@
 #define PATH_GET_MAP "/getmap"
 #define PATH_GRAPH "/graph"
 #define PATH_PIE_CHART "/pie"
+#define PATH_HEALTHY "/healthy"
 #define PATH_HISTORY "/history"
 #define PATH_HISTORY_RESET "/historyreset"
 #define PATH_LEARN_SPAM "/learnspam"
 #define PATH_LEARN_HAM "/learnham"
+#define PATH_METRICS "/metrics"
+#define PATH_READY "/ready"
 #define PATH_SAVE_ACTIONS "/saveactions"
 #define PATH_SAVE_SYMBOLS "/savesymbols"
 #define PATH_SAVE_MAP "/savemap"
@@ -174,6 +177,12 @@ struct rspamd_controller_worker_ctx {
 	struct rspamd_rrd_file *rrd;
 	struct rspamd_lang_detector *lang_det;
 	gdouble task_timeout;
+
+	/* Health check stuff */
+	guint workers_count;
+	guint scanners_count;
+	guint workers_hb_lost;
+	ev_timer health_check_timer;
 };
 
 struct rspamd_controller_plugin_cbdata {
@@ -331,6 +340,8 @@ check_uncached:
 			/* We have some unknown salt here */
 			msg_info_ctx ("incorrect salt: %z, while %z expected",
 					salt_len, pbkdf->salt_len);
+			g_free (salt_decoded);
+
 			return FALSE;
 		}
 
@@ -340,6 +351,9 @@ check_uncached:
 			/* We have some unknown salt here */
 			msg_info_ctx ("incorrect key: %z, while %z expected",
 					key_len, pbkdf->key_len);
+			g_free (salt_decoded);
+			g_free (key_decoded); /* valid even if key_decoded == NULL */
+
 			return FALSE;
 		}
 
@@ -1348,6 +1362,7 @@ rspamd_controller_handle_graph (
 	rspamd_controller_send_ucl (conn_ent, res);
 	ucl_object_unref (res);
 	g_free (acc);
+	g_free (rrd_result);
 
 	return 0;
 }
@@ -1576,6 +1591,59 @@ rspamd_controller_handle_lua_history (lua_State *L,
 	return;
 err:
 	rspamd_controller_send_error (conn_ent, 500, "Internal error");
+}
+
+/*
+ * Healthy command handler:
+ * request: /healthy
+ * headers: Password
+ * reply: json {"success":true}
+ */
+static int
+rspamd_controller_handle_healthy (struct rspamd_http_connection_entry *conn_ent,
+								  struct rspamd_http_message *msg)
+{
+	struct rspamd_controller_session *session = conn_ent->ud;
+
+	if (!rspamd_controller_check_password (conn_ent, session, msg, FALSE)) {
+		return 0;
+	}
+
+	if (session->ctx->workers_hb_lost != 0) {
+		rspamd_controller_send_error (conn_ent, 500,
+				"%d workers are not responding", session->ctx->workers_hb_lost);
+	}
+	else {
+		rspamd_controller_send_string (conn_ent, "{\"success\":true}");
+	}
+
+	return 0;
+}
+
+/*
+ * Ready command handler:
+ * request: /ready
+ * headers: Password
+ * reply: json {"success":true} or {"error":"error message"}
+ */
+static int
+rspamd_controller_handle_ready (struct rspamd_http_connection_entry *conn_ent,
+								struct rspamd_http_message *msg)
+{
+	struct rspamd_controller_session *session = conn_ent->ud;
+
+	if (!rspamd_controller_check_password (conn_ent, session, msg, FALSE)) {
+		return 0;
+	}
+
+	if (session->ctx->scanners_count == 0) {
+		rspamd_controller_send_error (conn_ent, 500, "no healthy scanner workers are running");
+	}
+	else {
+		rspamd_controller_send_string (conn_ent, "{\"success\":true}");
+	}
+
+	return 0;
 }
 
 /*
@@ -2717,6 +2785,391 @@ rspamd_controller_handle_statreset (
 	return rspamd_controller_handle_stat_common (conn_ent, msg, TRUE);
 }
 
+/*
+ * Metrics command handler:
+ * request: /metrics
+ * headers: Password
+ * reply: OpenMetrics
+ */
+
+static gboolean
+rspamd_controller_metrics_fin_task (void *ud) {
+	struct rspamd_stat_cbdata *cbdata = ud;
+	struct rspamd_http_connection_entry *conn_ent;
+	ucl_object_t *top;
+	GList *fuzzy_elts, *cur;
+	struct rspamd_fuzzy_stat_entry *entry;
+	rspamd_fstring_t *output;
+	gint i;
+
+	conn_ent = cbdata->conn_ent;
+	top = cbdata->top;
+
+	ucl_object_insert_key (top,
+			ucl_object_fromint (cbdata->learned), "total_learns", 0, false);
+
+	output = rspamd_fstring_sized_new (1024);
+	rspamd_printf_fstring (&output, "# HELP rspamd_build_info A metric with a constant '1' value labeled by version from which rspamd was built.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_build_info gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_build_info{version=\"%s\"} 1\n",
+		ucl_object_tostring (ucl_object_lookup (top, "version")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_config A metric with a constant '1' value labeled by id of the current config.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_config gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_config{id=\"%s\"} 1\n",
+		ucl_object_tostring (ucl_object_lookup (top, "config_id")));
+	rspamd_printf_fstring (&output, "# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.\n");
+	rspamd_printf_fstring (&output, "# TYPE process_start_time_seconds gauge\n");
+	rspamd_printf_fstring (&output, "process_start_time_seconds %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "start_time")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_read_only Whether the rspamd instance is read-only.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_read_only gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_read_only %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "read_only")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_scanned_total Scanned messages.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_scanned_total counter\n");
+	rspamd_printf_fstring (&output, "rspamd_scanned_total %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "scanned")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_learned_total Learned messages.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_learned_total counter\n");
+	rspamd_printf_fstring (&output, "rspamd_learned_total %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "learned")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_spam_total Messages classified as spam.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_spam_total counter\n");
+	rspamd_printf_fstring (&output, "rspamd_spam_total %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "spam_count")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_ham_total Messages classified as ham.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_ham_total counter\n");
+	rspamd_printf_fstring (&output, "rspamd_ham_total %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "ham_count")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_connections Active connections.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_connections gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_connections %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "connections")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_control_connections_total Control connections.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_control_connections_total counter\n");
+	rspamd_printf_fstring (&output, "rspamd_control_connections_total %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "control_connections")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_pools_allocated Pools allocated.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_pools_allocated gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_pools_allocated %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "pools_allocated")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_pools_freed Pools freed.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_pools_freed gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_pools_freed %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "pools_freed")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_allocated_bytes Bytes allocated.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_allocated_bytes gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_allocated_bytes %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "bytes_allocated")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_chunks_allocated Chunks allocated.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_chunks_allocated gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_chunks_allocated %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "chunks_allocated")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_shared_chunks_allocated Shared chunks allocated.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_shared_chunks_allocated gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_shared_chunks_allocated %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "shared_chunks_allocated")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_chunks_freed Chunks freed.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_chunks_freed gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_chunks_freed %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "chunks_freed")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_chunks_oversized Chunks oversized.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_chunks_oversized gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_chunks_oversized %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "chunks_oversized")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_fragmented Fragmented.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_fragmented gauge\n");
+	rspamd_printf_fstring (&output, "rspamd_fragmented %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "fragmented")));
+	rspamd_printf_fstring (&output, "# HELP rspamd_learns_total Total learns.\n");
+	rspamd_printf_fstring (&output, "# TYPE rspamd_learns_total counter\n");
+	rspamd_printf_fstring (&output, "rspamd_learns_total %L\n",
+		ucl_object_toint (ucl_object_lookup (top, "total_learns")));
+
+	const ucl_object_t *acts_obj = ucl_object_lookup (top, "actions");
+
+	if (acts_obj) {
+		rspamd_printf_fstring (&output, "# HELP rspamd_actions_total Actions labelled by action type.\n");
+		rspamd_printf_fstring (&output, "# TYPE rspamd_actions_total counter\n");
+		for (i = METRIC_ACTION_REJECT; i <= METRIC_ACTION_NOACTION; i++) {
+			const char *str_act = rspamd_action_to_str (i);
+			const ucl_object_t *act = ucl_object_lookup (acts_obj, str_act);
+
+			if (act) {
+				rspamd_printf_fstring(&output, "rspamd_actions_total{type=\"%s\"} %L\n",
+						str_act,
+						ucl_object_toint(act));
+			}
+			else {
+				rspamd_printf_fstring (&output, "rspamd_actions_total{type=\"%s\"} 0\n",
+						str_act);
+			}
+		}
+	}
+
+	if (cbdata->stat) {
+		const ucl_object_t *cur_elt;
+		ucl_object_iter_t it = NULL;
+		rspamd_fstring_t *revision;
+		rspamd_fstring_t *used;
+		rspamd_fstring_t *total;
+		rspamd_fstring_t *size;
+		rspamd_fstring_t *languages;
+		rspamd_fstring_t *users;
+
+		revision = rspamd_fstring_sized_new (16);
+		used = rspamd_fstring_sized_new (16);
+		total = rspamd_fstring_sized_new (16);
+		size = rspamd_fstring_sized_new (16);
+		languages = rspamd_fstring_sized_new (16);
+		users = rspamd_fstring_sized_new (16);
+
+		while ((cur_elt = ucl_object_iterate (cbdata->stat, &it, true))) {
+			const char *sym = ucl_object_tostring (ucl_object_lookup (cur_elt, "symbol"));
+			const char *type = ucl_object_tostring (ucl_object_lookup (cur_elt, "type"));
+
+			if (sym && type) {
+				rspamd_printf_fstring (&revision, "rspamd_statfiles_revision{symbol=\"%s\",type=\"%s\"} %L\n",
+						sym,
+						type,
+						ucl_object_toint (ucl_object_lookup (cur_elt, "revision")));
+				rspamd_printf_fstring (&used, "rspamd_statfiles_used{symbol=\"%s\",type=\"%s\"} %L\n",
+						sym,
+						type,
+						ucl_object_toint (ucl_object_lookup (cur_elt, "used")));
+				rspamd_printf_fstring (&total, "rspamd_statfiles_totals{symbol=\"%s\",type=\"%s\"} %L\n",
+						sym,
+						type,
+						ucl_object_toint (ucl_object_lookup (cur_elt, "total")));
+				rspamd_printf_fstring (&size, "rspamd_statfiles_size{symbol=\"%s\",type=\"%s\"} %L\n",
+						sym,
+						type,
+						ucl_object_toint (ucl_object_lookup (cur_elt, "size")));
+				rspamd_printf_fstring (&languages, "rspamd_statfiles_languages{symbol=\"%s\",type=\"%s\"} %L\n",
+						sym,
+						type,
+						ucl_object_toint (ucl_object_lookup (cur_elt, "languages")));
+				rspamd_printf_fstring (&users, "rspamd_statfiles_users{symbol=\"%s\",type=\"%s\"} %L\n",
+						sym,
+						type,
+						ucl_object_toint (ucl_object_lookup (cur_elt, "users")));
+			}
+		}
+
+		if (RSPAMD_FSTRING_LEN(revision) > 0) {
+			rspamd_printf_fstring (&output, "# HELP rspamd_statfiles_revision Stat files revision.\n");
+			rspamd_printf_fstring (&output, "# TYPE rspamd_statfiles_revision gauge\n");
+			output = rspamd_fstring_append (output,
+					RSPAMD_FSTRING_DATA(revision), RSPAMD_FSTRING_LEN(revision));
+		}
+		if (RSPAMD_FSTRING_LEN(used) > 0) {
+			rspamd_printf_fstring (&output, "# HELP rspamd_statfiles_used Stat files used.\n");
+			rspamd_printf_fstring (&output, "# TYPE rspamd_statfiles_used gauge\n");
+			output = rspamd_fstring_append (output,
+					RSPAMD_FSTRING_DATA(used), RSPAMD_FSTRING_LEN(used));
+		}
+		if (RSPAMD_FSTRING_LEN(total) > 0) {
+			rspamd_printf_fstring (&output, "# HELP rspamd_statfiles_totals Stat files total.\n");
+			rspamd_printf_fstring (&output, "# TYPE rspamd_statfiles_totals gauge\n");
+			output = rspamd_fstring_append (output,
+					RSPAMD_FSTRING_DATA(total), RSPAMD_FSTRING_LEN(total));
+		}
+		if (RSPAMD_FSTRING_LEN(size) > 0) {
+			rspamd_printf_fstring (&output, "# HELP rspamd_statfiles_size Stat files size.\n");
+			rspamd_printf_fstring (&output, "# TYPE rspamd_statfiles_size gauge\n");
+			output = rspamd_fstring_append (output,
+					RSPAMD_FSTRING_DATA(size), RSPAMD_FSTRING_LEN(size));
+		}
+		if (RSPAMD_FSTRING_LEN(languages) > 0) {
+			rspamd_printf_fstring (&output, "# HELP rspamd_statfiles_languages Stat files languages.\n");
+			rspamd_printf_fstring (&output, "# TYPE rspamd_statfiles_languages gauge\n");
+			output = rspamd_fstring_append (output,
+					RSPAMD_FSTRING_DATA(languages), RSPAMD_FSTRING_LEN(languages));
+		}
+		if (RSPAMD_FSTRING_LEN(users) > 0) {
+			rspamd_printf_fstring (&output, "# HELP rspamd_statfiles_users Stat files users.\n");
+			rspamd_printf_fstring (&output, "# TYPE rspamd_statfiles_users gauge\n");
+			output = rspamd_fstring_append (output,
+					RSPAMD_FSTRING_DATA(users), RSPAMD_FSTRING_LEN(users));
+		}
+
+		rspamd_fstring_free (revision);
+		rspamd_fstring_free (used);
+		rspamd_fstring_free (total);
+		rspamd_fstring_free (size);
+		rspamd_fstring_free (languages);
+		rspamd_fstring_free (users);
+	}
+
+	fuzzy_elts = rspamd_mempool_get_variable (cbdata->task->task_pool, "fuzzy_stat");
+
+	if (fuzzy_elts) {
+		rspamd_printf_fstring (&output, "# HELP rspamd_fuzzy_stat Fuzzy stat labelled by storage.\n");
+		rspamd_printf_fstring (&output, "# TYPE rspamd_fuzzy_stat gauge\n");
+		for (cur = fuzzy_elts; cur != NULL; cur = g_list_next (cur)) {
+			entry = cur->data;
+
+			if (entry->name) {
+				rspamd_printf_fstring (&output, "rspamd_fuzzy_stat{storage=\"%s\"} %ud\n",
+						entry->name, entry->fuzzy_cnt);
+			}
+		}
+	}
+
+	rspamd_printf_fstring (&output, "# EOF\n");
+
+	rspamd_controller_send_openmetrics (conn_ent, output);
+
+	return TRUE;
+}
+
+static int
+rspamd_controller_handle_metrics_common (
+	struct rspamd_http_connection_entry *conn_ent,
+	struct rspamd_http_message *msg,
+	gboolean do_reset)
+{
+	struct rspamd_controller_session *session = conn_ent->ud;
+	ucl_object_t *top, *sub;
+	gint i;
+	int64_t uptime;
+	guint64 spam = 0, ham = 0;
+	rspamd_mempool_stat_t mem_st;
+	struct rspamd_stat *stat, stat_copy;
+	struct rspamd_controller_worker_ctx *ctx;
+	struct rspamd_task *task;
+	struct rspamd_stat_cbdata *cbdata;
+
+	memset (&mem_st, 0, sizeof (mem_st));
+	rspamd_mempool_stat (&mem_st);
+	memcpy (&stat_copy, session->ctx->worker->srv->stat, sizeof (stat_copy));
+	stat = &stat_copy;
+	ctx = session->ctx;
+
+	task = rspamd_task_new (session->ctx->worker, session->cfg, session->pool,
+			ctx->lang_det, ctx->event_loop, FALSE);
+	task->resolver = ctx->resolver;
+	cbdata = rspamd_mempool_alloc0 (session->pool, sizeof (*cbdata));
+	cbdata->conn_ent = conn_ent;
+	cbdata->task = task;
+	top = ucl_object_typed_new (UCL_OBJECT);
+	cbdata->top = top;
+
+	task->s = rspamd_session_create (session->pool,
+			rspamd_controller_metrics_fin_task,
+			NULL,
+			rspamd_controller_stat_cleanup_task,
+			cbdata);
+	task->fin_arg = cbdata;
+	task->http_conn = rspamd_http_connection_ref (conn_ent->conn);;
+	task->sock = conn_ent->conn->fd;
+
+	ucl_object_insert_key (top, ucl_object_fromstring (
+			RVERSION), "version",  0, false);
+	ucl_object_insert_key (top, ucl_object_fromstring (
+			session->ctx->cfg->checksum), "config_id", 0, false);
+	uptime = ev_time () - session->ctx->start_time;
+	ucl_object_insert_key (top, ucl_object_fromint (
+			uptime), "uptime", 0, false);
+	ucl_object_insert_key (top, ucl_object_fromint (
+			session->ctx->start_time), "start_time", 0, false);
+	ucl_object_insert_key (top, ucl_object_frombool (!session->is_enable),
+			"read_only", 0, false);
+	ucl_object_insert_key (top, ucl_object_fromint (
+			stat->messages_scanned), "scanned", 0, false);
+	ucl_object_insert_key (top, ucl_object_fromint (
+			stat->messages_learned), "learned", 0, false);
+
+	if (stat->messages_scanned > 0) {
+		sub = ucl_object_typed_new (UCL_OBJECT);
+		for (i = METRIC_ACTION_REJECT; i <= METRIC_ACTION_NOACTION; i++) {
+			ucl_object_insert_key (sub,
+				ucl_object_fromint (stat->actions_stat[i]),
+				rspamd_action_to_str (i), 0, false);
+			if (i < METRIC_ACTION_GREYLIST) {
+				spam += stat->actions_stat[i];
+			}
+			else {
+				ham += stat->actions_stat[i];
+			}
+			if (do_reset) {
+#ifndef HAVE_ATOMIC_BUILTINS
+				session->ctx->worker->srv->stat->actions_stat[i] = 0;
+#else
+				__atomic_store_n(&session->ctx->worker->srv->stat->actions_stat[i],
+						0, __ATOMIC_RELEASE);
+#endif
+			}
+		}
+		ucl_object_insert_key (top, sub, "actions", 0, false);
+	}
+
+	ucl_object_insert_key (top, ucl_object_fromint (
+			spam), "spam_count", 0, false);
+	ucl_object_insert_key (top, ucl_object_fromint (
+			ham),  "ham_count",	 0, false);
+	ucl_object_insert_key (top,
+		ucl_object_fromint (stat->connections_count), "connections", 0, false);
+	ucl_object_insert_key (top,
+		ucl_object_fromint (stat->control_connections_count),
+		"control_connections", 0, false);
+
+	ucl_object_insert_key (top,
+		ucl_object_fromint (mem_st.pools_allocated), "pools_allocated", 0,
+		false);
+	ucl_object_insert_key (top,
+		ucl_object_fromint (mem_st.pools_freed), "pools_freed", 0, false);
+	ucl_object_insert_key (top,
+		ucl_object_fromint (mem_st.bytes_allocated), "bytes_allocated", 0,
+		false);
+	ucl_object_insert_key (top,
+		ucl_object_fromint (
+			mem_st.chunks_allocated), "chunks_allocated", 0, false);
+	ucl_object_insert_key (top,
+		ucl_object_fromint (mem_st.shared_chunks_allocated),
+		"shared_chunks_allocated", 0, false);
+	ucl_object_insert_key (top,
+		ucl_object_fromint (mem_st.chunks_freed), "chunks_freed", 0, false);
+	ucl_object_insert_key (top,
+		ucl_object_fromint (
+			mem_st.oversized_chunks), "chunks_oversized", 0, false);
+	ucl_object_insert_key (top,
+			ucl_object_fromint (mem_st.fragmented_size), "fragmented", 0, false);
+
+	if (do_reset) {
+		session->ctx->srv->stat->messages_scanned = 0;
+		session->ctx->srv->stat->messages_learned = 0;
+		session->ctx->srv->stat->connections_count = 0;
+		session->ctx->srv->stat->control_connections_count = 0;
+		rspamd_mempool_stat_reset ();
+	}
+
+	fuzzy_stat_command (task);
+
+	/* Now write statistics for each statfile */
+	rspamd_stat_statistics (task, session->ctx->cfg, &cbdata->learned,
+			&cbdata->stat);
+	session->task = task;
+
+	rspamd_session_pending (task->s);
+
+
+	return 0;
+}
+
+
+static int
+rspamd_controller_handle_metrics (struct rspamd_http_connection_entry *conn_ent,
+	struct rspamd_http_message *msg)
+{
+	struct rspamd_controller_session *session = conn_ent->ud;
+
+	if (!rspamd_controller_check_password (conn_ent, session, msg, FALSE)) {
+		return 0;
+	}
+	return rspamd_controller_handle_metrics_common (conn_ent, msg, FALSE);
+}
+
 
 /*
  * Counters command handler:
@@ -2764,7 +3217,7 @@ rspamd_controller_handle_custom (struct rspamd_http_connection_entry *conn_ent,
 	http_parser_parse_url (msg->url->str, msg->url->len, TRUE, &u);
 
 	if (u.field_set & (1 << UF_PATH)) {
-		guint unnorm_len;
+		gsize unnorm_len;
 		lookup.begin = msg->url->str + u.field_data[UF_PATH].off;
 		lookup.len = u.field_data[UF_PATH].len;
 
@@ -2971,7 +3424,7 @@ rspamd_controller_handle_lua_plugin (struct rspamd_http_connection_entry *conn_e
 	http_parser_parse_url (msg->url->str, msg->url->len, TRUE, &u);
 
 	if (u.field_set & (1 << UF_PATH)) {
-		guint unnorm_len;
+		gsize unnorm_len;
 		lookup.begin = msg->url->str + u.field_data[UF_PATH].off;
 		lookup.len = u.field_data[UF_PATH].len;
 
@@ -3116,7 +3569,7 @@ rspamd_controller_accept_socket (EV_P_ ev_io *w, int revents)
 	struct rspamd_worker *worker = (struct rspamd_worker *)w->data;
 	struct rspamd_controller_worker_ctx *ctx;
 	struct rspamd_controller_session *session;
-	rspamd_inet_addr_t *addr;
+	rspamd_inet_addr_t *addr = NULL;
 	gint nfd;
 
 	ctx = worker->ctx;
@@ -3129,6 +3582,7 @@ rspamd_controller_accept_socket (EV_P_ ev_io *w, int revents)
 	}
 	/* Check for EAGAIN */
 	if (nfd == 0) {
+		rspamd_inet_address_free (addr);
 		return;
 	}
 
@@ -3522,6 +3976,33 @@ rspamd_controller_register_plugins_paths (struct rspamd_controller_worker_ctx *c
 	lua_pop (L, 1); /* rspamd_plugins global */
 }
 
+static void
+rspamd_controller_health_rep (struct rspamd_worker *worker,
+				struct rspamd_srv_reply *rep, gint rep_fd,
+				gpointer ud)
+{
+	struct rspamd_controller_worker_ctx *ctx = (struct rspamd_controller_worker_ctx *)ud;
+
+	ctx->workers_count = rep->reply.health.workers_count;
+	ctx->scanners_count = rep->reply.health.scanners_count;
+	ctx->workers_hb_lost = rep->reply.health.workers_hb_lost;
+
+	ev_timer_again (ctx->event_loop, &ctx->health_check_timer);
+}
+
+static void
+rspamd_controller_health_timer (EV_P_ ev_timer *w, int revents)
+{
+	struct rspamd_controller_worker_ctx *ctx = (struct rspamd_controller_worker_ctx *)w->data;
+	struct rspamd_srv_command srv_cmd;
+
+	memset (&srv_cmd, 0, sizeof (srv_cmd));
+	srv_cmd.type = RSPAMD_SRV_HEALTH;
+	rspamd_srv_send_command (ctx->worker, ctx->event_loop, &srv_cmd, -1,
+			rspamd_controller_health_rep, ctx);
+	ev_timer_stop (EV_A_ w);
+}
+
 /*
  * Start worker process
  */
@@ -3607,6 +4088,12 @@ start_controller_worker (struct rspamd_worker *worker)
 			PATH_GRAPH,
 			rspamd_controller_handle_graph);
 	rspamd_http_router_add_path (ctx->http,
+			PATH_HEALTHY,
+			rspamd_controller_handle_healthy);
+	rspamd_http_router_add_path (ctx->http,
+			PATH_READY,
+			rspamd_controller_handle_ready);
+	rspamd_http_router_add_path (ctx->http,
 			PATH_HISTORY,
 			rspamd_controller_handle_history);
 	rspamd_http_router_add_path (ctx->http,
@@ -3618,6 +4105,9 @@ start_controller_worker (struct rspamd_worker *worker)
 	rspamd_http_router_add_path (ctx->http,
 			PATH_LEARN_HAM,
 			rspamd_controller_handle_learnham);
+	rspamd_http_router_add_path (ctx->http,
+			PATH_METRICS,
+			rspamd_controller_handle_metrics);
 	rspamd_http_router_add_path (ctx->http,
 			PATH_SAVE_ACTIONS,
 			rspamd_controller_handle_saveactions);
@@ -3708,6 +4198,12 @@ start_controller_worker (struct rspamd_worker *worker)
 	rspamd_stat_init (worker->srv->cfg, ctx->event_loop);
 	rspamd_worker_init_controller (worker, &ctx->rrd);
 	rspamd_lua_run_postloads (ctx->cfg->lua_state, ctx->cfg, ctx->event_loop, worker);
+
+	/* TODO: maybe make it configurable */
+	ev_timer_init (&ctx->health_check_timer, rspamd_controller_health_timer,
+			1.0, 60.0);
+	ctx->health_check_timer.data = ctx;
+	ev_timer_start (ctx->event_loop, &ctx->health_check_timer);
 
 #ifdef WITH_HYPERSCAN
 	rspamd_control_worker_add_cmd_handler (worker,

@@ -2,72 +2,82 @@
 Test Setup      Http Setup
 Test Teardown   Http Teardown
 Library         Process
-Library         ${TESTDIR}/lib/rspamd.py
-Resource        ${TESTDIR}/lib/rspamd.robot
-Variables       ${TESTDIR}/lib/vars.py
+Library         ${RSPAMD_TESTDIR}/lib/rspamd.py
+Resource        ${RSPAMD_TESTDIR}/lib/rspamd.robot
+Variables       ${RSPAMD_TESTDIR}/lib/vars.py
 
 *** Variables ***
-# ${CONFIG}       ${TESTDIR}/configs/http.conf
-${URL_TLD}      ${TESTDIR}/../lua/unit/test_tld.dat
-${CONFIG}       ${TESTDIR}/configs/lua_test.conf
-${MESSAGE}      ${TESTDIR}/messages/spam_message.eml
-${RSPAMD_SCOPE}  Test
+${CONFIG}              ${RSPAMD_TESTDIR}/configs/lua_test.conf
+${MESSAGE}             ${RSPAMD_TESTDIR}/messages/spam_message.eml
+${RSPAMD_LUA_SCRIPT}   ${RSPAMD_TESTDIR}/lua/http.lua
+${RSPAMD_SCOPE}        Suite
+${RSPAMD_URL_TLD}      ${RSPAMD_TESTDIR}/../lua/unit/test_tld.dat
 
 *** Test Cases ***
 Simple HTTP request
-  Check url  /request  get  HTTP_DNS_200  HTTP_200  HTTP_CORO_DNS_200  HTTP_CORO_200  method_get  hello world  HTTP_CORO_200 (0.00)[hello world]
-  Check url  /request  post  HTTP_DNS_200  HTTP_200  HTTP_CORO_DNS_200  HTTP_CORO_200  method_post  hello post  HTTP_CORO_DNS_200 (0.00)[hello post]
+  Scan File  ${MESSAGE}  Url=/request  Method=get
+  ...  Settings={symbols_enabled = [SIMPLE_HTTP_TEST]}
+  Expect Symbols  HTTP_DNS_200  HTTP_200  HTTP_CORO_DNS_200
+  Expect Symbol With Exact Options  HTTP_CORO_200  hello world
 
-*** Test Cases ***
+  Scan File  ${MESSAGE}  Url=/request  Method=post
+  ...  Settings={symbols_enabled = [SIMPLE_HTTP_TEST]}
+  Expect Symbols  HTTP_DNS_200  HTTP_200  HTTP_CORO_DNS_200
+  Expect Symbol With Exact Options  HTTP_CORO_200  hello post
+
 HTTP request 403
-  Check url  /error_403  get  HTTP_DNS_403  HTTP_403  HTTP_CORO_DNS_403  HTTP_CORO_403  method_get
-  Check url  /error_403  post  HTTP_DNS_403  HTTP_403  HTTP_CORO_DNS_403  HTTP_CORO_403  method_post
+  Scan File  ${MESSAGE}  Url=/error_403  Method=get
+  ...  Settings={symbols_enabled = [SIMPLE_HTTP_TEST]}
+  Expect Symbols  HTTP_DNS_403  HTTP_403  HTTP_CORO_DNS_403  method_get
 
+  Scan File  ${MESSAGE}  Url=/error_403  Method=post
+  ...  Settings={symbols_enabled = [SIMPLE_HTTP_TEST]}
+  Expect Symbols  HTTP_DNS_403  HTTP_403  HTTP_CORO_DNS_403  method_post
 
-*** Test Cases ***
 HTTP timeout
-  Check url  /timeout  get  HTTP_ERROR  HTTP_ERROR  HTTP_CORO_DNS_ERROR  HTTP_CORO_ERROR  method_get  IO timeout
-  Check url  /timeout  post  HTTP_DNS_ERROR  HTTP_ERROR  HTTP_CORO_DNS_ERROR  HTTP_CORO_ERROR  method_post  IO timeout
+  Scan File  ${MESSAGE}  Url=/timeout  Method=get
+  ...  Settings={symbols_enabled = [SIMPLE_HTTP_TEST]}
+  Expect Symbols  HTTP_ERROR  HTTP_ERROR  HTTP_CORO_DNS_ERROR  HTTP_CORO_ERROR  method_get
+  # FIXME: where is "IO timeout"
 
+  Scan File  ${MESSAGE}  Url=/timeout  Method=post
+  ...  Settings={symbols_enabled = [SIMPLE_HTTP_TEST]}
+  Expect Symbols  HTTP_ERROR  HTTP_ERROR  HTTP_CORO_DNS_ERROR  HTTP_CORO_ERROR  method_post
+  # FIXME: where is "IO timeout"
 
-*** Test Cases ***
 HTTP empty response
-  Check url  /empty  get  HTTP_ERROR  HTTP_ERROR  HTTP_CORO_DNS_ERROR  HTTP_CORO_ERROR  method_get  IO read error: unexpected EOF
-  Check url  /empty  post  HTTP_DNS_ERROR  HTTP_ERROR  HTTP_CORO_DNS_ERROR  HTTP_CORO_ERROR  method_post  IO read error: unexpected EOF
+  Scan File  ${MESSAGE}  Url=/empty  Method=get
+  ...  Settings={symbols_enabled = [SIMPLE_HTTP_TEST]}
+  Expect Symbols  HTTP_ERROR  HTTP_ERROR  HTTP_CORO_DNS_ERROR  HTTP_CORO_ERROR  method_get
+  # FIXME: where is "IO read error: unexpected EOF"
+
+  Scan File  ${MESSAGE}  Url=/empty  Method=post
+  ...  Settings={symbols_enabled = [SIMPLE_HTTP_TEST]}
+  Expect Symbols  HTTP_ERROR  HTTP_ERROR  HTTP_CORO_DNS_ERROR  HTTP_CORO_ERROR  method_post
+  # FIXME: where is "IO read error: unexpected EOF"
 
 SSL Large HTTP request
   Scan File  ${MESSAGE}
+  ...  Settings={symbols_enabled = [LARGE_HTTP_TEST]}
   Expect Symbol  HTTP_SSL_LARGE
 
 *** Keywords ***
-Lua Setup
-  [Arguments]  ${LUA_SCRIPT}
-  Set Suite Variable  ${LUA_SCRIPT}
-  Generic Setup
-
 Http Setup
   Run Dummy Http
   Run Dummy Https
-  Lua Setup  ${TESTDIR}/lua/http.lua
+  Rspamd Setup
 
 Http Teardown
   ${http_pid} =  Get File  /tmp/dummy_http.pid
   Shutdown Process With Children  ${http_pid}
   ${https_pid} =  Get File  /tmp/dummy_https.pid
   Shutdown Process With Children  ${https_pid}
-  Normal Teardown
+  Rspamd Teardown
 
 Run Dummy Http
-  ${result} =  Start Process  ${TESTDIR}/util/dummy_http.py
+  ${result} =  Start Process  ${RSPAMD_TESTDIR}/util/dummy_http.py
   Wait Until Created  /tmp/dummy_http.pid
 
 Run Dummy Https
-  ${result} =  Start Process  ${TESTDIR}/util/dummy_https.py  ${TESTDIR}/util/server.pem
+  ${result} =  Start Process  ${RSPAMD_TESTDIR}/util/dummy_https.py  ${RSPAMD_TESTDIR}/util/server.pem
   Wait Until Created  /tmp/dummy_https.pid
-
-Check url
-  [Arguments]  ${url}  ${method}  @{expect_results}
-  ${result} =  Scan Message With Rspamc  --header=url:${url}  --header=method:${method}  ${MESSAGE}
-  FOR  ${expect}  IN  @{expect_results}
-    Check Rspamc  ${result}  ${expect}
-  END
