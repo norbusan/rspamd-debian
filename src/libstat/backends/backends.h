@@ -36,6 +36,7 @@ struct rspamd_task;
 
 struct rspamd_stat_backend {
 	const char *name;
+	bool read_only;
 
 	gpointer (*init) (struct rspamd_stat_ctx *ctx, struct rspamd_config *cfg,
 					  struct rspamd_statfile *st);
@@ -112,8 +113,8 @@ struct rspamd_stat_backend {
         void rspamd_##name##_close (gpointer ctx)
 
 RSPAMD_STAT_BACKEND_DEF(mmaped_file);
-
 RSPAMD_STAT_BACKEND_DEF(sqlite3);
+RSPAMD_STAT_BACKEND_DEF(cdb);
 
 #ifdef WITH_HIREDIS
 

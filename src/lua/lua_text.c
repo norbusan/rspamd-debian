@@ -920,6 +920,10 @@ lua_text_split (lua_State *L)
 	struct rspamd_lua_regexp *re;
 	gboolean stringify = FALSE, own_re = FALSE;
 
+	if (t == NULL) {
+		return luaL_error (L, "invalid arguments");
+	}
+
 	if (lua_type (L, 2) == LUA_TUSERDATA) {
 		re = lua_check_regexp (L, 2);
 	}
@@ -947,7 +951,7 @@ lua_text_split (lua_State *L)
 		own_re = TRUE;
 	}
 
-	if (t && re) {
+	if (re) {
 		if (lua_isboolean (L, 3)) {
 			stringify = lua_toboolean (L, 3);
 		}
@@ -1394,7 +1398,7 @@ lua_text_find (lua_State *L)
 }
 
 #define BITOP(a,b,op) \
-		((a)[(gsize)(b)/(8*sizeof *(a))] op (gsize)1<<((gsize)(b)%(8*sizeof *(a))))
+		((a)[(guint64)(b)/(8u*sizeof *(a))] op (guint64)1<<((guint64)(b)%(8u*sizeof *(a))))
 
 static gint
 lua_text_exclude_chars (lua_State *L)
@@ -1404,7 +1408,7 @@ lua_text_exclude_chars (lua_State *L)
 	gssize patlen;
 	const gchar *pat = lua_tolstring (L, 2, &patlen), *p, *end;
 	gchar *dest, *d;
-	gsize byteset[32 / sizeof(gsize)]; /* Bitset for ascii */
+	guint64 byteset[32 / sizeof(guint64)]; /* Bitset for ascii */
 	gboolean copy = TRUE;
 	guint *plen;
 
@@ -1445,7 +1449,7 @@ lua_text_exclude_chars (lua_State *L)
 
 				if (patlen > 0) {
 					/*
-					 * This stuff assumes little endian, but GSIZE_FROM_LE should
+					 * This stuff assumes little endian, but GUINT64_FROM_LE should
 					 * deal with proper conversion
 					 */
 					switch (*pat) {
@@ -1454,22 +1458,22 @@ lua_text_exclude_chars (lua_State *L)
 						break;
 					case 's':
 						/* "\r\n\t\f " */
-						byteset[0] |= GSIZE_FROM_LE (0x100003600);
+						byteset[0] |= GUINT64_FROM_LE(0x100003600LLU);
 						break;
 					case 'n':
 						/* newlines: "\r\n" */
-						byteset[0] |= GSIZE_FROM_LE (0x2400);
+						byteset[0] |= GUINT64_FROM_LE (0x2400LLU);
 						break;
 					case '8':
 						/* 8 bit characters */
-						byteset[2] |= GSIZE_FROM_LE (0xffffffffffffffffLLU);
-						byteset[3] |= GSIZE_FROM_LE (0xffffffffffffffffLLU);
+						byteset[2] |= GUINT64_FROM_LE (0xffffffffffffffffLLU);
+						byteset[3] |= GUINT64_FROM_LE (0xffffffffffffffffLLU);
 						break;
 					case 'c':
 						/* Non printable (control) characters */
-						byteset[0] |= GSIZE_FROM_LE (0xffffffff);
+						byteset[0] |= GUINT64_FROM_LE (0xffffffffLLU);
 						/* Del character */
-						byteset[1] |= GSIZE_FROM_LE (0x8000000000000000);
+						byteset[1] |= GUINT64_FROM_LE (0x8000000000000000LLU);
 						break;
 					}
 				}
@@ -1515,7 +1519,7 @@ lua_text_oneline (lua_State *L)
 	struct rspamd_lua_text *t = lua_check_text (L, 1);
 	const gchar *p, *end;
 	gchar *dest, *d;
-	gsize byteset[32 / sizeof(gsize)]; /* Bitset for ascii */
+	guint64 byteset[32 / sizeof(guint64)]; /* Bitset for ascii */
 	gboolean copy = TRUE, seen_8bit = FALSE;
 	guint *plen;
 
@@ -1549,14 +1553,14 @@ lua_text_oneline (lua_State *L)
 		/* Fill pattern bitset */
 		memset (byteset, 0, sizeof byteset);
 		/* All spaces */
-		byteset[0] |= GSIZE_FROM_LE (0x100003600);
+		byteset[0] |= GUINT64_FROM_LE (0x100003600LLU);
 		/* Control characters */
-		byteset[0] |= GSIZE_FROM_LE (0xffffffff);
+		byteset[0] |= GUINT64_FROM_LE (0xffffffffLLU);
 		/* Del character */
-		byteset[1] |= GSIZE_FROM_LE (0x8000000000000000);
+		byteset[1] |= GUINT64_FROM_LE (0x8000000000000000LLU);
 		/* 8 bit characters */
-		byteset[2] |= GSIZE_FROM_LE (0xffffffffffffffffLLU);
-		byteset[3] |= GSIZE_FROM_LE (0xffffffffffffffffLLU);
+		byteset[2] |= GUINT64_FROM_LE (0xffffffffffffffffLLU);
+		byteset[3] |= GUINT64_FROM_LE (0xffffffffffffffffLLU);
 
 		p = t->start;
 		end = t->start + t->len;

@@ -104,11 +104,19 @@ LUA_FUNCTION_DEF (html, get_images);
  */
 LUA_FUNCTION_DEF (html, foreach_tag);
 
+/***
+ * @method html:get_invisible()
+ * Returns invisible content of the HTML data
+ * @return
+ */
+LUA_FUNCTION_DEF (html, get_invisible);
+
 static const struct luaL_reg htmllib_m[] = {
 	LUA_INTERFACE_DEF (html, has_tag),
 	LUA_INTERFACE_DEF (html, has_property),
 	LUA_INTERFACE_DEF (html, get_images),
 	LUA_INTERFACE_DEF (html, foreach_tag),
+	LUA_INTERFACE_DEF (html, get_invisible),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
 };
@@ -448,7 +456,7 @@ lua_html_foreach_tag (lua_State *L)
 				auto *ltag = static_cast<lua_html_tag *>(lua_newuserdata(L, sizeof(lua_html_tag)));
 				ltag->tag = tag;
 				ltag->html = hc;
-				auto ct = ltag->tag->get_content(hc->parsed);
+				auto ct = ltag->tag->get_content(hc);
 				rspamd_lua_setclass (L, "rspamd{html_tag}", -1);
 				lua_pushinteger (L, ct.size());
 
@@ -482,6 +490,22 @@ lua_html_foreach_tag (lua_State *L)
 	}
 
 	return 0;
+}
+
+static gint
+lua_html_get_invisible (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	auto *hc = lua_check_html (L, 1);
+
+	if (hc != NULL) {
+		lua_new_text (L, hc->invisible.c_str(), hc->invisible.size(), false);
+	}
+	else {
+		lua_newtable (L);
+	}
+
+	return 1;
 }
 
 static gint
@@ -541,7 +565,7 @@ lua_html_tag_get_flags (lua_State *L)
 	struct lua_html_tag *ltag = lua_check_html_tag (L, 1);
 	gint i = 1;
 
-	if (ltag->tag) {
+	if (ltag && ltag->tag) {
 		/* Push flags */
 		lua_createtable (L, 4, 0);
 		if (ltag->tag->flags & FL_HREF) {
@@ -582,7 +606,7 @@ lua_html_tag_get_content (lua_State *L)
 	if (ltag) {
 
 		if (ltag->html) {
-			auto ct = ltag->tag->get_content(ltag->html->parsed);
+			auto ct = ltag->tag->get_content(ltag->html);
 			if (ct.size() > 0) {
 				t = static_cast<rspamd_lua_text *>(lua_newuserdata(L, sizeof(*t)));
 				rspamd_lua_setclass(L, "rspamd{text}", -1);
@@ -613,7 +637,7 @@ lua_html_tag_get_content_length (lua_State *L)
 
 	if (ltag) {
 		if (ltag->html) {
-			auto ct = ltag->tag->get_content(ltag->html->parsed);
+			auto ct = ltag->tag->get_content(ltag->html);
 			lua_pushinteger (L, ct.size());
 		}
 		else {

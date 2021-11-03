@@ -351,6 +351,10 @@ rdns_parse_rr (struct rdns_resolver *resolver,
 	case DNS_T_TXT:
 	case DNS_T_SPF:
 		if (datalen <= *remain) {
+			if (datalen > UINT16_MAX / 2) {
+				rdns_info ("too large datalen; domain %s", rep->requested_name);
+				return -1;
+			}
 			elt->content.txt.data = malloc(datalen + 1);
 			if (elt->content.txt.data == NULL) {
 				rdns_err ("failed to allocate %d bytes for TXT record; domain %s",
@@ -370,6 +374,16 @@ rdns_parse_rr (struct rdns_resolver *resolver,
 					*remain -= txtlen + 1;
 				}
 				else {
+
+					if (txtlen + copied + parts > datalen) {
+						/* Incorrect datalen reported ! */
+						rdns_err ("incorrect txtlen (%d) > datalen (%d) reported; domain %s",
+								(txtlen + copied + parts), datalen,
+								rep->requested_name);
+						return -1;
+					}
+
+					/* Reported equal to the actual data copied */
 					break;
 				}
 			}
@@ -403,6 +417,10 @@ rdns_parse_rr (struct rdns_resolver *resolver,
 			rdns_info ("stripped dns reply while reading TLSA record; domain %s", rep->requested_name);
 			return -1;
 		}
+		if (datalen > UINT16_MAX / 2) {
+			rdns_info ("too large datalen; domain %s", rep->requested_name);
+			return -1;
+		}
 		GET8 (elt->content.tlsa.usage);
 		GET8 (elt->content.tlsa.selector);
 		GET8 (elt->content.tlsa.match_type);
@@ -425,7 +443,7 @@ rdns_parse_rr (struct rdns_resolver *resolver,
 		*remain -= datalen;
 		break;
 	default:
-		rdns_debug ("unexpected RR type: %d; domain %s", type, rep->requested_name);
+		rdns_info ("unexpected RR type: %d; domain %s", type, rep->requested_name);
 		p += datalen;
 		*remain -= datalen;
 		break;

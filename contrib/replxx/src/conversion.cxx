@@ -5,8 +5,6 @@
 #include <clocale>
 
 #include "unicode/utf8.h"
-
-
 #include "conversion.hxx"
 
 #ifdef _WIN32
@@ -61,8 +59,8 @@ ConversionResult copyString8to32(char32_t* dst, int dstSize, int& dstCount, cons
 				if (U8_IS_LEAD (sourceStart[prev_i])) {
 					auto lead_byte = sourceStart[prev_i];
 					auto trailing_bytes = (((uint8_t)(lead_byte)>=0xc2)+
-							((uint8_t)(lead_byte)>=0xe0)+
-							((uint8_t)(lead_byte)>=0xf0));
+										   ((uint8_t)(lead_byte)>=0xe0)+
+										   ((uint8_t)(lead_byte)>=0xf0));
 
 					if (trailing_bytes + i > slen) {
 						return ConversionResult::sourceExhausted;
@@ -90,13 +88,15 @@ ConversionResult copyString8to32(char32_t* dst, int dstSize, int& dstCount, cons
 
 ConversionResult copyString8to32(char32_t* dst, int dstSize, int& dstCount, const char8_t* src) {
 	return copyString8to32(
-		dst, dstSize, dstCount, reinterpret_cast<const char*>(src)
+			dst, dstSize, dstCount, reinterpret_cast<const char*>(src)
 	);
 }
 
-void copyString32to8(
-	char* dst, int dstSize, const char32_t* src, int srcSize, int* dstCount
+int copyString32to8(
+		char* dst, int dstSize, const char32_t* src, int srcSize
 ) {
+	int resCount = 0;
+
 	if ( ! locale::is8BitEncoding ) {
 		int j = 0;
 		UBool is_error = 0;
@@ -110,9 +110,7 @@ void copyString32to8(
 		}
 
 		if (!is_error) {
-			if (dstCount) {
-				*dstCount = j;
-			}
+			resCount = j;
 
 			if (j < dstSize) {
 				dst[j] = '\0';
@@ -123,13 +121,13 @@ void copyString32to8(
 		for ( i = 0; ( i < dstSize ) && ( i < srcSize ) && src[i]; ++ i ) {
 			dst[i] = static_cast<char>( src[i] );
 		}
-		if ( dstCount ) {
-			*dstCount = i;
-		}
+		resCount = i;
 		if ( i < dstSize ) {
 			dst[i] = 0;
 		}
 	}
+
+	return resCount;
 }
 
 }

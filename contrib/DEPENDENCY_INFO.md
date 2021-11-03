@@ -10,7 +10,7 @@
 | libottery     | ?       | Public Domain / CC0 | YES     | many changes       |
 | librdns       | ?       | BSD-2-Clause        | YES     |                    |
 | libucl        | ?       | BSD-2-Clause        | YES     |                    |
-| replxx        | 0.0.2   | BSD-2-Clause        | YES     | libicu usage       |
+| replxx        |  6d93360 | BSD-2-Clause       | YES     | libicu usage       |
 | lua-argparse  | 0.7.0   | MIT                 | NO      |                    |
 | lua-bit       | 1.0.2   | MIT                 | YES     | build fixes        |
 | lua-fun       | ?       | MIT                 | YES     | rspamd text        |
@@ -34,5 +34,5 @@
 | robin-hood    | 3.9.1   | MIT                 | NO      |                    |
 | frozen        | 1.0.1   | Apache 2            | NO      |                    |
 | fmt           | 7.1.3   | MIT                 | NO      |                    |
-| doctest       | 2.4.5   | MIT                 | NO      |                    |
+| doctest       | 2.4.6   | MIT                 | NO      |                    |
 | function2     | 4.1.0   | Boost               | NO      |                    |

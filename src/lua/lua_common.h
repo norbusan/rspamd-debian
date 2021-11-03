@@ -126,7 +126,6 @@ struct rspamd_lua_regexp {
 	rspamd_regexp_t *re;
 	gchar *module;
 	gchar *re_pattern;
-	gsize match_limit;
 	gint re_flags;
 };
 
@@ -528,6 +527,14 @@ gsize lua_logger_out_type (lua_State *L, gint pos, gchar *outbuf,
 */
 void *rspamd_lua_check_udata (lua_State *L, gint pos, const gchar *classname);
 
+#define RSPAMD_LUA_CHECK_UDATA_PTR_OR_RETURN(L, pos, classname, type, dest)  do { \
+    type **_maybe_ptr = (type **)rspamd_lua_check_udata((L), (pos), (classname)); \
+    if (_maybe_ptr == NULL) { \
+        return luaL_error (L, "%s: invalid arguments; pos = %d; expected = %s", G_STRFUNC, (pos), (classname)); \
+    } \
+    (dest) = *(_maybe_ptr);                                                          \
+} while(0)
+
 /**
 * Safely checks userdata to match specified class
 * @param L
@@ -565,6 +572,15 @@ void rspamd_lua_run_config_unload (lua_State *L, struct rspamd_config *cfg);
 */
 void rspamd_lua_add_ref_dtor (lua_State *L, rspamd_mempool_t *pool,
 							  gint ref);
+
+/**
+ * Returns a lua reference from a function like string, e.g. `return function(...) end`
+ * @param L
+ * @param str
+ * @return
+ */
+gint rspamd_lua_function_ref_from_str (lua_State *L, const gchar *str, gsize slen,
+									   const gchar *modname, GError **err);
 
 /**
 * Tries to load some module using `require` and get some method from it

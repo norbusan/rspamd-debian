@@ -401,7 +401,7 @@ LUA_FUNCTION_DEF (util, gzip_decompress);
 LUA_FUNCTION_DEF (util, inflate);
 
 /***
- * @function util.gzip_compress(data)
+ * @function util.gzip_compress(data, [level=1])
  * Compresses input using gzip compression
  *
  * @param {string/rspamd_text} data input data
@@ -716,9 +716,14 @@ static const struct luaL_reg utillib_f[] = {
 };
 
 LUA_FUNCTION_DEF (int64, tostring);
+LUA_FUNCTION_DEF (int64, fromstring);
 LUA_FUNCTION_DEF (int64, tonumber);
 LUA_FUNCTION_DEF (int64, hex);
 
+static const struct luaL_reg int64lib_f[] = {
+		LUA_INTERFACE_DEF (int64, fromstring),
+		{NULL, NULL}
+};
 static const struct luaL_reg int64lib_m[] = {
 	LUA_INTERFACE_DEF (int64, tostring),
 	LUA_INTERFACE_DEF (int64, tonumber),
@@ -1501,7 +1506,13 @@ lua_util_glob (lua_State *L)
 		pattern = luaL_checkstring (L, i);
 
 		if (pattern) {
-			glob (pattern, flags, NULL, &gl);
+			if (glob (pattern, flags, NULL, &gl) != 0) {
+				/* There is no way to return error here, so just create an table */
+				lua_createtable (L, 0, 0);
+				globfree (&gl);
+
+				return 1;
+			}
 		}
 	}
 
@@ -3429,6 +3440,16 @@ lua_load_util (lua_State * L)
 	return 1;
 }
 
+static gint
+lua_load_int64 (lua_State * L)
+{
+	lua_newtable (L);
+	luaL_register (L, NULL, int64lib_f);
+
+	return 1;
+}
+
+
 void
 luaopen_util (lua_State * L)
 {
@@ -3437,6 +3458,7 @@ luaopen_util (lua_State * L)
 	rspamd_lua_new_class (L, "rspamd{int64}", int64lib_m);
 	lua_pop (L, 1);
 	rspamd_lua_add_preload (L, "rspamd_util", lua_load_util);
+	rspamd_lua_add_preload (L, "rspamd_int64", lua_load_int64);
 }
 
 static int
@@ -3444,9 +3466,65 @@ lua_int64_tostring (lua_State *L)
 {
 	gint64 n = lua_check_int64 (L, 1);
 	gchar buf[32];
+	bool is_signed = false;
 
-	rspamd_snprintf (buf, sizeof (buf), "%uL", n);
+	if (lua_isboolean (L, 2)) {
+		is_signed = lua_toboolean (L, 2);
+	}
+
+	if (is_signed) {
+		rspamd_snprintf(buf, sizeof(buf), "%L", n);
+	}
+	else {
+		rspamd_snprintf(buf, sizeof(buf), "%uL", n);
+	}
 	lua_pushstring (L, buf);
+
+	return 1;
+}
+
+static int
+lua_int64_fromstring (lua_State *L)
+{
+	struct rspamd_lua_text *t = lua_check_text_or_string (L, 1);
+
+	if (t && t->len > 0) {
+		guint64 u64;
+		const char *p = t->start;
+		gsize len = t->len;
+		bool neg = false;
+
+		/*
+		 * We use complicated negation to allow both signed and unsinged values to
+		 * fit into result.
+		 * So we read int64 as unsigned and copy it to signed number.
+		 * If we wanted u64 this allows to have the same memory representation of
+		 * signed and unsigned.
+		 * If we wanted signed i64 we still can use -1000500 and it will be parsed
+		 * properly
+		 */
+		if (*p == '-') {
+			neg = true;
+			p ++;
+			len --;
+		}
+		if (!rspamd_strtou64(p, len, &u64)) {
+			lua_pushnil (L);
+			lua_pushstring (L, "invalid number");
+			return 2;
+		}
+
+		gint64* i64_p = lua_newuserdata (L, sizeof (gint64));
+		rspamd_lua_setclass (L, "rspamd{int64}", -1);
+		memcpy (i64_p, &u64, sizeof(u64));
+
+		if (neg) {
+			*i64_p = -(*i64_p);
+		}
+	}
+	else {
+
+	}
 
 	return 1;
 }
@@ -3458,7 +3536,7 @@ lua_int64_tonumber (lua_State *L)
 	gdouble d;
 
 	d = n;
-	lua_pushnumber (L, d);
+	lua_pushinteger (L, d);
 
 	return 1;
 }

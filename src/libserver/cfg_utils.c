@@ -334,8 +334,11 @@ rspamd_config_free (struct rspamd_config *cfg)
 	g_hash_table_unref (cfg->trusted_keys);
 
 	rspamd_re_cache_unref (cfg->re_cache);
-	rspamd_upstreams_library_unref (cfg->ups_ctx);
 	g_ptr_array_free (cfg->c_modules, TRUE);
+
+	if (cfg->monitored_ctx) {
+		rspamd_monitored_ctx_destroy (cfg->monitored_ctx);
+	}
 
 	if (cfg->lua_state && cfg->own_lua_state) {
 		lua_thread_pool_free (cfg->lua_thread_pool);
@@ -348,10 +351,7 @@ rspamd_config_free (struct rspamd_config *cfg)
 	}
 #endif
 
-	if (cfg->monitored_ctx) {
-		rspamd_monitored_ctx_destroy (cfg->monitored_ctx);
-	}
-
+	rspamd_upstreams_library_unref (cfg->ups_ctx);
 	HASH_CLEAR (hh, cfg->actions);
 
 	rspamd_mempool_destructors_enforce (cfg->cfg_pool);
@@ -943,98 +943,6 @@ rspamd_config_post_load (struct rspamd_config *cfg,
 	}
 
 	return ret;
-}
-
-#if 0
-void
-parse_err (const gchar *fmt, ...)
-{
-	va_list aq;
-	gchar logbuf[BUFSIZ], readbuf[32];
-	gint r;
-
-	va_start (aq, fmt);
-	rspamd_strlcpy (readbuf, yytext, sizeof (readbuf));
-
-	r = snprintf (logbuf,
-			sizeof (logbuf),
-			"config file parse error! line: %d, text: %s, reason: ",
-			yylineno,
-			readbuf);
-	r += vsnprintf (logbuf + r, sizeof (logbuf) - r, fmt, aq);
-
-	va_end (aq);
-	g_critical ("%s", logbuf);
-}
-
-void
-parse_warn (const gchar *fmt, ...)
-{
-	va_list aq;
-	gchar logbuf[BUFSIZ], readbuf[32];
-	gint r;
-
-	va_start (aq, fmt);
-	rspamd_strlcpy (readbuf, yytext, sizeof (readbuf));
-
-	r = snprintf (logbuf,
-			sizeof (logbuf),
-			"config file parse warning! line: %d, text: %s, reason: ",
-			yylineno,
-			readbuf);
-	r += vsnprintf (logbuf + r, sizeof (logbuf) - r, fmt, aq);
-
-	va_end (aq);
-	g_warning ("%s", logbuf);
-}
-#endif
-
-void
-rspamd_config_unescape_quotes (gchar *line)
-{
-	gchar *c = line, *t;
-
-	while (*c) {
-		if (*c == '\\' && *(c + 1) == '"') {
-			t = c;
-			while (*t) {
-				*t = *(t + 1);
-				t++;
-			}
-		}
-		c++;
-	}
-}
-
-GList *
-rspamd_config_parse_comma_list (rspamd_mempool_t * pool, const gchar *line)
-{
-	GList *res = NULL;
-	const gchar *c, *p;
-	gchar *str;
-
-	c = line;
-	p = c;
-
-	while (*p) {
-		if (*p == ',' && *c != *p) {
-			str = rspamd_mempool_alloc (pool, p - c + 1);
-			rspamd_strlcpy (str, c, p - c + 1);
-			res = g_list_prepend (res, str);
-			/* Skip spaces */
-			while (g_ascii_isspace (*(++p))) ;
-			c = p;
-			continue;
-		}
-		p++;
-	}
-	if (res != NULL) {
-		rspamd_mempool_add_destructor (pool,
-			(rspamd_mempool_destruct_t) g_list_free,
-			res);
-	}
-
-	return res;
 }
 
 struct rspamd_classifier_config *
@@ -2848,7 +2756,11 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 
 			/* Toggle FIPS mode */
 			if (mode == 0) {
+#if defined(OPENSSL_VERSION_MAJOR) && (OPENSSL_VERSION_MAJOR >= 3)
+				if (EVP_set_default_properties (NULL, "fips=yes") != 1) {
+#else
 				if (FIPS_mode_set (1) != 1) {
+#endif
 					err = ERR_get_error ();
 				}
 			}
@@ -2857,7 +2769,11 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 			}
 
 			if (err != (unsigned long)-1) {
+#if defined(OPENSSL_VERSION_MAJOR) && (OPENSSL_VERSION_MAJOR >= 3)
+				msg_err_config ("EVP_set_default_properties failed: %s",
+#else
 				msg_err_config ("FIPS_mode_set failed: %s",
+#endif
 						ERR_error_string (err, NULL));
 				ret = FALSE;
 			}

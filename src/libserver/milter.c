@@ -846,25 +846,25 @@ rspamd_milter_consume_input (struct rspamd_milter_session *session,
 		case st_len_1:
 			/* The first length byte in big endian order */
 			priv->parser.datalen = 0;
-			priv->parser.datalen |= *p << 24;
+			priv->parser.datalen |= ((gsize)*p) << 24;
 			priv->parser.state = st_len_2;
 			p++;
 			break;
 		case st_len_2:
 			/* The second length byte in big endian order */
-			priv->parser.datalen |= *p << 16;
+			priv->parser.datalen |= ((gsize)*p) << 16;
 			priv->parser.state = st_len_3;
 			p++;
 			break;
 		case st_len_3:
 			/* The third length byte in big endian order */
-			priv->parser.datalen |= *p << 8;
+			priv->parser.datalen |= ((gsize)*p) << 8;
 			priv->parser.state = st_len_4;
 			p++;
 			break;
 		case st_len_4:
 			/* The fourth length byte in big endian order */
-			priv->parser.datalen |= *p;
+			priv->parser.datalen |= ((gsize)*p);
 			priv->parser.state = st_read_cmd;
 			p++;
 			break;
@@ -908,8 +908,8 @@ rspamd_milter_consume_input (struct rspamd_milter_session *session,
 					 * In general, don't use it for anything but ping checks
 					 */
 					memset (&http_callbacks, 0, sizeof (http_callbacks));
-					http_parser_init (&http_parser, HTTP_REQUEST);
 					http_parser.data = url;
+					http_parser_init (&http_parser, HTTP_REQUEST);
 					http_callbacks.on_url = rspamd_milter_http_on_url;
 					http_parser_execute (&http_parser, &http_callbacks,
 							priv->parser.buf->str, priv->parser.buf->len);

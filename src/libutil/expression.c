@@ -1133,7 +1133,7 @@ rspamd_parse_expression (const gchar *line, gsize len,
 						"rewind stack; op: %s",
 				e->expression_stack->len,
 				operand_stack->len,
-				rspamd_expr_op_to_str (op));
+				rspamd_expr_op_to_str (op_stack));
 
 		if (op_stack != OP_OBRACE) {
 			elt.type = ELT_OP;
@@ -1183,7 +1183,9 @@ rspamd_parse_expression (const gchar *line, gsize len,
 	return TRUE;
 
 error_label:
-	msg_debug_expression ("fatal error: %e", *err);
+	if (err && *err) {
+		msg_debug_expression ("fatal expression parse error: %e", *err);
+	}
 
 	while ((tmp = rspamd_expr_stack_elt_pop (operand_stack)) != NULL) {
 		g_node_destroy (tmp);

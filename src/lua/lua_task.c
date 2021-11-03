@@ -31,6 +31,7 @@
 #include "libserver/maps/map_helpers.h"
 
 #include <math.h>
+#include "libmime/received.h"
 
 /***
  * @module rspamd_task
@@ -423,6 +424,13 @@ LUA_FUNCTION_DEF (task, get_header_count);
 LUA_FUNCTION_DEF (task, get_raw_headers);
 
 /***
+ * @method task:get_headers([need_modified=false])
+ * Get all headers of a message in the same format as get_header_full
+ * @return {table of headers data} all headers for a message
+ */
+LUA_FUNCTION_DEF (task, get_headers);
+
+/***
  * @method task:modify_header(name, mods)
  * Modify an existing or non-existing header with the name `name`
  * Mods is a table with the following structure:
@@ -445,9 +453,9 @@ LUA_FUNCTION_DEF (task, modify_header);
  * the following structure:
  *
  * - `from_hostname` - string that represents hostname provided by a peer
- * - `from_ip` - string representation of IP address as provided by a peer
+ * - `from_ip` - string representation of sending IP address
  * - `real_hostname` - hostname as resolved by MTA
- * - `real_ip` - string representation of IP as resolved by PTR request of MTA
+ * - `real_ip` - rspamd_ip object representing sending IP address
  * - `by_hostname` - MTA hostname
  * - `proto` - protocol, e.g. ESMTP or ESMTPS
  * - `timestamp` - received timestamp
@@ -1242,6 +1250,7 @@ static const struct luaL_reg tasklib_m[] = {
 	LUA_INTERFACE_DEF (task, get_header_full),
 	LUA_INTERFACE_DEF (task, get_header_count),
 	LUA_INTERFACE_DEF (task, get_raw_headers),
+	LUA_INTERFACE_DEF (task, get_headers),
 	LUA_INTERFACE_DEF (task, modify_header),
 	LUA_INTERFACE_DEF (task, get_received_headers),
 	LUA_INTERFACE_DEF (task, get_queue_id),
@@ -2312,7 +2321,7 @@ lua_task_set_pre_result (lua_State * L)
 						action->name, action->threshold);
 			}
 
-			return luaL_error (L, "unknown action %s", lua_tostring (L, 2));
+			return luaL_error (L, "unknown action %s", act_str);
 		}
 
 		if (module == NULL) {
@@ -3113,6 +3122,32 @@ lua_task_has_header (lua_State * L)
 }
 
 static gint
+lua_task_get_headers (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_task *task = lua_check_task (L, 1);
+	bool need_modified = lua_isnoneornil(L, 2) ? false : lua_toboolean(L, 2);
+
+	if (task && task->message) {
+		struct rspamd_mime_header *cur;
+		int i = 1;
+
+		lua_createtable (L, rspamd_mime_headers_count(MESSAGE_FIELD(task, raw_headers)), 0);
+		LL_FOREACH2(MESSAGE_FIELD(task, headers_order), cur, ord_next) {
+			rspamd_lua_push_header_array(L, cur->name, cur, RSPAMD_TASK_HEADER_PUSH_FULL,
+					need_modified);
+			lua_rawseti(L, -2, i++);
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+
+	return 1;
+}
+
+static gint
 lua_task_get_raw_headers (lua_State *L)
 {
 	LUA_TRACE_POINT;
@@ -3139,9 +3174,6 @@ lua_task_get_received_headers (lua_State * L)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_task *task = lua_check_task (L, 1);
-	struct rspamd_received_header *rh;
-	const gchar *proto;
-	guint k = 1;
 
 	if (task) {
 		if (!task->message) {
@@ -3151,115 +3183,15 @@ lua_task_get_received_headers (lua_State * L)
 		}
 
 		if (!lua_task_get_cached (L, task, "received")) {
-			lua_createtable (L, 0, 0);
 
-			DL_FOREACH (MESSAGE_FIELD (task, received), rh) {
-				lua_createtable (L, 0, 10);
-
-				if (rh->hdr && rh->hdr->decoded) {
-					rspamd_lua_table_set (L, "raw", rh->hdr->decoded);
-				}
-
-				lua_pushstring (L, "flags");
-				lua_createtable (L, 0, 3);
-
-				lua_pushstring (L, "artificial");
-				if (rh->flags & RSPAMD_RECEIVED_FLAG_ARTIFICIAL) {
-					lua_pushboolean (L, true);
-				}
-				else {
-					lua_pushboolean (L, false);
-				}
-				lua_settable (L, -3);
-
-				lua_pushstring (L, "authenticated");
-				if (rh->flags & RSPAMD_RECEIVED_FLAG_AUTHENTICATED) {
-					lua_pushboolean (L, true);
-				}
-				else {
-					lua_pushboolean (L, false);
-				}
-				lua_settable (L, -3);
-
-				lua_pushstring (L, "ssl");
-				if (rh->flags & RSPAMD_RECEIVED_FLAG_SSL) {
-					lua_pushboolean (L, true);
-				}
-				else {
-					lua_pushboolean (L, false);
-				}
-				lua_settable (L, -3);
-
-				lua_settable (L, -3);
-
-				if (G_UNLIKELY (rh->from_ip == NULL &&
-						rh->real_ip == NULL &&
-						rh->real_hostname == NULL &&
-						rh->by_hostname == NULL && rh->timestamp == 0 &&
-						rh->for_mbox == NULL)) {
-					lua_rawseti (L, -2, k ++);
-
-					continue;
-				}
-
-				rspamd_lua_table_set (L, "from_hostname", rh->from_hostname);
-				rspamd_lua_table_set (L, "from_ip", rh->from_ip);
-				rspamd_lua_table_set (L, "real_hostname", rh->real_hostname);
-				lua_pushstring (L, "real_ip");
-				rspamd_lua_ip_push (L, rh->addr);
-				lua_settable (L, -3);
-				lua_pushstring (L, "proto");
-
-				switch (rh->flags & RSPAMD_RECEIVED_FLAG_TYPE_MASK) {
-				case RSPAMD_RECEIVED_SMTP:
-					proto = "smtp";
-					break;
-				case RSPAMD_RECEIVED_ESMTP:
-					proto = "esmtp";
-					break;
-				case RSPAMD_RECEIVED_ESMTPS:
-					proto = "esmtps";
-					break;
-				case RSPAMD_RECEIVED_ESMTPA:
-					proto = "esmtpa";
-					break;
-				case RSPAMD_RECEIVED_ESMTPSA:
-					proto = "esmtpsa";
-					break;
-				case RSPAMD_RECEIVED_LMTP:
-					proto = "lmtp";
-					break;
-				case RSPAMD_RECEIVED_IMAP:
-					proto = "imap";
-					break;
-				case RSPAMD_RECEIVED_HTTP:
-					proto = "http";
-					break;
-				case RSPAMD_RECEIVED_LOCAL:
-					proto = "local";
-					break;
-				case RSPAMD_RECEIVED_MAPI:
-					proto = "mapi";
-					break;
-				case RSPAMD_RECEIVED_UNKNOWN:
-				default:
-					proto = "unknown";
-					break;
-				}
-
-				lua_pushstring (L, proto);
-				lua_settable (L, -3);
-
-				lua_pushstring (L, "timestamp");
-				lua_pushinteger (L, rh->timestamp);
-				lua_settable (L, -3);
-
-				rspamd_lua_table_set (L, "by_hostname", rh->by_hostname);
-				rspamd_lua_table_set (L, "for", rh->for_mbox);
-				lua_rawseti (L, -2, k ++);
+			if (rspamd_received_export_to_lua(task, L)) {
+				lua_task_set_cached (L, task, "received", -1);
 			}
-
-			lua_task_set_cached (L, task, "received", -1);
+			else {
+				/* no received, preserve compatibility */
+				lua_newtable (L);
+				return 1;
+			}
 		}
 	}
 	else {
@@ -5059,22 +4991,28 @@ lua_task_get_symbols_tokens (lua_State *L)
 	struct rspamd_task *task = lua_check_task (L, 1);
 	struct tokens_foreach_cbdata cbd;
 
-	cbd.task = task;
-	cbd.L = L;
-	cbd.idx = 1;
-	cbd.normalize = TRUE;
+	if (task) {
+		cbd.task = task;
+		cbd.L = L;
+		cbd.idx = 1;
+		cbd.normalize = TRUE;
 
-	if (lua_type (L, 2) == LUA_TBOOLEAN) {
-		cbd.normalize = lua_toboolean (L, 2);
+		if (lua_type(L, 2) == LUA_TBOOLEAN) {
+			cbd.normalize = lua_toboolean(L, 2);
+		}
+		else {
+			cbd.normalize = TRUE;
+		}
+
+		lua_createtable(L,
+				rspamd_symcache_stats_symbols_count(task->cfg->cache), 0);
+		rspamd_symcache_foreach(task->cfg->cache, tokens_foreach_cb, &cbd);
 	}
 	else {
-		cbd.normalize = TRUE;
+		return luaL_error (L, "invalid arguments");
 	}
 
-	lua_createtable (L,
-			rspamd_symcache_stats_symbols_count (task->cfg->cache), 0);
-	rspamd_symcache_foreach (task->cfg->cache, tokens_foreach_cb, &cbd);
-
+	/* Return type is table created */
 	return 1;
 }
 
@@ -5661,6 +5599,13 @@ lua_task_set_settings (lua_State *L)
 
 	if (settings != NULL && task != NULL) {
 
+		if (task->settings) {
+			/* Do not allow to set settings on top of the existing ones */
+			ucl_object_unref (settings);
+
+			return luaL_error (L, "invalid invocation: settings has been already set");
+		}
+
 		metric_elt = ucl_object_lookup (settings, DEFAULT_METRIC);
 
 		if (metric_elt) {
@@ -5718,7 +5663,7 @@ lua_task_set_settings (lua_State *L)
 					if (!isnan (act_score)) {
 						struct rspamd_action *new_act;
 
-						HASH_FIND_PTR (task->cfg->actions, act_name, new_act);
+						HASH_FIND_STR (task->cfg->actions, act_name, new_act);
 
 						if (new_act == NULL) {
 							/* New action! */
@@ -6051,7 +5996,7 @@ lua_task_store_in_file (lua_State *L)
 	gboolean force_new = FALSE, keep = FALSE;
 	gchar fpath[PATH_MAX];
 	const gchar *tmpmask = NULL, *fname = NULL;
-	guint64 mode = 00600;
+	guint mode = 00600;
 	gint fd;
 	struct lua_file_cbdata *cbdata;
 	GError *err = NULL;
@@ -6090,7 +6035,7 @@ lua_task_store_in_file (lua_State *L)
 					rspamd_snprintf (fpath, sizeof (fpath), "%s", tmpmask);
 				}
 
-				fd = mkstemp (fpath);
+				fd = g_mkstemp_full (fpath, O_WRONLY|O_CREAT|O_EXCL, mode);
 				fname = fpath;
 
 				if (fd != -1) {
@@ -6666,8 +6611,8 @@ lua_task_headers_foreach (lua_State *L)
 				lua_gettable (L, 3);
 
 				if (lua_isuserdata (L, -1)) {
-					re = *(struct rspamd_lua_regexp **)
-							rspamd_lua_check_udata (L, -1, "rspamd{regexp}");
+					RSPAMD_LUA_CHECK_UDATA_PTR_OR_RETURN(L, -1, "rspamd{regexp}",
+							struct rspamd_lua_regexp, re);
 				}
 
 				lua_pop (L, 1);
